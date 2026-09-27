@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "import_id": "example-import-001",
+  "source": "manual-example",
+  "mode": "patch",
+  "as_of": "2026-09-27T09:00:00+09:00",
+  "owners": [
+    {
+      "id": "owner-example"
+    }
+  ],
+  "records": [
+    {
+      "id": "asset-example-cash",
+      "kind": "asset",
+      "owner_id": "owner-example",
+      "effective_at": "2026-09-27T09:00:00+09:00",
+      "revision": 1,
+      "status": "active",
+      "category": "cash",
+      "currency": "KRW",
+      "value": "1000000",
+      "valuation_method": "manual",
+      "liquidity": "available"
+    }
+  ]
+}

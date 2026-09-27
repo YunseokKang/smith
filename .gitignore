@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.env
+.env.*
+!.env.example
+data/
+reports/
+secrets/
+*.db
+*.sqlite*
+config/smith.local.toml
+.DS_Store

@@ -1,0 +1,19 @@
+# Proposed defaults. Checking this file does not schedule or send anything.
+[app]
+timezone = "Asia/Seoul"
+financial_access = "read_only"
+
+[advice]
+risk_preference = "growth_aggressive"
+include_alternatives = true
+require_macro_context = true
+
+[privacy]
+remove_personal_identifiers = true
+
+[reports]
+enabled = false
+weekdays = ["monday", "thursday"]
+time = "06:00"
+delivery = "gmail"
+# Actual recipient and credentials belong in ignored local configuration.

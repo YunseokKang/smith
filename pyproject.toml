@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smith-private-banker"
+version = "0.1.0"
+description = "Read-only personal wealth adviser scaffold"
+requires-python = ">=3.11"
+# Windows has no system IANA time zone database; zoneinfo falls back to tzdata.
+dependencies = ["tzdata"]
+
+[project.scripts]
+smith = "smith.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
