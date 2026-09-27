@@ -209,3 +209,6 @@ existing tests missed the issue; do not require incident reports for ordinary de
    For substantial features, add requirement-to-module mapping and lifecycle details where useful.
 
 Do not claim remote publication, integration success, test success, or operational readiness without evidence.
+
+Branching: while the codebase is small, commit and push directly to `main` without feature branches.
+The user will say when to switch to a branch-based workflow. Commit and push only when asked.
