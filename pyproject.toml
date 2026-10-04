@@ -7,8 +7,9 @@ name = "smith-private-banker"
 version = "0.1.0"
 description = "Read-only personal wealth adviser scaffold"
 requires-python = ">=3.11"
-# Windows has no system IANA time zone database; zoneinfo falls back to tzdata.
-dependencies = ["tzdata"]
+# tzdata: Windows has no system IANA time zone database; zoneinfo falls back to it.
+# keyring: broker credentials live in the OS credential store, never in files or env vars.
+dependencies = ["tzdata", "keyring"]
 
 [project.scripts]
 smith = "smith.cli:main"

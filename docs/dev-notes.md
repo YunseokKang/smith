@@ -17,11 +17,13 @@
 ### 환경 구성
 
 ```powershell
-python -m pip install --user uv
-python -m uv venv --python 3.12 .venv
+py -3.10 -m pip install --user uv
+py -3.10 -m uv venv --python 3.12 .venv
 $env:UV_LINK_MODE = "copy"
-python -m uv pip install --python .venv -e .
+py -3.10 -m uv pip install --python .venv -e .
 ```
+
+uv는 시스템 Python 3.10에 설치돼 있으므로 `py -3.10 -m uv`로 부른다(TS-005).
 
 ### 검증
 
@@ -42,6 +44,10 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
 - PowerShell 5.1에서 네이티브 명령에 `2>&1`을 붙이지 않는다. stderr 줄이 `NativeCommandError`로
   감싸져 성공한 실행도 오류처럼 보인다. unittest는 결과를 stderr로 출력하므로 특히 주의한다.
 - 시간대는 `zoneinfo`와 `tzdata` 의존성으로 처리한다. 호스트 로컬 시간대에 의존하지 않는다.
+- 토스 키는 Windows 자격 증명 관리자(`keyring`, 서비스 `smith.toss`)에만 둔다. 사용자가 직접
+  `smith toss login`으로 입력한다. 개발 에이전트는 키를 요청·출력하지 않는다.
+- 개발 에이전트가 실행하는 `smith toss check`는 값 숨김 모드로만 실행한다. `--show-values`는
+  사용자 본인 터미널에서 앱과 대조할 때만 쓴다.
 - 문서나 로그에 사용자 홈 경로 등 개인 식별 경로를 남기지 않는다.
 
 ## 트러블슈팅 기록
@@ -78,3 +84,11 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
 - 해결: `tests/test_config.py`의 읽기·쓰기에 `encoding="utf-8"`을 명시했다.
   `tomllib.load`는 바이너리 모드로 읽어 영향이 없다.
 - 예방: 텍스트 입출력은 항상 인코딩을 명시한다.
+
+### TS-005 `.venv` Python에서 `No module named uv` (2026-10-04)
+
+- 증상: `python -m uv pip install ...`이 `No module named uv`로 실패.
+- 원인: VS Code 터미널이 `.venv`를 자동 활성화해 `python`이 `.venv\Scripts\python.exe`를 가리켰다.
+  uv는 시스템 Python 3.10에만 설치돼 있다. `$env:VIRTUAL_ENV`로 활성화 여부를 확인할 수 있다.
+- 해결: `py -3.10 -m uv ...`로 시스템 Python을 명시한다.
+- 예방: 환경 구성 명령은 `python` 대신 `py -3.10`(uv) 또는 `.\.venv\Scripts\python.exe`(프로젝트)로 쓴다.

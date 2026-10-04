@@ -1,6 +1,8 @@
-"""Command line entry point. No network, LLM or email operations are implemented."""
+"""Command line entry point. Network access is limited to read-only Toss requests; no LLM or email."""
 import argparse
+import getpass
 import sqlite3
+import sys
 import tomllib
 from collections import Counter
 from contextlib import closing
@@ -31,9 +33,42 @@ def main(argv: list[str] | None = None) -> int:
     show.add_argument("--as-of", type=_aware_datetime, help="ISO 8601 time with UTC offset (default: now)")
     show.add_argument("--known-at", type=_aware_datetime,
                       help="Use only revisions recorded by this time, to reproduce an earlier view (default: now)")
+    toss = sub.add_parser("toss", help="Toss Securities read-only connection")
+    toss.add_argument("action", choices=("login", "logout", "check"))
+    toss.add_argument("--show-values", action="store_true",
+                      help="check: also print amounts and symbols (for your own terminal only)")
     args = parser.parse_args(argv)
-    commands = {"check-config": _check_config, "import": _import, "records": _records}
+    commands = {"check-config": _check_config, "import": _import, "records": _records, "toss": _toss}
     return commands[args.command](args)
+
+
+def _toss(args: argparse.Namespace) -> int:
+    # Imported lazily so ledger commands work without the credential store.
+    from smith import credentials
+    from smith.toss import TossClient
+    from smith.toss_check import run_check
+
+    if args.action == "logout":
+        credentials.delete_toss_client()
+        print("Removed Toss credentials from the OS credential store.")
+        return 0
+    if args.action == "login":
+        if not sys.stdin.isatty():
+            print("Run `smith toss login` in an interactive terminal; secrets are never passed as arguments.")
+            return 2
+        client_id = getpass.getpass("Toss client ID (hidden): ").strip()
+        client_secret = getpass.getpass("Toss client secret (hidden): ").strip()
+        if not client_id or not client_secret:
+            print("Both values are required. Nothing saved.")
+            return 2
+        credentials.save_toss_client(client_id, client_secret)
+        print("Saved to the OS credential store (service smith.toss). Next: smith toss check")
+        return 0
+    stored = credentials.load_toss_client()
+    if stored is None:
+        print("No Toss credentials stored. Run `smith toss login` in your terminal first.")
+        return 2
+    return run_check(TossClient(*stored), show_values=args.show_values)
 
 
 def _aware_datetime(text: str) -> datetime:

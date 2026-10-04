@@ -81,9 +81,31 @@
   `rate-limit-exceeded`/`edge-rate-limit-exceeded`(429), `internal-error`/`maintenance`(500).
 - 로그에는 HTTP 상태, `code`, `requestId`만 남긴다. `message`와 `data`는 남기지 않는다.
 
+## Smith 구현 현황
+
+- `src/smith/toss.py`: 표준 라이브러리 `urllib` 기반 조회 전용 client. 위 표의 5개 요청만 허용하고,
+  그 밖의 요청은 네트워크 전에 `ForbiddenRequest`로 거부한다. 요청 timeout 10초.
+- token은 실행마다 발급해 메모리에만 두고, `expired-token`/`invalid-token`이면 한 번 재발급한다.
+  OS 자격 증명 저장소(Windows Credential Manager)는 값 길이 제한이 있어 JWT 저장에 쓰지 않는다.
+  **같은 client를 다른 도구와 함께 쓰면 Smith 실행 때마다 그 도구의 token이 끊긴다.** Smith 전용 client를 권장한다.
+- `client_id`/`client_secret`은 `src/smith/credentials.py`가 OS 자격 증명 저장소(서비스 `smith.toss`)에 둔다.
+  같은 Windows 사용자로 실행되는 프로세스는 읽을 수 있으므로, 5단계 headless 자문 프로세스에는
+  shell·임의 코드 실행 도구를 주지 않는다.
+- `smith toss check`: token, 계좌 목록, 계좌별 보유 주식·매수 가능 금액(KRW, USD), USD/KRW 환율을 한 번씩 조회한다.
+  기본 출력은 개수·통화·시각만 보여 개발 에이전트와 공유해도 되는 수준이다. 계좌번호는 어떤 모드에서도 출력하지 않는다.
+- 아직 원장에 저장하지 않는다. snapshot 모드와 함께 3단계 후반에 구현한다.
+
+## 실제 계좌 연결 확인 (2026-10-04)
+
+`smith toss check`(값 숨김 모드)로 확인했다.
+- token 발급 성공, `expires_in`은 약 86400초(24시간).
+- 계좌 목록: `BROKERAGE` 1개.
+- 보유 주식·매수 가능 금액(KRW, USD)·USD/KRW 환율 모두 정상 응답. 보유 종목에 KRW와 USD가 함께 있다.
+- AC-01: 사용자가 `--show-values` 출력을 토스 앱과 대조해 일치함을 확인했다.
+- 이 client는 Smith 전용이다(다른 도구와 공유하지 않음). 실행마다 token을 발급하는 현재 방식을 유지한다.
+
 ## 아직 확인하지 않은 것
 
-- 실제 계좌 응답과 토스 앱 표시값의 차이(AC-01).
-- 실제 `expires_in` 값, 한 사용자가 client를 여러 개 발급받을 수 있는지.
+- 한 사용자가 client를 여러 개 발급받을 수 있는지.
 - 매수 가능 금액과 앱의 예수금·출금 가능액·결제 예정 금액의 관계.
 - 보유 주식 `lastPrice`의 지연 여부와 장 마감 후 값의 의미.

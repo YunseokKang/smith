@@ -5,20 +5,21 @@
 
 ## 현재 상태
 
-구현됨: 설정 검증, 수동 JSON 입력 검증과 SQLite 자산 원장(이력·멱등성·종료·정정·미리보기).
-토스 API 호출, 계산·요약, Claude Code headless 실행, 시황 검색, 보고서 생성, 스케줄 실행,
-Gmail 발송은 **아직 구현되지 않았다**. 진행 상황은 `docs/roadmap.md`.
+구현됨: 설정 검증, 수동 JSON 입력 검증과 SQLite 자산 원장(이력·멱등성·종료·정정·미리보기),
+토스증권 조회 전용 연결 점검(`smith toss check`).
+토스 데이터의 원장 저장, 계산·요약, Claude Code headless 실행, 시황 검색, 보고서 생성,
+스케줄 실행, Gmail 발송은 **아직 구현되지 않았다**. 진행 상황은 `docs/roadmap.md`.
 실제 개인정보·잔고·인증정보는 포함하지 않는다. 예시 데이터는 모두 가상이다.
 
 ## 빠른 시작
 
 개발 환경은 Windows + PowerShell, Python 3.11 이상이다. 표준 라이브러리 외 의존성은
-Windows 시간대 데이터용 `tzdata`뿐이다. 저장소 루트에서 실행한다.
+Windows 시간대 데이터용 `tzdata`와 OS 자격 증명 저장소용 `keyring`이다. 저장소 루트에서 실행한다.
 
 ```powershell
-python -m pip install --user uv
-python -m uv venv --python 3.12 .venv
-python -m uv pip install --python .venv -e .
+py -3.10 -m pip install --user uv
+py -3.10 -m uv venv --python 3.12 .venv
+py -3.10 -m uv pip install --python .venv -e .
 
 .\.venv\Scripts\smith.exe --help
 .\.venv\Scripts\smith.exe check-config --config config/smith.example.toml
@@ -30,6 +31,8 @@ python -m uv pip install --python .venv -e .
 | `check-config --config FILE` | 설정 검증. 스케줄을 등록하거나 이메일을 보내지 않는다 |
 | `import FILE [--dry-run] [--db PATH]` | JSON 검증 후 원장에 원자적으로 적용. `--dry-run`은 계획만 표시 |
 | `records [--as-of TIME] [--known-at TIME] [--db PATH]` | 지정 시각에 유효한 레코드 목록. `--known-at`은 그 시각까지 기록된 내용만 사용 |
+| `toss login` / `toss logout` | 토스 client ID·secret을 OS 자격 증명 저장소에 저장·삭제. 입력은 화면에 표시되지 않는다 |
+| `toss check [--show-values]` | 허용된 조회 API를 한 번씩 호출해 연결 점검. 기본은 금액·종목을 숨긴다 |
 
 기본 원장은 `data/smith.db`(Git 제외). 입력 형식은 `docs/data-contract.md`,
 환경 문제와 해결 기록은 `docs/dev-notes.md`를 참고한다.
