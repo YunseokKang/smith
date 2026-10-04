@@ -4,6 +4,7 @@ The state of a record at time T is chosen from its revisions that no correction 
 superseded: the latest `effective_at` not after T wins, and ties go to the higher revision.
 Filtering by `recorded_at` reproduces what the ledger knew at an earlier time.
 """
+import hashlib
 import json
 import logging
 import sqlite3
@@ -24,7 +25,7 @@ from smith.records import (
 logger = logging.getLogger(__name__)
 _END_OF_TIME = datetime.max.replace(tzinfo=timezone.utc)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 _V1 = (
     """CREATE TABLE imports (
         import_id TEXT PRIMARY KEY,
@@ -103,7 +104,25 @@ _V5 = (
         PRIMARY KEY (feed_id, link, retrieved_at)
     )""",
 )
-_MIGRATIONS = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5}
+# Each advice run with the exact sanitized payload, prompt version and model, so advice can be traced
+# to the data, assumptions and evidence it was based on.
+_V6 = (
+    """CREATE TABLE advice_runs (
+        run_id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        use_case TEXT NOT NULL,
+        question TEXT NOT NULL,
+        payload_sha256 TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        prompt_version TEXT NOT NULL,
+        model TEXT NOT NULL,
+        cost_usd TEXT,
+        outcome TEXT NOT NULL,
+        error_code TEXT,
+        advice TEXT
+    )""",
+)
+_MIGRATIONS = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6}
 _COLUMNS = ("record_id, revision, kind, owner_id, source, status, change_type, corrects_revision, "
             "reason, effective_at, recorded_at, import_id, fields")
 
@@ -455,6 +474,16 @@ def snapshot(conn: sqlite3.Connection) -> Iterator[None]:
         yield
     finally:
         conn.execute("ROLLBACK")
+
+
+def record_advice_run(conn: sqlite3.Connection, *, run_id: str, created_at: datetime, use_case: str,
+                      question: str, payload: str, prompt_version: str, model: str, cost_usd: str | None,
+                      outcome: str, error_code: str | None = None, advice: str | None = None) -> None:
+    """Persist one advice attempt; the payload is the sanitized text that was (or would have been) sent."""
+    conn.execute("INSERT INTO advice_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 (run_id, _db_time(created_at), use_case, question,
+                  hashlib.sha256(payload.encode("utf-8")).hexdigest(), payload, prompt_version, model, cost_usd,
+                  outcome, error_code, advice))
 
 
 def latest_observations(conn: sqlite3.Connection, *, as_of: datetime,

@@ -73,6 +73,8 @@
   `market`(`KR`, `US`, `other`), `quantity`, `unit_price`, `average_cost`, `value_after_costs`
   (세금·수수료 공제 후 평가액). 토스 동기화가 채우며 수동 입력에도 쓸 수 있다.
 - 선택 필드 `occupancy`(부동산 용도): `owner_occupied`(실거주), `leased_out`(임대), `vacant`, `other`.
+- 선택 필드 `managed_by`(운용 주체): `self`, `hermes`(별도 fund manager가 운용), `other`.
+  자문은 Hermes 운용 자산의 직접 매각·변경을 권하지 않는다.
 - 구성을 모르는 계좌 총액은 `unclassified` 한 건으로, 구성을 알면 자산군별 레코드로 나눠 입력한다.
   한 계좌를 두 방식으로 동시에 입력하면 이중 합산되므로, 나눌 때는 총액 레코드를 종료한다.
 - `valuation_method`: `manual`(본인 추정), `statement`(금융기관 앱·명세서 값), `market`(시세×수량),
@@ -105,6 +107,8 @@
 - `internal_transfer`: 본인 계좌 간 이동(적금 납입 등). 수입·지출로 계산하지 않는다.
 - `frequency`: `once`, `monthly`, `quarterly`, `annual`. `once`는 `end_date`를 쓰지 않는다.
 - `end_date`는 `start_date` 이후여야 한다. 없으면 계속 유지되는 흐름이다.
+- `commitment`(선택): `fixed`(계약상 의무) 또는 `discretionary`(추가 원금 상환처럼 언제든 멈출 수 있음).
+  긴급 자금 조달처럼 지출 조정 여지를 따질 때 쓴다. 없으면 미확인이다.
 
 **goal**: `category`, `currency`, `target_amount`(0 초과), `target_date`, `priority`
 - `category`: `home`, `emergency_fund`, `retirement`, `education`, `major_purchase`, `debt_repayment`, `other`

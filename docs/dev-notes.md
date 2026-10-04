@@ -123,3 +123,18 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
 - 증상: 편집 후 `SyntaxError: unterminated string literal`.
 - 원인: 치환 스크립트의 문자열 안에서 `"\n"` 이스케이프가 해석돼 소스에 실제 줄바꿈이 들어갔다.
 - 해결·예방: 이스케이프가 들어 있는 코드는 Edit 도구로 고치고, 스크립트 편집 뒤에는 `ast.parse`로 문법을 확인한다.
+
+### TS-010 `claude`가 `.CMD` 래퍼라 인자가 cmd.exe를 거침 (2026-10-04)
+
+- 증상: `shutil.which("claude")`가 npm의 `claude.CMD`를 반환한다.
+- 위험: `.cmd`/`.bat`에 넘긴 인자는 cmd.exe가 다시 해석해 `%`, `&`, `|` 등으로 명령이 주입될 수 있다.
+- 해결: 래퍼가 실행하는 `node_modules\@anthropic-ai\claude-code\bin\claude.exe`를 직접 실행하고,
+  네이티브 실행 파일을 찾지 못하면 실행을 거부한다(`adviser.find_claude`).
+
+### TS-011 headless 구조화 출력 `error_max_structured_output_retries` (2026-10-04)
+
+- 증상: 실제 payload로 `--json-schema`를 쓰면 종료 코드 1, 결과 subtype이 `error_max_structured_output_retries`.
+- 원인: 스키마의 `maxLength`·`maxItems`·`additionalProperties: false`를 모델 출력이 반복해서 어겼다.
+- 해결: CLI에는 타입·필수 필드만 넘기고, 받은 뒤 알 수 없는 필드는 버리고(`prune`) 길이·개수를 검증한다
+  (`validate`). 제한값과 인용 가능한 참조는 시스템 지침에 명시한다.
+- 예방: 실패 시 CLI 결과의 `subtype`을 오류 세부로 남겨 원인을 바로 본다.

@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from smith.records import (
-    ACCOUNT_TYPES, ASSET_CATEGORIES, CURRENCIES, FREQUENCIES, GOAL_CATEGORIES, INFLOW_CATEGORIES,
-    LIABILITY_CATEGORIES, LIQUIDITY_CLASSES, MARKETS, OCCUPANCY, OUTFLOW_CATEGORIES, PRIORITIES, RATE_TYPES,
+    ACCOUNT_TYPES, ASSET_CATEGORIES, COMMITMENTS, CURRENCIES, FREQUENCIES, GOAL_CATEGORIES, INFLOW_CATEGORIES,
+    LIABILITY_CATEGORIES, LIQUIDITY_CLASSES, MANAGERS, MARKETS, OCCUPANCY, OUTFLOW_CATEGORIES, PRIORITIES, RATE_TYPES,
     REPAYMENT_METHODS, TRANSFER_CATEGORIES, VALUATION_METHODS, ChangeType, ImportBatch, ImportRejected,
     Kind, RecordInput, Status, canonical_decimal,
 )
@@ -133,6 +133,7 @@ _KIND_FIELDS: dict[Kind, dict[str, _Field]] = {
         "value_after_costs": _Field(_decimal(), nullable=True),
         # Real estate use matters for housing scenarios and tax treatment.
         "occupancy": _Field(_enum(OCCUPANCY), nullable=True),
+        "managed_by": _Field(_enum(MANAGERS), nullable=True),
     },
     Kind.LIABILITY: {
         "category": _Field(_enum(LIABILITY_CATEGORIES)),
@@ -155,6 +156,7 @@ _KIND_FIELDS: dict[Kind, dict[str, _Field]] = {
         "start_date": _Field(_date),
         "end_date": _Field(_date, nullable=True),
         "liability_record_id": _Field(_reference, nullable=True),
+        "commitment": _Field(_enum(COMMITMENTS), nullable=True),
     },
     Kind.GOAL: {
         "category": _Field(_enum(GOAL_CATEGORIES)),

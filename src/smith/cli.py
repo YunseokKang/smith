@@ -1,4 +1,4 @@
-"""Command line entry point. Network access is limited to read-only Toss requests; no LLM or email."""
+"""Command line entry point. Network access is read-only; the adviser runs in a restricted headless process."""
 import argparse
 import getpass
 import json
@@ -58,9 +58,11 @@ def main(argv: list[str] | None = None) -> int:
     macro.add_argument("--db", type=Path, default=DEFAULT_DB)
     macro.add_argument("--days", type=int, default=400, help="sync: history window in days (default: 400)")
     macro.add_argument("--as-of", type=date.fromisoformat, help="show: YYYY-MM-DD (default: today)")
+    from smith import advise_command
+    advise_command.add_parser(sub, DEFAULT_DB)
     args = parser.parse_args(argv)
     commands = {"check-config": _check_config, "import": _import, "records": _records, "toss": _toss,
-                "summary": _summary, "evidence": _evidence}
+                "summary": _summary, "evidence": _evidence, "advise": advise_command.run}
     return commands[args.command](args)
 
 

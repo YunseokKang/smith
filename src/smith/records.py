@@ -60,6 +60,8 @@ VALUATION_METHODS = frozenset({"manual", "statement", "market", "appraisal", "ap
 LIQUIDITY_CLASSES = frozenset({"immediate", "days", "months", "restricted"})
 MARKETS = frozenset({"KR", "US", "other"})
 OCCUPANCY = frozenset({"owner_occupied", "leased_out", "vacant", "other"})
+# Who operates the holding. Hermes-managed assets are run by a separate agent and are not Smith's to sell.
+MANAGERS = frozenset({"self", "hermes", "other"})
 
 LIABILITY_CATEGORIES = frozenset({
     "mortgage", "jeonse_loan", "credit_loan", "credit_line", "card_balance", "policy_loan",
@@ -79,6 +81,8 @@ OUTFLOW_CATEGORIES = frozenset({
 # Moving money between the user's own accounts is neither income nor spending.
 TRANSFER_CATEGORIES = frozenset({"internal_transfer"})
 FREQUENCIES = frozenset({"once", "monthly", "quarterly", "annual"})
+# Whether an outflow can be stopped at will (an extra loan prepayment) or is contractual.
+COMMITMENTS = frozenset({"fixed", "discretionary"})
 
 GOAL_CATEGORIES = frozenset({
     "home", "emergency_fund", "retirement", "education", "major_purchase", "debt_repayment", "other",
