@@ -199,7 +199,10 @@ def _validate_budget(value: str) -> None:
         raise AdviserError("invalid-budget")
 
 
-def _validated_cost(value: Any) -> str:
+def _validated_cost(value: Any) -> str | None:
+    """A missing cost is recorded as unknown; a malformed one is an error."""
+    if value is None:
+        return None
     if isinstance(value, bool):
         raise AdviserError("invalid-cost")
     try:

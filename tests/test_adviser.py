@@ -228,6 +228,16 @@ class AdviserTests(unittest.TestCase):
                                 runner=runner())
         self.assertEqual(caught.exception.code, "input-mismatch")
 
+    def test_missing_cost_is_unknown_and_home_date_defaults_to_the_goal(self):
+        self.assertIsNone(adviser._validated_cost(None))
+        with self.assertRaises(adviser.AdviserError):
+            adviser._validated_cost("-1")
+        goal = rec("home-goal", "goal", category="home", currency="KRW", target_amount="3000000000",
+                   target_date="2029-10-01", priority="high")
+        view = self.make_view(RECORDS[:1] + [goal])
+        self.assertEqual(advise_command._home_goal_date(view, date(2026, 10, 4)), date(2029, 10, 1))
+        self.assertIsNone(advise_command._home_goal_date(view, date(2030, 1, 1)))
+
     def test_advice_audit_record_hashes_the_exact_payload(self):
         conn = ledger.connect(":memory:")
         self.addCleanup(conn.close)

@@ -11,6 +11,8 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from smith.config import DEFAULT_TIMEZONE
+
 from keyring.errors import KeyringError
 
 from smith import adviser, cases, credentials, ledger
@@ -34,7 +36,8 @@ def add_parser(sub: Any, default_db: Any) -> None:
                         help="funding: target KRW")
     advise.add_argument("--target-price", type=_positive_whole_amount, default=Decimal(3_000_000_000),
                         help="home: KRW today")
-    advise.add_argument("--target-date", type=date.fromisoformat, help="home: YYYY-MM-DD (default: 3 years ahead)")
+    advise.add_argument("--target-date", type=date.fromisoformat,
+                        help="home: YYYY-MM-DD (default: the earliest future home goal, else 3 years ahead)")
     advise.add_argument("--show-payload", action="store_true", help="Print the sanitized context; do not call the model")
     advise.add_argument("--budget-usd", type=_positive_budget, default="1.00",
                         help="Spend cap for the model call (default: 1.00)")
@@ -50,17 +53,17 @@ def run(args: argparse.Namespace) -> int:
         print(f"No ledger at {args.db}.")
         return 1
     now = datetime.now(timezone.utc)
-    today = now.astimezone(ZoneInfo("Asia/Seoul")).date()
-    args.target_date = args.target_date or _years_after(today, 3)
-    if args.case == "home" and args.target_date <= today:
-        print("Invalid target: --target-date must be in the future.")
-        return 2
+    today = now.astimezone(ZoneInfo(DEFAULT_TIMEZONE)).date()
     try:
         with closing(ledger.connect_read_only(args.db)) as conn:
             view = load_view(conn, as_of=now, known_at=now)
     except (sqlite3.Error, ledger.LedgerError) as error:
         print(f"Ledger error ({type(error).__name__}): not a readable Smith ledger.")
         return 1
+    args.target_date = args.target_date or _home_goal_date(view, today) or _years_after(today, 3)
+    if args.case == "home" and args.target_date <= today:
+        print("Invalid target: --target-date must be in the future.")
+        return 2
     facts = _facts(view, args)
     context = build_context(view, facts, include_positions=args.case == "portfolio")
     question = args.question or DEFAULT_QUESTIONS[args.case].format(
@@ -110,7 +113,8 @@ def _ask(args: argparse.Namespace, view: Any, question: str, context: dict[str, 
         print("Advice was validated but withheld because its audit record could not be saved.")
         return 1
     print("\n".join(render(result["advice"], view.aliases)))
-    print(f"\n(run {run_id}, {result['prompt_version']}, cost ${result['cost_usd']})")
+    cost = "unknown" if result["cost_usd"] is None else f"${result['cost_usd']}"
+    print(f"\n(run {run_id}, {result['prompt_version']}, cost {cost})")
     return 0
 
 
@@ -135,6 +139,12 @@ def _positive_whole_amount(value: str) -> Decimal:
 def _positive_budget(value: str) -> str:
     _positive_decimal(value)
     return value
+
+
+def _home_goal_date(view: Any, today: date) -> date | None:
+    """The earliest future home goal in the ledger, so the default matches the user's own plan."""
+    dates = [g["target_date"] for g in view.summary.goals if g["category"] == "home" and g["target_date"] > today]
+    return min(dates, default=None)
 
 
 def _years_after(value: date, years: int) -> date:

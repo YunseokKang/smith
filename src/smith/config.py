@@ -4,6 +4,8 @@ from pathlib import Path
 import tomllib
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+# The household's local timezone until the scheduler (stage 6) reads it from the config file.
+DEFAULT_TIMEZONE = "Asia/Seoul"
 WEEKDAYS = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
 
 
