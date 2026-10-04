@@ -24,6 +24,10 @@ from typing import Any
 
 PROMPT_VERSION = "advice-v4"
 HEADLESS_ENV = "SMITH_HEADLESS"
+# The household uses a flat-rate subscription and asked for the most capable reasoning model
+# (2026-10-05). Fable runs about 2.5x the notional cost of Opus; the cap only bounds a runaway call.
+DEFAULT_MODEL = "fable"
+DEFAULT_BUDGET_USD = "5.00"
 _TIMEOUT_SECONDS = 300
 _MAX_OUTPUT_BYTES = 1_000_000
 _MAX_TEXT = 4000
@@ -132,8 +136,8 @@ def cli_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return loose
 
 
-def run_adviser(question: str, context: dict[str, Any], *, executable: Path, budget_usd: str = "1.00",
-                model: str | None = "opus", prompt: str | None = None,
+def run_adviser(question: str, context: dict[str, Any], *, executable: Path, budget_usd: str = DEFAULT_BUDGET_USD,
+                model: str | None = DEFAULT_MODEL, prompt: str | None = None,
                 runner: Runner = subprocess.run) -> dict[str, Any]:
     """Ask for advice and return the validated structured output plus run metadata.
 

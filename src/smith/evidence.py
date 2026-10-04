@@ -29,8 +29,13 @@ class SeriesSpec:
     series_id: str  # ECOS: "<stat code>/<item code>"; FRED: series id.
     label: str
     unit: str
-    source_url: str
+    source_url: str  # An https URL, optionally followed by a space and a readable series code.
     max_age_days: int  # Older latest observations are reported as stale.
+
+    @property
+    def link(self) -> str:
+        """The URL part of `source_url`, without the readable series code."""
+        return self.source_url.split(" ", 1)[0]
 
 
 SERIES = (

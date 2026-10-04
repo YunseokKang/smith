@@ -578,10 +578,16 @@ def claim_report(conn: sqlite3.Connection, *, report_id: str, slot: datetime | N
 
 
 def start_sending(conn: sqlite3.Connection, *, report_id: str, now: datetime, subject: str,
-                  html_sha256: str) -> None:
-    """Mark the point after which the mail request may have reached Gmail. Committed before the request."""
-    conn.execute("UPDATE report_runs SET status = 'sending', send_started_at = ?, subject = ?, html_sha256 = ? "
-                 "WHERE report_id = ? AND status = 'building'", (_db_time(now), subject, html_sha256, report_id))
+                  html_sha256: str) -> bool:
+    """Mark the point after which the mail request may have reached Gmail. Committed before the request.
+
+    Returns False when this run no longer holds its claim (its lease expired and it was recovered or
+    the slot was claimed again by a newer run); the caller must then not send.
+    """
+    cursor = conn.execute("UPDATE report_runs SET status = 'sending', send_started_at = ?, subject = ?, "
+                          "html_sha256 = ? WHERE report_id = ? AND status = 'building'",
+                          (_db_time(now), subject, html_sha256, report_id))
+    return cursor.rowcount == 1
 
 
 def finish_report(conn: sqlite3.Connection, *, report_id: str, status: str, finished_at: datetime,
@@ -611,8 +617,9 @@ def recover_stale_reports(conn: sqlite3.Connection, *, now: datetime) -> list[di
     cutoff = _db_time(now - REPORT_LEASE)
     conn.execute("BEGIN IMMEDIATE")
     try:
-        stale = conn.execute("SELECT report_id, slot, status FROM report_runs WHERE "
-                             "(status = 'building' AND created_at < ?) OR (status = 'sending' AND send_started_at < ?)",
+        # Rows migrated from v7 have no send_started_at; their claim time stands in for it.
+        stale = conn.execute("SELECT report_id, slot, status FROM report_runs WHERE (status = 'building' AND "
+                             "created_at < ?) OR (status = 'sending' AND COALESCE(send_started_at, created_at) < ?)",
                              (cutoff, cutoff)).fetchall()
         for report_id, _, status in stale:
             outcome, code = (("failed", "interrupted-before-send") if status == "building"
@@ -634,6 +641,9 @@ def _settle_missed(conn: sqlite3.Connection, report_id: str, now: datetime) -> N
         return
     kind, missed = row
     for slot in json.loads(missed):
+        # A missed slot may be an earlier scheduled run that failed; it is covered by this report now.
+        conn.execute("UPDATE report_runs SET status = 'merged', error_code = ?, finished_at = ? "
+                     "WHERE slot = ? AND status = 'failed'", (f"merged-into:{report_id}", _db_time(now), slot))
         conn.execute(f"INSERT OR IGNORE INTO report_runs ({_REPORT_COLUMNS}) "
                      "VALUES (?, ?, ?, 'scheduled', ?, ?, NULL, '[]', NULL, NULL, 'merged', 0, NULL, ?, ?)",
                      (f"{report_id}-merged-{slot}", slot, kind, _db_time(now), _db_time(now),
@@ -649,12 +659,11 @@ def report_runs(conn: sqlite3.Connection, *, limit: int = 20) -> list[dict[str, 
 
 
 def unresolved_runs(conn: sqlite3.Connection, *, since: datetime | None) -> list[dict[str, Any]]:
-    """Runs after the last sent report that the reader should hear about: possibly delivered (unknown)
-    or scheduled and failed with no attempts left, oldest first. Manual sends report on the console."""
+    """Runs after the last sent report that may have been delivered (unknown), oldest first. Failed
+    scheduled slots are not listed here: `delivery.due` reports them as missed and the next delivered
+    report settles them."""
     floor = "" if since is None else _db_time(since)
-    runs = [r for r in report_runs(conn, limit=1000) if r["created_at"] > floor and (
-        r["status"] == "unknown" or (r["status"] == "failed" and r["slot"] is not None
-                                     and r["attempts"] >= MAX_SEND_ATTEMPTS))]
+    runs = [r for r in report_runs(conn, limit=1000) if r["created_at"] > floor and r["status"] == "unknown"]
     return sorted(runs, key=lambda r: r["created_at"])
 
 

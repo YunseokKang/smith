@@ -39,9 +39,9 @@ def add_parser(sub: Any, default_db: Any) -> None:
     advise.add_argument("--target-date", type=date.fromisoformat,
                         help="home: YYYY-MM-DD (default: the earliest future home goal, else 3 years ahead)")
     advise.add_argument("--show-payload", action="store_true", help="Print the sanitized context; do not call the model")
-    advise.add_argument("--budget-usd", type=_positive_budget, default="1.00",
-                        help="Spend cap for the model call (default: 1.00)")
-    advise.add_argument("--model", default="opus", help="Claude model alias or name (default: opus)")
+    advise.add_argument("--budget-usd", type=_positive_budget, default=adviser.DEFAULT_BUDGET_USD,
+                        help=f"Spend cap for the model call (default: {adviser.DEFAULT_BUDGET_USD})")
+    advise.add_argument("--model", default=adviser.DEFAULT_MODEL, help=f"Claude model alias or name (default: {adviser.DEFAULT_MODEL})")
     advise.add_argument("--db", type=type(default_db), default=default_db)
 
 
@@ -95,8 +95,10 @@ def _facts(view: Any, args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _secrets() -> list[str]:
+    """Every secret Smith stores, so the outbound check can refuse a payload that contains one."""
     toss = credentials.load_toss_client() or ()
-    return [*toss, *(credentials.load_api_key(p) or "" for p in credentials.EVIDENCE_PROVIDERS)]
+    gmail = credentials.load_gmail() or ()
+    return [*toss, *gmail, *(credentials.load_api_key(p) or "" for p in credentials.EVIDENCE_PROVIDERS)]
 
 
 def _ask(args: argparse.Namespace, view: Any, question: str, context: dict[str, Any], payload: str,

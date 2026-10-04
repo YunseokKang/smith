@@ -4,12 +4,12 @@ Gmail runs no scripts, so every chart is an inline-styled HTML table: stat tiles
 (one accent, the rest neutral), a zero-centred diverging bar for changes and a timeline. Each chart
 has a plain table twin. State is always icon + label + color.
 
-Visual language follows docs/design-reference.md (style only, no brand marks): cream canvas, serif
-headings at weight 400 with negative tracking, cream cards, dark bands, one coral callout. Bands
-alternate cream -> coral -> card -> dark -> cream -> dark footer so no surface repeats; the coral
-callout comes first after the overview because the reader principle is bottom line up front.
-Chart colors were checked with the dataviz validator on the cream surface: increases are coral and
-decreases blue (the Korean market convention), always with an arrow and a sign.
+Visual language follows docs/design-reference.md (style only, no brand marks): white canvas, one
+blue accent used scarcely, display type at weight 400 with negative tracking, tabular monospace
+numbers, 24px card radius, pill badges, and a light/dark band rotation: dark hero (date, key numbers,
+the one most important message) -> white proposals -> dark strategy -> white sections -> soft footer.
+Chart colors were checked with the dataviz validator on white: increases red and decreases blue
+(the Korean market convention), always with an arrow and a sign.
 """
 from decimal import Decimal
 from html import escape
@@ -20,15 +20,16 @@ from smith.proposals import Proposal, Track
 from smith.report_data import CATEGORY_LABELS, COMPONENT_LABELS
 
 # Design tokens (docs/design-reference.md).
-CANVAS, CARD, DARK, DARK_RAISED = "#faf9f5", "#efe9de", "#181715", "#252320"
-CORAL, CORAL_DEEP, HAIRLINE = "#cc785c", "#a9583e", "#e6dfd8"
-INK, BODY, MUTED, MUTED_SOFT, ON_DARK, ON_DARK_SOFT = "#141413", "#3d3d3a", "#6c6a64", "#8e8b82", "#faf9f5", "#a09d96"
-SERIF = "'Noto Serif KR','Nanum Myeongjo',Batang,Georgia,'Times New Roman',serif"
-SANS = "Pretendard,'Malgun Gothic','Apple SD Gothic Neo',-apple-system,'Segoe UI',Roboto,sans-serif"
+CANVAS, SOFT, STRONG, DARK, DARK_RAISED = "#ffffff", "#f7f7f7", "#eef0f3", "#0a0b0d", "#16181c"
+BLUE, HAIRLINE = "#0052ff", "#dee1e6"
+INK, BODY, MUTED, MUTED_SOFT, ON_DARK, ON_DARK_SOFT = "#0a0b0d", "#5b616e", "#7c828a", "#a8acb3", "#ffffff", "#a8acb3"
+SANS = "Inter,Pretendard,'Malgun Gothic','Apple SD Gothic Neo',-apple-system,'Segoe UI',Roboto,sans-serif"
+# Numbers are tabular; Hangul units fall back to the system font.
+MONO = "'JetBrains Mono','Geist Mono',Consolas,'Malgun Gothic','Apple SD Gothic Neo',monospace"
 # Chart colors (validated): accent and the neutral rest; diverging poles.
-ACCENT, MUTED_BAR, UP, DOWN = CORAL, "#cdc5b7", CORAL, "#1d6f9a"
-STATUS = {"stable": ("●", "안정", "#2f7d43"), "watch": ("▲", "주의", "#a87c0f"), "act": ("■", "대응 필요", "#b23b3b")}
-TRACK_STATUS = {"on_track": ("●", "궤도 위", "#5db872"), "attention": ("▲", "보완 필요", "#e8a55a"),
+ACCENT, MUTED_BAR, UP, DOWN = BLUE, "#a8acb3", "#cf202f", BLUE
+STATUS = {"stable": ("●", "안정", "#05b169"), "watch": ("▲", "주의", "#f4b000"), "act": ("■", "대응 필요", "#ff5c66")}
+TRACK_STATUS = {"on_track": ("●", "궤도 위", "#05b169"), "attention": ("▲", "보완 필요", "#f4b000"),
                 "unknown": ("○", "판단 불가", ON_DARK_SOFT)}
 PRIORITY_LABELS = {1: "지금 실행", 2: "이번 달·분기", 3: "유지·점검"}
 SERIES_LABELS = {
@@ -64,10 +65,8 @@ def render(data: dict[str, Any]) -> tuple[str, str]:
     status = _status(data)
     full = data["kind"] != "thursday"
     advice = data.get("advice") or {"proposals": [], "strategy": [], "assumptions": []}
-    bands = [_band(CANVAS, _header(data, status) + _overview(data)),
-             # White body text needs the deeper coral for 4.5:1 contrast (#cc785c gives about 3.3:1).
-             _band(CORAL_DEEP, _callout(advice["proposals"])),
-             _band(CARD, _proposals(advice["proposals"], full))]
+    bands = [_band(DARK, _header(data, status) + _overview(data) + _callout(advice["proposals"])),
+             _band(CANVAS, _proposals(advice["proposals"], full), border=True)]
     if full and advice["strategy"]:
         bands.append(_band(DARK, _strategy(advice["strategy"])))
     sections = [_change(data), _timeline(data)]
@@ -77,12 +76,12 @@ def render(data: dict[str, Any]) -> tuple[str, str]:
                      _securities(sectors["securities"]), _real_estate(sectors["real_estate"]),
                      _pension(sectors["pension_insurance"]), _macro(sectors["macro"])]
     sections.append(_glossary())
-    bands.append(_band(CANVAS, "".join(sections)))
-    bands.append(_band(DARK, _footer(data, advice["assumptions"])))
+    bands.append(_band(CANVAS, "".join(sections), border=True))
+    bands.append(_band(SOFT, _footer(data, advice["assumptions"])))
     spacer = '<tr><td style="height:12px;line-height:12px;font-size:0">&nbsp;</td></tr>'
     html = (f'<!doctype html><html lang="ko"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>Smith 보고서</title></head>'
-            f'<body style="margin:0;padding:0;background:{CANVAS};font-family:{SANS};color:{INK};">'
+            f'<body style="margin:0;padding:0;background:{CANVAS};font-family:{SANS};color:{INK};word-break:keep-all;">'
             f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:{CANVAS}">'
             f'<tr><td align="center" style="padding:12px 4px">'
             f'<table role="presentation" width="640" cellpadding="0" cellspacing="0" style="width:100%;max-width:640px">'
@@ -120,24 +119,26 @@ def _pct(ratio: Decimal | None, places: int = 1) -> str:
     return "미상" if ratio is None else f"{ratio * 100:.{places}f}%"
 
 
-def _band(background: str, inner: str) -> str:
-    return (f'<tr><td style="background:{background};border-radius:12px;padding:24px 22px 20px">'
+def _band(background: str, inner: str, *, border: bool = False) -> str:
+    edge = f"border:1px solid {HAIRLINE};" if border else ""
+    return (f'<tr><td style="background:{background};{edge}border-radius:24px;padding:24px 18px 20px">'
             f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{inner}</table></td></tr>')
 
 
-def _heading(text: str, *, color: str = INK, size: int = 22) -> str:
-    return (f'<div style="font-family:{SERIF};font-weight:400;font-size:{size}px;line-height:1.25;'
-            f'letter-spacing:-0.3px;color:{color};margin:0 0 8px">{escape(text)}</div>')
+def _heading(text: str, *, color: str = INK, size: int = 24) -> str:
+    return (f'<div style="font-family:{SANS};font-weight:400;font-size:{size}px;line-height:1.2;'
+            f'letter-spacing:-0.5px;color:{color};margin:0 0 8px">{escape(text)}</div>')
 
 
-def _eyebrow(text: str, *, color: str = MUTED) -> str:
-    return (f'<div style="font-size:12px;font-weight:500;letter-spacing:1.5px;color:{color};'
-            f'margin-bottom:6px">{escape(text)}</div>')
+def _eyebrow(text: str, *, color: str = INK, background: str = STRONG) -> str:
+    """Pill label above a heading."""
+    return (f'<div style="margin-bottom:10px"><span style="display:inline-block;background:{background};color:{color};'
+            f'font-size:12px;font-weight:600;border-radius:100px;padding:4px 12px">{escape(text)}</span></div>')
 
 
 def _section(title: str, lead: str, inner: str) -> str:
-    return (f'<tr><td style="padding:22px 0 6px;border-top:1px solid {HAIRLINE}">{_heading(title)}'
-            f'<div style="font-size:15px;line-height:1.65;color:{BODY};margin-bottom:12px">{lead}</div>{inner}</td></tr>')
+    return (f'<tr><td style="padding:22px 0 6px;border-top:1px solid {HAIRLINE}">{_heading(title, size=22)}'
+            f'<div style="font-size:15px;line-height:1.6;color:{BODY};margin-bottom:12px">{lead}</div>{inner}</td></tr>')
 
 
 def _bars(rows: list[tuple[str, Decimal | None, bool]], *, value_text: Any = _short) -> str:
@@ -150,39 +151,44 @@ def _bars(rows: list[tuple[str, Decimal | None, bool]], *, value_text: Any = _sh
         width = max(1, int(abs(value) / peak * 100))
         color = ACCENT if strong else MUTED_BAR
         cells.append(f'<tr><td style="width:160px;font-size:13px;color:{BODY};padding:4px 8px 4px 0;white-space:nowrap">{escape(label)}</td>'
-                     f'<td><div style="background:{color};height:12px;width:{width}%;border-radius:0 4px 4px 0"></div></td>'
-                     f'<td style="width:100px;text-align:right;font-size:13px;color:{INK};padding-left:8px;white-space:nowrap">'
-                     f'{value_text(value)}</td></tr>')
+                     f'<td><div style="background:{color};height:12px;width:{width}%;border-radius:0 100px 100px 0"></div></td>'
+                     f'<td style="width:100px;text-align:right;font-family:{MONO};font-size:12px;color:{INK};padding-left:8px;'
+                     f'white-space:nowrap">{value_text(value)}</td></tr>')
     return f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{"".join(cells)}</table>'
 
 
 def _diverging(rows: list[tuple[str, Decimal]], *, value_text: Any = None) -> str:
-    """Zero-centred bars: increases to the right in coral with ▲ and +, decreases to the left in blue."""
+    """Zero-centred bars: increases to the right in red with ▲ and +, decreases to the left in blue."""
     peak = max((abs(v) for _, v in rows), default=Decimal(0)) or Decimal(1)
     cells = []
     for label, value in rows:
         width = int(abs(value) / peak * 100) if value else 0
         left = (f'<div style="background:{DOWN};height:12px;width:{width}%;margin-left:auto;'
-                f'border-radius:4px 0 0 4px"></div>' if value < 0 else "")
-        right = (f'<div style="background:{UP};height:12px;width:{width}%;border-radius:0 4px 4px 0"></div>'
+                f'border-radius:100px 0 0 100px"></div>' if value < 0 else "")
+        right = (f'<div style="background:{UP};height:12px;width:{width}%;border-radius:0 100px 100px 0"></div>'
                  if value > 0 else "")
         arrow = "▲" if value > 0 else "▼" if value < 0 else "–"
         cells.append(f'<tr><td style="width:160px;font-size:13px;color:{BODY};padding:4px 8px 4px 0;white-space:nowrap">{escape(label)}</td>'
-                     f'<td style="width:33%;border-right:1px solid {MUTED_BAR}">{left}</td><td style="width:33%">{right}</td>'
-                     f'<td style="width:100px;text-align:right;font-size:13px;color:{INK};padding-left:8px;white-space:nowrap">'
-                     f'{value_text(value) if value_text else f"{arrow} {_signed_short(value)}"}</td></tr>')
+                     f'<td style="width:33%;border-right:1px solid {HAIRLINE}">{left}</td><td style="width:33%">{right}</td>'
+                     f'<td style="width:100px;text-align:right;font-family:{MONO};font-size:12px;color:{INK};padding-left:8px;'
+                     f'white-space:nowrap">{value_text(value) if value_text else f"{arrow} {_signed_short(value)}"}</td></tr>')
     return f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{"".join(cells)}</table>'
 
 
 def _table(headers: list[str], rows: list[list[str | tuple[str, str]]]) -> str:
     """The table twin every chart carries; values are exact. A (text, url) cell becomes a source link."""
-    head = "".join(f'<th style="text-align:left;font-size:12px;font-weight:500;color:{MUTED};padding:6px;'
+    head = "".join(f'<th style="text-align:left;font-size:12px;font-weight:600;color:{MUTED};padding:6px;'
                    f'border-bottom:1px solid {HAIRLINE}">{escape(h)}</th>' for h in headers)
-    body = "".join("<tr>" + "".join(f'<td style="font-size:12px;padding:5px 6px;color:{BODY};border-bottom:1px solid '
-                                    f'{CANVAS};{"white-space:nowrap" if len(_text_of(c)) <= 10 else ""}">{_cell(c)}</td>'
+    body = "".join("<tr>" + "".join(f'<td style="font-size:12px;padding:6px;color:{BODY};border-bottom:1px solid {STRONG};'
+                                    f'{"font-family:" + MONO + ";" if _numeric(c) else ""}'
+                                    f'{"white-space:nowrap" if len(_text_of(c)) <= 10 else ""}">{_cell(c)}</td>'
                                     for c in row) + "</tr>" for row in rows)
     return (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px">'
             f'<tr>{head}</tr>{body}</table>')
+
+
+def _numeric(cell: str | tuple[str, str]) -> bool:
+    return not isinstance(cell, tuple) and cell[:1] in set("0123456789+-−▲▼")
 
 
 def _text_of(cell: str | tuple[str, str]) -> str:
@@ -193,11 +199,11 @@ def _cell(cell: str | tuple[str, str]) -> str:
     if not isinstance(cell, tuple):
         return escape(cell)
     text, url = cell
-    # Only plain https links are rendered; anything else stays text (feed links are already checked).
-    target = url.split(" ")[0]
-    if not target.startswith("https://") or any(ch in target for ch in "\"'<> "):
+    # Only a whole, plain https URL becomes a link; anything else (spaces, controls, quotes, angle
+    # brackets) stays text rather than being trimmed into a different URL.
+    if not url.startswith("https://") or any(ch.isspace() or ord(ch) < 32 or ch in "\"'<>\x7f" for ch in url):
         return escape(text)
-    return f'<a href="{escape(target, quote=True)}" style="color:{CORAL_DEEP}">{escape(text)}</a>'
+    return f'<a href="{escape(url, quote=True)}" style="color:{BLUE};text-decoration:none">{escape(text)}</a>'
 
 
 # --- top bands --------------------------------------------------------------------------------------------
@@ -209,12 +215,12 @@ def _header(data: dict[str, Any], status: str) -> str:
               else "일부 데이터가 불완전하거나 동기화에 실패했습니다. 맨 아래 '데이터 상태'를 확인하시기 바랍니다.")
     note = ""
     if data.get("delivery_note"):
-        note = (f'<div style="font-size:13px;line-height:1.6;color:{INK};background:{CARD};border-radius:8px;'
-                f'padding:10px 12px;margin-top:12px">▲ {escape(data["delivery_note"])}</div>')
-    return (f'<tr><td>{_eyebrow(f"SMITH · {edition}")}'
-            f'<div style="font-family:{SERIF};font-weight:400;font-size:30px;line-height:1.15;letter-spacing:-0.5px;'
-            f'color:{INK};margin:2px 0 10px">{data["as_of"]:%Y년 %m월 %d일} 보고</div>'
-            f'<div style="font-size:14px;color:{BODY}"><span style="color:{color};font-weight:500">{icon} {label}</span>'
+        note = (f'<div style="font-size:13px;line-height:1.6;color:{ON_DARK};background:{DARK_RAISED};border-radius:16px;'
+                f'padding:12px 14px;margin-top:14px">▲ {escape(data["delivery_note"])}</div>')
+    return (f'<tr><td>{_eyebrow(f"SMITH · {edition}", color=ON_DARK, background=DARK_RAISED)}'
+            f'<div style="font-family:{SANS};font-weight:400;font-size:30px;line-height:1.15;letter-spacing:-0.8px;'
+            f'color:{ON_DARK};margin:4px 0 12px">{data["as_of"]:%Y년 %m월 %d일} 보고</div>'
+            f'<div style="font-size:14px;color:{ON_DARK_SOFT}"><span style="color:{color};font-weight:600">{icon} {label}</span>'
             f' — {reason}</div>{note}</td></tr>')
 
 
@@ -229,62 +235,64 @@ def _overview(data: dict[str, Any]) -> str:
               "" if home is None else f'{home["target_date"]:%Y.%m} 기준 시나리오')]
 
     def tile(title: str, value: str, sub: str) -> str:
-        return (f'<td style="width:50%;padding:6px;vertical-align:top"><div style="border:1px solid {HAIRLINE};'
-                f'border-radius:12px;padding:14px 16px;background:{CANVAS}">'
-                f'<div style="font-size:12px;font-weight:500;color:{MUTED}">{escape(title)}</div>'
-                f'<div style="font-family:{SERIF};font-weight:400;font-size:24px;letter-spacing:-0.3px;color:{INK};'
-                f'margin:6px 0 2px">{escape(value)}</div>'
-                f'<div style="font-size:12px;color:{BODY}">{escape(sub)}</div></div></td>')
+        return (f'<td style="width:50%;padding:5px;vertical-align:top"><div style="border-radius:24px;padding:16px 18px;'
+                f'background:{DARK_RAISED}">'
+                f'<div style="font-size:12px;font-weight:600;color:{ON_DARK_SOFT}">{escape(title)}</div>'
+                f'<div style="font-family:{MONO};font-weight:500;font-size:22px;color:{ON_DARK};margin:8px 0 2px">'
+                f'{escape(value)}</div>'
+                f'<div style="font-size:12px;color:{ON_DARK_SOFT}">{escape(sub)}</div></div></td>')
     # Two by two so the tiles stay readable on a phone.
     grid = "".join(f"<tr>{tile(*a)}{tile(*b)}</tr>" for a, b in (tiles[:2], tiles[2:]))
-    return (f'<tr><td style="padding-top:16px"><table role="presentation" width="100%" cellpadding="0" '
-            f'cellspacing="0" style="margin:0 -6px">{grid}</table></td></tr>')
+    return (f'<tr><td style="padding-top:18px"><table role="presentation" width="100%" cellpadding="0" '
+            f'cellspacing="0">{grid}</table></td></tr>')
 
 
 def _callout(proposals: list[Proposal]) -> str:
-    """The single most important message, once per report."""
+    """The single most important message, once per report, closing the dark hero."""
     if proposals:
         top = proposals[0]
         title, why = top.title, _first_sentence(top.why)
     else:
         title = "이번 주에는 새로 실행하실 일이 없습니다. 지금의 전략을 유지하시는 것이 합리적입니다."
         why = "현금 여유, 대출 부담, 목표 일정 모두 기준 안에 있어 바꿀 이유가 확인되지 않았습니다."
-    return (f'<tr><td>{_eyebrow("이번 주 가장 중요한 한 가지", color="#ffffff")}'
-            f'<div style="font-family:{SERIF};font-weight:400;font-size:24px;line-height:1.3;letter-spacing:-0.3px;'
-            f'color:#ffffff">{escape(title)}</div>'
-            f'<div style="font-size:14px;line-height:1.6;color:#ffffff;margin-top:10px">{escape(why)}</div></td></tr>')
+    return (f'<tr><td style="padding-top:10px"><div style="background:{DARK_RAISED};border-radius:24px;padding:22px 20px">'
+            f'{_eyebrow("이번 주 가장 중요한 한 가지", color=ON_DARK, background=BLUE)}'
+            f'<div style="font-family:{SANS};font-weight:400;font-size:22px;line-height:1.35;letter-spacing:-0.4px;'
+            f'color:{ON_DARK}">{escape(title)}</div>'
+            f'<div style="font-size:14px;line-height:1.6;color:{ON_DARK_SOFT};margin-top:10px">{escape(why)}</div>'
+            f'</div></td></tr>')
 
 
 def _proposals(proposals: list[Proposal], full: bool) -> str:
     """The proposal cards: why now, effect, risks, timing, what would change the judgement, certainty."""
-    head = f'<tr><td>{_eyebrow("이번 주 제안")}{_heading("고객님께 드리는 제안")}</td></tr>'
+    head = f'<tr><td>{_eyebrow("이번 주 제안")}{_heading("고객님께 드리는 제안", size=28)}</td></tr>'
     if not proposals:
-        return head + (f'<tr><td style="font-size:15px;line-height:1.65;color:{BODY}">새 제안이 없습니다. 제안이 없는 것도 '
+        return head + (f'<tr><td style="font-size:15px;line-height:1.6;color:{BODY}">새 제안이 없습니다. 제안이 없는 것도 '
                        '판단입니다. 다음 보고에서 변화가 있으면 다시 말씀드리겠습니다.</td></tr>')
     cards = []
     for number, p in enumerate(proposals[:3], 1):
-        badge = (f'<span style="display:inline-block;background:{CORAL};color:#ffffff;font-size:12px;font-weight:500;'
-                 f'border-radius:9999px;padding:3px 10px;margin-right:6px">{number}</span>'
-                 f'<span style="display:inline-block;background:{CARD};color:{INK};font-size:12px;font-weight:500;'
-                 f'border-radius:9999px;padding:3px 10px">{PRIORITY_LABELS.get(p.priority, "")}</span>')
-        title = (f'<div style="font-family:{SERIF};font-weight:400;font-size:19px;line-height:1.35;letter-spacing:-0.2px;'
-                 f'color:{INK};margin:10px 0 6px">{escape(p.title)}</div>')
+        badge = (f'<span style="display:inline-block;background:{BLUE};color:#ffffff;font-size:12px;font-weight:600;'
+                 f'border-radius:100px;padding:4px 11px;margin-right:6px">{number}</span>'
+                 f'<span style="display:inline-block;background:{STRONG};color:{INK};font-size:12px;font-weight:600;'
+                 f'border-radius:100px;padding:4px 12px">{PRIORITY_LABELS.get(p.priority, "")}</span>')
+        title = (f'<div style="font-size:18px;font-weight:600;line-height:1.4;color:{INK};margin:12px 0 8px">'
+                 f'{escape(p.title)}</div>')
         if full:
             rows = [("왜 지금", p.why), ("예상 효과", p.effect), ("위험과 대안", p.risks), ("시점", p.timing),
                     ("다시 판단할 조건", p.reconsider), ("근거의 성격", p.certainty)]
-            detail = "".join(f'<tr><td style="width:96px;vertical-align:top;font-size:12px;font-weight:500;color:{MUTED};'
-                             f'padding:5px 8px 5px 0">{escape(k)}</td><td style="font-size:14px;line-height:1.6;color:{BODY};'
-                             f'padding:5px 0">{escape(v)}</td></tr>' for k, v in rows)
+            detail = "".join(f'<tr><td style="width:92px;vertical-align:top;font-size:12px;font-weight:600;color:{MUTED};'
+                             f'padding:6px 8px 6px 0">{escape(k)}</td><td style="font-size:14px;line-height:1.6;color:{BODY};'
+                             f'padding:6px 0">{escape(v)}</td></tr>' for k, v in rows)
             detail = f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{detail}</table>'
         else:
             detail = f'<div style="font-size:14px;line-height:1.6;color:{BODY}">{escape(_first_sentence(p.why))}</div>'
-        cards.append(f'<tr><td style="padding-top:12px"><div style="background:{CANVAS};border-radius:12px;'
-                     f'padding:20px 22px">{badge}{title}{detail}</div></td></tr>')
+        cards.append(f'<tr><td style="padding-top:12px"><div style="background:{CANVAS};border:1px solid {HAIRLINE};'
+                     f'border-radius:24px;padding:20px 20px">{badge}{title}{detail}</div></td></tr>')
     rest = proposals[3:]
     more = ""
     if rest:
         items = "".join(f'<div style="font-size:13px;line-height:1.6;color:{BODY}">· {escape(p.title)}</div>' for p in rest)
-        more = (f'<tr><td style="padding-top:16px"><div style="font-size:12px;font-weight:500;color:{MUTED};'
+        more = (f'<tr><td style="padding-top:16px"><div style="font-size:12px;font-weight:600;color:{MUTED};'
                 f'margin-bottom:4px">함께 검토한 다른 제안</div>{items}</td></tr>')
     if not full:
         more += (f'<tr><td style="padding-top:12px;font-size:12px;color:{MUTED}">목요 보고는 요약입니다. 근거와 위험은 월요 보고에서 '
@@ -293,17 +301,19 @@ def _proposals(proposals: list[Proposal], full: bool) -> str:
 
 
 def _strategy(tracks: list[Track]) -> str:
-    """Monday: whether each long-range goal is on track."""
+    """Monday: whether each long-range goal is on track, as raised cards on the dark band."""
     rows = []
     for track in tracks:
         icon, label, color = TRACK_STATUS[track.status]
-        rows.append(f'<tr><td style="padding:12px 0;border-top:1px solid {DARK_RAISED}">'
-                    f'<div style="font-size:13px;font-weight:500;color:{ON_DARK}">{escape(track.name)} '
+        rows.append(f'<tr><td style="padding-top:10px"><div style="background:{DARK_RAISED};border-radius:24px;padding:18px 20px">'
+                    f'<div style="font-size:13px;font-weight:600;color:{ON_DARK}">{escape(track.name)} '
                     f'<span style="color:{color}">{icon} {label}</span></div>'
-                    f'<div style="font-family:{SERIF};font-weight:400;font-size:17px;line-height:1.4;color:{ON_DARK};'
-                    f'margin:4px 0">{escape(track.headline)}</div>'
-                    f'<div style="font-size:13px;line-height:1.6;color:{ON_DARK_SOFT}">{escape(track.detail)}</div></td></tr>')
-    return (f'<tr><td>{_eyebrow("전략 방향", color=ON_DARK_SOFT)}{_heading("목표까지 지금 궤도에 있습니까", color=ON_DARK)}'
+                    f'<div style="font-size:17px;font-weight:400;line-height:1.4;color:{ON_DARK};margin:6px 0">'
+                    f'{escape(track.headline)}</div>'
+                    f'<div style="font-size:13px;line-height:1.6;color:{ON_DARK_SOFT}">{escape(track.detail)}</div>'
+                    f'</div></td></tr>')
+    return (f'<tr><td>{_eyebrow("전략 방향", color=ON_DARK, background=DARK_RAISED)}'
+            f'{_heading("목표까지 지금 궤도에 있습니까", color=ON_DARK, size=28)}'
             f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{"".join(rows)}</table></td></tr>')
 
 
@@ -340,7 +350,7 @@ def _timeline(data: dict[str, Any]) -> str:
     rows = []
     for item in items:
         months = (item["date"].year - today.year) * 12 + item["date"].month - today.month
-        rows.append(f'<tr><td style="width:100px;font-size:13px;font-weight:500;color:{INK};padding:7px 8px 7px 0">'
+        rows.append(f'<tr><td style="width:100px;font-family:{MONO};font-size:12px;font-weight:500;color:{INK};padding:7px 8px 7px 0">'
                     f'{item["date"]:%Y.%m.%d}</td>'
                     f'<td style="font-size:13px;color:{BODY};padding:7px 0 7px 12px;border-left:3px solid {ACCENT}">'
                     f'{escape(item["label"])} · {_short(item["amount"])} <span style="color:{MUTED_SOFT}">({months}개월 후)</span></td></tr>')
@@ -369,10 +379,13 @@ def _allocation(data: dict[str, Any]) -> str:
     if not rows or not summary.total_assets:
         return ""
     top_key, top_value = rows[0]
-    immediate = summary.by_liquidity.get("immediate", Decimal(0))
+    immediate = data["kpis"]["immediate"]
     title_share = _pct(top_value / summary.total_assets, 0)
-    lead = (f"자산의 <b>{title_share}</b>가 {CATEGORY_LABELS.get(top_key, top_key)}에 집중되어 있습니다. "
-            f"즉시 활용 가능한 자금은 전체의 <b>{_pct(immediate / summary.total_assets)}</b>입니다.")
+    lead = f"자산의 <b>{title_share}</b>가 {CATEGORY_LABELS.get(top_key, top_key)}에 집중되어 있습니다. "
+    if immediate is not None:
+        lead += f"즉시 활용 가능한 자금은 전체의 <b>{_pct(immediate / summary.total_assets)}</b>입니다."
+    if "balance_sheet" in summary.incomplete_areas:
+        lead += " 환율이 없어 원화로 바꾸지 못한 자산은 이 비중 계산에서 빠져 있습니다."
     bars = _bars([(CATEGORY_LABELS.get(k, k), v, i == 0) for i, (k, v) in enumerate(rows)])
     table = _table(["자산 유형", "금액", "비중"], [[CATEGORY_LABELS.get(k, k), _won(v), _pct(v / summary.total_assets)]
                                             for k, v in rows])
@@ -381,11 +394,16 @@ def _allocation(data: dict[str, Any]) -> str:
 
 def _cash(cash: dict[str, Any], data: dict[str, Any]) -> str:
     months = data["kpis"]["immediate_months"]
-    lead = (f"즉시 활용 가능한 자금은 <b>{_short(cash['immediate'])}</b>으로, 월 지출의 "
-            f"<b>{'미상' if months is None else f'{months:.1f}개월'}</b>분입니다. "
-            f"비상금 기준(월 지출 {cash['emergency_months_assumption']}개월, 가정)인 {_short(cash['reserve_target'])}"
-            + (f"까지 <b>{_short(cash['reserve_gap'])}</b>이 부족합니다." if cash["reserve_gap"] else "을 충족합니다.")
-            + " <b>유동성</b>(얼마나 빨리 현금으로 바꿀 수 있는지)별 분포는 아래와 같습니다.")
+    if cash["reserve_gap"] is None:
+        # An amount without an FX rate makes the reserve check unknown rather than met or short.
+        lead = ("즉시 활용 가능한 자금이나 월 지출 가운데 환율이 없어 원화로 바꾸지 못한 금액이 있어, "
+                f"비상금 기준(월 지출 {cash['emergency_months_assumption']}개월) 충족 여부는 계산하지 않았습니다.")
+    else:
+        lead = (f"즉시 활용 가능한 자금은 <b>{_short(cash['immediate'])}</b>으로, 월 지출의 "
+                f"<b>{'미상' if months is None else f'{months:.1f}개월'}</b>분입니다. "
+                f"비상금 기준(월 지출 {cash['emergency_months_assumption']}개월, 가정)인 {_short(cash['reserve_target'])}"
+                + (f"까지 <b>{_short(cash['reserve_gap'])}</b>이 부족합니다." if cash["reserve_gap"] else "을 충족합니다."))
+    lead += " <b>유동성</b>(얼마나 빨리 현금으로 바꿀 수 있는지)별 분포는 아래와 같습니다."
     ladder = cash["ladder"]
     bars = _bars([(label, value, label == "즉시") for label, value in ladder])
     return _section("현금·유동성", lead, bars + _table(["현금화 속도", "금액"], [[l, _won(v)] for l, v in ladder]))
@@ -430,12 +448,12 @@ def _real_estate(estate: dict[str, Any]) -> str:
     props = estate["properties"]
     if not props:
         return ""
-    lead = (f"부동산이 자산의 <b>{_pct(estate['share_of_assets'], 0)}</b>를 차지합니다. "
+    dates = sorted({f"{p['valued_on']:%Y.%m}" for p in props})
+    lead = (f"부동산이 자산의 <b>{_pct(estate['share_of_assets'], 0)}</b>를 차지합니다(시세 기준 {', '.join(dates)}). "
             "<b>LTV</b>(집값 대비 대출 비율)가 낮을수록 시세 하락에 견딜 여유가 큽니다.")
     bars = _bars([(p["label"], p["value"], i == 0) for i, p in enumerate(props)])
-    table = _table(["부동산", "평가액", "관련 부채", "LTV", "시세 기준일"],
-                   [[p["label"], _short(p["value"]), _short(p["debt"]), _pct(p["ltv"]), f"{p['valued_on']:%Y.%m}"]
-                    for p in props])
+    table = _table(["부동산", "평가액", "관련 부채", "LTV"],
+                   [[p["label"], _short(p["value"]), _short(p["debt"]), _pct(p["ltv"])] for p in props])
     return _section("부동산·주거", lead, bars + table)
 
 
@@ -456,10 +474,11 @@ def _macro(macro: dict[str, Any]) -> str:
             "금리가 오르면 변동금리 대출 이자는 늘고, 예금 이자와 채권 수익률은 높아지며, 주식·부동산 가격에는 "
             "대체로 부담이 됩니다. 우리 집 자산 가운데 이 변화에 노출된 금액은 아래 표와 같습니다.")
     chart = _diverging([(label, change) for label, change in rates], value_text=_pp) if rates else ""
-    table = _table(["지표", "값", "3개월", "1년", "출처·관측일"],
+    # Three-month changes stay in the data for the narrative; the phone-width table keeps the 1-year view.
+    table = _table(["지표", "값", "1년 변화", "출처·관측일"],
                    [[SERIES_LABELS.get(r["spec"].series_id, r["spec"].label),
-                     f"{r['value']}{'%' if r['spec'].unit == '%' else '원'}", _delta(r["change_3m"]), _delta(r["change_12m"]),
-                     (f"{r['spec'].provider.upper()} {r['observed_on']:%m.%d}", r["spec"].source_url)] for r in rows])
+                     f"{r['value']}{'%' if r['spec'].unit == '%' else '원'}", _delta(r["change_12m"]),
+                     (f"{r['spec'].provider.upper()} {r['observed_on']:%m.%d}", r["spec"].link)] for r in rows])
     table += _table(["금리·환율 변화에 노출된 자산·부채", "금액"],
                     [[_exposure_label(e.key), _won(e.amount)] for e in macro["exposures"].exposures])
     news = macro["announcements"][:5]
@@ -479,13 +498,13 @@ def _pp(value: Decimal) -> str:
 
 
 def _glossary() -> str:
-    inner = "".join(f'<div style="font-size:13px;line-height:1.6;color:{BODY};margin:3px 0"><b style="font-weight:500;'
+    inner = "".join(f'<div style="font-size:13px;line-height:1.6;color:{BODY};margin:3px 0"><b style="font-weight:600;'
                     f'color:{INK}">{escape(term)}</b> — {escape(text)}</div>' for term, text in TERMS.items())
     return _section("용어 풀이", "", inner)
 
 
 def _footer(data: dict[str, Any], assumptions: list[str]) -> str:
-    """Dark footer: where the numbers came from, their limits, and what Smith never does."""
+    """Soft footer: where the numbers came from, their limits, and what Smith never does."""
     lines = [f"{_source(f['source'])}: {f['records']}건, 기준일 {f['oldest'].date()}~{f['newest'].date()}"
              for f in data["freshness"]]
     lines += [f"동기화 · {_source(s['source'])}: 최근 성공 {s['last_success'].date() if s['last_success'] else '없음'}"
@@ -494,11 +513,11 @@ def _footer(data: dict[str, Any], assumptions: list[str]) -> str:
     if not data["completeness"]["complete"]:
         lines.append(f"불완전 영역: {', '.join(data['completeness']['areas'])}")
     lines += [f"가정: {a}" for a in assumptions]
-    items = "".join(f'<div style="font-size:12px;line-height:1.6;color:{ON_DARK_SOFT}">· {escape(line)}</div>' for line in lines)
-    return (f'<tr><td>{_eyebrow("데이터 상태", color=ON_DARK_SOFT)}'
-            f'<div style="font-size:13px;color:{ON_DARK};margin-bottom:8px">이 보고서가 사용한 데이터의 기준 시점과 한계입니다.</div>'
-            f'{items}<div style="font-size:12px;line-height:1.6;color:{ON_DARK_SOFT};margin-top:14px;padding-top:12px;'
-            f'border-top:1px solid {DARK_RAISED}">Smith는 조회 전용 자문입니다. 매매·이체·대출 신청을 실행하지 않으며, '
+    items = "".join(f'<div style="font-size:12px;line-height:1.6;color:{MUTED}">· {escape(line)}</div>' for line in lines)
+    return (f'<tr><td>{_eyebrow("데이터 상태")}'
+            f'<div style="font-size:13px;color:{BODY};margin-bottom:8px">이 보고서가 사용한 데이터의 기준 시점과 한계입니다.</div>'
+            f'{items}<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-top:14px;padding-top:12px;'
+            f'border-top:1px solid {HAIRLINE}">Smith는 조회 전용 자문입니다. 매매·이체·대출 신청을 실행하지 않으며, '
             f'세금과 법령은 실행 전 현행 기준을 확인하셔야 합니다.</div></td></tr>')
 
 

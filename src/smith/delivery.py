@@ -54,13 +54,14 @@ def due(conn: Any, config: dict[str, Any], now: datetime) -> tuple[datetime, lis
     if row is not None and (row["status"] != "failed" or row["attempts"] >= ledger.MAX_SEND_ATTEMPTS):
         return None
     # Missed slots are counted from the last scheduled slot that has any record (sent, merged or
-    # the activation marker), so history before scheduling was enabled is never backfilled.
+    # the activation marker), so history before scheduling was enabled is never backfilled. An earlier
+    # slot that failed (with attempts left or not) was not delivered either, so it counts as missed.
     recorded = [datetime.fromisoformat(s) for s, r in rows.items() if r["status"] in ("sent", "merged")]
     if not recorded:
         return latest, []
     since = max(recorded)
     missed = [s for s in slots_between(reports, tz, since, latest - timedelta(seconds=1))
-              if ledger._db_time(s) not in rows]
+              if ledger._db_time(s) not in rows or rows[ledger._db_time(s)]["status"] == "failed"]
     return latest, missed
 
 
@@ -127,8 +128,11 @@ def publish(db: Path, *, recipient: str, credentials: tuple[str, str, str], now:
         return _finish(db, report_id, "failed", now, error_code=f"build-{type(error).__name__}")
     digest = hashlib.sha256(html.encode("utf-8")).hexdigest()
     with closing(ledger.connect(db)) as conn:
-        ledger.start_sending(conn, report_id=report_id, now=datetime.now(timezone.utc), subject=subject,
-                             html_sha256=digest)
+        holds_claim = ledger.start_sending(conn, report_id=report_id, now=datetime.now(timezone.utc),
+                                           subject=subject, html_sha256=digest)
+    if not holds_claim:
+        # Fencing: this run outlived its lease and was recovered or superseded; another run owns the slot.
+        return {"report_id": report_id, "status": "skipped", "subject": subject, "error_code": "claim-lost"}
     try:
         message_id = sender(credentials, recipient=recipient, subject=subject, html=html, text=_text(subject))
     except gmail.MailError as error:
@@ -155,14 +159,11 @@ def _delivery_note(slot: datetime | None, missed: list[datetime], now: datetime,
                      "(발행 시각에 PC가 꺼져 있었거나 실행되지 못했습니다).")
     if missed:
         listed = ", ".join(f"{m:%m월 %d일 %H:%M}" for m in missed)
-        parts.append(f"그 사이 놓친 정기 보고({listed})는 이 보고서에 합쳐 보고드립니다.")
+        parts.append(f"그 사이 보내드리지 못한 정기 보고({listed})는 이 보고서에 합쳐 보고드립니다.")
     for run in unresolved:
         when = local_time(datetime.fromisoformat(run["slot"] or run["created_at"]), tz)
-        if run["status"] == "unknown":
-            parts.append(f"{when:%m월 %d일 %H:%M} 보고는 발송 결과를 확인하지 못했습니다. 받은편지함에 없다면 "
-                         "이 보고서가 그 내용을 대신합니다.")
-        else:
-            parts.append(f"{when:%m월 %d일 %H:%M} 보고는 발송에 실패했습니다({run['error_code'] or '원인 미상'}).")
+        parts.append(f"{when:%m월 %d일 %H:%M} 보고는 발송 결과를 확인하지 못했습니다. 받은편지함에 없다면 "
+                     "이 보고서가 그 내용을 대신합니다.")
     if sync_failures:
         parts.append(f"보고서 작성 전 일부 데이터({', '.join(sync_failures)})를 새로 받지 못해 이전 값을 사용했습니다.")
     return " ".join(parts) or None

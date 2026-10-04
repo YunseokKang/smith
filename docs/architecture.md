@@ -105,7 +105,7 @@ v3는 공급자 동기화 시도의 성공·실패를 남기는 `sync_runs` 표�
 - headless 경계(`src/smith/adviser.py`, Claude Code 2.1.195에서 확인): 네이티브 `claude.exe`를 직접 실행
   (`.cmd` 래퍼는 cmd.exe 인자 해석 때문에 실행 거부), 질문·payload는 stdin, `--tools ""`, `--safe-mode`,
   `--no-session-persistence`, `--system-prompt`, `--output-format json`, `--json-schema`,
-  `--max-budget-usd`(기본 1.00), 기본 모델 `opus`. 빈 임시 작업 디렉터리, 환경변수 허용 목록,
+  `--max-budget-usd`(기본 5.00, 폭주 방지용 상한), 기본 모델 `fable`(가장 강한 추론 모델, 사용자 결정 2026-10-05). "추가 과금 없음"은 운영 환경 가정이다: 현재 Claude Code가 정액 구독 로그인으로 인증되어 있다는 사실에 기대며, 코드가 보장하지 않는다. 허용 환경변수에 `ANTHROPIC_API_KEY`가 있으므로 그 키가 설정되면 API 과금이 된다. OAuth 인증에서 예산 상한의 의미는 문서화되어 있지 않다. 빈 임시 작업 디렉터리, 환경변수 허용 목록,
   `SMITH_HEADLESS=1`(이 값이 있으면 `smith advise`가 거부해 재귀 실행을 막는다), 300초 제한, 출력 1MB 제한.
 - 출력 검증: CLI에는 최소 스키마를 넘긴다(길이·최대 개수·추가 필드 제약이 있으면 실제
   payload에서 `error_max_structured_output_retries`가 났다). 받은 뒤 알 수 없는 필드는 버리고 길이·개수·
@@ -128,7 +128,8 @@ Gmail API, 권한은 `gmail.send` 하나(메일함 읽기 없음). 2026-10-04 �
 - client ID·secret·refresh token은 OS 자격 증명 저장소(`smith.gmail`)에만 둔다. 다운로드한 client JSON은 로그인 후 삭제해도 된다.
 - 받는 주소는 Git 제외 `config/smith.local.toml`의 `[mail] recipient` 하나뿐이다. 모델 출력이나 보고서 내용이 수신자를 바꿀 수 없다.
 - 발송 결과: 성공(메시지 ID), 실패(4xx), **결과 미상**(요청 후 응답 유실, 5xx, 또는 성공 상태인데 본문·메시지 ID가
-  없는 경우). 결과 미상은 자동 재발송하지 않는다.
+  없는 경우). 결과 미상은 자동 재발송하지 않는다. `sent`는 받은편지함 도착 확인이 아니라 Gmail API가 Message를
+  반환했다는 뜻이다.
 
 ## 정기 발행 (6단계, `src/smith/delivery.py`, 원장 v8 `report_runs`)
 
@@ -139,12 +140,19 @@ Gmail API, 권한은 `gmail.send` 하나(메일함 읽기 없음). 2026-10-04 �
   `sent`·`unknown`·진행 중 회차는 자동으로 다시 보내지 않고, `failed`(명확한 실패)만 최대 3회 재시도한다.
   수동 발행(`send-now`)은 회차를 소모하지 않는다.
 - 중단 복구: 30분 넘게 `building`인 실행은 메일 요청 전이므로 `failed`(재시도 가능), `sending`인 실행은 이미
-  전달됐을 수 있으므로 `unknown`(자동 재발송 금지)으로 닫는다. `run-due`가 매번 먼저 정리한다.
+  전달됐을 수 있으므로 `unknown`(자동 재발송 금지)으로 닫는다. `run-due`가 매번 먼저 정리한다. v7에서 넘어와
+  `send_started_at`이 없는 `sending` 행은 선점 시각을 대신 쓴다.
+- 선점 확인(fencing): `building` → `sending` 전환은 그 실행의 `report_id`이고 아직 `building`일 때만 성공한다.
+  임대 시간이 지나 복구되었거나 새 실행이 같은 회차를 다시 선점했다면 전환이 0건이 되고, 이전 실행은 메일을
+  보내지 않고 끝난다(`claim-lost`).
 - PC가 꺼져 회차를 놓치면 다음 실행에서 최신 회차 한 통으로 보내며, 제목에 "지연 발송", 본문에 놓친 회차를
   표시한다. 놓친 회차는 그 보고가 `sent` 또는 `unknown`으로 끝날 때 같은 트랜잭션에서 `merged`로 기록한다.
   명확히 실패하면 놓친 회차는 재시도에 그대로 남는다. 최초 실행은 과거 회차를 소급하지 않는다.
-- 직전 발송 이후 결과 미상이거나 재시도를 모두 쓴 회차, 발행 전 동기화에 실패한 데이터는 다음 보고서 상단 안내에
-  적는다. `report status`도 중단·미상 상태를 표시한다.
+- 이전 회차가 실패한 채(재시도가 남았든 아니든) 다음 회차가 오면, 그 회차도 놓친 회차로 다음 보고서에 합치고
+  발송되면 `merged`로 바꾼다. 결과 미상 회차와 발행 전 동기화 실패는 다음 보고서 상단 안내에 적는다.
+  `report status`도 중단·미상 상태를 표시한다.
+- 계산 정밀도: 요약(`build_summary`)과 보고서 데이터 전체가 같은 100자리 Decimal 문맥에서 계산된다. 입력 값은 최대
+  23자리이므로 금액×환율, 수량×가격×환율도 반올림되지 않는다.
 - 비교 기준은 직전 `sent` 보고의 스냅샷 시각이다. 발송 직전에 토스·근거 동기화를 실행하고 반환 코드를 확인한다
   (토스 자격 증명이 없어도 `sync_runs`에 실패를 남긴다. 매도 종목 자동 종료는 하지 않음).
 - 실행: Windows 작업 스케줄러가 로그온 상태에서 15분마다 `pythonw -m smith report run-due`를 호출한다(자격 증명

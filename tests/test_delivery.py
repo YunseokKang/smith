@@ -116,6 +116,37 @@ class DeliveryTests(unittest.TestCase):
         self.publish(NEXT_MON + timedelta(minutes=1), NEXT_MON)
         self.assertIn("10월 08일 06:00 보고는 발송 결과를 확인하지 못했습니다", self.notes[-1])
 
+    def test_a_run_that_lost_its_claim_does_not_send(self):
+        with closing(ledger.connect(self.db)) as conn:
+            ledger.claim_report(conn, report_id="old", slot=MON, kind="monday", trigger="scheduled", created_at=MON,
+                                as_of=MON, baseline=None, missed_slots=[])
+            delivery.recover(conn, MON + timedelta(hours=1))   # Lease expired: the old run is closed.
+            ledger.claim_report(conn, report_id="new", slot=MON, kind="monday", trigger="scheduled",
+                                created_at=MON + timedelta(hours=1), as_of=MON, baseline=None, missed_slots=[])
+            # The old process resumes: it must not move the slot to sending, and so must not send.
+            self.assertFalse(ledger.start_sending(conn, report_id="old", now=MON, subject="s", html_sha256="d"))
+            self.assertEqual(ledger.report_runs(conn)[0]["status"], "building")
+            self.assertTrue(ledger.start_sending(conn, report_id="new", now=MON, subject="s", html_sha256="d"))
+
+    def test_an_earlier_failed_slot_is_reported_with_the_next_one(self):
+        self.publish(MON + timedelta(minutes=1), MON)
+        self.publish(THU + timedelta(minutes=1), THU, outcome="failed")   # One failure, attempts left.
+        late = NEXT_MON + timedelta(minutes=5)
+        self.assertEqual(self.due(late), (NEXT_MON, [THU]))               # Not silently dropped.
+        self.publish(late, NEXT_MON, [THU])
+        with closing(ledger.connect(self.db)) as conn:
+            statuses = {r["slot"]: r["status"] for r in ledger.report_runs(conn) if r["slot"]}
+        self.assertEqual(statuses[ledger._db_time(THU)], "merged")
+
+    def test_a_sending_row_without_a_start_time_is_recovered(self):
+        # Rows migrated from v7 have no send_started_at.
+        with closing(ledger.connect(self.db)) as conn:
+            ledger.claim_report(conn, report_id="v7", slot=MON, kind="monday", trigger="scheduled", created_at=MON,
+                                as_of=MON, baseline=None, missed_slots=[])
+            conn.execute("UPDATE report_runs SET status = 'sending', send_started_at = NULL WHERE report_id = 'v7'")
+            delivery.recover(conn, MON + timedelta(hours=1))
+            self.assertEqual(ledger.report_runs(conn)[0]["status"], "unknown")
+
     def test_missing_setup_is_recorded_for_unattended_runs(self):
         result = delivery.record_failure(self.db, now=MON, slot=MON, missed=[], kind="monday",
                                          code="setup-no-gmail-grant")

@@ -9,9 +9,10 @@ from collections import Counter
 from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from smith import ledger
-from smith.config import load_config, local_time
+from smith.config import DEFAULT_TIMEZONE, load_config, local_time
 from smith.importer import load_import_file
 from smith.records import Action, ImportBatch, ImportRejected, Kind
 
@@ -210,7 +211,9 @@ def _evidence_show(args: argparse.Namespace) -> int:
     from smith.relevance import exposures
 
     now = datetime.now(timezone.utc)
-    as_of = datetime.combine(args.as_of, datetime.max.time(), timezone.utc) if args.as_of else local_time(now)
+    # A requested date is a household-local calendar day, ending at 23:59:59 local time.
+    as_of = (datetime.combine(args.as_of, datetime.max.time(), ZoneInfo(DEFAULT_TIMEZONE)) if args.as_of
+             else local_time(now))
     try:
         with closing(ledger.connect_read_only(args.db)) as conn, ledger.snapshot(conn):
             rows = evidence.describe(ledger.load_evidence(conn, known_at=now), as_of=as_of.date())

@@ -7,7 +7,7 @@ import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, localcontext
 from typing import Any
 
 from smith import ledger
@@ -25,6 +25,9 @@ _STALE_MANUAL = timedelta(days=90)
 _STALE_API = timedelta(days=7)
 _STALE_FX = timedelta(days=7)
 _UPCOMING = timedelta(days=365)
+# Imported values have at most 23 digits (importer), so amount x rate and quantity x price x rate need
+# about 70; every calculation over ledger amounts runs in this context so no product is rounded.
+DECIMAL_PRECISION = 100
 
 
 @dataclass
@@ -72,7 +75,8 @@ class Summary:
 
 def build_summary(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetime) -> Summary:
     """Summarize the ledger as it stood at `as_of`, using only data recorded by `known_at`."""
-    with ledger.snapshot(conn):
+    with ledger.snapshot(conn), localcontext() as context:
+        context.prec = DECIMAL_PRECISION
         return _build(conn, Summary(as_of, known_at))
 
 

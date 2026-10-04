@@ -1,10 +1,10 @@
 import json
 import unittest
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from zoneinfo import ZoneInfo
 
-from smith import ledger
+from smith import ledger, report_html
 from smith.announcements import Announcement
 from smith.importer import parse_import
 from smith.records import ImportBatch, Observation
@@ -128,6 +128,59 @@ class ReportTests(unittest.TestCase):
         self.assertIn("제안 3건", subject)
         self.assertIn("이번 주 가장 중요한 한 가지", html)
         self.assertIn("목표까지 지금 궤도에 있습니까", html)
+
+    def test_proposals_never_treat_unconverted_amounts_as_known(self):
+        later = datetime(2026, 10, 2, tzinfo=timezone.utc)
+        self.apply("u1", later, [
+            rec("eur-cash", "asset", 1, later, category="cash", account_type="bank", currency="EUR", value="5000",
+                valuation_method="manual", liquidity="immediate"),
+            rec("pay", "cashflow", 1, later, category="salary", direction="inflow", currency="KRW", amount="5000000",
+                frequency="monthly", start_date="2026-01-01"),
+            rec("living", "cashflow", 1, later, category="living_expense", direction="outflow", currency="KRW",
+                amount="2000000", frequency="monthly", start_date="2026-01-01"),
+            rec("lease", "liability", 1, later, category="lease_deposit_obligation", currency="KRW",
+                outstanding_principal="300000000", annual_rate="0", rate_type="fixed", repayment_method="bullet",
+                maturity="2028-06-30")])
+        data = build_report(self.conn, as_of=later, known_at=later, baseline=None, kind="monday")
+        self.assertIsNone(data["kpis"]["immediate"])
+        proposals = {p.key: p for p in data["advice"]["proposals"]}
+        self.assertNotIn("emergency-reserve", proposals)              # Unknown, not a confident shortfall.
+        self.assertNotIn("accumulated", proposals["lease-return"].figures)
+        tracks = {t.name: t for t in data["advice"]["strategy"]}
+        self.assertEqual(tracks["전세보증금 반환"].status, "unknown")
+        self.assertEqual(tracks["노후 준비"].headline, "연금 계좌 정보 없음")  # No accounts is not 0 won.
+        self.assertIn("환산하지 못해", render(data)[1])
+
+    def test_prepayment_compares_the_highest_rate_loan(self):
+        later = datetime(2026, 10, 2, tzinfo=timezone.utc)
+        self.apply("r1", later, [
+            rec("big", "liability", 1, later, category="mortgage", currency="KRW", outstanding_principal="1000000000",
+                annual_rate="0.02", rate_type="variable", repayment_method="equal_principal"),
+            rec("dear", "liability", 1, later, category="credit_loan", currency="KRW", outstanding_principal="100000000",
+                annual_rate="0.06", rate_type="fixed", repayment_method="bullet")])
+        ledger.store_evidence(self.conn, [("ecos", "817Y002/010502000", date(2026, 10, 1), "3.00", None)],
+                              retrieved_at=later)
+        data = build_report(self.conn, as_of=later, known_at=later, baseline=None, kind="monday")
+        prepayment = next(p for p in data["advice"]["proposals"] if p.key == "prepayment")
+        self.assertEqual(prepayment.figures["loan_rate"], Decimal("0.06"))   # Not the largest (2%) loan.
+        self.assertIn("이어가시는 것이 합리적", prepayment.title)
+
+    def test_summary_amounts_are_exact_for_the_largest_importable_values(self):
+        at = datetime(2026, 9, 3, tzinfo=timezone.utc)
+        value, rate = "888888888888888.12345678", "777777777777777.87654321"
+        conn = ledger.connect(":memory:")
+        self.addCleanup(conn.close)
+        self.conn = conn
+        self.apply("x0", at, [rec("usd", "asset", 1, at, category="cash", account_type="bank", currency="USD",
+                                  value=value, valuation_method="manual", liquidity="immediate")], fx=rate)
+        summary = build_report(conn, as_of=T1, known_at=T1, baseline=None, kind="monday")["view"].summary
+        with localcontext() as context:
+            context.prec = 100
+            self.assertEqual(summary.total_assets, Decimal(value) * Decimal(rate))
+
+    def test_links_must_be_whole_plain_urls(self):
+        self.assertEqual(report_html._cell(("출처", "https://host/path suffix")), "출처")
+        self.assertIn('href="https://host/path"', report_html._cell(("출처", "https://host/path")))
 
     def test_calendar_dates_use_the_household_timezone(self):
         # Monday 06:00 KST is Sunday 21:00 UTC; a salary starting on Monday counts in that report.

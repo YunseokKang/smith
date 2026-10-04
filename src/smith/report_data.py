@@ -13,7 +13,7 @@ from smith import cases, ledger, proposals
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import LedgerView, base_amount, load_view
 from smith.records import Kind, RecordInput, Status
-from smith.summary import BASE_CURRENCY, build_summary, recurring_active
+from smith.summary import BASE_CURRENCY, DECIMAL_PRECISION, build_summary, recurring_active
 
 CATEGORY_LABELS = {
     "cash": "현금", "deposit": "예금", "installment_savings": "적금·청약", "stock": "주식", "fund": "펀드",
@@ -31,8 +31,6 @@ _MONTHS = {"monthly": 1, "quarterly": 3, "annual": 12}
 EMERGENCY_MONTHS = 6       # Assumption: emergency reserve of six months of outflow.
 RATE_SHOCKS = (Decimal("0.005"), Decimal("0.01"), Decimal("0.02"))
 TIMELINE_YEARS = 5
-# Imported values have at most 23 digits, so quantity x price x rate needs about 70; leave headroom.
-_PRECISION = 100
 
 
 def build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetime,
@@ -41,8 +39,14 @@ def build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetim
 
     `as_of` is converted to the household timezone first, because calendar dates come from it.
     """
-    as_of = local_time(as_of, tz)
-    baseline = None if baseline is None else local_time(baseline, tz)
+    with localcontext() as context:
+        context.prec = DECIMAL_PRECISION  # The same precision policy as the summary (no rounded products).
+        return _build_report(conn, as_of=local_time(as_of, tz), known_at=known_at,
+                             baseline=None if baseline is None else local_time(baseline, tz), kind=kind)
+
+
+def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetime,
+                  baseline: datetime | None, kind: str) -> dict[str, Any]:
     view = load_view(conn, as_of=as_of, known_at=known_at)
     change = None if baseline is None else decompose(conn, baseline, as_of, known_at)
     kpis, sectors = _kpis(view, change), _sectors(view)
@@ -73,7 +77,7 @@ def decompose(conn: sqlite3.Connection, t0: datetime, t1: datetime, known_at: da
     # Enough precision that quantity x price x rate is exact, so the sum check only fails when the
     # decomposition itself is wrong, never because of rounding.
     with localcontext() as context:
-        context.prec = _PRECISION
+        context.prec = DECIMAL_PRECISION
         start = _net_worth(original, rates0, unconverted)
         restated_start = _net_worth(restated, rates0_restated, unconverted)
         parts["correction"] = restated_start - start
@@ -147,13 +151,34 @@ def _record_change(before: RecordInput | None, after: RecordInput | None, rates0
     return {key: (n1 - n0) * fx0, "fx": n1 * (fx1 - fx0)}
 
 
+def _liquidity(view: LedgerView) -> dict[str, Decimal | None]:
+    """Asset totals by liquidity; a bucket holding an amount without an FX rate is unknown, not partial."""
+    totals: dict[str, Decimal | None] = {key: Decimal(0) for key in LIQUIDITY_LABELS}
+    for record in view.records:
+        if record.kind is not Kind.ASSET:
+            continue
+        key, amount = record.fields["liquidity"], base_amount(view, record)
+        current = totals.get(key, Decimal(0))
+        totals[key] = None if current is None or amount is None else current + amount
+    return totals
+
+
+def _flows(view: LedgerView) -> tuple[Decimal | None, Decimal | None]:
+    """(monthly net, monthly outflow), both unknown when a cash flow could not be converted."""
+    summary = view.summary
+    if "cash_flow" in summary.incomplete_areas:
+        return None, None
+    return summary.monthly_net, summary.monthly_outflow
+
+
 def _kpis(view: LedgerView, change: dict[str, Any] | None) -> dict[str, Any]:
     summary = view.summary
-    immediate = summary.by_liquidity.get("immediate", Decimal(0))
-    months = immediate / summary.monthly_outflow if summary.monthly_outflow else None
+    immediate = _liquidity(view)["immediate"]
+    monthly_net, outflow = _flows(view)
+    months = immediate / outflow if immediate is not None and outflow else None
     home = _home_progress(view)
     return {"net_worth": summary.net_worth, "net_worth_change": None if change is None else change["total"],
-            "monthly_net": summary.monthly_net, "immediate": immediate, "immediate_months": months,
+            "monthly_net": monthly_net, "immediate": immediate, "immediate_months": months,
             "home_progress": home}
 
 
@@ -201,12 +226,13 @@ def _sectors(view: LedgerView) -> dict[str, Any]:
 
 
 def _cash_sector(view: LedgerView) -> dict[str, Any]:
-    summary = view.summary
-    reserve = summary.monthly_outflow * EMERGENCY_MONTHS
-    immediate = summary.by_liquidity.get("immediate", Decimal(0))
-    return {"ladder": [(LIQUIDITY_LABELS[k], summary.by_liquidity.get(k, Decimal(0)))
-                       for k in ("immediate", "days", "months", "restricted")],
-            "immediate": immediate, "reserve_target": reserve, "reserve_gap": max(Decimal(0), reserve - immediate),
+    liquidity = _liquidity(view)
+    _, outflow = _flows(view)
+    reserve = None if outflow is None else outflow * EMERGENCY_MONTHS
+    immediate = liquidity["immediate"]
+    gap = None if reserve is None or immediate is None else max(Decimal(0), reserve - immediate)
+    return {"ladder": [(LIQUIDITY_LABELS[k], liquidity[k]) for k in ("immediate", "days", "months", "restricted")],
+            "liquidity": liquidity, "immediate": immediate, "reserve_target": reserve, "reserve_gap": gap,
             "emergency_months_assumption": EMERGENCY_MONTHS}
 
 
@@ -224,7 +250,7 @@ def _debt_sector(view: LedgerView) -> dict[str, Any]:
     loans = [r for r in view.records if r.kind is Kind.LIABILITY]
     variable = [r for r in loans if r.fields["rate_type"] in ("variable", "mixed")]
     variable_total = _total(base_amount(view, r) for r in variable)
-    return {"loans": [{"label": _liability_label(r), "amount": base_amount(view, r),
+    return {"loans": [{"label": _liability_label(r), "category": r.fields["category"], "amount": base_amount(view, r),
                        "rate": Decimal(r.fields["annual_rate"]), "rate_type": r.fields["rate_type"],
                        "maturity": r.fields.get("maturity")} for r in loans],
             "variable_total": variable_total,

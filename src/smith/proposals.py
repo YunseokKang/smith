@@ -22,6 +22,10 @@ PENSION_CREDIT_RATE = Decimal("0.132")     # Above 55M won gross salary; 16.5% a
 DECISION_LEAD_MONTHS = 6                    # Decide how to return a lease deposit this long before it is due.
 LEASE_HORIZON_MONTHS = 48
 CD_SERIES, BASE_RATE_SERIES = "817Y002/010502000", "722Y001/0101000"
+# Differences smaller than this are within the error of approximating deposit rates by the CD rate.
+DECISION_MARGIN = Decimal("0.005")
+# Loans an extra payment can reduce (a lease deposit is returned, not prepaid).
+REPAYABLE = ("mortgage", "jeonse_loan", "credit_loan", "credit_line", "policy_loan", "other")
 _PENSION_ACCOUNTS = ("pension_savings", "irp")
 
 
@@ -70,14 +74,18 @@ def _facts(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any]) -> d
             months = _months_between(today, due)
             if 0 < months <= LEASE_HORIZON_MONTHS:
                 leases.append({"due": due, "months": months, "amount": base_amount(view, record)})
-    liquid = summary.by_liquidity.get("immediate", Decimal(0)) + summary.by_liquidity.get("days", Decimal(0))
+    # Inputs come from report_data, where a total that includes an unconverted amount is None.
+    # Rules skip or say "unknown" rather than turn a partial total into a confident figure.
+    liquidity = sectors["cash"]["liquidity"]
+    immediate, days = liquidity.get("immediate"), liquidity.get("days")
+    liquid = None if immediate is None or days is None else immediate + days
     pension = [base_amount(view, r) for r in view.records
                if r.kind is Kind.ASSET and r.fields.get("account_type") in _PENSION_ACCOUNTS]
+    pension_total = None if not pension or any(v is None for v in pension) else sum(pension, Decimal(0))
     return {"today": today, "summary": summary, "kpis": kpis, "sectors": sectors, "leases": leases,
-            "liquid": liquid, "surplus": summary.monthly_net, "pension_accounts": len(pension),
-            "pension_total": None if any(v is None for v in pension) else sum(pension, Decimal(0)),
-            "cd": _series(view, CD_SERIES), "base_rate": _series(view, BASE_RATE_SERIES),
-            "complete": summary.complete}
+            "liquid": liquid, "surplus": kpis["monthly_net"], "pension_accounts": len(pension),
+            "pension_total": pension_total, "cd": _series(view, CD_SERIES),
+            "base_rate": _series(view, BASE_RATE_SERIES)}
 
 
 def _series(view: LedgerView, series_id: str) -> dict[str, Any] | None:
@@ -90,6 +98,13 @@ def _series(view: LedgerView, series_id: str) -> dict[str, Any] | None:
 def _months_between(start: date, end: date) -> int:
     # Calendar-month difference, the same count the timeline and the home calculator show.
     return (end.year - start.year) * 12 + end.month - start.month
+
+
+def _accumulated(facts: dict[str, Any], months: int) -> Decimal | None:
+    """Liquid assets plus the monthly surplus saved until then; unknown if either input is unknown."""
+    if facts["liquid"] is None or facts["surplus"] is None:
+        return None
+    return facts["liquid"] + max(facts["surplus"], Decimal(0)) * months
 
 
 def _add_months(day: date, months: int) -> date:
@@ -106,20 +121,26 @@ def _lease_return(facts: dict[str, Any]) -> Proposal | None:
     amount, months, surplus = lease["amount"], lease["months"], facts["surplus"]
     if amount is None:
         return None
-    accumulated = facts["liquid"] + max(surplus, Decimal(0)) * months
-    coverage = accumulated / amount if amount else None
+    accumulated = _accumulated(facts, months)
+    coverage = accumulated / amount if accumulated is not None and amount else None
     deadline = _add_months(lease["due"], -DECISION_LEAD_MONTHS)
     priority = 1 if months <= 12 or (coverage is not None and coverage < 1 and months <= 24) else 2
     home = facts["kpis"]["home_progress"]
     overlap = (" 다만 같은 자산과 여유 자금을 주택 이전 목표 계산에도 쓰고 있어, 두 목표가 같은 돈을 나눠 써야 합니다."
                if home else "")
+    if accumulated is None:
+        readiness = (" 일부 자산이나 현금흐름을 원화로 환산하지 못해(환율 없음) 만기 때 준비할 수 있는 금액은 "
+                     "계산하지 않았습니다.")
+    else:
+        readiness = (f" 지금 며칠 안에 현금으로 바꿀 수 있는 자산 {short_won(facts['liquid'])}에 매월 여유 "
+                     f"{short_won(surplus)}이 그대로 쌓인다고 보면, 만기 때 약 {short_won(accumulated)}으로 필요액의 "
+                     f"{percent(coverage, 0)}입니다.{overlap}")
     return Proposal(
         key="lease-return", priority=priority,
         title=f"{lease['due']:%Y년 %m월} 돌려드려야 할 전세보증금 {short_won(amount)}의 반환 방법을 "
               f"{deadline:%Y년 %m월}까지 정해 두시길 권합니다.",
-        why=(f"전세보증금은 계약이 끝나면 세입자에게 돌려줘야 하는, 날짜와 금액이 정해진 큰 지출입니다(남은 기간 {months}개월). "
-             f"지금 며칠 안에 현금으로 바꿀 수 있는 자산 {short_won(facts['liquid'])}에 매월 여유 {short_won(surplus)}이 "
-             f"그대로 쌓인다고 보면, 만기 때 약 {short_won(accumulated)}으로 필요액의 {percent(coverage, 0)}입니다.{overlap}"),
+        why=(f"전세보증금은 계약이 끝나면 세입자에게 돌려줘야 하는, 날짜와 금액이 정해진 큰 지출입니다(남은 기간 {months}개월)."
+             + readiness),
         effect=("반환 방법(재계약, 새 세입자의 보증금, 매도, 보유 자금)을 미리 정해 두면 만기 직전에 주식을 불리한 시세에 "
                 "팔거나 급히 대출을 받는 일을 피할 수 있습니다."),
         risks=("새 세입자의 보증금이 지금보다 낮으면(이른바 역전세) 그 차액을 직접 마련해야 합니다. 아무것도 정하지 않으면 "
@@ -127,13 +148,14 @@ def _lease_return(facts: dict[str, Any]) -> Proposal | None:
         timing=f"{deadline:%Y.%m}까지 방법 결정(만기 {DECISION_LEAD_MONTHS}개월 전)",
         reconsider="주변 전세 시세가 크게 바뀌거나, 재계약·매도 여부가 정해지면 다시 계산합니다.",
         certainty="계산(현재 잔액과 현금흐름이 유지된다는 가정)",
-        figures={"amount": amount, "months": Decimal(months), "accumulated": accumulated})
+        figures={"amount": amount, "months": Decimal(months),
+                 **({} if accumulated is None else {"accumulated": accumulated})})
 
 
 def _emergency_reserve(facts: dict[str, Any]) -> Proposal | None:
     cash = facts["sectors"]["cash"]
     gap, surplus = cash["reserve_gap"], facts["surplus"]
-    if not gap:
+    if not gap or surplus is None:  # Met, or unknown because an amount could not be converted.
         return None
     months_cover = facts["kpis"]["immediate_months"]
     fill_months = None if surplus <= 0 else (gap / surplus).to_integral_value(rounding=ROUND_CEILING)
@@ -157,7 +179,7 @@ def _emergency_reserve(facts: dict[str, Any]) -> Proposal | None:
 
 def _surplus_plan(facts: dict[str, Any]) -> Proposal | None:
     summary, surplus = facts["summary"], facts["surplus"]
-    if surplus <= 0 or summary.monthly_transfers > 0:
+    if surplus is None or surplus <= 0 or summary.monthly_transfers > 0:
         return None
     return Proposal(
         key="surplus-plan", priority=2,
@@ -183,7 +205,8 @@ def _pension_credit(facts: dict[str, Any]) -> Proposal | None:
         key="pension-credit", priority=1 if today.month >= 10 else 3,
         title=f"올해 연금저축·IRP 납입액을 확인해 세액공제 한도를 {today.year}년 12월 31일 전에 채우시길 권합니다.",
         why=("연금저축과 IRP(개인형 퇴직연금)에 넣은 돈은 합해서 연 900만 원(연금저축만은 600만 원)까지 세금을 돌려받습니다"
-             f"(세액공제). 총급여가 5,500만 원을 넘으면 공제율은 13.2%로, 한도를 채우면 최대 약 {short_won(maximum)}입니다. "
+             f"(세액공제). 총급여가 5,500만 원을 넘으면 공제율은 13.2%(소득세 12%와 지방소득세 1.2%를 합한 실효율)로, "
+             f"한도를 채우면 최대 약 {short_won(maximum)}입니다. "
              "올해 납입분은 올해 말까지 넣어야 인정됩니다."),
         effect="올해 이미 넣은 금액을 알려 주시면 남은 한도와 돌려받을 금액을 정확히 계산해 드리겠습니다.",
         risks="연금 계좌의 돈은 55세 전에 꺼내면 공제받은 세금을 다시 내야 합니다. 가까운 큰 지출(보증금 반환)에 쓸 돈을 넣지는 마십시오.",
@@ -194,30 +217,39 @@ def _pension_credit(facts: dict[str, Any]) -> Proposal | None:
 
 
 def _prepayment(facts: dict[str, Any]) -> Proposal | None:
-    loans = [l for l in facts["sectors"]["debt"]["loans"] if l["rate_type"] in ("variable", "mixed") and l["rate"] > 0]
+    """The marginal effect of prepaying is set by the highest-rate loan that can be repaid, fixed or not."""
+    loans = [l for l in facts["sectors"]["debt"]["loans"] if l["category"] in REPAYABLE and l["rate"] > 0]
     cd = facts["cd"]
     if not loans or cd is None:
         return None
-    loan = max(loans, key=lambda l: l["amount"] or Decimal(0))
-    rate = loan["rate"]
+    loan = max(loans, key=lambda l: l["rate"])
+    rate, label = loan["rate"], loan["label"]
     deposit = cd["value"] / 100 * (1 - INTEREST_TAX)
     example = Decimal(10_000_000)
-    keep = rate > deposit
+    gap = rate - deposit
+    verdict = "keep" if gap >= DECISION_MARGIN else "deposit" if gap <= -DECISION_MARGIN else "close"
+    titles = {"keep": f"{label} 원금을 미리 갚는 지금의 방식을 이어가시는 것이 합리적입니다.",
+              "deposit": f"{label}을 미리 갚기보다 예금·채권에 두는 편이 나은지 점검하시길 권합니다.",
+              "close": f"{label} 추가 상환과 예금의 차이가 작으니, 꺼내 쓸 수 있는 쪽을 우선하셔도 됩니다."}
+    effects = {"keep": "확실한 이자 절감이 예금 이자보다 뚜렷하게 큽니다. 주식 투자는 기대수익이 더 높을 수 있지만 손실 "
+                       "가능성이 있어 확실한 절감과 직접 비교할 수는 없습니다.",
+               "deposit": "예금 이자가 대출 이자 절감보다 뚜렷하게 커졌습니다. 다만 대출 금리도 곧 다시 정해질 수 있습니다.",
+               "close": (f"차이가 {percent(DECISION_MARGIN, 1)}p보다 작아 어느 쪽도 뚜렷이 낫지 않습니다. 이럴 때는 필요할 때 "
+                         "다시 꺼내 쓸 수 있는 예금이 더 유연합니다.")}
     return Proposal(
-        key="prepayment", priority=3,
-        title=("주택담보대출 원금을 미리 갚는 지금의 방식을 이어가시는 것이 합리적입니다." if keep else
-               "대출을 미리 갚기보다 예금·채권에 두는 편이 나은지 점검하시길 권합니다."),
-        why=(f"대출 금리 {percent(rate)}는, 갚는 순간 그만큼의 이자를 확실히 아끼는 '세금 없는 수익'과 같습니다. 같은 1,000만 원을 "
-             f"단기 예금에 두면(CD 91일물 {cd['value']}% 기준, 이자소득세 15.4%를 뗀 뒤 {percent(deposit)}) 연 "
-             f"{short_won(example * deposit)}을 받고, 대출을 갚으면 연 {short_won(example * rate)}의 이자를 아낍니다."),
-        effect=("확실한 이자 절감이 예금 이자보다 큽니다. 주식 투자는 기대수익이 더 높을 수 있지만 손실 가능성이 있어 "
-                "확실한 절감과 직접 비교할 수는 없습니다." if keep else
-                "예금 이자가 대출 이자 절감보다 커졌습니다. 다만 대출 금리도 곧 다시 정해질 수 있습니다."),
-        risks=("갚은 돈은 다시 꺼내 쓰기 어렵습니다. 비상금과 보증금 반환 자금을 먼저 확보한 범위에서 하시고, "
-               "중도상환수수료가 있는지는 대출 약정서를 확인하셔야 합니다."),
-        timing="매월(현행 유지)" if keep else "다음 대출 금리 재산정 전",
-        reconsider=f"세후 예금 금리가 대출 금리({percent(rate)})를 넘거나, 보증금 반환 자금이 부족해 보이면 다시 판단합니다.",
-        certainty="계산(현재 금리가 유지된다는 가정)",
+        key="prepayment", priority=2 if verdict == "deposit" else 3,
+        title=titles[verdict],
+        why=(f"갚을 수 있는 대출 중 금리가 가장 높은 것은 {label}({percent(rate)})입니다. 대출을 갚으면 그만큼의 이자를 확실히 "
+             f"아끼는 '세금 없는 수익'과 같습니다. 같은 1,000만 원을 단기 예금에 두면 연 {short_won(example * deposit)}"
+             f"(CD 91일물 {cd['value']}%에서 이자소득세 15.4%를 뗀 {percent(deposit)}로 근사)을 받고, 대출을 갚으면 연 "
+             f"{short_won(example * rate)}의 이자를 아낍니다."),
+        effect=effects[verdict],
+        risks=("CD 91일물은 은행 간 단기 금리로, 실제 정기예금 금리와 다를 수 있습니다. 갚은 돈은 다시 꺼내 쓰기 어렵고, "
+               "중도상환수수료는 대출 약정서를 확인하셔야 합니다. 비상금과 보증금 반환 자금을 먼저 확보하십시오."),
+        timing="매월(현행 유지)" if verdict == "keep" else "다음 대출 금리 재산정 전",
+        reconsider=(f"세후 예금 금리와 대출 금리({percent(rate)})의 차이가 {percent(DECISION_MARGIN, 1)}p 안팎으로 바뀌거나, "
+                    "보증금 반환 자금이 부족해 보이면 다시 판단합니다."),
+        certainty="계산(현재 금리가 유지된다는 가정, 예금 금리는 근사)",
         figures={"loan_rate": rate, "deposit_after_tax": deposit})
 
 
@@ -262,9 +294,10 @@ def _strategy(facts: dict[str, Any]) -> list[Track]:
     for lease in facts["leases"]:
         if lease["amount"] is None:
             continue
-        accumulated = facts["liquid"] + max(facts["surplus"], Decimal(0)) * lease["months"]
+        accumulated = _accumulated(facts, lease["months"])
+        status = "unknown" if accumulated is None else "on_track" if accumulated >= lease["amount"] else "attention"
         tracks.append(Track(
-            "전세보증금 반환", "on_track" if accumulated >= lease["amount"] else "attention",
+            "전세보증금 반환", status,
             f"{lease['due']:%Y년 %m월} {short_won(lease['amount'])}, 만기 때 예상 가용 자금 {short_won(accumulated)}",
             "주택 이전 목표와 같은 자금을 나눠 써야 하므로, 두 목표를 합친 자금 계획이 필요합니다." if home else ""))
     pension = facts["pension_total"]
@@ -278,5 +311,5 @@ def _strategy(facts: dict[str, Any]) -> list[Track]:
 def _assumptions() -> list[str]:
     return [f"이자소득세 {percent(INTEREST_TAX, 1)}",
             f"연금계좌 세액공제 한도 연 {short_won(PENSION_CREDIT_LIMIT)}(연금저축 {short_won(PENSION_SAVINGS_LIMIT)}), "
-            f"공제율 {percent(PENSION_CREDIT_RATE, 1)}(총급여 5,500만 원 초과 가정)",
-            "예금 금리는 CD 91일물 금리로 근사"]
+            f"공제율 {percent(PENSION_CREDIT_RATE, 1)}(소득세 12%+지방소득세, 총급여 5,500만 원 초과 가정)",
+            "예금 금리는 CD 91일물 유통수익률로 근사(실제 정기예금 금리와 다를 수 있음)"]

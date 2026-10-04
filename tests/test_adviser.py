@@ -98,6 +98,16 @@ class AdviserTests(unittest.TestCase):
             check_outbound("x" * (MAX_PAYLOAD_BYTES + 1), secrets=[])
         self.assertIn("payload-too-large", caught.exception.rules)
 
+    def test_every_stored_secret_is_checked_before_sending(self):
+        with mock.patch("smith.credentials.load_toss_client", return_value=("toss-id", "toss-secret")), \
+                mock.patch("smith.credentials.load_gmail", return_value=("g-id", "g-secret", "g-refresh")), \
+                mock.patch("smith.credentials.load_api_key", side_effect=lambda provider: f"{provider}-key"):
+            secrets = advise_command._secrets()
+        for value in ("toss-secret", "g-secret", "g-refresh", "ecos-key", "fred-key"):
+            self.assertIn(value, secrets)
+        with self.assertRaises(PayloadRejected):
+            check_outbound("refresh token g-refresh was pasted here", secrets=secrets)
+
     def test_case_facts_are_computed_in_code(self):
         funding = cases.funding_facts(self.view, amount=Decimal(100_000_000))
         self.assertEqual(funding["reachable_by_liquidity"]["immediate"], {"cumulative": "50000000", "covers_target": False})
