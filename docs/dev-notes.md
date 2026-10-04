@@ -34,7 +34,10 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
 
 ## 반복 방지 규칙
 
-- 텍스트 파일 입출력은 항상 `encoding="utf-8"`을 명시한다.
+- 텍스트 파일 입출력은 항상 `encoding="utf-8"`을 명시한다. 사용자가 편집하는 입력 파일은
+  `utf-8-sig`로 읽는다. 메모장과 PowerShell 5.1 `Out-File`이 UTF-8 BOM을 붙이기 때문이다.
+- SQLite 파일을 쓰는 코드와 테스트는 연결을 반드시 닫는다(`contextlib.closing`).
+  Windows는 열린 파일을 삭제할 수 없어 임시 디렉터리 정리가 실패한다.
 - 문서의 셸 명령은 PowerShell 문법으로 작성한다. `VAR=x cmd`, `&&`는 PowerShell 5.1에서 동작하지 않는다.
 - PowerShell 5.1에서 네이티브 명령에 `2>&1`을 붙이지 않는다. stderr 줄이 `NativeCommandError`로
   감싸져 성공한 실행도 오류처럼 보인다. unittest는 결과를 stderr로 출력하므로 특히 주의한다.

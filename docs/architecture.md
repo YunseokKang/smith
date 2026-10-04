@@ -17,7 +17,14 @@ CLI와 향후 앱은 동일한 application service를 호출한다. 웹 서버�
 
 ## 저장소 및 RAG
 
-PoC는 SQLite를 후보로 두되 최종 선택은 배포·동시성 확인 후 결정한다.
+PoC 원장은 표준 라이브러리 `sqlite3`로 구현했다(`src/smith/ledger.py`, 기본 `data/smith.db`).
+선택 이유: 의존성 없음, 단일 사용자 규모, 파일 하나로 백업 가능, transaction 지원.
+배포 환경과 동시 실행 요구가 확정되면 재검토한다.
+원장은 record revision을 추가만 하는 구조다. 공통 열(ID, kind, owner, source, status, 시각,
+revision)은 컬럼으로, 종류별 필드는 정규화된 JSON 텍스트로 저장해 계약 확장 시 migration을 줄인다.
+가져오기는 `BEGIN IMMEDIATE` transaction으로 직렬화하며, 스키마 버전은 `PRAGMA user_version`으로 관리한다.
+스키마 생성은 쓰기 경로(`import`)에서만 한다. 미리보기와 조회는 원장을 읽기 전용(`mode=ro`)으로 열고,
+초기화되지 않은 파일이면 빈 메모리 원장으로 계획한다.
 잔고·현금흐름·거래는 구조화된 DB에 저장한다. RAG는 약관·상품 문서·외부 자료·과거 자문을
 검색하는 데 사용하며 수치의 원장으로 사용하지 않는다. 문서가 적으면 전문 검색부터 시작해
 필요할 때 임베딩 검색을 추가한다. 출처, 문서 버전, 유효 기간과 인용 위치를 보존한다.
@@ -27,6 +34,8 @@ PoC는 SQLite를 후보로 두되 최종 선택은 배포·동시성 확인 후 
 금융 API 키는 어댑터만 접근한다. 조회 전용 권한을 공급자가 지원하면 우선 사용하고,
 미지원이면 명시적으로 허용한 조회 endpoint만 어댑터에서 호출한다.
 인증 token 발급의 POST와 주문 POST를 혼동하지 않는다. 주문 기능 자체는 제공하지 않는다.
+토스증권 Open API는 scope가 없어 같은 token으로 주문 API도 호출된다. 따라서 토스 어댑터는
+`docs/toss-openapi.md`의 허용 목록 밖 요청을 네트워크 호출 전에 거부하고, 이를 테스트로 검증한다.
 
 Claude Code headless 실행은 비밀정보나 운영 DB에 직접 접근할 수 없는 별도 작업 경계에서
 수행한다. 범용 shell과 임의 HTTP를 자문 도구로 노출하지 않는다. 실제 CLI 버전의 권한·도구

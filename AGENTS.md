@@ -181,6 +181,7 @@ If `docs/INDEX.md` exists, use it to locate relevant topics. Otherwise use the c
 - `docs/requirements.md`: confirmed scope and acceptance criteria.
 - `docs/architecture.md`: proposed architecture and decisions.
 - `docs/data-contract.md`: JSON import/update semantics.
+- `docs/toss-openapi.md`: verified Toss Securities Open API facts and the read-only allowlist.
 - `docs/roadmap.md`: implementation status and next work.
 - `docs/dev-notes.md`: Windows development environment and troubleshooting log.
 

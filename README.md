@@ -5,8 +5,9 @@
 
 ## 현재 상태
 
-요구사항과 개발 골격만 준비된 단계다. 토스 API 호출, 자산 DB 저장, Claude Code headless 실행,
-시황 검색, 보고서 생성, 스케줄 실행, Gmail 발송은 **아직 구현되지 않았다**.
+구현됨: 설정 검증, 수동 JSON 입력 검증과 SQLite 자산 원장(이력·멱등성·종료·정정·미리보기).
+토스 API 호출, 계산·요약, Claude Code headless 실행, 시황 검색, 보고서 생성, 스케줄 실행,
+Gmail 발송은 **아직 구현되지 않았다**. 진행 상황은 `docs/roadmap.md`.
 실제 개인정보·잔고·인증정보는 포함하지 않는다. 예시 데이터는 모두 가상이다.
 
 ## 빠른 시작
@@ -24,7 +25,13 @@ python -m uv pip install --python .venv -e .
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-현재 지원 명령은 `check-config`뿐이다. 설정 확인은 스케줄을 등록하거나 이메일을 보내지 않는다.
+| 명령 | 동작 |
+|---|---|
+| `check-config --config FILE` | 설정 검증. 스케줄을 등록하거나 이메일을 보내지 않는다 |
+| `import FILE [--dry-run] [--db PATH]` | JSON 검증 후 원장에 원자적으로 적용. `--dry-run`은 계획만 표시 |
+| `records [--as-of TIME] [--known-at TIME] [--db PATH]` | 지정 시각에 유효한 레코드 목록. `--known-at`은 그 시각까지 기록된 내용만 사용 |
+
+기본 원장은 `data/smith.db`(Git 제외). 입력 형식은 `docs/data-contract.md`,
 환경 문제와 해결 기록은 `docs/dev-notes.md`를 참고한다.
 
 ## 구조
@@ -33,13 +40,14 @@ python -m uv pip install --python .venv -e .
 |---|---|
 | `docs/requirements.md` | 확정 요구사항, 수용 기준, 미결정 항목 |
 | `docs/architecture.md` | 제안 아키텍처, 데이터·권한 경계 |
-| `docs/data-contract.md` | JSON 입력 및 반복 갱신 계약 초안 |
+| `docs/data-contract.md` | JSON 입력 계약 v1과 revision·정정 규칙 |
+| `docs/toss-openapi.md` | 토스증권 Open API 확인 결과와 설계 반영 사항 |
 | `docs/roadmap.md` | 구현 순서와 검증 기준 |
 | `docs/dev-notes.md` | Windows 개발 환경, 트러블슈팅 기록 |
 | `config/smith.example.toml` | 월·목 06:00 KST 등 기본 설정 |
-| `examples/portfolio.example.json` | 가상의 수동 입력 예시 |
-| `src/smith/` | CLI, 설정 검증, 연동 Protocol |
-| `tests/` | 설정의 안전 기본값·스케줄 검증 |
+| `examples/portfolio.example.json` | 가상의 수동 입력 예시(자산·부채·현금흐름·목표) |
+| `src/smith/` | CLI, 설정 검증, 레코드 타입, importer, 원장, 연동 Protocol |
+| `tests/` | 설정, 입력 검증, 원장 이력, CLI 테스트 |
 | `AGENTS.md`, `CLAUDE.md` | 개발 에이전트 작업 지침 |
 
 ## 운영 원칙

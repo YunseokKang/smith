@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "import_id": "example-import-001",
+  "import_id": "example-2026-09-01",
   "source": "manual-example",
   "mode": "patch",
-  "as_of": "2026-09-27T09:00:00+09:00",
+  "as_of": "2026-09-01T09:00:00+09:00",
   "owners": [
     {
       "id": "owner-example"
@@ -14,14 +14,57 @@
       "id": "asset-example-cash",
       "kind": "asset",
       "owner_id": "owner-example",
-      "effective_at": "2026-09-27T09:00:00+09:00",
+      "effective_at": "2026-09-01T09:00:00+09:00",
       "revision": 1,
       "status": "active",
       "category": "cash",
+      "account_type": "bank",
       "currency": "KRW",
       "value": "1000000",
       "valuation_method": "manual",
-      "liquidity": "available"
+      "liquidity": "immediate"
+    },
+    {
+      "id": "liability-example-loan",
+      "kind": "liability",
+      "owner_id": "owner-example",
+      "effective_at": "2026-09-01T09:00:00+09:00",
+      "revision": 1,
+      "status": "active",
+      "category": "credit_loan",
+      "currency": "KRW",
+      "outstanding_principal": "500000",
+      "annual_rate": "0.05",
+      "rate_type": "fixed",
+      "maturity": "2027-09-01",
+      "repayment_method": "bullet"
+    },
+    {
+      "id": "cashflow-example-salary",
+      "kind": "cashflow",
+      "owner_id": "owner-example",
+      "effective_at": "2026-09-01T09:00:00+09:00",
+      "revision": 1,
+      "status": "active",
+      "direction": "inflow",
+      "category": "salary",
+      "currency": "KRW",
+      "amount": "3000000",
+      "frequency": "monthly",
+      "start_date": "2026-09-01"
+    },
+    {
+      "id": "goal-example-home",
+      "kind": "goal",
+      "owner_id": "owner-example",
+      "effective_at": "2026-09-01T09:00:00+09:00",
+      "revision": 1,
+      "status": "active",
+      "category": "home",
+      "currency": "KRW",
+      "target_amount": "100000000",
+      "target_date": "2029-09-01",
+      "priority": "high"
     }
   ]
 }
