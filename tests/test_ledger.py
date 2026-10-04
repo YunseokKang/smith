@@ -1,6 +1,8 @@
 import json
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -189,6 +191,21 @@ class LedgerTests(unittest.TestCase):
         self.apply(asset(revision=3, effective_at=OCT1, change_type="correction", corrects_revision=2,
                          reason="closed by mistake"), import_id="i4")
         self.assertEqual(self.state(NOV15), ("active", "100"))
+
+    def test_old_schema_is_read_through_a_migrated_copy_and_upgraded_on_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "v1.db"
+            with closing(sqlite3.connect(path)) as old:
+                for statement in ledger._MIGRATIONS[1]:
+                    old.execute(statement)
+                old.execute("PRAGMA user_version = 1")
+            with closing(ledger.connect_read_only(path)) as view:
+                self.assertEqual(ledger.latest_observations(view, as_of=LATER, known_at=LATER), {})
+            with closing(sqlite3.connect(path)) as check:
+                self.assertEqual(check.execute("PRAGMA user_version").fetchone()[0], 1)
+            ledger.connect(path).close()
+            with closing(sqlite3.connect(path)) as check:
+                self.assertEqual(check.execute("PRAGMA user_version").fetchone()[0], ledger.SCHEMA_VERSION)
 
     def test_dry_run_writes_nothing(self):
         loan = liability(collateral_record_id="asset-a")  # Resolved against the same batch.

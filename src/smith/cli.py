@@ -1,6 +1,7 @@
 """Command line entry point. Network access is limited to read-only Toss requests; no LLM or email."""
 import argparse
 import getpass
+import json
 import sqlite3
 import sys
 import tomllib
@@ -12,9 +13,11 @@ from pathlib import Path
 from smith import ledger
 from smith.config import load_config
 from smith.importer import load_import_file
-from smith.records import Action, ImportRejected, Kind
+from smith.records import Action, ImportBatch, ImportRejected, Kind
 
 DEFAULT_DB = Path("data/smith.db")
+# Manual files should use the same owner id so that API and manual records belong together.
+DEFAULT_OWNER = "self"
 _AMOUNT_FIELD = {Kind.ASSET: "value", Kind.LIABILITY: "outstanding_principal",
                  Kind.CASHFLOW: "amount", Kind.GOAL: "target_amount"}
 
@@ -34,19 +37,51 @@ def main(argv: list[str] | None = None) -> int:
     show.add_argument("--known-at", type=_aware_datetime,
                       help="Use only revisions recorded by this time, to reproduce an earlier view (default: now)")
     toss = sub.add_parser("toss", help="Toss Securities read-only connection")
-    toss.add_argument("action", choices=("login", "logout", "check"))
+    toss.add_argument("action", choices=("login", "logout", "check", "sync"))
     toss.add_argument("--show-values", action="store_true",
-                      help="check: also print amounts and symbols (for your own terminal only)")
+                      help="check/sync: also print amounts and symbols (for your own terminal only)")
+    toss.add_argument("--db", type=Path, default=DEFAULT_DB)
+    toss.add_argument("--owner", default=DEFAULT_OWNER, help=f"sync: owner id (default: {DEFAULT_OWNER})")
+    toss.add_argument("--dry-run", action="store_true", help="sync: show planned changes without writing")
+    toss.add_argument("--close-missing", action="store_true",
+                      help="sync: close positions that the snapshot no longer reports")
+    report = sub.add_parser("summary", help="Net worth, allocation, liquidity and cash flow from the ledger")
+    report.add_argument("--db", type=Path, default=DEFAULT_DB)
+    report.add_argument("--as-of", type=_aware_datetime, help="ISO 8601 time with UTC offset (default: now)")
+    report.add_argument("--known-at", type=_aware_datetime, help="Use only data recorded by this time")
+    report.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     args = parser.parse_args(argv)
-    commands = {"check-config": _check_config, "import": _import, "records": _records, "toss": _toss}
+    commands = {"check-config": _check_config, "import": _import, "records": _records, "toss": _toss,
+                "summary": _summary}
     return commands[args.command](args)
+
+
+def _summary(args: argparse.Namespace) -> int:
+    from smith.summary import build_summary, render, to_dict
+
+    if not args.db.exists():
+        print(f"No ledger at {args.db}. Import a JSON file or run `smith toss sync` first.")
+        return 1
+    now = datetime.now(timezone.utc)
+    try:
+        with closing(ledger.connect_read_only(args.db)) as conn:
+            summary = build_summary(conn, as_of=args.as_of or now, known_at=args.known_at or now)
+    except (sqlite3.Error, ledger.LedgerError) as error:
+        print(f"Ledger error ({type(error).__name__}): not a readable Smith ledger.")
+        return 1
+    if args.json:
+        print(json.dumps(to_dict(summary), ensure_ascii=False, indent=2))
+    else:
+        print("\n".join(render(summary)))
+    return 0
 
 
 def _toss(args: argparse.Namespace) -> int:
     # Imported lazily so ledger commands work without the credential store.
     from smith import credentials
-    from smith.toss import TossClient
+    from smith.toss import TossClient, TossError
     from smith.toss_check import run_check
+    from smith.toss_sync import SyncError, collect_snapshot
 
     if args.action == "logout":
         credentials.delete_toss_client()
@@ -68,7 +103,37 @@ def _toss(args: argparse.Namespace) -> int:
     if stored is None:
         print("No Toss credentials stored. Run `smith toss login` in your terminal first.")
         return 2
-    return run_check(TossClient(*stored), show_values=args.show_values)
+    if args.action == "check":
+        return run_check(TossClient(*stored), show_values=args.show_values)
+    attempted_at = datetime.now(timezone.utc)
+    try:
+        batch = collect_snapshot(TossClient(*stored), owner_id=args.owner, collected_at=attempted_at)
+    except (TossError, SyncError) as error:
+        print(f"Toss sync failed: {error}. No records written.")
+        code = error.code if isinstance(error, TossError) else "invalid-response"
+        if not args.dry_run:
+            _record_sync(args.db, attempted_at, "failure", code)
+        return 1
+    result = _apply_batch(batch, args.db, dry_run=args.dry_run, close_missing=args.close_missing,
+                          list_records=args.show_values)
+    if not args.dry_run:
+        if result == 0:
+            _record_sync(args.db, attempted_at, "success", import_id=batch.import_id)
+        else:
+            _record_sync(args.db, attempted_at, "failure", "not-applied")
+    return result
+
+
+def _record_sync(db: Path, attempted_at: datetime, outcome: str, error_code: str | None = None,
+                 import_id: str | None = None) -> None:
+    # Failures are stored too, so `summary` can warn that the latest data was not refreshed.
+    try:
+        db.parent.mkdir(parents=True, exist_ok=True)
+        with closing(ledger.connect(db)) as conn:
+            ledger.record_sync_run(conn, source="toss", attempted_at=attempted_at, outcome=outcome,
+                                   error_code=error_code, import_id=import_id)
+    except (OSError, sqlite3.Error, ledger.LedgerError) as error:
+        print(f"Warning: could not record the sync outcome ({type(error).__name__}).")
 
 
 def _aware_datetime(text: str) -> datetime:
@@ -100,15 +165,20 @@ def _import(args: argparse.Namespace) -> int:
         return 2
     except ImportRejected as rejected:
         return _print_rejected(rejected)
+    return _apply_batch(batch, args.db, dry_run=args.dry_run)
+
+
+def _apply_batch(batch: ImportBatch, db: Path, *, dry_run: bool, close_missing: bool = False,
+                 list_records: bool = True) -> int:
     try:
-        if args.dry_run:
-            conn = ledger.connect_for_planning(args.db)
+        if dry_run:
+            conn = ledger.connect_for_planning(db)
         else:
-            args.db.parent.mkdir(parents=True, exist_ok=True)
-            conn = ledger.connect(args.db)
+            db.parent.mkdir(parents=True, exist_ok=True)
+            conn = ledger.connect(db)
         with closing(conn):
             result = ledger.apply_import(conn, batch, recorded_at=datetime.now(timezone.utc),
-                                         dry_run=args.dry_run)
+                                         dry_run=dry_run, close_missing=close_missing)
     except ImportRejected as rejected:
         return _print_rejected(rejected)
     except (OSError, sqlite3.Error, ledger.LedgerError) as error:
@@ -117,12 +187,12 @@ def _import(args: argparse.Namespace) -> int:
     if result.outcome == "already_imported":
         print(f"Import {result.import_id} was already applied with identical content. No changes.")
         return 0
-    print(f"Import {result.import_id}: {len(result.actions)} record(s)")
-    for record_id, revision, action in result.actions:
+    print(f"Import {result.import_id}: {len(result.actions)} record(s), {len(batch.observations)} observation(s)")
+    for record_id, revision, action in result.actions if list_records else ():
         print(f"  {action:<10} {record_id} (revision {revision})")
     counts = Counter(action for _, _, action in result.actions)
     print(" ".join(f"{action}={counts[action]}" for action in Action))
-    print("Dry run: no changes written." if result.outcome == "dry_run" else f"Applied to {args.db}.")
+    print("Dry run: no changes written." if result.outcome == "dry_run" else f"Applied to {db}.")
     return 0
 
 

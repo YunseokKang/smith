@@ -1,7 +1,23 @@
 """Financial record types shared by the importer and the ledger."""
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
+
+
+def canonical_decimal(text: str) -> str:
+    """Return a decimal in canonical text form (no exponent, no trailing zeros, no negative zero).
+
+    Raises:
+        ValueError: `text` is not a finite decimal.
+    """
+    try:
+        number = Decimal(text)
+    except InvalidOperation:
+        raise ValueError("not a decimal") from None
+    if not number.is_finite():
+        raise ValueError("not a finite decimal")
+    return "0" if number.is_zero() else format(number.normalize(), "f")
 
 
 class Kind(StrEnum):
@@ -42,13 +58,16 @@ ACCOUNT_TYPES = frozenset({
 })
 VALUATION_METHODS = frozenset({"manual", "statement", "market", "appraisal", "api"})
 LIQUIDITY_CLASSES = frozenset({"immediate", "days", "months", "restricted"})
+MARKETS = frozenset({"KR", "US", "other"})
+OCCUPANCY = frozenset({"owner_occupied", "leased_out", "vacant", "other"})
 
 LIABILITY_CATEGORIES = frozenset({
     "mortgage", "jeonse_loan", "credit_loan", "credit_line", "card_balance", "policy_loan",
     "lease_deposit_obligation", "other",
 })
-RATE_TYPES = frozenset({"fixed", "variable", "mixed"})
-REPAYMENT_METHODS = frozenset({"bullet", "equal_payment", "equal_principal", "revolving", "other"})
+# "unknown" records a loan whose terms are not yet confirmed instead of leaving it out.
+RATE_TYPES = frozenset({"fixed", "variable", "mixed", "unknown"})
+REPAYMENT_METHODS = frozenset({"bullet", "equal_payment", "equal_principal", "revolving", "other", "unknown"})
 
 INFLOW_CATEGORIES = frozenset({
     "salary", "business_income", "rental_income", "pension_income", "investment_income", "other_income",
@@ -91,7 +110,25 @@ class RecordInput:
 
 
 @dataclass(frozen=True)
+class Observation:
+    """A reference measurement that is not part of net worth, such as broker buying power or an FX rate.
+
+    For an FX rate, `subject` is the base currency and `currency` the quote currency:
+    1 `subject` = `value` `currency`.
+    """
+
+    subject: str
+    metric: str
+    currency: str
+    value: str
+    observed_at: datetime
+
+
+@dataclass(frozen=True)
 class ImportBatch:
+    """Records to apply atomically. In snapshot mode the ledger assigns revisions itself and
+    treats the batch as the complete set of active records for its owners and source."""
+
     import_id: str
     source: str
     mode: str
@@ -99,6 +136,7 @@ class ImportBatch:
     owner_ids: tuple[str, ...]
     records: tuple[RecordInput, ...]
     payload_sha256: str
+    observations: tuple[Observation, ...] = ()
 
 
 @dataclass(frozen=True)

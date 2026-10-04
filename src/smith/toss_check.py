@@ -30,6 +30,9 @@ def run_check(client: TossClient, *, show_values: bool, emit: Callable[[str], No
         rate = client.exchange_rate("USD", "KRW")
         detail = f", midRate {rate['midRate']}" if show_values else ""
         emit(f"exchange-rate  USD/KRW ok, valid from {rate['validFrom']}{detail}")
+    except (KeyError, TypeError, AttributeError):
+        emit(f"{step}: failed: invalid-response (unexpected response shape)")
+        return 1
     except TossError as error:
         emit(f"{step}: failed: {error}")
         if error.status in _HINTS:

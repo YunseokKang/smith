@@ -24,13 +24,20 @@
 | `schema_version` | `1` |
 | `import_id` | 멱등성 키. 같은 ID·같은 내용은 no-op, 같은 ID·다른 내용은 오류. 거절된 import의 ID는 다시 쓸 수 있다 |
 | `source` | `manual` 또는 `manual-<소문자·숫자>`. API 원천(예: 토스)은 어댑터 코드만 기록한다 |
-| `mode` | `patch`만 지원. `snapshot`은 토스 어댑터 단계에서 구현한다 |
+| `mode` | 파일은 `patch`만. `snapshot`은 API 어댑터(`smith toss sync`)만 사용한다 |
 | `as_of` | 원천 정보의 기준 시점. 가져오는 시각보다 미래면 거절 |
-| `owners` | `[{"id": "..."}]`. 레코드의 `owner_id`는 여기에 선언돼야 한다 |
+| `owners` | `[{"id": "..."}]`. 레코드의 `owner_id`는 여기에 선언돼야 한다. 본인은 `self`, 함께 관리하는 배우자(예정자 포함)는 `partner`를 쓴다. 토스 동기화 기본값은 `self` |
 | `records` | 1개 이상. 한 import 안에서 같은 record `id`는 한 번만 |
 
 `patch`는 포함한 레코드만 갱신하고 빠진 레코드는 그대로 둔다.
 내용 비교는 JSON 서식과 키 순서를 무시한다.
+
+**snapshot**(API 어댑터 전용)은 배치를 해당 owner·source의 활성 레코드 전체로 본다.
+- revision은 원장이 매긴다. 필드가 최신 revision과 같으면 `unchanged`, 다르면 새 revision.
+- 배치에 없는 활성 레코드는 종료 후보다. `--close-missing`이 없으면 배치 전체를 거절한다.
+- 공급자가 다시 보고한 종료 레코드(예: 다시 매수한 종목)는 같은 ID로 재개할 수 있다.
+  수동 입력의 "종료는 최종 상태" 규칙의 유일한 예외다.
+- 매수 가능 금액·환율 같은 참고 지표는 레코드가 아닌 관측값(observations)으로 저장하며 순자산에 들어가지 않는다.
 
 ## 레코드 공통 필드
 
@@ -62,6 +69,10 @@
   `crypto`, `unclassified`(구성 미상 총액), `other`
 - `account_type`(계좌·세제 포장): `bank`, `brokerage`, `isa`, `pension_savings`(연금저축), `irp`, `dc`,
   `insurance`, `crypto_exchange`, `none`(부동산·보증금처럼 계좌가 없음), `other`
+- 선택 필드(종목 단위 세부): `symbol`(영문·숫자·`.`·`-` 20자 이하), `instrument_name`(100자 이하),
+  `market`(`KR`, `US`, `other`), `quantity`, `unit_price`, `average_cost`, `value_after_costs`
+  (세금·수수료 공제 후 평가액). 토스 동기화가 채우며 수동 입력에도 쓸 수 있다.
+- 선택 필드 `occupancy`(부동산 용도): `owner_occupied`(실거주), `leased_out`(임대), `vacant`, `other`.
 - 구성을 모르는 계좌 총액은 `unclassified` 한 건으로, 구성을 알면 자산군별 레코드로 나눠 입력한다.
   한 계좌를 두 방식으로 동시에 입력하면 이중 합산되므로, 나눌 때는 총액 레코드를 종료한다.
 - `valuation_method`: `manual`(본인 추정), `statement`(금융기관 앱·명세서 값), `market`(시세×수량),
@@ -79,9 +90,9 @@
 - `credit_limit`: 마이너스통장 등의 한도. 부채 원금이 아니며 순자산에 들어가지 않는다.
 - `collateral_record_id`: 담보 자산 레코드 ID(예: 보험계약대출의 해약환급금, 주택담보대출의 부동산).
 - `annual_rate`: 소수 비율. `0.045`가 4.5%. 1 이상이면 거절한다(퍼센트 입력 실수 방지).
-- `rate_type`: `fixed`, `variable`, `mixed`
+- `rate_type`: `fixed`, `variable`, `mixed`, `unknown`(미확인)
 - `repayment_method`: `bullet`(만기일시), `equal_payment`(원리금균등), `equal_principal`(원금균등),
-  `revolving`, `other`
+  `revolving`, `other`, `unknown`(미확인). 미확인 값은 확인되면 다음 revision으로 갱신한다.
 
 **cashflow**: `direction`, `category`, `currency`, `amount`(0 초과), `frequency`, `start_date`, `end_date`(선택),
 `liability_record_id`(`loan_payment`일 때 필수, 그 외 금지)
@@ -153,8 +164,6 @@
 
 ## 아직 없는 것
 
-- `snapshot` 모드와 누락 항목 종료 미리보기(토스 어댑터 단계).
 - 공동 소유 지분(소유 지분 테이블과 합계 1 검증).
-- 종목 수량·단가 등 세부 필드(토스 어댑터 단계에서 필요한 만큼 추가).
 - 보험 보장(coverage) 레코드.
 - 보고서가 사용한 import·snapshot ID 저장(6단계에서 `--known-at`과 함께 재현 근거로 사용).

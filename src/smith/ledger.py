@@ -7,20 +7,22 @@ Filtering by `recorded_at` reproduces what the ledger knew at an earlier time.
 import json
 import logging
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timezone
 from itertools import groupby
 from pathlib import Path
+from typing import Any
 
 from smith.records import (
-    REFERENCE_FIELDS, Action, ChangeType, ImportBatch, ImportRejected, ImportResult, Kind, RecordInput,
-    Status, StoredRevision,
+    REFERENCE_FIELDS, Action, ChangeType, ImportBatch, ImportRejected, ImportResult, Kind, Observation,
+    RecordInput, Status, StoredRevision,
 )
 
 logger = logging.getLogger(__name__)
 _END_OF_TIME = datetime.max.replace(tzinfo=timezone.utc)
 
-SCHEMA_VERSION = 1
-_SCHEMA = (
+SCHEMA_VERSION = 3
+_V1 = (
     """CREATE TABLE imports (
         import_id TEXT PRIMARY KEY,
         payload_sha256 TEXT NOT NULL,
@@ -50,6 +52,30 @@ _SCHEMA = (
         PRIMARY KEY (record_id, revision)
     )""",
 )
+# Reference measurements kept out of net worth, such as broker buying power and FX rates.
+_V2 = (
+    """CREATE TABLE observations (
+        import_id TEXT NOT NULL REFERENCES imports(import_id),
+        subject TEXT NOT NULL,
+        metric TEXT NOT NULL,
+        currency TEXT NOT NULL,
+        value TEXT NOT NULL,
+        observed_at TEXT NOT NULL,
+        PRIMARY KEY (import_id, subject, metric, currency)
+    )""",
+)
+# Every provider sync attempt, so a failed refresh is visible instead of silently leaving old data.
+_V3 = (
+    """CREATE TABLE sync_runs (
+        source TEXT NOT NULL,
+        attempted_at TEXT NOT NULL,
+        outcome TEXT NOT NULL CHECK (outcome IN ('success', 'failure')),
+        error_code TEXT,
+        import_id TEXT,
+        PRIMARY KEY (source, attempted_at)
+    )""",
+)
+_MIGRATIONS = {1: _V1, 2: _V2, 3: _V3}
 _COLUMNS = ("record_id, revision, kind, owner_id, source, status, change_type, corrects_revision, "
             "reason, effective_at, recorded_at, import_id, fields")
 
@@ -71,12 +97,11 @@ def connect(path: Path | str) -> sqlite3.Connection:
 
 
 def connect_read_only(path: Path | str) -> sqlite3.Connection:
-    """Open an existing, initialized ledger without creating, migrating or writing anything."""
-    conn, version = _open_read_only(path)
-    if version != SCHEMA_VERSION:
-        conn.close()
-        raise LedgerError(f"ledger schema {version} is not the supported version {SCHEMA_VERSION}")
-    return conn
+    """Open an initialized ledger without creating, migrating or writing the file.
+
+    An older schema is read through an in-memory copy migrated to the current version.
+    """
+    return _read_view(path, empty_ok=False)
 
 
 def connect_for_planning(path: Path | str) -> sqlite3.Connection:
@@ -86,13 +111,27 @@ def connect_for_planning(path: Path | str) -> sqlite3.Connection:
     """
     if not Path(path).exists():
         return connect(":memory:")
+    return _read_view(path, empty_ok=True)
+
+
+def _read_view(path: Path | str, *, empty_ok: bool) -> sqlite3.Connection:
     conn, version = _open_read_only(path)
     if version == SCHEMA_VERSION:
         return conn
-    conn.close()
-    if version != 0:
-        raise LedgerError(f"ledger schema {version} is not the supported version {SCHEMA_VERSION}")
-    return connect(":memory:")
+    try:
+        if version > SCHEMA_VERSION or (version == 0 and not empty_ok):
+            raise LedgerError(f"ledger schema {version} is not readable by schema {SCHEMA_VERSION}")
+        memory = sqlite3.connect(":memory:", isolation_level=None)
+        conn.backup(memory)
+    finally:
+        conn.close()
+    try:
+        memory.execute("PRAGMA foreign_keys = ON")
+        _migrate(memory)
+    except BaseException:
+        memory.close()
+        raise
+    return memory
 
 
 def _open_read_only(path: Path | str) -> tuple[sqlite3.Connection, int]:
@@ -110,9 +149,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         if version > SCHEMA_VERSION:
             raise LedgerError(f"ledger schema {version} is newer than supported {SCHEMA_VERSION}")
-        if version == 0:
-            for statement in _SCHEMA:
+        for step in range(version + 1, SCHEMA_VERSION + 1):
+            for statement in _MIGRATIONS[step]:
                 conn.execute(statement)
+        if version < SCHEMA_VERSION:
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     except BaseException:
         conn.execute("ROLLBACK")
@@ -121,8 +161,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
 
 def apply_import(conn: sqlite3.Connection, batch: ImportBatch, *, recorded_at: datetime,
-                 dry_run: bool = False) -> ImportResult:
+                 dry_run: bool = False, close_missing: bool = False) -> ImportResult:
     """Apply a batch atomically, or plan it without writing when `dry_run` is set.
+
+    In snapshot mode, active records of the same source and owners that are absent from the
+    batch are closed only when `close_missing` is set; otherwise the batch is rejected.
 
     Raises:
         ImportRejected: the batch conflicts with stored revisions; nothing is written.
@@ -130,7 +173,7 @@ def apply_import(conn: sqlite3.Connection, batch: ImportBatch, *, recorded_at: d
     # A dry run only reads, so it must also work on a read-only connection.
     conn.execute("BEGIN" if dry_run else "BEGIN IMMEDIATE")
     try:
-        result = _apply(conn, batch, recorded_at, dry_run)
+        result = _apply(conn, batch, recorded_at, dry_run, close_missing)
     except BaseException:
         conn.execute("ROLLBACK")
         raise
@@ -142,7 +185,7 @@ def apply_import(conn: sqlite3.Connection, batch: ImportBatch, *, recorded_at: d
 
 
 def _apply(conn: sqlite3.Connection, batch: ImportBatch, recorded_at: datetime,
-           dry_run: bool) -> ImportResult:
+           dry_run: bool, close_missing: bool) -> ImportResult:
     stored = conn.execute("SELECT payload_sha256 FROM imports WHERE import_id = ?",
                           (batch.import_id,)).fetchone()
     if stored is not None:
@@ -153,11 +196,14 @@ def _apply(conn: sqlite3.Connection, batch: ImportBatch, recorded_at: datetime,
     problems: list[str] = []
     if batch.as_of > recorded_at:
         problems.append("as_of: must not be in the future")
+    snapshot = batch.mode == "snapshot"
+    records = _resolve_snapshot(conn, batch, close_missing, problems) if snapshot else list(batch.records)
     planned: list[tuple[RecordInput, Action]] = []
-    batch_kinds = {record.record_id: record.kind for record in batch.records}
-    for index, record in enumerate(batch.records):
+    batch_kinds = {record.record_id: record.kind for record in records}
+    for index, record in enumerate(records):
         path = f"records[{index}]"
-        action = _plan(record, batch.source, _revisions(conn, record.record_id), path, problems)
+        action = _plan(record, batch.source, _revisions(conn, record.record_id), path, problems,
+                       allow_reopen=snapshot)
         if action is not None:
             planned.append((record, action))
         _check_references(conn, record, batch_kinds, path, problems)
@@ -169,8 +215,42 @@ def _apply(conn: sqlite3.Connection, batch: ImportBatch, recorded_at: datetime,
     return ImportResult(batch.import_id, "dry_run" if dry_run else "applied", actions)
 
 
+def _resolve_snapshot(conn: sqlite3.Connection, batch: ImportBatch, close_missing: bool,
+                      problems: list[str]) -> list[RecordInput]:
+    """Number snapshot records against the ledger and add closures for records the source no longer reports.
+
+    A record whose fields match its latest active revision is passed through unchanged, so a
+    repeated snapshot adds no revisions.
+    """
+    records = []
+    for record in batch.records:
+        history = _revisions(conn, record.record_id)
+        latest = history[-1].record if history else None
+        if latest is not None and latest.status is Status.ACTIVE and latest.fields == record.fields:
+            records.append(latest)
+        else:
+            records.append(replace(record, revision=latest.revision + 1 if latest else 1))
+    reported = {record.record_id for record in batch.records}
+    placeholders = ", ".join("?" * len(batch.owner_ids))
+    scope = conn.execute(f"SELECT DISTINCT record_id FROM record_revisions WHERE source = ? "
+                         f"AND owner_id IN ({placeholders}) ORDER BY record_id",
+                         (batch.source, *batch.owner_ids)).fetchall()
+    missing = []
+    for (record_id,) in scope:
+        history = _revisions(conn, record_id)
+        if record_id in reported or _state_at(history, _END_OF_TIME).record.status is Status.CLOSED:
+            continue
+        latest = history[-1].record
+        missing.append(RecordInput(record_id, latest.kind, latest.owner_id, batch.as_of, latest.revision + 1,
+                                   Status.CLOSED, ChangeType.UPDATE, None, None, {}))
+    if missing and not close_missing:
+        problems.append(f"snapshot: {len(missing)} active record(s) are missing from this snapshot "
+                        f"({', '.join(r.record_id for r in missing)}); close them explicitly to continue")
+    return records + missing
+
+
 def _plan(record: RecordInput, source: str, history: list[StoredRevision], path: str,
-          problems: list[str]) -> Action | None:
+          problems: list[str], *, allow_reopen: bool = False) -> Action | None:
     if not history:
         if record.revision != 1:
             problems.append(f"{path}.revision: a new record must start at revision 1")
@@ -194,8 +274,9 @@ def _plan(record: RecordInput, source: str, history: list[StoredRevision], path:
     if record.change_type is ChangeType.CORRECTION:
         return _plan_correction(record, history, path, problems)
     # Real changes move forward in time from the record's current state; past errors are corrections.
+    # A provider snapshot may report a closed position again (for example, a stock bought back).
     current = _state_at(history, _END_OF_TIME)
-    if current.record.status is Status.CLOSED:
+    if current.record.status is Status.CLOSED and not allow_reopen:
         problems.append(f"{path}: {record.record_id} is closed; only corrections are allowed "
                         "(use a new record id to reopen)")
         return None
@@ -247,6 +328,45 @@ def _write(conn: sqlite3.Connection, batch: ImportBatch, planned: list[tuple[Rec
           json.dumps(r.fields, sort_keys=True, ensure_ascii=False))
          for r, action in planned if action is not Action.UNCHANGED],
     )
+    conn.executemany("INSERT INTO observations VALUES (?, ?, ?, ?, ?, ?)",
+                     [(batch.import_id, o.subject, o.metric, o.currency, o.value, _db_time(o.observed_at))
+                      for o in batch.observations])
+
+
+def record_sync_run(conn: sqlite3.Connection, *, source: str, attempted_at: datetime, outcome: str,
+                    error_code: str | None = None, import_id: str | None = None) -> None:
+    """Persist one sync attempt. `error_code` is a short provider or Smith code, never a message."""
+    conn.execute("INSERT INTO sync_runs VALUES (?, ?, ?, ?, ?)",
+                 (source, _db_time(attempted_at), outcome, error_code, import_id))
+
+
+def sync_status(conn: sqlite3.Connection, *, known_at: datetime) -> dict[str, dict[str, Any]]:
+    """Return, per source, the last successful and last failed attempt recorded by `known_at`."""
+    rows = conn.execute("SELECT source, attempted_at, outcome, error_code FROM sync_runs "
+                        "WHERE attempted_at <= ? ORDER BY attempted_at", (_db_time(known_at),)).fetchall()
+    status: dict[str, dict[str, Any]] = {}
+    for source, attempted_at, outcome, error_code in rows:
+        entry = status.setdefault(source, {"last_success": None, "last_failure": None, "last_error": None})
+        if outcome == "success":
+            entry["last_success"] = datetime.fromisoformat(attempted_at)
+        else:
+            entry["last_failure"], entry["last_error"] = datetime.fromisoformat(attempted_at), error_code
+    return status
+
+
+def latest_observations(conn: sqlite3.Connection, *, as_of: datetime,
+                        known_at: datetime) -> dict[tuple[str, str, str], tuple[Observation, str]]:
+    """Return the latest observation per (subject, metric, currency) observed by `as_of` and recorded
+    by `known_at`, together with its source."""
+    rows = conn.execute(
+        "SELECT o.subject, o.metric, o.currency, o.value, o.observed_at, i.source FROM observations o "
+        "JOIN imports i ON i.import_id = o.import_id WHERE o.observed_at <= ? AND i.recorded_at <= ? "
+        "ORDER BY o.observed_at", (_db_time(as_of), _db_time(known_at))).fetchall()
+    latest = {}
+    for subject, metric, currency, value, observed_at, source in rows:
+        latest[(subject, metric, currency)] = (
+            Observation(subject, metric, currency, value, datetime.fromisoformat(observed_at)), source)
+    return latest
 
 
 def record_history(conn: sqlite3.Connection, record_id: str) -> list[StoredRevision]:

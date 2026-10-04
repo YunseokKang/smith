@@ -11,9 +11,9 @@ from typing import Any, NoReturn
 
 from smith.records import (
     ACCOUNT_TYPES, ASSET_CATEGORIES, CURRENCIES, FREQUENCIES, GOAL_CATEGORIES, INFLOW_CATEGORIES,
-    LIABILITY_CATEGORIES, LIQUIDITY_CLASSES, OUTFLOW_CATEGORIES, PRIORITIES, RATE_TYPES,
+    LIABILITY_CATEGORIES, LIQUIDITY_CLASSES, MARKETS, OCCUPANCY, OUTFLOW_CATEGORIES, PRIORITIES, RATE_TYPES,
     REPAYMENT_METHODS, TRANSFER_CATEGORIES, VALUATION_METHODS, ChangeType, ImportBatch, ImportRejected,
-    Kind, RecordInput, Status,
+    Kind, RecordInput, Status, canonical_decimal,
 )
 
 SCHEMA_VERSION = 1
@@ -23,7 +23,9 @@ _MANUAL_SOURCE = re.compile(r"manual(-[a-z0-9]+)*")
 # Bounded digits keep every value exact within the default 28-digit Decimal context.
 _DECIMAL = re.compile(r"-?\d{1,15}(\.\d{1,8})?")
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_SYMBOL = re.compile(r"[A-Za-z0-9.\-]{1,20}")
 _REASON_MAX = 200
+_NAME_MAX = 100
 
 _ENVELOPE_KEYS = frozenset({"schema_version", "import_id", "source", "mode", "as_of", "owners", "records"})
 _COMMON_KEYS = frozenset({
@@ -74,8 +76,22 @@ def _decimal(*, positive: bool = False, below_one: bool = False) -> Parser:
         if below_one and number >= 1:
             problems.add(path, "must be a fraction below 1 (0.045 means 4.5%)")
             return None
-        return "0" if number.is_zero() else format(number.normalize(), "f")
+        return canonical_decimal(value)
     return parse
+
+
+def _symbol(value: Any, path: str, problems: _Problems) -> str | None:
+    if isinstance(value, str) and _SYMBOL.fullmatch(value):
+        return value
+    problems.add(path, "must be 1-20 letters, digits, '.' or '-'")
+    return None
+
+
+def _name(value: Any, path: str, problems: _Problems) -> str | None:
+    if isinstance(value, str) and value.strip() and len(value) <= _NAME_MAX:
+        return value
+    problems.add(path, f"must be non-empty text of at most {_NAME_MAX} characters")
+    return None
 
 
 def _currency(value: Any, path: str, problems: _Problems) -> str | None:
@@ -107,6 +123,16 @@ _KIND_FIELDS: dict[Kind, dict[str, _Field]] = {
         "value": _Field(_decimal()),
         "valuation_method": _Field(_enum(VALUATION_METHODS)),
         "liquidity": _Field(_enum(LIQUIDITY_CLASSES)),
+        # Optional position detail, filled by broker adapters and usable in manual files.
+        "symbol": _Field(_symbol, nullable=True),
+        "instrument_name": _Field(_name, nullable=True),
+        "market": _Field(_enum(MARKETS), nullable=True),
+        "quantity": _Field(_decimal(), nullable=True),
+        "unit_price": _Field(_decimal(), nullable=True),
+        "average_cost": _Field(_decimal(), nullable=True),
+        "value_after_costs": _Field(_decimal(), nullable=True),
+        # Real estate use matters for housing scenarios and tax treatment.
+        "occupancy": _Field(_enum(OCCUPANCY), nullable=True),
     },
     Kind.LIABILITY: {
         "category": _Field(_enum(LIABILITY_CATEGORIES)),

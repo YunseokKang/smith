@@ -3,6 +3,7 @@
 The provider has no read-only scope: the same token can place orders. Every request is
 therefore checked against an allowlist before it reaches the network. See docs/toss-openapi.md.
 """
+import http.client
 import json
 import logging
 import urllib.error
@@ -48,6 +49,10 @@ def urllib_transport(method: str, url: str, headers: dict[str, str], body: bytes
     except urllib.error.HTTPError as error:
         with error:
             return error.code, error.read()
+    except (OSError, http.client.HTTPException):
+        # DNS failure, timeout, refused or dropped connection. URLError is an OSError. The
+        # original message may contain hosts or request details, so only a code is kept.
+        raise TossError(0, "network-error") from None
 
 
 class TossClient:
@@ -80,13 +85,16 @@ class TossClient:
         for attempt in range(2):
             headers["Authorization"] = f"Bearer {self._access_token()}"
             try:
-                return self._send("GET", path, query, headers)["result"]
+                payload = self._send("GET", path, query, headers)
             except TossError as error:
                 # An expired or replaced token is re-issued once; other failures surface.
                 if attempt == 0 and error.status == 401 and error.code in ("expired-token", "invalid-token"):
                     self._token = None
                     continue
                 raise
+            if "result" not in payload:
+                raise TossError(200, "invalid-response")
+            return payload["result"]
         raise AssertionError("unreachable")
 
     def _access_token(self) -> str:
@@ -95,7 +103,10 @@ class TossClient:
                                            "client_secret": self._client_secret}).encode("ascii")
             payload = self._send("POST", "/oauth2/token", None,
                                  {"Content-Type": "application/x-www-form-urlencoded"}, body)
-            self._token, self.token_expires_in = payload["access_token"], payload.get("expires_in")
+            token = payload.get("access_token")
+            if not isinstance(token, str) or not token:
+                raise TossError(200, "invalid-response")
+            self._token, self.token_expires_in = token, payload.get("expires_in")
         return self._token
 
     def _send(self, method: str, path: str, query: dict[str, str] | None, headers: dict[str, str],

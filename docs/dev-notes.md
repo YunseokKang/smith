@@ -92,3 +92,11 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
   uv는 시스템 Python 3.10에만 설치돼 있다. `$env:VIRTUAL_ENV`로 활성화 여부를 확인할 수 있다.
 - 해결: `py -3.10 -m uv ...`로 시스템 Python을 명시한다.
 - 예방: 환경 구성 명령은 `python` 대신 `py -3.10`(uv) 또는 `.\.venv\Scripts\python.exe`(프로젝트)로 쓴다.
+
+### TS-006 PowerShell 파이프로 넘긴 JSON에 `Unexpected UTF-8 BOM` (2026-10-04)
+
+- 증상: `smith summary --json | python -c "json.load(sys.stdin)"`가 BOM 오류로 실패.
+- 원인: PowerShell 5.1은 네이티브 명령 사이 파이프에서 `$OutputEncoding`으로 다시 인코딩하며 BOM을 붙인다.
+  비ASCII 문자도 바뀔 수 있다.
+- 해결: 파이프 처리는 Git Bash에서 하거나, 받는 쪽에서 `sys.stdin.buffer.read().decode("utf-8-sig")`로 읽는다.
+- 예방: 기계 처리용 출력은 파이프보다 파일이나 Python 내부 호출로 다룬다.
