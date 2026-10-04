@@ -6,8 +6,8 @@
 ## 현재 상태
 
 구현됨: 설정 검증, 수동 JSON 입력 검증과 SQLite 자산 원장(이력·멱등성·종료·정정·미리보기),
-토스증권 조회 전용 연결 점검과 원장 동기화, 순자산·자산 배분·유동성·현금흐름 요약.
-Claude Code headless 실행, 시황 검색, 보고서 생성, 스케줄 실행, Gmail 발송은
+토스증권 조회 전용 연결 점검과 원장 동기화, 순자산·자산 배분·유동성·현금흐름 요약,
+ECOS·FRED 금리 근거. Claude Code headless 실행, 공식 발표문 수집, 보고서 생성, 스케줄 실행, Gmail 발송은
 **아직 구현되지 않았다**. 진행 상황은 `docs/roadmap.md`.
 실제 개인정보·잔고·인증정보는 포함하지 않는다. 예시 데이터는 모두 가상이다.
 
@@ -34,6 +34,7 @@ py -3.10 -m uv pip install --python .venv -e .
 | `toss login` / `toss logout` | 토스 client ID·secret을 OS 자격 증명 저장소에 저장·삭제. 입력은 화면에 표시되지 않는다 |
 | `toss check [--show-values]` | 허용된 조회 API를 한 번씩 호출해 연결 점검. 기본은 금액·종목을 숨긴다 |
 | `toss sync [--dry-run] [--close-missing]` | 토스 보유 주식을 snapshot으로 원장에 저장. 매수 가능 금액·환율은 참고 관측값 |
+| `evidence login` / `evidence sync [--days N]` / `evidence show [--as-of DATE]` | ECOS·FRED 금리 근거 저장·조회. 키는 OS 자격 증명 저장소 |
 | `summary [--as-of TIME] [--known-at TIME] [--json]` | 순자산, 자산 배분, 유동성, 월 현금흐름, 목표, 데이터 신선도와 경고 |
 
 기본 원장은 `data/smith.db`(Git 제외). 입력 형식은 `docs/data-contract.md`,

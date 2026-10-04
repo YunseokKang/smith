@@ -7,7 +7,7 @@ import sys
 import tomllib
 from collections import Counter
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from smith import ledger
@@ -50,9 +50,14 @@ def main(argv: list[str] | None = None) -> int:
     report.add_argument("--as-of", type=_aware_datetime, help="ISO 8601 time with UTC offset (default: now)")
     report.add_argument("--known-at", type=_aware_datetime, help="Use only data recorded by this time")
     report.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    macro = sub.add_parser("evidence", help="Korean and US rates from ECOS and FRED")
+    macro.add_argument("action", choices=("login", "sync", "show"))
+    macro.add_argument("--db", type=Path, default=DEFAULT_DB)
+    macro.add_argument("--days", type=int, default=400, help="sync: history window in days (default: 400)")
+    macro.add_argument("--as-of", type=date.fromisoformat, help="show: YYYY-MM-DD (default: today)")
     args = parser.parse_args(argv)
     commands = {"check-config": _check_config, "import": _import, "records": _records, "toss": _toss,
-                "summary": _summary}
+                "summary": _summary, "evidence": _evidence}
     return commands[args.command](args)
 
 
@@ -124,13 +129,84 @@ def _toss(args: argparse.Namespace) -> int:
     return result
 
 
+def _evidence(args: argparse.Namespace) -> int:
+    from smith import credentials, evidence
+
+    if args.action == "login":
+        if not sys.stdin.isatty():
+            print("Run `smith evidence login` in an interactive terminal; keys are never passed as arguments.")
+            return 2
+        for provider in credentials.EVIDENCE_PROVIDERS:
+            key = getpass.getpass(f"{provider.upper()} API key (hidden, Enter to keep current): ").strip()
+            if key:
+                credentials.save_api_key(provider, key)
+        print("Saved to the OS credential store. Next: smith evidence sync")
+        return 0
+    if args.action == "show":
+        return _evidence_show(args)
+    today = datetime.now(timezone.utc).date()
+    failed = 0
+    for provider in credentials.EVIDENCE_PROVIDERS:
+        attempted_at = datetime.now(timezone.utc)
+        key = credentials.load_api_key(provider)
+        try:
+            if key is None:
+                raise evidence.EvidenceError(provider, "no-api-key")
+            points = evidence.fetch_provider(provider, key, start=today - timedelta(days=args.days), end=today)
+            # Data counts as known only once fully received, so `known_at` never sees it earlier.
+            received_at = datetime.now(timezone.utc)
+            args.db.parent.mkdir(parents=True, exist_ok=True)
+            with closing(ledger.connect(args.db)) as conn:
+                added = ledger.store_evidence(conn, points, retrieved_at=received_at)
+        except evidence.EvidenceError as error:
+            print(f"{provider}: failed ({error.code}). Nothing stored for this provider.")
+            _record_sync(args.db, attempted_at, "failure", error.code, source=provider)
+            failed += 1
+            continue
+        print(f"{provider}: {len(points)} observation(s) fetched, {added} new or revised")
+        _record_sync(args.db, attempted_at, "success", source=provider)
+    return 1 if failed else 0
+
+
+def _evidence_show(args: argparse.Namespace) -> int:
+    from smith import evidence
+
+    if not args.db.exists():
+        print(f"No ledger at {args.db}. Run `smith evidence sync` first.")
+        return 1
+    now = datetime.now(timezone.utc)
+    try:
+        with closing(ledger.connect_read_only(args.db)) as conn:
+            rows = evidence.describe(ledger.load_evidence(conn, known_at=now), as_of=args.as_of or now.date())
+            status = ledger.sync_status(conn, known_at=now)
+    except (sqlite3.Error, ledger.LedgerError) as error:
+        print(f"Ledger error ({type(error).__name__}): not a readable Smith ledger.")
+        return 1
+    print(f"{'series':<34} {'value':>9} {'observed':<10} {'3m chg':>7} {'12m chg':>8}  source")
+    for row in rows:
+        spec = row["spec"]
+        value = f"{row['value']}{spec.unit if spec.unit == '%' else ''}" if row["value"] is not None else "-"
+        print(f"{spec.label:<34} {value:>9} {str(row['observed_on'] or '-'):<10} {_change(row['change_3m']):>7} "
+              f"{_change(row['change_12m']):>8}  {spec.source_url}{'  STALE' if row['stale'] else ''}")
+    for provider in ("ecos", "fred"):
+        entry = status.get(provider, {})
+        success, failure = entry.get("last_success"), entry.get("last_failure")
+        print(f"sync {provider}: last success {success.isoformat(timespec='minutes') if success else 'never'}, "
+              f"last failure {failure.isoformat(timespec='minutes') + ' (' + str(entry['last_error']) + ')' if failure else 'none'}")
+    return 0
+
+
+def _change(value: object) -> str:
+    return "-" if value is None else f"{value:+}"
+
+
 def _record_sync(db: Path, attempted_at: datetime, outcome: str, error_code: str | None = None,
-                 import_id: str | None = None) -> None:
+                 import_id: str | None = None, source: str = "toss") -> None:
     # Failures are stored too, so `summary` can warn that the latest data was not refreshed.
     try:
         db.parent.mkdir(parents=True, exist_ok=True)
         with closing(ledger.connect(db)) as conn:
-            ledger.record_sync_run(conn, source="toss", attempted_at=attempted_at, outcome=outcome,
+            ledger.record_sync_run(conn, source=source, attempted_at=attempted_at, outcome=outcome,
                                    error_code=error_code, import_id=import_id)
     except (OSError, sqlite3.Error, ledger.LedgerError) as error:
         print(f"Warning: could not record the sync outcome ({type(error).__name__}).")

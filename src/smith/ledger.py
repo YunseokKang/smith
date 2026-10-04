@@ -8,7 +8,7 @@ import json
 import logging
 import sqlite3
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from itertools import groupby
 from pathlib import Path
 from typing import Any
@@ -21,7 +21,7 @@ from smith.records import (
 logger = logging.getLogger(__name__)
 _END_OF_TIME = datetime.max.replace(tzinfo=timezone.utc)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 _V1 = (
     """CREATE TABLE imports (
         import_id TEXT PRIMARY KEY,
@@ -75,7 +75,20 @@ _V3 = (
         PRIMARY KEY (source, attempted_at)
     )""",
 )
-_MIGRATIONS = {1: _V1, 2: _V2, 3: _V3}
+# Macro evidence such as policy and market rates. A revised value is added as a new row, so an
+# earlier report can be reproduced from what was known when it was made.
+_V4 = (
+    """CREATE TABLE evidence_points (
+        provider TEXT NOT NULL,
+        series_id TEXT NOT NULL,
+        observed_on TEXT NOT NULL,
+        value TEXT NOT NULL,
+        published_on TEXT,
+        retrieved_at TEXT NOT NULL,
+        PRIMARY KEY (provider, series_id, observed_on, retrieved_at)
+    )""",
+)
+_MIGRATIONS = {1: _V1, 2: _V2, 3: _V3, 4: _V4}
 _COLUMNS = ("record_id, revision, kind, owner_id, source, status, change_type, corrects_revision, "
             "reason, effective_at, recorded_at, import_id, fields")
 
@@ -352,6 +365,38 @@ def sync_status(conn: sqlite3.Connection, *, known_at: datetime) -> dict[str, di
         else:
             entry["last_failure"], entry["last_error"] = datetime.fromisoformat(attempted_at), error_code
     return status
+
+
+def store_evidence(conn: sqlite3.Connection, points: list[tuple[str, str, date, str, date | None]], *,
+                   retrieved_at: datetime) -> int:
+    """Store (provider, series_id, observed_on, value, published_on) points atomically and return how
+    many were new. A point whose latest stored value is unchanged is skipped."""
+    # Read, compare and insert under one write lock so concurrent syncs cannot both add a value.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        known = load_evidence(conn, known_at=_END_OF_TIME)
+        rows = [(provider, series_id, observed_on.isoformat(), value,
+                 published_on.isoformat() if published_on else None, _db_time(retrieved_at))
+                for provider, series_id, observed_on, value, published_on in points
+                if known.get((provider, series_id), {}).get(observed_on, (None,))[0] != value]
+        conn.executemany("INSERT INTO evidence_points VALUES (?, ?, ?, ?, ?, ?)", rows)
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+    return len(rows)
+
+
+def load_evidence(conn: sqlite3.Connection, *,
+                  known_at: datetime) -> dict[tuple[str, str], dict[date, tuple[str, date | None]]]:
+    """Return {(provider, series_id): {observed_on: (value, published_on)}} as known at `known_at`."""
+    rows = conn.execute("SELECT provider, series_id, observed_on, value, published_on FROM evidence_points "
+                        "WHERE retrieved_at <= ? ORDER BY retrieved_at", (_db_time(known_at),)).fetchall()
+    series: dict[tuple[str, str], dict[date, tuple[str, date | None]]] = {}
+    for provider, series_id, observed_on, value, published_on in rows:
+        series.setdefault((provider, series_id), {})[date.fromisoformat(observed_on)] = (
+            value, date.fromisoformat(published_on) if published_on else None)
+    return series
 
 
 def latest_observations(conn: sqlite3.Connection, *, as_of: datetime,

@@ -23,6 +23,7 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(main(["import", str(EXAMPLE), "--db", str(missing), "--dry-run"]), 0)
                 self.assertEqual(main(["import", str(EXAMPLE), "--db", str(db), "--dry-run"]), 0)
                 self.assertEqual(main(["records", "--db", str(db)]), 1)
+                self.assertEqual(main(["evidence", "show", "--db", str(db)]), 1)
                 self.assertEqual((missing.exists(), db.stat().st_size), (False, 0))
                 self.assertEqual(main(["import", str(EXAMPLE), "--db", str(db)]), 0)
                 self.assertEqual(main(["import", str(EXAMPLE), "--db", str(db)]), 0)

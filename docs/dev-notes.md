@@ -100,3 +100,11 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
   비ASCII 문자도 바뀔 수 있다.
 - 해결: 파이프 처리는 Git Bash에서 하거나, 받는 쪽에서 `sys.stdin.buffer.read().decode("utf-8-sig")`로 읽는다.
 - 예방: 기계 처리용 출력은 파이프보다 파일이나 Python 내부 호출로 다룬다.
+
+### TS-007 FRED `realtime_start`를 발표일로 오해 (2026-10-04, 리뷰 지적)
+
+- 증상: 과거 관측치까지 발표일이 동기화 날짜로 저장됐다.
+- 원인: `realtime_start`는 값이 유효한 실시간 기간의 시작일이며, 기간을 지정하지 않으면 조회 당일이다.
+- 해결: `published_on`을 비우고, 로컬 원장의 기존 FRED 행도 `published_on = NULL`로 정리했다.
+- 예방: 공급자 필드의 의미는 이름이 아니라 공식 문서 정의로 확인한다
+  (https://fred.stlouisfed.org/docs/api/fred/realtime_period.html).
