@@ -4,6 +4,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from smith import ledger
+from smith.announcements import FEEDS, Announcement, FeedError, fetch_feed
 from smith.evidence import SERIES, EvidenceError, describe, fetch_provider
 
 START, END = date(2025, 9, 1), date(2026, 10, 4)
@@ -67,3 +68,47 @@ class EvidenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def rss(*items: str) -> bytes:
+    return f"<rss><channel><title>t</title>{''.join(items)}</channel></rss>".encode("utf-8")
+
+
+def item(link: str, title: str = "FOMC statement", date_text: str = "Wed, 16 Sep 2026 18:00:00 GMT") -> str:
+    return f"<item><title>{title}</title><link>{link}</link><pubDate>{date_text}</pubDate></item>"
+
+
+class AnnouncementTests(unittest.TestCase):
+    def test_feed_items_are_untrusted_and_filtered(self):
+        feed = FEEDS[0]
+        body = rss(item("https://www.federalreserve.gov/a.htm", "Line\nbreak " + "x" * 400),
+                   item("https://evil.example/federalreserve.gov"),       # Foreign host.
+                   item("http://www.federalreserve.gov/b.htm"),           # Not https.
+                   item("https://www.federalreserve.gov/c.htm", date_text="soon"),  # No usable date.
+                   item("https://[broken"),                                    # Unparsable link.
+                   item("https://www.federalreserve.gov/d.htm", "Rate‮ cut  note"))
+        items = fetch_feed(feed, fetch=lambda url: (200, body))
+        self.assertEqual([i.link for i in items], ["https://www.federalreserve.gov/a.htm",
+                                                   "https://www.federalreserve.gov/d.htm"])
+        self.assertEqual(items[1].title, "Rate  cut  note")  # Bidi and line separators removed.
+        self.assertTrue(items[0].title.startswith("Line break") and len(items[0].title) == 300)
+        for label, response, code in [("not xml", (200, b"<html"), "invalid-response"),
+                                      ("empty", (200, rss()), "no-items"),
+                                      ("too large", (200, b"x" * 2_000_001), "too-large"),
+                                      ("http error", (503, b""), "http-503"),
+                                      ("redirect", (301, b""), "http-301")]:  # Redirects are never followed.
+            with self.subTest(label), self.assertRaises(FeedError) as caught:
+                fetch_feed(feed, fetch=lambda url, r=response: r)
+            self.assertEqual(caught.exception.code, code)
+        conn = ledger.connect(":memory:")
+        self.addCleanup(conn.close)
+        at = datetime(2026, 10, 4, tzinfo=timezone.utc)
+        later = datetime(2026, 10, 5, tzinfo=timezone.utc)
+        revised = [Announcement(items[0].feed_id, items[0].link, "Revised title", items[0].published_at)]
+        self.assertEqual((ledger.store_announcements(conn, items, retrieved_at=at),
+                          ledger.store_announcements(conn, items, retrieved_at=at),
+                          ledger.store_announcements(conn, revised, retrieved_at=later)), (2, 0, 1))
+        titles = lambda known_at: {a.link: a.title for a in ledger.load_announcements(
+            conn, since=datetime(2026, 1, 1, tzinfo=timezone.utc), until=later, known_at=known_at)}
+        self.assertEqual((titles(at)[items[0].link], titles(later)[items[0].link]),
+                         (items[0].title, "Revised title"))

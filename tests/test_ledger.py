@@ -207,6 +207,19 @@ class LedgerTests(unittest.TestCase):
             with closing(sqlite3.connect(path)) as check:
                 self.assertEqual(check.execute("PRAGMA user_version").fetchone()[0], ledger.SCHEMA_VERSION)
 
+    def test_snapshot_gives_reads_one_consistent_view(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.db"
+            ledger.connect(path).close()
+            with closing(ledger.connect_read_only(path)) as reader, closing(sqlite3.connect(path, timeout=0.05)) as writer:
+                with ledger.snapshot(reader):
+                    ledger.record_states(reader, as_of=LATER, known_at=LATER)
+                    with self.assertRaises(sqlite3.OperationalError):  # A writer cannot change the view mid-read.
+                        with writer:
+                            writer.execute("INSERT INTO sync_runs VALUES ('x', 't', 'success', NULL, NULL)")
+                with writer:
+                    writer.execute("INSERT INTO sync_runs VALUES ('x', 't', 'success', NULL, NULL)")
+
     def test_dry_run_writes_nothing(self):
         loan = liability(collateral_record_id="asset-a")  # Resolved against the same batch.
         result = self.apply(asset(), loan, import_id="i1", dry_run=True)

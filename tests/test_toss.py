@@ -68,7 +68,7 @@ class TossTests(unittest.TestCase):
             self.assertNotIn(hidden, output)
 
     def test_network_and_shape_failures_become_safe_codes(self):
-        with mock.patch("urllib.request.urlopen", side_effect=urllib.error.URLError("dns fail for host.example")):
+        with mock.patch("smith.toss.open_url", side_effect=urllib.error.URLError("dns fail for host.example")):
             with self.assertRaises(TossError) as caught:
                 urllib_transport("GET", "https://openapi.tossinvest.com/api/v1/accounts", {}, None)
         self.assertEqual((caught.exception.code, str(caught.exception)), ("network-error", "HTTP 0 network-error"))

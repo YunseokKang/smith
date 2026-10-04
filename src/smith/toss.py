@@ -12,6 +12,8 @@ import urllib.request
 from collections.abc import Callable
 from typing import Any
 
+from smith.net import open_url
+
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://openapi.tossinvest.com"
@@ -44,7 +46,7 @@ class ForbiddenRequest(Exception):
 def urllib_transport(method: str, url: str, headers: dict[str, str], body: bytes | None) -> tuple[int, bytes]:
     request = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
+        with open_url(request, timeout=_TIMEOUT_SECONDS) as response:
             return response.status, response.read()
     except urllib.error.HTTPError as error:
         with error:

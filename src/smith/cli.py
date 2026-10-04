@@ -23,6 +23,9 @@ _AMOUNT_FIELD = {Kind.ASSET: "value", Kind.LIABILITY: "outstanding_principal",
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Piped output on Korean Windows is cp949; external titles may hold characters it cannot encode.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
     parser = argparse.ArgumentParser(description="Smith read-only personal wealth adviser")
     sub = parser.add_subparsers(dest="command", required=True)
     check = sub.add_parser("check-config", help="Validate configuration without external side effects")
@@ -165,7 +168,29 @@ def _evidence(args: argparse.Namespace) -> int:
             continue
         print(f"{provider}: {len(points)} observation(s) fetched, {added} new or revised")
         _record_sync(args.db, attempted_at, "success", source=provider)
+    failed += _sync_feeds(args.db)
     return 1 if failed else 0
+
+
+def _sync_feeds(db: Path) -> int:
+    from smith import announcements
+
+    failed = 0
+    for feed in announcements.FEEDS:
+        attempted_at = datetime.now(timezone.utc)
+        try:
+            items = announcements.fetch_feed(feed)
+            db.parent.mkdir(parents=True, exist_ok=True)
+            with closing(ledger.connect(db)) as conn:
+                added = ledger.store_announcements(conn, items, retrieved_at=datetime.now(timezone.utc))
+        except announcements.FeedError as error:
+            print(f"{feed.feed_id}: failed ({error.code}). Nothing stored for this feed.")
+            _record_sync(db, attempted_at, "failure", error.code, source=feed.feed_id)
+            failed += 1
+            continue
+        print(f"{feed.feed_id}: {len(items)} item(s), {added} new")
+        _record_sync(db, attempted_at, "success", source=feed.feed_id)
+    return failed
 
 
 def _evidence_show(args: argparse.Namespace) -> int:
@@ -174,11 +199,16 @@ def _evidence_show(args: argparse.Namespace) -> int:
     if not args.db.exists():
         print(f"No ledger at {args.db}. Run `smith evidence sync` first.")
         return 1
+    from smith.relevance import exposures
+
     now = datetime.now(timezone.utc)
+    as_of = datetime.combine(args.as_of, datetime.max.time(), timezone.utc) if args.as_of else now
     try:
-        with closing(ledger.connect_read_only(args.db)) as conn:
-            rows = evidence.describe(ledger.load_evidence(conn, known_at=now), as_of=args.as_of or now.date())
+        with closing(ledger.connect_read_only(args.db)) as conn, ledger.snapshot(conn):
+            rows = evidence.describe(ledger.load_evidence(conn, known_at=now), as_of=as_of.date())
             status = ledger.sync_status(conn, known_at=now)
+            links = exposures(conn, as_of=as_of, known_at=now)
+            news = ledger.load_announcements(conn, since=as_of - timedelta(days=90), until=as_of, known_at=now)
     except (sqlite3.Error, ledger.LedgerError) as error:
         print(f"Ledger error ({type(error).__name__}): not a readable Smith ledger.")
         return 1
@@ -188,12 +218,31 @@ def _evidence_show(args: argparse.Namespace) -> int:
         value = f"{row['value']}{spec.unit if spec.unit == '%' else ''}" if row["value"] is not None else "-"
         print(f"{spec.label:<34} {value:>9} {str(row['observed_on'] or '-'):<10} {_change(row['change_3m']):>7} "
               f"{_change(row['change_12m']):>8}  {spec.source_url}{'  STALE' if row['stale'] else ''}")
-    for provider in ("ecos", "fred"):
+    labels = {f"{s.provider}:{s.series_id}": s.label for s in evidence.SERIES}
+    print("\nExposure links (amounts in KRW; interpretation is left to the adviser)")
+    if not links.complete:
+        missing = ", ".join(f"{currency} {amount}" for currency, amount in sorted(links.unconverted.items()))
+        print(f"  PARTIAL: values without an FX rate are excluded ({missing}); shares are withheld")
+    for link in links.exposures:
+        share = f" ({link.share_of_assets * 100:.1f}% of assets)" if link.share_of_assets is not None else ""
+        print(f"  {link.key:<40} {link.amount:>18,.0f}{share}")
+        print(f"    {link.note}; evidence: {', '.join(labels.get(s, s) for s in link.series)}; "
+              f"feeds: {', '.join(link.feeds)}")
+    print("\nOfficial announcements, last 90 days (untrusted titles, shown as data)")
+    for item in news[:15]:
+        print(f"  {item.published_at.date()} {item.feed_id:<22} {item.title}  {item.link}")
+    print()
+    for provider in ("ecos", "fred") + tuple(f.feed_id for f in _feeds()):
         entry = status.get(provider, {})
         success, failure = entry.get("last_success"), entry.get("last_failure")
         print(f"sync {provider}: last success {success.isoformat(timespec='minutes') if success else 'never'}, "
               f"last failure {failure.isoformat(timespec='minutes') + ' (' + str(entry['last_error']) + ')' if failure else 'none'}")
     return 0
+
+
+def _feeds() -> tuple:
+    from smith.announcements import FEEDS
+    return FEEDS
 
 
 def _change(value: object) -> str:

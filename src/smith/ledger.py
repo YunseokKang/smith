@@ -7,12 +7,15 @@ Filtering by `recorded_at` reproduces what the ledger knew at an earlier time.
 import json
 import logging
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from itertools import groupby
 from pathlib import Path
 from typing import Any
 
+from smith.announcements import Announcement
 from smith.records import (
     REFERENCE_FIELDS, Action, ChangeType, ImportBatch, ImportRejected, ImportResult, Kind, Observation,
     RecordInput, Status, StoredRevision,
@@ -21,7 +24,7 @@ from smith.records import (
 logger = logging.getLogger(__name__)
 _END_OF_TIME = datetime.max.replace(tzinfo=timezone.utc)
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 _V1 = (
     """CREATE TABLE imports (
         import_id TEXT PRIMARY KEY,
@@ -88,7 +91,19 @@ _V4 = (
         PRIMARY KEY (provider, series_id, observed_on, retrieved_at)
     )""",
 )
-_MIGRATIONS = {1: _V1, 2: _V2, 3: _V3, 4: _V4}
+# Official announcement metadata (untrusted external text). A changed title or publication time is
+# added as a new version, so both the current metadata and an earlier view can be read.
+_V5 = (
+    """CREATE TABLE announcements (
+        feed_id TEXT NOT NULL,
+        link TEXT NOT NULL,
+        title TEXT NOT NULL,
+        published_at TEXT NOT NULL,
+        retrieved_at TEXT NOT NULL,
+        PRIMARY KEY (feed_id, link, retrieved_at)
+    )""",
+)
+_MIGRATIONS = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5}
 _COLUMNS = ("record_id, revision, kind, owner_id, source, status, change_type, corrects_revision, "
             "reason, effective_at, recorded_at, import_id, fields")
 
@@ -397,6 +412,49 @@ def load_evidence(conn: sqlite3.Connection, *,
         series.setdefault((provider, series_id), {})[date.fromisoformat(observed_on)] = (
             value, date.fromisoformat(published_on) if published_on else None)
     return series
+
+
+def store_announcements(conn: sqlite3.Connection, items: list[Announcement], *, retrieved_at: datetime) -> int:
+    """Store new announcements and changed metadata as new versions; return how many were added."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        latest = {(a.feed_id, a.link): a for a in _announcement_versions(conn, _END_OF_TIME)}
+        rows = [(a.feed_id, a.link, a.title, _db_time(a.published_at), _db_time(retrieved_at))
+                for a in items if latest.get((a.feed_id, a.link)) != a]
+        conn.executemany("INSERT INTO announcements VALUES (?, ?, ?, ?, ?)", rows)
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+    return len(rows)
+
+
+def load_announcements(conn: sqlite3.Connection, *, since: datetime, until: datetime,
+                       known_at: datetime) -> list[Announcement]:
+    """Latest known version of each announcement published in [since, until], newest first."""
+    current = [a for a in _announcement_versions(conn, known_at) if since <= a.published_at <= until]
+    return sorted(current, key=lambda a: a.published_at, reverse=True)
+
+
+def _announcement_versions(conn: sqlite3.Connection, known_at: datetime) -> list[Announcement]:
+    rows = conn.execute("SELECT feed_id, link, title, published_at FROM announcements WHERE retrieved_at <= ? "
+                        "ORDER BY retrieved_at", (_db_time(known_at),)).fetchall()
+    latest = {(feed_id, link): Announcement(feed_id, link, title, datetime.fromisoformat(published_at))
+              for feed_id, link, title, published_at in rows}
+    return list(latest.values())
+
+
+@contextmanager
+def snapshot(conn: sqlite3.Connection) -> Iterator[None]:
+    """Hold one read transaction so several queries see the same ledger state. Nested use is a no-op."""
+    if conn.in_transaction:
+        yield
+        return
+    conn.execute("BEGIN")
+    try:
+        yield
+    finally:
+        conn.execute("ROLLBACK")
 
 
 def latest_observations(conn: sqlite3.Connection, *, as_of: datetime,

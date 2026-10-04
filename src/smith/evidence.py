@@ -17,6 +17,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from smith.net import open_url
 from smith.records import canonical_decimal
 
 _TIMEOUT_SECONDS = 15
@@ -63,7 +64,7 @@ class EvidenceError(Exception):
 
 def urllib_get(url: str) -> tuple[int, bytes]:
     try:
-        with urllib.request.urlopen(url, timeout=_TIMEOUT_SECONDS) as response:
+        with open_url(url, timeout=_TIMEOUT_SECONDS) as response:
             return response.status, response.read()
     except urllib.error.HTTPError as error:
         with error:

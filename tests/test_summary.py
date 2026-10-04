@@ -6,6 +6,7 @@ from decimal import Decimal
 from smith import ledger
 from smith.importer import parse_import
 from smith.records import ImportBatch, Observation
+from smith.relevance import exposures
 from smith.summary import build_summary, render, to_dict
 
 SEP1 = "2026-09-01T00:00:00+00:00"
@@ -75,6 +76,9 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(summary.goals[0]["months_left"], 35)
         self.assertEqual(to_dict(summary)["net_worth"], "1900000")
         self.assertIn("Net worth", render(summary)[1])
+        links = {e.key: e.amount for e in exposures(self.conn, as_of=OCT1, known_at=OCT1).exposures}
+        self.assertEqual((links["usd_assets"], links["krw_cash_and_deposits"]), (Decimal(1400000), Decimal(1000000)))
+        self.assertNotIn("variable_rate_debt", links)  # The test loan is fixed-rate.
 
     def test_missing_fx_and_stale_data_are_reported_not_zeroed(self):
         later = datetime(2027, 1, 15, tzinfo=timezone.utc)
@@ -101,6 +105,12 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(summary.monthly_inflow, Decimal(3000000))
         self.assertTrue(any("not positive" in w for w in summary.warnings))
         self.assertTrue(any("last sync failed" in w and "network-error" in w for w in summary.warnings))
+        # Exposures from an incomplete ledger are partial: shares would use a wrong denominator.
+        result = exposures(self.conn, as_of=OCT1, known_at=OCT1)
+        self.assertFalse(result.complete)
+        self.assertEqual(result.unconverted, {"USD": Decimal(1000)})
+        self.assertTrue(all(e.share_of_assets is None for e in result.exposures))
+        self.assertTrue(any("partial" in w for w in result.warnings))
 
 
 if __name__ == "__main__":

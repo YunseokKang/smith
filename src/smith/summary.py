@@ -72,7 +72,12 @@ class Summary:
 
 def build_summary(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetime) -> Summary:
     """Summarize the ledger as it stood at `as_of`, using only data recorded by `known_at`."""
-    summary = Summary(as_of, known_at)
+    with ledger.snapshot(conn):
+        return _build(conn, Summary(as_of, known_at))
+
+
+def _build(conn: sqlite3.Connection, summary: Summary) -> Summary:
+    as_of, known_at = summary.as_of, summary.known_at
     states = [s for s in ledger.record_states(conn, as_of=as_of, known_at=known_at)
               if s.record.status is Status.ACTIVE]
     rates = _load_observations(conn, summary)

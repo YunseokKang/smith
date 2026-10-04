@@ -108,3 +108,18 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
 - 해결: `published_on`을 비우고, 로컬 원장의 기존 FRED 행도 `published_on = NULL`로 정리했다.
 - 예방: 공급자 필드의 의미는 이름이 아니라 공식 문서 정의로 확인한다
   (https://fred.stlouisfed.org/docs/api/fred/realtime_period.html).
+
+### TS-008 파이프 출력에서 `UnicodeEncodeError: 'cp949'` (2026-10-04)
+
+- 증상: `smith evidence show | ...`가 Fed 제목의 en dash(`–`)에서 중단. Git Bash에서는 한글이 깨져 보임.
+- 원인: 한국어 Windows에서 Python은 파이프 출력에 cp949를 쓴다. cp949에 없는 문자는 인코딩할 수 없고,
+  Git Bash는 그 바이트를 UTF-8로 읽는다.
+- 해결: CLI 시작 시 `sys.stdout.reconfigure(errors="replace")`. Git Bash에서 파이프로 볼 때는
+  `PYTHONIOENCODING=utf-8`을 지정한다.
+- 예방: 외부 텍스트를 출력하는 명령은 파이프 출력으로도 확인한다.
+
+### TS-009 Python 문자열 치환 스크립트로 코드를 고치다 `\n`이 실제 줄바꿈으로 들어감 (2026-10-04)
+
+- 증상: 편집 후 `SyntaxError: unterminated string literal`.
+- 원인: 치환 스크립트의 문자열 안에서 `"\n"` 이스케이프가 해석돼 소스에 실제 줄바꿈이 들어갔다.
+- 해결·예방: 이스케이프가 들어 있는 코드는 Edit 도구로 고치고, 스크립트 편집 뒤에는 `ast.parse`로 문법을 확인한다.
