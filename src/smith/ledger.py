@@ -11,7 +11,7 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from itertools import groupby
 from pathlib import Path
 from typing import Any
@@ -25,7 +25,7 @@ from smith.records import (
 logger = logging.getLogger(__name__)
 _END_OF_TIME = datetime.max.replace(tzinfo=timezone.utc)
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 8
 _V1 = (
     """CREATE TABLE imports (
         import_id TEXT PRIMARY KEY,
@@ -122,7 +122,57 @@ _V6 = (
         advice TEXT
     )""",
 )
-_MIGRATIONS = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6}
+# Report publication: one row per scheduled slot (unique) or manual send. A slot is claimed before
+# sending, so a crash or lost response can never lead to a second automatic send of the same slot.
+_V7 = (
+    """CREATE TABLE report_runs (
+        report_id TEXT PRIMARY KEY,
+        slot TEXT,
+        kind TEXT NOT NULL,
+        trigger TEXT NOT NULL CHECK (trigger IN ('scheduled', 'manual')),
+        created_at TEXT NOT NULL,
+        as_of TEXT NOT NULL,
+        baseline TEXT,
+        missed_slots TEXT NOT NULL,
+        subject TEXT,
+        html_sha256 TEXT,
+        status TEXT NOT NULL CHECK (status IN ('sending', 'sent', 'failed', 'unknown', 'merged')),
+        attempts INTEGER NOT NULL,
+        message_id TEXT,
+        error_code TEXT,
+        finished_at TEXT
+    )""",
+    "CREATE UNIQUE INDEX report_runs_slot ON report_runs(slot) WHERE slot IS NOT NULL",
+)
+# Split the claimed run into `building` (no mail request yet: safe to retry after a lease expires) and
+# `sending` (request started: an interrupted run becomes unknown and is never resent automatically).
+_REPORT_COLUMNS = ("report_id, slot, kind, trigger, created_at, as_of, baseline, missed_slots, subject, html_sha256, "
+                   "status, attempts, message_id, error_code, finished_at")
+_V8 = (
+    """CREATE TABLE report_runs_v8 (
+        report_id TEXT PRIMARY KEY,
+        slot TEXT,
+        kind TEXT NOT NULL,
+        trigger TEXT NOT NULL CHECK (trigger IN ('scheduled', 'manual')),
+        created_at TEXT NOT NULL,
+        as_of TEXT NOT NULL,
+        baseline TEXT,
+        missed_slots TEXT NOT NULL,
+        subject TEXT,
+        html_sha256 TEXT,
+        status TEXT NOT NULL CHECK (status IN ('building', 'sending', 'sent', 'failed', 'unknown', 'merged')),
+        attempts INTEGER NOT NULL,
+        message_id TEXT,
+        error_code TEXT,
+        finished_at TEXT,
+        send_started_at TEXT
+    )""",
+    f"INSERT INTO report_runs_v8 ({_REPORT_COLUMNS}) SELECT {_REPORT_COLUMNS} FROM report_runs",
+    "DROP TABLE report_runs",
+    "ALTER TABLE report_runs_v8 RENAME TO report_runs",
+    "CREATE UNIQUE INDEX report_runs_slot ON report_runs(slot) WHERE slot IS NOT NULL",
+)
+_MIGRATIONS = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8}
 _COLUMNS = ("record_id, revision, kind, owner_id, source, status, change_type, corrects_revision, "
             "reason, effective_at, recorded_at, import_id, fields")
 
@@ -484,6 +534,149 @@ def record_advice_run(conn: sqlite3.Connection, *, run_id: str, created_at: date
                  (run_id, _db_time(created_at), use_case, question,
                   hashlib.sha256(payload.encode("utf-8")).hexdigest(), payload, prompt_version, model, cost_usd,
                   outcome, error_code, advice))
+
+
+MAX_SEND_ATTEMPTS = 3
+# A run still `building` or `sending` after this long was interrupted (crash, power, killed task).
+REPORT_LEASE = timedelta(minutes=30)
+# Final outcomes that settle the slots a run reported as missed: the message was or may have been delivered.
+_DELIVERED = ("sent", "unknown")
+
+
+def claim_report(conn: sqlite3.Connection, *, report_id: str, slot: datetime | None, kind: str, trigger: str,
+                 created_at: datetime, as_of: datetime, baseline: datetime | None,
+                 missed_slots: list[datetime]) -> bool:
+    """Atomically claim a report run in the `building` state. Returns False when the slot was already
+    sent, is in an unknown state, is in progress, or has used all attempts. Missed slots are only
+    settled (merged) when this run is finished as sent or unknown."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = None
+        if slot is not None:
+            row = conn.execute("SELECT report_id, status, attempts FROM report_runs WHERE slot = ?",
+                               (_db_time(slot),)).fetchone()
+            if row is not None and (row[1] != "failed" or row[2] >= MAX_SEND_ATTEMPTS):
+                conn.execute("ROLLBACK")
+                return False
+        missed = json.dumps([_db_time(m) for m in missed_slots])
+        if row is not None:
+            conn.execute("UPDATE report_runs SET report_id = ?, status = 'building', attempts = attempts + 1, "
+                         "created_at = ?, as_of = ?, baseline = ?, missed_slots = ?, error_code = NULL, "
+                         "finished_at = NULL, send_started_at = NULL WHERE slot = ?",
+                         (report_id, _db_time(created_at), _db_time(as_of), _optional_time(baseline), missed,
+                          _db_time(slot)))
+        else:
+            conn.execute(f"INSERT INTO report_runs ({_REPORT_COLUMNS}) "
+                         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 'building', 1, NULL, NULL, NULL)",
+                         (report_id, _optional_time(slot), kind, trigger, _db_time(created_at), _db_time(as_of),
+                          _optional_time(baseline), missed))
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+    return True
+
+
+def start_sending(conn: sqlite3.Connection, *, report_id: str, now: datetime, subject: str,
+                  html_sha256: str) -> None:
+    """Mark the point after which the mail request may have reached Gmail. Committed before the request."""
+    conn.execute("UPDATE report_runs SET status = 'sending', send_started_at = ?, subject = ?, html_sha256 = ? "
+                 "WHERE report_id = ? AND status = 'building'", (_db_time(now), subject, html_sha256, report_id))
+
+
+def finish_report(conn: sqlite3.Connection, *, report_id: str, status: str, finished_at: datetime,
+                  subject: str | None = None, html_sha256: str | None = None, message_id: str | None = None,
+                  error_code: str | None = None) -> None:
+    """Record the final outcome. A delivered (or possibly delivered) run settles its missed slots in the
+    same transaction; after a clean failure they stay open and are reported again on retry."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("UPDATE report_runs SET status = ?, finished_at = ?, subject = COALESCE(?, subject), "
+                     "html_sha256 = COALESCE(?, html_sha256), message_id = ?, error_code = ? WHERE report_id = ?",
+                     (status, _db_time(finished_at), subject, html_sha256, message_id, error_code, report_id))
+        if status in _DELIVERED:
+            _settle_missed(conn, report_id, finished_at)
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+
+
+def recover_stale_reports(conn: sqlite3.Connection, *, now: datetime) -> list[dict[str, Any]]:
+    """Close runs interrupted longer than REPORT_LEASE ago and return them.
+
+    `building` had not contacted Gmail, so it becomes a retryable failure. `sending` may have been
+    delivered, so it becomes unknown and is never resent automatically.
+    """
+    cutoff = _db_time(now - REPORT_LEASE)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        stale = conn.execute("SELECT report_id, slot, status FROM report_runs WHERE "
+                             "(status = 'building' AND created_at < ?) OR (status = 'sending' AND send_started_at < ?)",
+                             (cutoff, cutoff)).fetchall()
+        for report_id, _, status in stale:
+            outcome, code = (("failed", "interrupted-before-send") if status == "building"
+                             else ("unknown", "interrupted-during-send"))
+            conn.execute("UPDATE report_runs SET status = ?, error_code = ?, finished_at = ? WHERE report_id = ?",
+                         (outcome, code, _db_time(now), report_id))
+            if outcome in _DELIVERED:
+                _settle_missed(conn, report_id, now)
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+    return [{"report_id": r, "slot": s, "was": status} for r, s, status in stale]
+
+
+def _settle_missed(conn: sqlite3.Connection, report_id: str, now: datetime) -> None:
+    row = conn.execute("SELECT kind, missed_slots FROM report_runs WHERE report_id = ?", (report_id,)).fetchone()
+    if row is None:
+        return
+    kind, missed = row
+    for slot in json.loads(missed):
+        conn.execute(f"INSERT OR IGNORE INTO report_runs ({_REPORT_COLUMNS}) "
+                     "VALUES (?, ?, ?, 'scheduled', ?, ?, NULL, '[]', NULL, NULL, 'merged', 0, NULL, ?, ?)",
+                     (f"{report_id}-merged-{slot}", slot, kind, _db_time(now), _db_time(now),
+                      f"merged-into:{report_id}", _db_time(now)))
+
+
+def report_runs(conn: sqlite3.Connection, *, limit: int = 20) -> list[dict[str, Any]]:
+    """Most recent report runs first."""
+    columns = tuple(_REPORT_COLUMNS.split(", ")) + ("send_started_at",)
+    rows = conn.execute(f"SELECT {', '.join(columns)} FROM report_runs ORDER BY created_at DESC, slot DESC LIMIT ?",
+                        (limit,)).fetchall()
+    return [dict(zip(columns, row)) for row in rows]
+
+
+def unresolved_runs(conn: sqlite3.Connection, *, since: datetime | None) -> list[dict[str, Any]]:
+    """Runs after the last sent report that the reader should hear about: possibly delivered (unknown)
+    or scheduled and failed with no attempts left, oldest first. Manual sends report on the console."""
+    floor = "" if since is None else _db_time(since)
+    runs = [r for r in report_runs(conn, limit=1000) if r["created_at"] > floor and (
+        r["status"] == "unknown" or (r["status"] == "failed" and r["slot"] is not None
+                                     and r["attempts"] >= MAX_SEND_ATTEMPTS))]
+    return sorted(runs, key=lambda r: r["created_at"])
+
+
+def last_sent_report(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    """The latest successfully sent report; its snapshot time is the next report's baseline."""
+    sent = [r for r in report_runs(conn, limit=1000) if r["status"] == "sent"]
+    return max(sent, key=lambda r: r["as_of"], default=None)
+
+
+def mark_slot(conn: sqlite3.Connection, *, slot: datetime, kind: str, now: datetime, reason: str) -> None:
+    """Record a slot that must never be sent (for example one that passed before scheduling was enabled)."""
+    conn.execute(f"INSERT OR IGNORE INTO report_runs ({_REPORT_COLUMNS}) "
+                 "VALUES (?, ?, ?, 'scheduled', ?, ?, NULL, '[]', NULL, NULL, 'merged', 0, NULL, ?, ?)",
+                 (f"marker-{_db_time(slot)}", _db_time(slot), kind, _db_time(now), _db_time(now), reason, _db_time(now)))
+
+
+def known_slots(conn: sqlite3.Connection) -> set[str]:
+    return {row[0] for row in conn.execute("SELECT slot FROM report_runs WHERE slot IS NOT NULL")}
+
+
+def _optional_time(value: datetime | None) -> str | None:
+    return None if value is None else _db_time(value)
 
 
 def latest_observations(conn: sqlite3.Connection, *, as_of: datetime,

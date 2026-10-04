@@ -172,13 +172,12 @@ def _add_cashflow(summary: Summary, record: RecordInput, rates: dict[str, Decima
         return
     today = summary.as_of.date()
     start = date.fromisoformat(fields["start_date"])
-    end = date.fromisoformat(fields["end_date"]) if fields.get("end_date") else None
     if fields["frequency"] == "once":
         if today < start <= today + _UPCOMING:
             summary.upcoming_once.append({"record_id": record.record_id, "date": start, "category": fields["category"],
                                           "direction": fields["direction"], "amount": base})
         return
-    if start > today or (end is not None and end < today):
+    if not recurring_active(fields, today):
         return
     monthly = base / _MONTHS_PER_PERIOD[fields["frequency"]]
     category = fields["category"]
@@ -190,6 +189,14 @@ def _add_cashflow(summary: Summary, record: RecordInput, rates: dict[str, Decima
         summary.monthly_outflow += monthly
         if category == "loan_payment":
             _add_loan_interest(summary, record, by_id, rates)
+
+
+def recurring_active(fields: dict[str, Any], today: date) -> bool:
+    """A recurring cash flow counts on `today` (a local calendar date) between its start and end dates."""
+    if fields["frequency"] == "once":
+        return False
+    end = date.fromisoformat(fields["end_date"]) if fields.get("end_date") else None
+    return date.fromisoformat(fields["start_date"]) <= today and (end is None or end >= today)
 
 
 def _add_loan_interest(summary: Summary, payment: RecordInput, by_id: dict[str, RecordInput],

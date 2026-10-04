@@ -138,3 +138,44 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
 - 해결: CLI에는 타입·필수 필드만 넘기고, 받은 뒤 알 수 없는 필드는 버리고(`prune`) 길이·개수를 검증한다
   (`validate`). 제한값과 인용 가능한 참조는 시스템 지침에 명시한다.
 - 예방: 실패 시 CLI 결과의 `subtype`을 오류 세부로 남겨 원인을 바로 본다.
+
+### TS-012 보고서 HTML을 눈으로 확인하는 방법 (2026-10-04)
+
+- 상황: 시각화는 검증기(색)만으로 부족하고 실제 렌더링을 봐야 한다. Claude in Chrome 확장은 연결되지 않을 수 있다.
+- 방법: Windows 기본 Edge의 헤드리스 스크린샷을 쓴다. 긴 페이지는 개발 전용 Pillow(프로젝트 의존성 아님)로 잘라 본다.
+  ```powershell
+  Start-Process "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" -Wait -ArgumentList @(
+    "--headless=new","--disable-gpu","--hide-scrollbars","--window-size=700,5400",
+    "--screenshot=D:\SmithAgent\smith\reports\monday.png","file:///D:/SmithAgent/smith/reports/preview-monday.html")
+  ```
+- 주의: 스크린샷 경로는 짧은 이름(`MICHAE~1`)이 들어간 임시 폴더보다 `reports\`(Git 제외)가 안정적이었다.
+
+### TS-013 `Set-Content -Encoding UTF8`로 고친 TOML을 읽지 못함 (2026-10-05)
+
+- 증상: `TOMLDecodeError: Invalid statement (at line 1, column 1)`.
+- 원인: PowerShell 5.1의 `Set-Content`/`Out-File -Encoding UTF8`은 UTF-8 BOM을 붙인다. 설정 로더가 바이너리로 읽어
+  tomllib에 넘겨 BOM을 거부했다(TS-004의 `utf-8-sig` 규칙 미적용).
+- 해결: `load_config`가 `utf-8-sig`로 디코딩한다. 설정 파일 편집은 Python이나 Edit 도구를 쓰는 편이 안전하다.
+
+### TS-014 UTC `now.date()`가 현지 날짜와 다름 (2026-10-05, 리뷰)
+
+- 증상: 월요일 06:00 KST 정기 보고에서 10월 5일 시작 월급이 0원으로 계산됐다. 같은 시각을 KST로 넘기면 정상.
+- 원인: 월요일 06:00 KST는 UTC 일요일 21:00이다. `datetime.now(timezone.utc)`를 `as_of`로 넘기면 요약·타임라인의
+  `as_of.date()`가 하루 전 날짜가 된다.
+- 해결: 계산 진입점(`build_report`, `advise`, `summary`)에 넘기는 `as_of`는 `config.local_time()`으로 현지 시각으로
+  바꾼다. 저장은 `_db_time`이 UTC로 정규화한다. 날짜 경계 테스트는 KST 이른 아침 시각을 UTC로 바꿔 넣어 확인한다.
+
+### TS-015 `pythonw` 실행에는 콘솔이 없음 (2026-10-05, 리뷰)
+
+- 증상: 작업 스케줄러의 `pythonw -m smith report run-due`가 설정·자격 증명 오류로 끝나도 아무 흔적이 없다.
+- 원인: `pythonw`의 `sys.stdout`은 `None`이고 `print`는 조용히 버려진다.
+- 해결: 무인 실행 결과는 `data/report-runs.log`에 덧붙이고, 회차가 정해진 뒤의 실패는 원장에 남긴다.
+  `report status`가 로그 위치를 알려 준다. 작업은 배터리 전환 시 중단하지 않도록 설정했다
+  (`StopIfGoingOnBatteries=False`).
+
+### TS-016 헤드리스 Edge로는 500px보다 좁은 화면을 볼 수 없음 (2026-10-05)
+
+- 증상: `--window-size=390,...` 스크린샷이 잘려 보였지만, 실제 레이아웃 폭은 504px이었다.
+- 원인: headless 창의 최소 폭이 약 500px이다. 이미지만 390px로 잘린다.
+- 해결: 보고서를 `<iframe style="width:375px">`로 감싼 페이지를 찍는다. 넘침을 찾을 때는 `getBoundingClientRect().right`가
+  화면 폭을 넘는 요소를 페이지 위에 출력하는 스크립트를 넣고 스크린샷으로 읽는다(`--dump-dom` 출력은 PowerShell에서 비어 있었다).

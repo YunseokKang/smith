@@ -56,7 +56,7 @@ def run(args: argparse.Namespace) -> int:
     today = now.astimezone(ZoneInfo(DEFAULT_TIMEZONE)).date()
     try:
         with closing(ledger.connect_read_only(args.db)) as conn:
-            view = load_view(conn, as_of=now, known_at=now)
+            view = load_view(conn, as_of=now.astimezone(ZoneInfo(DEFAULT_TIMEZONE)), known_at=now)
     except (sqlite3.Error, ledger.LedgerError) as error:
         print(f"Ledger error ({type(error).__name__}): not a readable Smith ledger.")
         return 1

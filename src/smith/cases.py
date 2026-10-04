@@ -10,6 +10,7 @@ from typing import Any
 
 from smith.payload import LedgerView, base_amount, owner_alias, won
 from smith.records import INFLOW_CATEGORIES, OUTFLOW_CATEGORIES, TRANSFER_CATEGORIES, Kind
+from smith.summary import recurring_active
 
 _SECURITIES = ("stock", "fund", "bond", "unclassified")
 _RESTRICTED_ACCOUNTS = ("pension_savings", "irp", "dc")
@@ -281,13 +282,7 @@ def _monthly_total(view: LedgerView, records: list[Any]) -> Decimal | None:
 
 
 def _is_active_recurring(view: LedgerView, record: Any) -> bool:
-    fields = record.fields
-    if fields["frequency"] not in _MONTHS:
-        return False
-    today = view.as_of.date()
-    start = date.fromisoformat(fields["start_date"])
-    end = date.fromisoformat(fields["end_date"]) if fields.get("end_date") else None
-    return start <= today and (end is None or end >= today)
+    return recurring_active(record.fields, view.as_of.date())
 
 
 def _compound(rate: Decimal, years: Decimal) -> Decimal:

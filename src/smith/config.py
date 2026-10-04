@@ -1,17 +1,25 @@
 """Validate bootstrap settings; this module has no external side effects."""
-from datetime import time
+import re
+from datetime import datetime, time
 from pathlib import Path
 import tomllib
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-# The household's local timezone until the scheduler (stage 6) reads it from the config file.
+# The household's local timezone for commands that run without a config file (preview, advise, summary).
 DEFAULT_TIMEZONE = "Asia/Seoul"
 WEEKDAYS = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
 
 
+def local_time(moment: datetime, tz_name: str = DEFAULT_TIMEZONE) -> datetime:
+    """The same instant in the household timezone. Calculations take calendar dates (cash-flow start
+    and end, goal dates) from `as_of.date()`, so `as_of` must be local: 06:00 KST is the previous day
+    in UTC. Storage still normalizes every time to UTC."""
+    return moment.astimezone(ZoneInfo(tz_name))
+
+
 def load_config(path: Path) -> dict:
-    with path.open("rb") as stream:
-        config = tomllib.load(stream)
+    # Notepad and PowerShell 5.1 write a UTF-8 BOM, which tomllib rejects; accept it for edited files.
+    config = tomllib.loads(path.read_bytes().decode("utf-8-sig"))
     for section in ("app", "advice", "privacy", "reports"):
         if not isinstance(config.get(section), dict):
             raise ValueError(f"Missing section: {section}")
@@ -44,4 +52,11 @@ def load_config(path: Path) -> dict:
         raise ValueError("Report time must be a valid HH:MM") from None
     if reports.get("delivery") != "gmail":
         raise ValueError("Only the planned gmail delivery is supported by this scaffold")
+    mail = config.get("mail", {})
+    if not isinstance(mail, dict) or ("recipient" in mail and not _is_email(mail["recipient"])):
+        raise ValueError("mail.recipient must be one email address")
     return config
+
+
+def _is_email(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[^@\s,;<>]+@[^@\s,;<>]+\.[A-Za-z]{2,}", value) is not None

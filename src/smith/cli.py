@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from smith import ledger
-from smith.config import load_config
+from smith.config import load_config, local_time
 from smith.importer import load_import_file
 from smith.records import Action, ImportBatch, ImportRejected, Kind
 
@@ -58,11 +58,14 @@ def main(argv: list[str] | None = None) -> int:
     macro.add_argument("--db", type=Path, default=DEFAULT_DB)
     macro.add_argument("--days", type=int, default=400, help="sync: history window in days (default: 400)")
     macro.add_argument("--as-of", type=date.fromisoformat, help="show: YYYY-MM-DD (default: today)")
-    from smith import advise_command
+    from smith import advise_command, mail_command, report_command
     advise_command.add_parser(sub, DEFAULT_DB)
+    report_command.add_parser(sub, DEFAULT_DB)
+    mail_command.add_parser(sub)
     args = parser.parse_args(argv)
     commands = {"check-config": _check_config, "import": _import, "records": _records, "toss": _toss,
-                "summary": _summary, "evidence": _evidence, "advise": advise_command.run}
+                "summary": _summary, "evidence": _evidence, "advise": advise_command.run,
+                "report": report_command.run, "mail": mail_command.run}
     return commands[args.command](args)
 
 
@@ -75,7 +78,7 @@ def _summary(args: argparse.Namespace) -> int:
     now = datetime.now(timezone.utc)
     try:
         with closing(ledger.connect_read_only(args.db)) as conn:
-            summary = build_summary(conn, as_of=args.as_of or now, known_at=args.known_at or now)
+            summary = build_summary(conn, as_of=local_time(args.as_of or now), known_at=args.known_at or now)
     except (sqlite3.Error, ledger.LedgerError) as error:
         print(f"Ledger error ({type(error).__name__}): not a readable Smith ledger.")
         return 1
@@ -112,6 +115,9 @@ def _toss(args: argparse.Namespace) -> int:
     stored = credentials.load_toss_client()
     if stored is None:
         print("No Toss credentials stored. Run `smith toss login` in your terminal first.")
+        if args.action == "sync" and not args.dry_run:
+            # Recorded so that scheduled reports warn that holdings were not refreshed.
+            _record_sync(args.db, datetime.now(timezone.utc), "failure", "no-credentials")
         return 2
     if args.action == "check":
         return run_check(TossClient(*stored), show_values=args.show_values)
@@ -149,7 +155,7 @@ def _evidence(args: argparse.Namespace) -> int:
         return 0
     if args.action == "show":
         return _evidence_show(args)
-    today = datetime.now(timezone.utc).date()
+    today = local_time(datetime.now(timezone.utc)).date()
     failed = 0
     for provider in credentials.EVIDENCE_PROVIDERS:
         attempted_at = datetime.now(timezone.utc)
@@ -204,7 +210,7 @@ def _evidence_show(args: argparse.Namespace) -> int:
     from smith.relevance import exposures
 
     now = datetime.now(timezone.utc)
-    as_of = datetime.combine(args.as_of, datetime.max.time(), timezone.utc) if args.as_of else now
+    as_of = datetime.combine(args.as_of, datetime.max.time(), timezone.utc) if args.as_of else local_time(now)
     try:
         with closing(ledger.connect_read_only(args.db)) as conn, ledger.snapshot(conn):
             rows = evidence.describe(ledger.load_evidence(conn, known_at=now), as_of=as_of.date())
@@ -280,7 +286,7 @@ def _check_config(args: argparse.Namespace) -> int:
     reports = config["reports"]
     print("Configuration valid. Financial access: read_only.")
     print(f"Report schedule: {', '.join(reports['weekdays'])} {reports['time']} ({config['app']['timezone']})")
-    print("Scaffold only: no schedule registered and no email sent.")
+    print("Check only: this command never schedules or sends anything.")
     return 0
 
 

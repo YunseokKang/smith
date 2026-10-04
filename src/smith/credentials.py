@@ -6,6 +6,8 @@ import keyring
 from keyring.errors import PasswordDeleteError
 
 _TOSS = "smith.toss"
+_GMAIL = "smith.gmail"
+_GMAIL_NAMES = ("client_id", "client_secret", "refresh_token")
 # Public statistics APIs: read-only data keys, still kept out of files and logs.
 EVIDENCE_PROVIDERS = ("ecos", "fred")
 
@@ -38,6 +40,21 @@ def save_api_key(provider: str, api_key: str) -> None:
 
 def delete_api_key(provider: str) -> None:
     _delete(f"smith.{provider}", ("api_key",))
+
+
+def load_gmail() -> tuple[str, str, str] | None:
+    """Return (client_id, client_secret, refresh_token) for the send-only Gmail grant."""
+    values = tuple(keyring.get_password(_GMAIL, name) for name in _GMAIL_NAMES)
+    return values if all(values) else None  # type: ignore[return-value]
+
+
+def save_gmail(client_id: str, client_secret: str, refresh_token: str) -> None:
+    for name, value in zip(_GMAIL_NAMES, (client_id, client_secret, refresh_token)):
+        keyring.set_password(_GMAIL, name, value)
+
+
+def delete_gmail() -> None:
+    _delete(_GMAIL, _GMAIL_NAMES)
 
 
 def _delete(service: str, names: tuple[str, ...]) -> None:
