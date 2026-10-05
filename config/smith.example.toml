@@ -1,10 +1,13 @@
 # Proposed defaults. Checking this file does not schedule or send anything.
+# Unknown keys are rejected, so a misspelled setting fails loudly instead of being ignored.
+config_version = 1
+
 [app]
 timezone = "Asia/Seoul"
 financial_access = "read_only"
 
 [advice]
-risk_preference = "growth_aggressive"
+risk_preference = "growth_aggressive"   # conservative | balanced | growth | growth_aggressive (passed to the AI)
 include_alternatives = true
 require_macro_context = true
 

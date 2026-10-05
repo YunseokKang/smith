@@ -474,9 +474,11 @@ def _strategy(facts: dict[str, Any]) -> list[Track]:
     tracks.append(Track(
         "노후 준비", "on_track" if mid["ratio"] >= 1 else "attention",
         f"월 {short_won(plan['spend'])}(현재 가치) 생활에 필요한 자금 약 {short_won(plan['need'])}, 연금 계좌만으로는 {paths}",
-        (f"지금 연금 계좌 {short_won(pension)}에 매년 {short_won(plan['yearly'])}씩 더하고 실질 연 3%로 불린다고 가정했습니다"
-         "(국민연금·퇴직금·부동산 제외). 은퇴 시기를 정하시면 부족분을 무엇으로 채울지(부동산 축소, 추가 적립, 국민연금) "
-         "구체적으로 계산해 드리겠습니다.")))
+        (f"지금 연금 계좌 {short_won(plan['assets'] if pension is None else pension)}에 매년 {short_won(plan['yearly'])}씩 "
+         "더하고 실질 연 3%로 불린다고 가정했습니다(국민연금·퇴직금·부동산 제외). "
+         + (f"환율이 없어 원화로 바꾸지 못한 연금 자산·납입 {plan['unconverted']}건은 빼고 계산했으므로, 위 비율은 확인된 "
+            "금액만으로 본 하한입니다. " if plan["unconverted"] else "")
+         + "은퇴 시기를 정하시면 부족분을 무엇으로 채울지(부동산 축소, 추가 적립, 국민연금) 구체적으로 계산해 드리겠습니다.")))
     return tracks
 
 

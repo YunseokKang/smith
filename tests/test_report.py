@@ -214,6 +214,21 @@ class ReportTests(unittest.TestCase):
         self.assertTrue(change["complete"])
         self.assertEqual((change["total"], change["parts"]["trades"]), (Decimal(130_000), Decimal(130_000)))
 
+    def test_new_and_paid_off_loans_are_debt_changes_not_trades(self):
+        start = datetime(2026, 9, 2, tzinfo=timezone.utc)
+        new_loan = rec("loan2", "liability", 1, start, category="credit_loan", currency="KRW",
+                       outstanding_principal="1000000", annual_rate="0.05", rate_type="fixed", repayment_method="bullet")
+        self.apply("d0", start, [new_loan])
+        parts = build_report(self.conn, as_of=T1, known_at=T1, baseline=T0, kind="monday")["change"]["parts"]
+        self.assertEqual(parts["debt"], Decimal(100_000 - 1_000_000))    # Old loan repaid 100k, new loan 1M.
+        self.assertEqual(parts["trades"], Decimal(286_000 + 1_000_000))   # Unchanged: shares and the house only.
+        closed = dict(new_loan, revision=2, effective_at=datetime(2026, 9, 21, tzinfo=timezone.utc).isoformat(),
+                      status="closed")
+        self.apply("d1", datetime(2026, 9, 21, tzinfo=timezone.utc), [closed])
+        parts = build_report(self.conn, as_of=T1, known_at=T1, baseline=datetime(2026, 9, 3, tzinfo=timezone.utc),
+                             kind="monday")["change"]["parts"]
+        self.assertEqual(parts["debt"], Decimal(100_000 + 1_000_000))     # Paid off: debt falls by 1M.
+
     def test_decomposition_is_exact_for_the_largest_importable_values(self):
         big = datetime(2026, 9, 3, tzinfo=timezone.utc)
         q, p0, p1 = "999999999999999.12345678", "999999999999999.87654321", "999999999999998.11111111"
@@ -224,6 +239,50 @@ class ReportTests(unittest.TestCase):
                    fx="1399.12345678")
         change = build_report(self.conn, as_of=T1, known_at=T1, baseline=big, kind="monday")["change"]
         self.assertLessEqual(abs(sum(change["parts"].values()) - change["total"]), Decimal("0.5"))
+
+    def test_one_report_reads_one_ledger_state_even_if_an_import_lands_mid_build(self):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        from smith import report_data
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "smith.db"
+        self.conn = ledger.connect(path)
+        self.addCleanup(self.conn.close)
+        self.apply("s0", T0, [cash(1, T0, "100")])
+        writer = ledger.connect(path)
+        self.addCleanup(writer.close)
+        writer.execute("PRAGMA busy_timeout = 50")
+        blocked, original = [], report_data.decompose
+
+        def import_then_decompose(*args, **kwargs):
+            mid = datetime(2026, 9, 10, tzinfo=timezone.utc)
+            doc = {"schema_version": 1, "import_id": "mid", "source": "manual", "mode": "patch",
+                   "as_of": mid.isoformat(), "owners": [{"id": "self"}], "records": [cash(2, mid, "200")]}
+            try:
+                ledger.apply_import(writer, parse_import(json.dumps(doc)), recorded_at=mid)
+            except Exception as error:  # noqa: BLE001 - the report holds the read snapshot.
+                blocked.append(type(error).__name__)
+            return original(*args, **kwargs)
+        with mock.patch.object(report_data, "decompose", import_then_decompose):
+            data = build_report(self.conn, as_of=T1, known_at=T1, baseline=T0, kind="monday")
+        self.assertEqual(blocked, ["OperationalError"])          # The writer waits for the report.
+        self.assertEqual((data["kpis"]["net_worth"], data["change"]["end"]), (Decimal(100), Decimal(100)))
+
+    def test_largest_amount_times_largest_rate_passes_every_path(self):
+        # 15-digit amount x 15-digit rate: about 30 integer digits, past the default 28-digit context.
+        from smith import narrative, summary
+        from smith.payload import load_view
+        top = "999999999999999.99999999"
+        self.apply("m0", T1, [rec("max", "asset", 1, T1, category="cash", account_type="bank", currency="USD",
+                                  value=top, valuation_method="manual", liquidity="immediate")], fx=top)
+        data = build_report(self.conn, as_of=T1, known_at=T1, baseline=T0, kind="monday")
+        render(data)
+        totals = summary.build_summary(self.conn, as_of=T1, known_at=T1)
+        summary.to_dict(totals), summary.render(totals)
+        json.dumps(narrative.build_payload(load_view(self.conn, as_of=T1, known_at=T1), data, None))
 
 
 if __name__ == "__main__":

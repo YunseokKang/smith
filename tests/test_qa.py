@@ -4,12 +4,11 @@ import subprocess
 import tempfile
 import unittest
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from smith import gmail, ledger, qa
 from smith.importer import parse_import
-from smith.report_data import build_report
 
 AT = datetime(2026, 10, 5, 3, 0, tzinfo=timezone.utc)
 ME = "me@example.com"
@@ -67,7 +66,7 @@ class QaTests(unittest.TestCase):
         self.sent.append(kwargs)
         return f"answer-{len(self.sent)}"
 
-    def poll(self, output=None):
+    def poll(self, output=None, now=AT):
         output = output or {"answer": {"text": "비상금은 바로 꺼낼 수 있는 계좌에 두시는 것이 좋습니다.", "refs": []},
                             "follow_up": ["얼마나 모아야 하나요?"]}
 
@@ -75,10 +74,9 @@ class QaTests(unittest.TestCase):
             envelope = {"subtype": "success", "is_error": False, "structured_output": output, "total_cost_usd": 0.2}
             return subprocess.CompletedProcess(args, 0, json.dumps(envelope), "")
 
-        def build():
-            with closing(ledger.connect_read_only(self.db)) as conn:
-                return build_report(conn, as_of=AT, known_at=AT, baseline=None, kind="monday")
-        return qa.poll(self.db, recipient=ME, credentials=("a", "b", "c"), now=AT, build=build, secrets=[],
+        def build(report):
+            return qa.rebuild(self.db, report, now=now)
+        return qa.poll(self.db, recipient=ME, credentials=("a", "b", "c"), now=now, build=build, secrets=[],
                        executable=Path("claude.exe"), runner=runner, sender=self.send, reader=self.reader,
                        poster=self.poster)
 
@@ -137,6 +135,28 @@ class QaTests(unittest.TestCase):
             self.assertEqual(ledger.recover_questions(conn, now=later)[0]["was"], "sending")
             status = conn.execute("SELECT status FROM mail_questions WHERE message_id = 'stuck'").fetchone()[0]
         self.assertEqual(status, "unknown")                                   # May have been sent: never resent.
+
+    def test_answers_use_the_report_they_reply_to(self):
+        later = AT + timedelta(hours=2)
+        doc = {"schema_version": 1, "import_id": "m2", "source": "manual", "mode": "patch", "as_of": later.isoformat(),
+               "owners": [{"id": "self"}], "records": [
+                   {"id": "cash", "kind": "asset", "owner_id": "self", "effective_at": later.isoformat(), "revision": 2,
+                    "status": "active", "category": "cash", "account_type": "bank", "currency": "KRW", "value": "20000000",
+                    "valuation_method": "manual", "liquidity": "immediate"}]}
+        with closing(ledger.connect(self.db)) as conn:
+            ledger.apply_import(conn, parse_import(json.dumps(doc)), recorded_at=later)
+            for at, judgement in ((AT, "보고서의 판단"), (later, "더 새로운 판단")):    # The report's, then a newer one.
+                ledger.record_advice_run(conn, run_id=judgement, created_at=at, use_case="report-narrative",
+                                         question="monday", payload="{}", prompt_version="v", model="m", cost_usd=None,
+                                         outcome="success", advice=json.dumps({"verified": {"situation": judgement}}))
+        self.poll(now=later)
+        with closing(ledger.connect_read_only(self.db)) as conn:
+            sent = conn.execute("SELECT payload FROM advice_runs WHERE use_case = 'mail-answer'").fetchone()[0]
+        self.assertIn('"10000000"', sent)                                     # Cash as the report showed it.
+        self.assertNotIn("20000000", sent)
+        self.assertIn("보고서의 판단", sent)
+        self.assertNotIn("더 새로운 판단", sent)
+        self.assertIn("보고서 시점의 원장 기준", self.sent[0]["html"])           # The ledger has moved on since.
 
     def test_quotes_are_stripped(self):
         self.assertEqual(qa.strip_quote("질문입니다\n> 인용\nOn Mon, Oct 5, 2026 at 6:00 AM Smith wrote:\n원문"), "질문입니다")

@@ -8,7 +8,8 @@
 구현됨: 설정 검증, 수동 JSON 입력 검증과 SQLite 자산 원장(이력·멱등성·종료·정정·미리보기),
 토스증권 조회 전용 연결 점검과 원장 동기화, 순자산·자산 배분·유동성·현금흐름 요약,
 ECOS·FRED 금리 근거, 한국은행·Fed 공식 발표 목록, 개인 노출과 근거 연결, 비식별 headless 자문(세 사용 사례),
-시각화 HTML 보고서, Gmail 발송, 월·목 정기 발행(작업 스케줄러). 보고서의 서술·제안 계층은 아직 없다.
+시각화 HTML 보고서, Gmail 발송, 월·목 정기 발행(작업 스케줄러), 결정적 제안 계층과 제안 이력, 웹 조사 브리프(출처 페이지
+대조), 코드 검증을 거친 AI 서술, 세금 관점 전략, 국토부 실거래가, 메일 답장 질의응답, 보고서 계보(lineage), `doctor` 점검.
 진행 상황은 `docs/roadmap.md`.
 실제 개인정보·잔고·인증정보는 포함하지 않는다. 예시 데이터는 모두 가상이다.
 
@@ -44,6 +45,10 @@ py -3.10 -m uv pip install --python .venv -e .
 | `realestate login\|status\|logout\|sync\|show` | 공공데이터포털·R-ONE 키 저장(화면 비표시), 보유 단지 실거래가 수집과 시세·전세 요약 |
 | `mail login --client-file PATH [--read]` / `mail status` / `mail test` / `mail answer` / `mail logout` | Gmail 권한 연결·확인·시험 발송. `--read`와 `[mail] answer_replies = true`면 보고서 메일에 대한 답장 질문에 답한다. 받는 주소는 Git 제외 `config/smith.local.toml` |
 | `summary [--as-of TIME] [--known-at TIME] [--json]` | 순자산, 자산 배분, 유동성, 월 현금흐름, 목표, 데이터 신선도와 경고 |
+| `doctor` | 원장·설정·자격 증명(존재 여부만)·작업 스케줄러·최근 동기화·조사·발송·메일 답변·실행 로그를 한 번에 점검. 아무것도 보내거나 쓰지 않는다 |
+
+정기 실행(Windows): `powershell -ExecutionPolicy Bypass -File scripts\install-schedule.ps1`가 `Smith\ReportDue`
+작업(15분마다 `report run-due`)을 등록·갱신한다(`-Remove`로 삭제). 등록 뒤 `smith doctor`로 확인한다.
 
 기본 원장은 `data/smith.db`(Git 제외). 입력 형식은 `docs/data-contract.md`,
 환경 문제와 해결 기록은 `docs/dev-notes.md`를 참고한다.
@@ -60,8 +65,10 @@ py -3.10 -m uv pip install --python .venv -e .
 | `docs/dev-notes.md` | Windows 개발 환경, 트러블슈팅 기록 |
 | `config/smith.example.toml` | 월·목 06:00 KST 등 기본 설정 |
 | `examples/portfolio.example.json` | 가상의 수동 입력 예시(자산·부채·현금흐름·목표) |
-| `src/smith/` | CLI, 설정 검증, 레코드 타입, importer, 원장, 연동 Protocol |
-| `tests/` | 설정, 입력 검증, 원장 이력, CLI 테스트 |
+| `src/smith/` | CLI, 설정 검증, 원장, 동기화, 계산·제안·세금, 조사·서술·검증, 보고서·발송, 질의응답 |
+| `scripts/install-schedule.ps1` | Windows 작업 스케줄러 등록(재현 가능한 설치) |
+| `tests/` | 위험 중심 단위 테스트(네트워크·실제 메일·모델 호출 없음) |
+| `.github/workflows/tests.yml` | push·PR마다 Windows에서 전체 테스트와 예시 설정 검증 |
 | `AGENTS.md`, `CLAUDE.md` | 개발 에이전트 작업 지침 |
 
 ## 운영 원칙

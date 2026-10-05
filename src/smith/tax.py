@@ -71,13 +71,17 @@ def facts(view: LedgerView, today: date, household: dict[str, Any] | None) -> di
     mine = [r for r in view.records if r.owner_id == "self"]
     accounts = {r.record_id: r.fields.get("account_type") for r in mine if r.kind is Kind.ASSET}
     contributions: dict[str, Decimal] = {}
+    unconverted = 0  # Pension assets or contributions without an FX rate: left out, and said so.
     for r in mine:
         f = r.fields
         if r.kind is not Kind.CASHFLOW or f["category"] != "internal_transfer" or not f.get("target_record_id"):
             continue
         kind = accounts.get(f["target_record_id"])
         amount = base_amount(view, r)
-        if kind is None or amount is None:
+        if kind is None:
+            continue
+        if amount is None:
+            unconverted += kind in ("pension_savings", "irp")
             continue
         if f["frequency"] == "once":
             per_month = Decimal(0)
@@ -87,6 +91,9 @@ def facts(view: LedgerView, today: date, household: dict[str, Any] | None) -> di
             total = per_month * _months_in_year(f, today.year)  # Paid and still to be paid this calendar year.
         contributions[kind] = contributions.get(kind, Decimal(0)) + total
         contributions[f"{kind}:monthly"] = contributions.get(f"{kind}:monthly", Decimal(0)) + per_month
+    pensions = [base_amount(view, r) for r in mine
+                if r.kind is Kind.ASSET and r.fields.get("account_type") in ("pension_savings", "irp")]
+    unconverted += sum(1 for amount in pensions if amount is None)
     us = [r for r in mine if r.kind is Kind.ASSET and r.fields.get("market") == "US" and r.fields.get("symbol")]
     gains = [_gain(view, r) for r in us]
     known = [g for g in gains if g is not None]
@@ -107,8 +114,9 @@ def facts(view: LedgerView, today: date, household: dict[str, Any] | None) -> di
                          for r in view.records if r.kind is Kind.ASSET and r.fields["category"] == "real_estate"],
         "premiums": [(base_amount(view, r), r.fields["frequency"], r.fields["start_date"]) for r in view.records
                      if r.kind is Kind.CASHFLOW and r.fields["category"] == "insurance_premium"],
-        "pension_assets": sum((base_amount(view, r) or Decimal(0)) for r in mine if r.kind is Kind.ASSET
-                              and r.fields.get("account_type") in ("pension_savings", "irp")),
+        # Known amounts only; `pension_unconverted` > 0 makes every figure built on these a lower bound.
+        "pension_assets": sum((a for a in pensions if a is not None), Decimal(0)),
+        "pension_unconverted": unconverted,
         "birth_year": household.get("birth_year"), "monthly_spend": household.get("retirement_monthly_spend"),
         "married": household.get("marriage_registered"), "cohabiting": household.get("cohabiting"),
     }
@@ -193,7 +201,9 @@ def retirement(t: dict[str, Any]) -> dict[str, Any] | None:
         growth = (1 + REAL_RETURN) ** years
         projected = t["pension_assets"] * growth + yearly * (growth - 1) / REAL_RETURN
         paths.append({"age": target, "years": years, "projected": projected, "ratio": projected / need})
-    return {"age": age, "need": need, "spend": spend, "paths": paths, "yearly": yearly}
+    # With unconverted pension amounts the projection is a lower bound (known amounts only), never a total.
+    return {"age": age, "need": need, "spend": spend, "paths": paths, "yearly": yearly, "assets": t["pension_assets"],
+            "unconverted": t.get("pension_unconverted", 0)}
 
 
 # --- strategy notes and year-end checklist -----------------------------------------------------------------

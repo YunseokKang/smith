@@ -39,8 +39,10 @@ def build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetim
     """Assemble report data. `baseline` is the previous report's time; None marks a first report.
 
     `as_of` is converted to the household timezone first, because calendar dates come from it.
+    The whole build reads one ledger snapshot: an import landing mid-build cannot give the KPIs one
+    ledger state and the change analysis or proposals another.
     """
-    with localcontext() as context:
+    with ledger.snapshot(conn), localcontext() as context:
         context.prec = DECIMAL_PRECISION  # The same precision policy as the summary (no rounded products).
         return _build_report(conn, as_of=local_time(as_of, tz), known_at=known_at,
                              baseline=None if baseline is None else local_time(baseline, tz), kind=kind,
@@ -136,10 +138,12 @@ def _record_change(before: RecordInput | None, after: RecordInput | None, rates0
     if any(currency not in rates for rates in needed):
         unconverted.add(currency)
         return {}
+    # Kind first: a new or paid-off loan is a debt change, not a trade.
+    opened_or_closed = "debt" if record.kind is Kind.LIABILITY else "trades"
     if before is None:
-        return {"trades": _signed_native(after) * rates1[currency]}
+        return {opened_or_closed: _signed_native(after) * rates1[currency]}
     if after is None:
-        return {"trades": -_signed_native(before) * rates0[currency]}
+        return {opened_or_closed: -_signed_native(before) * rates0[currency]}
     fx0, fx1 = rates0[currency], rates1[currency]
     f0, f1 = before.fields, after.fields
     if record.kind is Kind.ASSET and all(f.get(k) for f in (f0, f1) for k in ("quantity", "unit_price")):
@@ -166,7 +170,8 @@ def _profile(household: dict[str, Any] | None, as_of: datetime) -> dict[str, Any
     return {"age": None if birth is None else as_of.year - int(birth),
             "marriage_registered": household.get("marriage_registered"), "cohabiting": household.get("cohabiting"),
             "retirement_monthly_spend": None if household.get("retirement_monthly_spend") is None
-            else str(household["retirement_monthly_spend"])}
+            else str(household["retirement_monthly_spend"]),
+            "risk_preference": household.get("risk_preference")}
 
 
 def _liquidity(view: LedgerView) -> dict[str, Decimal | None]:

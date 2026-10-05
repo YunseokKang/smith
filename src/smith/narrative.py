@@ -79,7 +79,9 @@ Input JSON:
   backbone of the report. You may reorder them (order) and add context, but not change their figures.
 - strategy: long-range goal tracks computed by code.
 - ownership_notes: what is and is not known about legal ownership and household registration.
-- household_profile: the client's age, whether the marriage is registered, retirement spending goal.
+- household_profile: the client's age, whether the marriage is registered, retirement spending goal, and
+  risk_preference (the client's stated appetite, e.g. growth_aggressive: lean toward growth in direction
+  and ordering, but still name the safer alternative and never drop dated cash needs for it).
 - property_market: official transaction figures for each property (same complex and size): recent trade
   median, jeonse median, counts. Use them for price and reverse-jeonse judgements; few trades mean weak
   evidence.
@@ -653,17 +655,24 @@ def narrate(db: Path, view: Any, data: dict[str, Any], *, now: datetime, secrets
     the report then goes out with its deterministic content and says so in the data-status footer."""
     brief, reused = pinned_brief(db, view, now=now, brief_id=brief_id)
     official = 0 if brief is None else sum(1 for i in brief["brief"]["items"] if i.get("tier") == "official")
+    checks = [] if brief is None else [i["check"]["status"] for i in brief["brief"]["items"] if i.get("check")]
     status = {"brief": None if brief is None else {"created_at": brief["created_at"], "items": len(brief["brief"]["items"]),
-                                                    "official": official, "reused": reused},
-              "model": MODEL, "outcome": "skipped", "dropped": []}
+                                                    "official": official, "reused": reused,
+                                                    # Source pages fetched and compared (smith.sources).
+                                                    "checked": len(checks), "matched": checks.count("matched")},
+              "model": MODEL, "outcome": "skipped", "dropped": [],
+              # Lineage: the brief and audited model runs behind this report (stored with the report run).
+              "brief_id": None if brief is None else brief.get("brief_id"), "run_ids": []}
 
     def audit(use_case: str, payload: str, outcome: str, code: str | None, cost: str | None, content: Any) -> bool:
+        run_id = uuid.uuid4().hex
         try:
             with closing(ledger.connect(db)) as conn:
-                ledger.record_advice_run(conn, run_id=uuid.uuid4().hex, created_at=now, use_case=use_case,
+                ledger.record_advice_run(conn, run_id=run_id, created_at=now, use_case=use_case,
                                          question=data["kind"], payload=payload, prompt_version=PROMPT_VERSION,
                                          model=MODEL, cost_usd=cost, outcome=outcome, error_code=code,
                                          advice=None if content is None else json.dumps(content, ensure_ascii=False))
+            status["run_ids"].append(run_id)
             return True
         except Exception:  # noqa: BLE001 - reported to the caller as a failed audit.
             return False

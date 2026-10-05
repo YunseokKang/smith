@@ -41,7 +41,11 @@ class ConfigTests(unittest.TestCase):
         bad = [('answer_replies = true', 'answer_replies = "yes"'), ('birth_year = 1990', 'birth_year = "1990"'),
                ('retirement_monthly_spend = 5000000', 'retirement_monthly_spend = 5000000.5'),
                ('marriage_registered = false', 'marriage_registered = "no"'),
-               ('exclusive_area_m2 = 59.9', 'exclusive_area_m2 = "59.9"')]
+               ('exclusive_area_m2 = 59.9', 'exclusive_area_m2 = "59.9"'),
+               ('answer_replies = true', 'answer_reply = true'),                  # A typo is not ignored.
+               ('exclusive_area_m2 = 59.9', 'exclusive_area = 59.9'),
+               ('risk_preference = "growth_aggressive"', 'risk_preference = "yolo"'),
+               ('config_version = 1', 'config_version = 2')]
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "local.toml"
             base = EXAMPLE.read_text(encoding="utf-8") + good

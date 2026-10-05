@@ -211,3 +211,16 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
 - 원인: 동·호수를 저장하지 않으므로 같은 날·층·금액·면적의 서로 다른 계약이 같은 키가 됐다. 저장은 추가만 했다.
 - 해결: 키별로 `active_count`·`cancelled_count`를 세고(원장 v13), 받아 온 (주택, 종류, 월)은 통째로 지우고 다시
   넣는다. 분석은 건수만큼 펼쳐 중간값을 낸다. 설정에서 빠진 주택의 거래도 지운다.
+
+### TS-021 PowerShell 5.1 `Get-Content`/`Set-Content`로 고친 파일의 한글이 깨짐 (2026-10-05)
+
+- 증상: `(Get-Content f -Raw).Replace(...) | Set-Content f`로 테스트 파일 한 줄을 바꾸자 `SyntaxError: unterminated string`.
+- 원인: Windows PowerShell 5.1은 BOM 없는 UTF-8 파일을 시스템 코드 페이지(cp949)로 읽어, 한글이 깨진 채 다시 쓴다.
+- 해결: `git checkout`으로 복구. 파일 편집은 편집 도구나 `[IO.File]::ReadAllText(path, [Text.Encoding]::UTF8)` +
+  `WriteAllText(path, text, (New-Object Text.UTF8Encoding $false))`, 또는 Python 스크립트(`read_bytes().decode`)로 한다.
+
+### TS-022 `schtasks /Query` 출력이 실행 방식에 따라 언어·인코딩이 다름 (2026-10-05)
+
+- 증상: `smith doctor`의 스케줄러 상태가 모두 `?`. 콘솔에서는 영어 필드명(UTF-8)인데, 콘솔 없이
+  (`CREATE_NO_WINDOW`) 실행하면 한국어 필드명(cp949)으로 나온다. `text=True`는 cp949 디코딩 오류로 실패했다.
+- 해결: PowerShell `Get-ScheduledTask`·`Get-ScheduledTaskInfo` 결과를 `ConvertTo-Json`으로 받아 고정된 필드명으로 읽는다.

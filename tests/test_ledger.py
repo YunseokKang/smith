@@ -207,6 +207,22 @@ class LedgerTests(unittest.TestCase):
             with closing(sqlite3.connect(path)) as check:
                 self.assertEqual(check.execute("PRAGMA user_version").fetchone()[0], ledger.SCHEMA_VERSION)
 
+    def test_every_supported_version_migrates_to_the_current_schema(self):
+        def schema(conn):
+            return sorted(conn.execute("SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"))
+        with closing(ledger.connect(":memory:")) as fresh:
+            expected = schema(fresh)
+        for version in range(0, ledger.SCHEMA_VERSION):
+            with self.subTest(version=version), closing(sqlite3.connect(":memory:", isolation_level=None)) as conn:
+                for step in range(1, version + 1):
+                    for statement in ledger._MIGRATIONS[step]:
+                        conn.execute(statement)
+                conn.execute(f"PRAGMA user_version = {version}")
+                ledger._migrate(conn)
+                self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], ledger.SCHEMA_VERSION)
+                # Same tables, columns and constraints as a ledger created at the current version.
+                self.assertEqual(schema(conn), expected)
+
     def test_snapshot_gives_reads_one_consistent_view(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "ledger.db"

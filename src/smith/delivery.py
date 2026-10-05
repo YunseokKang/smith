@@ -6,7 +6,9 @@ is retried up to ledger.MAX_SEND_ATTEMPTS. If the PC was off, the latest due slo
 message that lists the missed slots, which are settled only once that message is (possibly) delivered;
 nothing is backfilled on the very first run.
 """
+import dataclasses
 import hashlib
+import json
 import time
 import uuid
 from collections.abc import Callable
@@ -101,8 +103,11 @@ def record_failure(db: Path, *, now: datetime, slot: datetime | None, missed: li
 def publish(db: Path, *, recipient: str, credentials: tuple[str, str, str], now: datetime, slot: datetime | None,
             missed: list[datetime], kind: str, sender: Sender = gmail.send, tz: str = DEFAULT_TIMEZONE,
             sync_failures: list[str] | None = None, narrator: Narrator | None = None,
-            household: dict[str, Any] | None = None) -> dict[str, Any]:
+            household: dict[str, Any] | None = None, lineage: dict[str, str | None] | None = None) -> dict[str, Any]:
     """Claim, build, send and record one report. Returns the final run record fields.
+
+    `lineage` carries the config hash and code version; with the ledger time, brief, model runs and a
+    digest of the canonical report data they are stored on the run before sending.
 
     `narrator(data)` adds the verified narrative (6c/6d) to the report data in place; it handles its own
     failures, so a report always goes out with at least its deterministic content.
@@ -139,7 +144,11 @@ def publish(db: Path, *, recipient: str, credentials: tuple[str, str, str], now:
     except Exception as error:  # noqa: BLE001 - any build failure must release the claim as a clean failure.
         return _finish(db, report_id, "failed", error_code=f"build-{type(error).__name__}")
     digest = hashlib.sha256(html.encode("utf-8")).hexdigest()
+    status = (data.get("narrative") or {}).get("status") or {}
     with closing(ledger.connect(db)) as conn:
+        ledger.record_lineage(conn, report_id=report_id, known_at=now, brief_id=status.get("brief_id"),
+                              advice_run_ids=status.get("run_ids", []), config_sha256=(lineage or {}).get("config_sha256"),
+                              code_version=(lineage or {}).get("code_version"), data_sha256=canonical_digest(data))
         holds_claim = ledger.start_sending(conn, report_id=report_id, now=datetime.now(timezone.utc),
                                            subject=subject, html_sha256=digest)
     if not holds_claim:
@@ -163,6 +172,23 @@ def _finish(db: Path, report_id: str, status: str, *, subject: str | None = None
                              subject=subject, html_sha256=digest, message_id=message_id, error_code=error_code,
                              shown_proposals=shown)
     return {"report_id": report_id, "status": status, "subject": subject, "error_code": error_code}
+
+
+def canonical_digest(data: dict[str, Any]) -> str:
+    """SHA-256 of the report data in a canonical JSON form (sorted keys, Decimals and times as text),
+    without the ledger view object. It pins the exact numbers sent; a later rebuild from the lineage can
+    differ only where proposal history (times shown, decisions) has moved on since."""
+    plain = {key: value for key, value in data.items() if key not in ("view", "narrative", "delivery_note")}
+    text = json.dumps(plain, sort_keys=True, ensure_ascii=False, default=_canonical)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _canonical(value: Any) -> Any:
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return dataclasses.asdict(value)
+    if isinstance(value, (set, frozenset, tuple)):
+        return sorted(value, key=str) if isinstance(value, (set, frozenset)) else list(value)
+    return str(value)
 
 
 def _delivery_note(slot: datetime | None, missed: list[datetime], now: datetime, unresolved: list[dict[str, Any]],

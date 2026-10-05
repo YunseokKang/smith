@@ -13,14 +13,16 @@ import json
 import re
 import subprocess
 import uuid
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from smith import headless, ledger
+from smith import headless, ledger, sources
 from smith.payload import LedgerView, check_outbound, mask_identifiers
 from smith.records import Kind
 
@@ -120,8 +122,12 @@ def topics(view: LedgerView) -> list[Topic]:
 
 
 def run_research(view: LedgerView, *, today: date, secrets: list[str], executable: Path,
-                 runner: headless.Runner = subprocess.run, model: str = MODEL) -> dict[str, Any]:
+                 runner: headless.Runner = subprocess.run, model: str = MODEL,
+                 verifier: Callable[..., tuple[list[dict[str, Any]], dict[str, int]]] | None = None) -> dict[str, Any]:
     """Research the topics and return {"topics", "brief", "cost_usd", "dropped"}.
+
+    Each kept item's source page is then fetched and checked (smith.sources): dead or non-public URLs
+    are dropped, and every item carries a "check" record (status, final URL, body hash, matched numbers).
 
     Raises:
         headless.HeadlessError: the call failed or produced no usable item.
@@ -134,6 +140,9 @@ def run_research(view: LedgerView, *, today: date, secrets: list[str], executabl
                                 model=model, budget_usd=BUDGET_USD, timeout_seconds=TIMEOUT_SECONDS,
                                 tools=headless.WEB_TOOLS, runner=runner)
     items, reasons = clean_items(output["items"], {t.ref for t in subjects}, today)
+    items, unreachable = (verifier or partial(sources.verify, tier=tier))(items)
+    for reason, count in unreachable.items():
+        reasons[reason] = reasons.get(reason, 0) + count
     if not items:
         raise headless.HeadlessError("empty-brief", ", ".join(sorted(reasons)) or None)
     gaps = [_clean(g, 300) for g in output["gaps"] if _clean(g, 300)]
@@ -166,8 +175,8 @@ def clean_items(raw: list[dict[str, str]], topic_refs: set[str], today: date) ->
 
 
 def tier(url: str) -> str:
-    """"official" for a government, central-bank or statutory publisher host, else "secondary". The URL is
-    only checked for its host: whether the page exists and says what the item claims is not verified."""
+    """"official" for a government, central-bank or statutory publisher host, else "secondary". This is
+    the host only; smith.sources then checks that the page exists and carries the item's numbers."""
     host = (urlsplit(url).hostname or "").lower()
     official = any(host == suffix.lstrip(".") or host.endswith(suffix if suffix.startswith(".") else "." + suffix)
                    for suffix in OFFICIAL_SUFFIXES)

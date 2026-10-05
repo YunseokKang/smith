@@ -43,8 +43,13 @@ def run(args: argparse.Namespace) -> int:
     if not args.db.exists():
         print(f"No ledger at {args.db}.")
         return 1
+    config, problem = _optional_config(args.config)
+    if problem:
+        print(problem)
+        return 2
+    tz = config["app"]["timezone"] if config else DEFAULT_TIMEZONE
     now = datetime.now(timezone.utc)
-    local = now.astimezone(ZoneInfo(DEFAULT_TIMEZONE))
+    local = now.astimezone(ZoneInfo(tz))
     kind = args.kind or ("thursday" if local.weekday() == 3 else "monday")
     if args.since is not None and args.since >= now:
         print("Invalid --since: it must be in the past.")
@@ -55,8 +60,8 @@ def run(args: argparse.Namespace) -> int:
             researched = _research(args.db, now, reuse_fresh=False)
             brief_id = researched["brief_id"] if researched["outcome"] == "success" else None
         with closing(ledger.connect_read_only(args.db)) as conn:
-            data = build_report(conn, as_of=now, known_at=now, baseline=args.since, kind=kind,
-                                household=_household(args.config))
+            data = build_report(conn, as_of=now, known_at=now, baseline=args.since, kind=kind, tz=tz,
+                                household=profile(config) if config else None)
     except (sqlite3.Error, ledger.LedgerError) as error:
         print(f"Ledger error ({type(error).__name__}): not a readable Smith ledger.")
         return 1
@@ -73,21 +78,56 @@ def run(args: argparse.Namespace) -> int:
 
 
 def profile(config: dict[str, Any]) -> dict[str, Any] | None:
-    """The household profile plus the local property map (acquisition data), for reports and tax."""
+    """The household profile plus the local property map (acquisition data) and the stated risk
+    preference ([advice]), for reports, tax and the narrative."""
     household = config.get("household")
-    if household is None:
+    risk = config.get("advice", {}).get("risk_preference")
+    if household is None and risk is None:
         return None
-    return {**household, "properties": config.get("properties") or {}}
+    return {**(household or {}), "properties": config.get("properties") or {}, "risk_preference": risk}
 
 
-def _household(path: Path) -> dict[str, Any] | None:
-    """The local household profile (birth year, retirement spending, marriage registration), if any."""
+def _optional_config(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """(config, problem) for preview: a missing file means defaults, but a broken one is an error, so a
+    preview never silently differs from what the scheduled run would send."""
     from smith.config import load_config
 
+    if not path.exists():
+        return None, None
     try:
-        return profile(load_config(path))
-    except (OSError, ValueError, UnicodeDecodeError):
+        return load_config(path), None
+    except (OSError, ValueError, UnicodeDecodeError) as error:
+        return None, f"Local config is invalid ({error}): {path}. Fix it or pass --config to another file."
+
+
+def lineage(config_path: Path) -> dict[str, str | None]:
+    """Config hash and code version for a report run's lineage. The code version is the checked-out
+    commit read from .git (no subprocess: the scheduler runs without a console); None outside a checkout."""
+    import hashlib
+
+    try:
+        config_sha256 = hashlib.sha256(config_path.read_bytes()).hexdigest()
+    except OSError:
+        config_sha256 = None
+    return {"config_sha256": config_sha256, "code_version": _git_commit(Path(__file__).resolve().parents[2])}
+
+
+def _git_commit(root: Path) -> str | None:
+    git = root / ".git"
+    try:
+        head = (git / "HEAD").read_text(encoding="ascii").strip()
+        if not head.startswith("ref: "):
+            return head[:40] or None
+        ref = head[5:]
+        loose = git / ref
+        if loose.exists():
+            return loose.read_text(encoding="ascii").strip()[:40]
+        for line in (git / "packed-refs").read_text(encoding="ascii").splitlines():
+            if line.endswith(f" {ref}"):
+                return line.split(" ", 1)[0][:40]
+    except OSError:
         return None
+    return None
 
 
 def _aware_datetime(text: str) -> datetime:
@@ -267,6 +307,11 @@ def _publish_once(args: argparse.Namespace) -> int:
     publish_at = datetime.now(timezone.utc)
     result = delivery.publish(args.db, recipient=recipient, credentials=stored, now=publish_at,
                               slot=slot, missed=missed, kind=kind, tz=tz, sync_failures=sync_failures,
-                              narrator=_narrator(args.db, publish_at, brief_id), household=profile(config))
-    _say(args.db, f"Report {result['status']}: {result.get('subject') or ''} {result.get('error_code') or ''}".rstrip())
+                              narrator=_narrator(args.db, publish_at, brief_id), household=profile(config),
+                              lineage=lineage(args.config))
+    # The subject can carry an amount (net-worth change); the plain-text log gets only the run id and outcome.
+    _say(args.db, f"Report {result['status']}: run {(result.get('report_id') or '-')[:8]} "
+                  f"{result.get('error_code') or ''}".rstrip())
+    if result.get("subject"):
+        print(f"Subject: {result['subject']}")
     return 0 if result["status"] in ("sent", "skipped") else 1

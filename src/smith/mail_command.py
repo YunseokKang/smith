@@ -63,9 +63,6 @@ def answer(db: Path, config_path: Path, *, verbose: bool = False) -> int:
     from datetime import datetime, timezone
 
     from smith import qa
-    from smith.config import local_time
-    from smith.report_data import build_report
-
     from smith.report_command import profile
 
     try:
@@ -81,13 +78,8 @@ def answer(db: Path, config_path: Path, *, verbose: bool = False) -> int:
     household, tz = profile(config), config["app"]["timezone"]
     now = datetime.now(timezone.utc)
 
-    def build() -> dict[str, Any]:
-        from contextlib import closing
-
-        from smith import ledger
-        with closing(ledger.connect_read_only(db)) as conn:
-            kind = "thursday" if local_time(now, tz).weekday() == 3 else "monday"
-            return build_report(conn, as_of=now, known_at=now, baseline=None, kind=kind, tz=tz, household=household)
+    def build(report: dict[str, Any] | None) -> dict[str, Any]:
+        return qa.rebuild(db, report, now=now, tz=tz, household=household)
     try:
         results = qa.poll(db, recipient=to, credentials=stored, now=now, build=build, secrets=credentials.all_secrets())
     except gmail.MailError as error:

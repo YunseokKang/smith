@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, localcontext
 from typing import Any
 
-from smith import ledger
+from smith import DECIMAL_PRECISION, ledger  # The package-wide Decimal policy (smith/__init__.py).
 from smith.records import (
     ASSET_CATEGORIES, INFLOW_CATEGORIES, OUTFLOW_CATEGORIES, TRANSFER_CATEGORIES, Kind, RecordInput,
     Status, StoredRevision,
@@ -25,9 +25,6 @@ _STALE_MANUAL = timedelta(days=90)
 _STALE_API = timedelta(days=7)
 _STALE_FX = timedelta(days=7)
 _UPCOMING = timedelta(days=365)
-# Imported values have at most 23 digits (importer), so amount x rate and quantity x price x rate need
-# about 70; every calculation over ledger amounts runs in this context so no product is rounded.
-DECIMAL_PRECISION = 100
 
 
 @dataclass

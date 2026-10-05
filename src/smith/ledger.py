@@ -25,7 +25,7 @@ from smith.records import (
 logger = logging.getLogger(__name__)
 _END_OF_TIME = datetime.max.replace(tzinfo=timezone.utc)
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 _V1 = (
     """CREATE TABLE imports (
         import_id TEXT PRIMARY KEY,
@@ -300,8 +300,13 @@ _V13 = (
     "DROP TABLE mail_questions",
     "ALTER TABLE mail_questions_v13 RENAME TO mail_questions",
 )
+# Report lineage: the ledger time, research brief, audited model runs, config, code and canonical data
+# a report was built from, so "why did Smith say this" can be reconstructed and questions answered
+# against the report they reply to.
+_LINEAGE_COLUMNS = ("known_at", "brief_id", "advice_run_ids", "config_sha256", "code_version", "data_sha256")
+_V14 = tuple(f"ALTER TABLE report_runs ADD COLUMN {column} TEXT" for column in _LINEAGE_COLUMNS)
 _MIGRATIONS = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8, 9: _V9, 10: _V10, 11: _V11, 12: _V12,
-               13: _V13}
+               13: _V13, 14: _V14}
 _COLUMNS = ("record_id, revision, kind, owner_id, source, status, change_type, corrects_revision, "
             "reason, effective_at, recorded_at, import_id, fields")
 
@@ -1029,6 +1034,49 @@ def answer_message_ids(conn: sqlite3.Connection) -> set[str]:
 def _answers_since(conn: sqlite3.Connection, since: datetime) -> int:
     return conn.execute("SELECT count(*) FROM mail_questions WHERE status IN ('answering', 'sending', 'answered', "
                         "'unknown') AND claimed_at >= ?", (_db_time(since),)).fetchone()[0]
+
+
+def record_lineage(conn: sqlite3.Connection, *, report_id: str, known_at: datetime, brief_id: str | None,
+                   advice_run_ids: list[str], config_sha256: str | None, code_version: str | None,
+                   data_sha256: str) -> None:
+    """Store what a report was built from (before it is sent, so an uncertain send keeps it too)."""
+    conn.execute("UPDATE report_runs SET known_at = ?, brief_id = ?, advice_run_ids = ?, config_sha256 = ?, "
+                 "code_version = ?, data_sha256 = ? WHERE report_id = ?",
+                 (_db_time(known_at), brief_id, json.dumps(advice_run_ids), config_sha256, code_version, data_sha256,
+                  report_id))
+
+
+def get_report(conn: sqlite3.Connection, report_id: str) -> dict[str, Any] | None:
+    """One report run with its lineage (lineage fields are None for reports sent before v14)."""
+    columns = tuple(_REPORT_COLUMNS.split(", ")) + _LINEAGE_COLUMNS
+    row = conn.execute(f"SELECT {', '.join(columns)} FROM report_runs WHERE report_id = ?", (report_id,)).fetchone()
+    if row is None:
+        return None
+    found = dict(zip(columns, row))
+    found["advice_run_ids"] = json.loads(found["advice_run_ids"]) if found["advice_run_ids"] else []
+    return found
+
+
+def get_advice(conn: sqlite3.Connection, run_ids: list[str], *, use_case: str,
+               created_at: str | None = None) -> dict[str, Any] | None:
+    """The last successful audited output among `run_ids` for a use case (a report's own narrative).
+    Reports sent before lineage existed (no run ids) match on the report's creation time instead: the
+    publish run audits its narrative with that same time."""
+    if run_ids:
+        where, params = f"run_id IN ({', '.join('?' * len(run_ids))})", tuple(run_ids)
+    elif created_at is not None:
+        where, params = "created_at = ?", (created_at,)
+    else:
+        return None
+    row = conn.execute(f"SELECT created_at, advice FROM advice_runs WHERE {where} AND use_case = ? "
+                       "AND outcome = 'success' AND advice IS NOT NULL ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                       (*params, use_case)).fetchone()
+    return None if row is None else {"created_at": datetime.fromisoformat(row[0]), "content": json.loads(row[1])}
+
+
+def changed_since(conn: sqlite3.Connection, known_at: datetime) -> bool:
+    """Whether any import was recorded after `known_at` (the ledger moved on since a report)."""
+    return conn.execute("SELECT 1 FROM imports WHERE recorded_at > ? LIMIT 1", (_db_time(known_at),)).fetchone() is not None
 
 
 def last_sent_report(conn: sqlite3.Connection) -> dict[str, Any] | None:

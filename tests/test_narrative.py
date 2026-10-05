@@ -114,7 +114,8 @@ class NarrativeTests(unittest.TestCase):
                dict(ITEM, published_on="2020-01-01"), dict(ITEM, kind="rumor")]
         news = dict(ITEM, source_url="https://news.example.com/1", published_on="2025-10")
         result = research.run_research(view, today=TODAY, secrets=[], executable=Path("claude.exe"),
-                                       runner=runner_returning({"items": [ITEM, news, *bad], "gaps": []}, calls))
+                                       runner=runner_returning({"items": [ITEM, news, *bad], "gaps": []}, calls),
+                                       verifier=lambda items: (items, {}))   # Page checks: test_sources.
         args = calls[0][0]
         self.assertEqual(args[args.index("--tools") + 1], "WebSearch,WebFetch")
         self.assertEqual(args[args.index("--permission-mode") + 1], "dontAsk")

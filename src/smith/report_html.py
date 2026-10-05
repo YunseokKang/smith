@@ -663,6 +663,9 @@ def _ai_lines(ai: dict[str, Any] | None) -> list[str]:
     if brief:
         line = (f"정책·시장 조사: {brief['created_at']:%m월 %d일} 웹 조사 {brief['items']}건(공식 출처 {brief.get('official', 0)}건). "
                 "금액·종목·계좌·직접 식별자 없이, 승인된 시·구와 자산·부채 유형만으로 조사했습니다.")
+        if brief.get("checked"):
+            line += (f" 출처 페이지를 직접 열어 {brief['checked']}건을 확인했고, 그중 {brief['matched']}건은 본문에서 "
+                     "같은 수치를 찾았습니다(없어진 페이지의 항목은 뺐습니다).")
         if brief.get("reused"):
             line += " 이번 보고에서 새로 조사하지 못해, 같은 주제로 앞서 조사한 자료를 다시 사용했습니다."
         lines = [line]

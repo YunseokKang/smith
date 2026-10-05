@@ -80,6 +80,19 @@ class TaxTests(unittest.TestCase):
         self.assertEqual((plan["age"], plan["need"]), (37, Decimal(1_800_000_000)))   # 72M a year / 4%.
         self.assertEqual([p["age"] for p in plan["paths"]], [55, 60, 65])
 
+    def test_a_pension_without_an_fx_rate_makes_the_retirement_track_a_lower_bound(self):
+        eur = rec("eur-pension", "asset", category="fund", account_type="pension_savings", currency="EUR",
+                  value="50000", valuation_method="statement", liquidity="restricted")
+        doc = {"schema_version": 1, "import_id": "t3", "source": "manual", "mode": "patch", "as_of": AT.isoformat(),
+               "owners": [{"id": "self"}], "records": [eur]}
+        ledger.apply_import(self.conn, parse_import(json.dumps(doc)), recorded_at=AT)
+        data = self.data()
+        t = tax.facts(data["view"], date(2026, 10, 5), HOUSEHOLD)
+        self.assertEqual((t["pension_assets"], t["pension_unconverted"]), (Decimal(70_000_000), 1))  # Not as zero.
+        self.assertEqual(tax.retirement(t)["unconverted"], 1)
+        track = next(tr for tr in data["advice"]["strategy"] if tr.name == "노후 준비")
+        self.assertIn("확인된 금액만으로 본 하한", track.detail)
+
     def test_capital_gains_estimates(self):
         D = Decimal
         # One home at 1.65bn bought for 1.0bn, held and lived 5 years: taxed share (0.45/1.65), 40% deduction.
