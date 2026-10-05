@@ -5,11 +5,11 @@ Every number a report shows is computed here from one ledger snapshot (see docs/
 """
 import sqlite3
 from collections.abc import Iterable
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, localcontext
 from typing import Any
 
-from smith import cases, ledger, proposals
+from smith import cases, ledger, proposals, realestate
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import LedgerView, base_amount, load_view
 from smith.records import Kind, RecordInput, Status
@@ -34,7 +34,8 @@ TIMELINE_YEARS = 5
 
 
 def build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetime,
-                 baseline: datetime | None, kind: str, tz: str = DEFAULT_TIMEZONE) -> dict[str, Any]:
+                 baseline: datetime | None, kind: str, tz: str = DEFAULT_TIMEZONE,
+                 household: dict[str, Any] | None = None) -> dict[str, Any]:
     """Assemble report data. `baseline` is the previous report's time; None marks a first report.
 
     `as_of` is converted to the household timezone first, because calendar dates come from it.
@@ -42,17 +43,23 @@ def build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetim
     with localcontext() as context:
         context.prec = DECIMAL_PRECISION  # The same precision policy as the summary (no rounded products).
         return _build_report(conn, as_of=local_time(as_of, tz), known_at=known_at,
-                             baseline=None if baseline is None else local_time(baseline, tz), kind=kind)
+                             baseline=None if baseline is None else local_time(baseline, tz), kind=kind,
+                             household=household)
 
 
 def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetime,
-                  baseline: datetime | None, kind: str) -> dict[str, Any]:
+                  baseline: datetime | None, kind: str, household: dict[str, Any] | None) -> dict[str, Any]:
     view = load_view(conn, as_of=as_of, known_at=known_at)
     change = None if baseline is None else decompose(conn, baseline, as_of, known_at)
     kpis, sectors = _kpis(view, change), _sectors(view)
+    # Official transactions matched to each property (local data; only derived figures leave this PC).
+    market = realestate.analyze(ledger.load_deals(conn, since=as_of.date() - timedelta(days=400)), today=as_of.date())
+    for prop in sectors["real_estate"]["properties"]:
+        prop["market"] = market.get(prop["record_id"])
     return {"kind": kind, "as_of": as_of, "baseline": baseline, "kpis": kpis,
             "change": change, "timeline": _timeline(view), "sectors": sectors,
-            "advice": proposals.build(view, kpis, sectors, active=ledger.active_proposals(conn)),
+            "advice": proposals.build(view, kpis, sectors, active=ledger.active_proposals(conn), household=household),
+            "household_profile": _profile(household, as_of),
             "completeness": {"complete": view.summary.complete, "areas": view.summary.incomplete_areas,
                              "unconverted": view.summary.unconverted},
             "warnings": view.summary.warnings, "freshness": view.summary.freshness, "sync": view.summary.sync,
@@ -149,6 +156,17 @@ def _record_change(before: RecordInput | None, after: RecordInput | None, rates0
     else:
         key = "cash_savings" if record.fields["category"] in _CASH_LIKE else "revaluation"
     return {key: (n1 - n0) * fx0, "fx": n1 * (fx1 - fx0)}
+
+
+def _profile(household: dict[str, Any] | None, as_of: datetime) -> dict[str, Any] | None:
+    """The part of the local household profile the narrative may see: age, not birth date."""
+    if not household:
+        return None
+    birth = household.get("birth_year")
+    return {"age": None if birth is None else as_of.year - int(birth),
+            "marriage_registered": household.get("marriage_registered"), "cohabiting": household.get("cohabiting"),
+            "retirement_monthly_spend": None if household.get("retirement_monthly_spend") is None
+            else str(household["retirement_monthly_spend"])}
 
 
 def _liquidity(view: LedgerView) -> dict[str, Decimal | None]:
@@ -283,7 +301,7 @@ def _real_estate_sector(view: LedgerView) -> dict[str, Any]:
         value = base_amount(view, record)
         debt = _total(base_amount(view, r) for r in view.records if r.kind is Kind.LIABILITY
                       and r.fields.get("collateral_record_id") == record.record_id)
-        properties.append({"label": _asset_label(record), "value": value, "debt": debt,
+        properties.append({"record_id": record.record_id, "label": _asset_label(record), "value": value, "debt": debt,
                            "ltv": debt / value if value and debt is not None else None,
                            "valued_on": record.effective_at.date()})
     total = view.summary.total_assets

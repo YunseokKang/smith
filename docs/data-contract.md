@@ -108,6 +108,8 @@
 - 유출 category: `living_expense`, `housing_cost`, `loan_payment`, `insurance_premium`, `tax`,
   `education`, `other_expense` → `direction=outflow`
 - `internal_transfer`: 본인 계좌 간 이동(적금 납입 등). 수입·지출로 계산하지 않는다.
+  선택 필드 `target_record_id`로 입금되는 자산 레코드(예: 연금저축 계좌의 펀드)를 가리키면, 계좌 유형별 연간
+  납입액(세액공제 한도 계산)에 쓴다. `internal_transfer`에만 쓸 수 있다.
 - `frequency`: `once`, `monthly`, `quarterly`, `annual`. `once`는 `end_date`를 쓰지 않는다.
 - `end_date`는 `start_date` 이후여야 한다. 없으면 계속 유지되는 흐름이다.
 - `commitment`(선택): `fixed`(계약상 의무) 또는 `discretionary`(추가 원금 상환처럼 언제든 멈출 수 있음).
@@ -116,7 +118,7 @@
 **goal**: `category`, `currency`, `target_amount`(0 초과), `target_date`, `priority`
 - `category`: `home`, `emergency_fund`, `retirement`, `education`, `major_purchase`, `debt_repayment`, `other`
 
-**참조 필드**(`collateral_record_id`, `liability_record_id`)는 원장에 있거나 같은 import에 있는
+**참조 필드**(`collateral_record_id`, `liability_record_id`, `target_record_id`)는 원장에 있거나 같은 import에 있는
 해당 kind 레코드를 가리켜야 한다.
 - `priority`: `high`, `medium`, `low`
 

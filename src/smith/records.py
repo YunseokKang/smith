@@ -90,7 +90,8 @@ GOAL_CATEGORIES = frozenset({
 PRIORITIES = frozenset({"high", "medium", "low"})
 
 # Fields that point at another record, with the kind they must point at.
-REFERENCE_FIELDS = {"collateral_record_id": Kind.ASSET, "liability_record_id": Kind.LIABILITY}
+REFERENCE_FIELDS = {"collateral_record_id": Kind.ASSET, "liability_record_id": Kind.LIABILITY,
+                    "target_record_id": Kind.ASSET}
 
 
 @dataclass(frozen=True)

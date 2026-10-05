@@ -1,7 +1,8 @@
 """`smith report preview`: build a report from the ledger and save it as an HTML file. Never sends."""
 import argparse
+import io
 import sqlite3
-from contextlib import closing
+from contextlib import closing, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -54,7 +55,8 @@ def run(args: argparse.Namespace) -> int:
             researched = _research(args.db, now, reuse_fresh=False)
             brief_id = researched["brief_id"] if researched["outcome"] == "success" else None
         with closing(ledger.connect_read_only(args.db)) as conn:
-            data = build_report(conn, as_of=now, known_at=now, baseline=args.since, kind=kind)
+            data = build_report(conn, as_of=now, known_at=now, baseline=args.since, kind=kind,
+                                household=_household(args.config))
     except (sqlite3.Error, ledger.LedgerError) as error:
         print(f"Ledger error ({type(error).__name__}): not a readable Smith ledger.")
         return 1
@@ -68,6 +70,24 @@ def run(args: argparse.Namespace) -> int:
     print(f"Preview saved (not sent): {out}")
     print(f"Subject: {subject}")
     return 0
+
+
+def profile(config: dict[str, Any]) -> dict[str, Any] | None:
+    """The household profile plus the local property map (acquisition data), for reports and tax."""
+    household = config.get("household")
+    if household is None:
+        return None
+    return {**household, "properties": config.get("properties") or {}}
+
+
+def _household(path: Path) -> dict[str, Any] | None:
+    """The local household profile (birth year, retirement spending, marriage registration), if any."""
+    from smith.config import load_config
+
+    try:
+        return profile(load_config(path))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
 
 
 def _aware_datetime(text: str) -> datetime:
@@ -196,6 +216,19 @@ def _publish_once(args: argparse.Namespace) -> int:
             for run_ in delivery.recover(conn, now):
                 _say(args.db, f"Interrupted run {run_['report_id']} ({run_['slot'] or 'manual'}, was {run_['was']}) closed.")
             found = delivery.due(conn, config, now)
+        if config.get("mail", {}).get("answer_replies"):
+            # Replies to report e-mails: a few Gmail reads every run, a model call only for a real question.
+            from smith import mail_command
+            try:
+                buffer = io.StringIO()
+                with redirect_stdout(buffer):
+                    code = mail_command.answer(args.db, args.config)
+                for line in buffer.getvalue().splitlines():
+                    _say(args.db, line)              # Answered questions and failures (e.g. an expired grant).
+                if code != 0 and not buffer.getvalue():
+                    _say(args.db, f"Answering questions failed (exit {code}).")
+            except Exception as error:  # noqa: BLE001 - answering questions must never block a report.
+                _say(args.db, f"Answering questions crashed: {type(error).__name__}")
         if found is None:
             upcoming = delivery.slots_between(config["reports"], tz, now, now + PREPARE_AHEAD)
             if upcoming:
@@ -222,6 +255,10 @@ def _publish_once(args: argparse.Namespace) -> int:
         sync_failures.append("토스증권 보유 내역")
     if cli_main(["evidence", "sync", "--db", str(args.db)]) != 0:
         sync_failures.append("금리·공식 발표")
+    if config.get("properties"):
+        from smith import realestate_command
+        if realestate_command.sync(args.db, args.config) != 0:
+            sync_failures.append("아파트 실거래가")
     # Research before claiming the slot (it needs no lease), unless a fresh prepared brief exists.
     researched = _research(args.db, datetime.now(timezone.utc))
     _say(args.db, f"Research {researched['outcome']}{' (prepared)' if researched.get('reused') else ''}: "
@@ -230,6 +267,6 @@ def _publish_once(args: argparse.Namespace) -> int:
     publish_at = datetime.now(timezone.utc)
     result = delivery.publish(args.db, recipient=recipient, credentials=stored, now=publish_at,
                               slot=slot, missed=missed, kind=kind, tz=tz, sync_failures=sync_failures,
-                              narrator=_narrator(args.db, publish_at, brief_id))
+                              narrator=_narrator(args.db, publish_at, brief_id), household=profile(config))
     _say(args.db, f"Report {result['status']}: {result.get('subject') or ''} {result.get('error_code') or ''}".rstrip())
     return 0 if result["status"] in ("sent", "skipped") else 1

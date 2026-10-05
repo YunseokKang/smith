@@ -77,7 +77,7 @@ class ReportTests(unittest.TestCase):
         data = build_report(self.conn, as_of=T1, known_at=T1, baseline=None, kind="thursday")
         self.assertIsNone(data["change"])
         subject, html = render(data)
-        self.assertIn("기준선", subject)
+        self.assertIn("목요 변화 점검", subject)  # With proposals the subject leads with them.
         self.assertIn("기준선", html)
         self.assertNotIn("자산 구성", html)  # Sector sections are Monday-only.
         self.assertIn("데이터 상태", html)
@@ -113,7 +113,7 @@ class ReportTests(unittest.TestCase):
         data = build_report(self.conn, as_of=later, known_at=later, baseline=None, kind="monday")
         proposals = {p.key: p for p in data["advice"]["proposals"]}
         self.assertEqual(set(proposals), {"lease-return", "emergency-reserve", "surplus-plan", "pension-credit",
-                                          "prepayment", "variable-rate"})
+                                          "prepayment", "variable-rate", "overseas-harvest", "isa-open"})
         # Act-now items: a deposit savings cannot cover within two years, cash under one month of spending,
         # and the year-end tax deadline in Q4.
         self.assertEqual([p.key for p in data["advice"]["proposals"][:3]],

@@ -1,9 +1,10 @@
-"""Gmail delivery through the Gmail API with the send-only scope.
+"""Gmail delivery and reply reading through the Gmail API.
 
 Verified against Google's docs on 2026-10-04: desktop OAuth uses the loopback redirect with PKCE
 (https://developers.google.com/identity/protocols/oauth2/native-app) and sending is
-`POST gmail/v1/users/me/messages/send` with a base64url RFC 2822 message and the
-`gmail.send` scope. Smith never requests read access to the mailbox.
+`POST gmail/v1/users/me/messages/send` with a base64url RFC 2822 message and the `gmail.send` scope.
+Answering the client's e-mail replies (FR-18, opt-in) additionally needs `gmail.readonly`, a
+restricted scope: Smith then reads only the threads of reports it sent itself, never the inbox.
 
 A request that may have reached Google but returned no answer has an unknown outcome; it is
 reported as such and never retried automatically, so a report is not sent twice.
@@ -13,6 +14,7 @@ import hashlib
 import http.client
 import http.server
 import json
+import re
 import secrets
 import time
 import urllib.error
@@ -27,6 +29,11 @@ from typing import Any
 from smith.net import open_url
 
 SCOPE = "https://www.googleapis.com/auth/gmail.send"
+READ_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+# Every message Smith sends carries this header, so a reply reader never mistakes Smith's own mail
+# (for example an answer whose send outcome, and so its id, is unknown) for a question.
+SMITH_HEADER = "X-Smith-Message"
+API_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
@@ -73,8 +80,21 @@ def _json(raw: bytes) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def get(url: str, headers: dict[str, str]) -> tuple[int, dict[str, Any]]:
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with open_url(request, timeout=_TIMEOUT_SECONDS) as response:
+            return response.status, _json(response.read())
+    except urllib.error.HTTPError as error:
+        with error:
+            return error.code, _json(error.read())
+
+
+Getter = Callable[[str, dict[str, str]], tuple[int, dict[str, Any]]]
+
+
 def login(client_id: str, client_secret: str, *, open_browser: Callable[[str], Any] = webbrowser.open,
-          poster: Poster = post) -> str:
+          poster: Poster = post, read: bool = False) -> str:
     """Run the browser consent flow on a loopback port and return a refresh token.
 
     Raises:
@@ -104,7 +124,8 @@ def login(client_id: str, client_secret: str, *, open_browser: Callable[[str], A
         server.timeout = 1
         redirect_uri = f"http://127.0.0.1:{server.server_address[1]}"
         open_browser(AUTH_URL + "?" + urllib.parse.urlencode({
-            "client_id": client_id, "redirect_uri": redirect_uri, "response_type": "code", "scope": SCOPE,
+            "client_id": client_id, "redirect_uri": redirect_uri, "response_type": "code",
+            "scope": f"{SCOPE} {READ_SCOPE}" if read else SCOPE,
             "code_challenge": challenge, "code_challenge_method": "S256", "state": state,
             "access_type": "offline", "prompt": "consent"}))
         deadline = time.monotonic() + _LOGIN_TIMEOUT_SECONDS
@@ -122,13 +143,72 @@ def login(client_id: str, client_secret: str, *, open_browser: Callable[[str], A
         {"Content-Type": "application/x-www-form-urlencoded"})
     if status != 200 or not payload.get("refresh_token"):
         raise MailError("token-exchange-failed" if status != 200 else "no-refresh-token")
-    if SCOPE not in str(payload.get("scope", "")).split():
+    granted = str(payload.get("scope", "")).split()
+    if SCOPE not in granted:
         raise MailError("send-scope-not-granted")
+    if read and READ_SCOPE not in granted:
+        raise MailError("read-scope-not-granted")
     return str(payload["refresh_token"])
 
 
+def access_token(credentials: tuple[str, str, str], *, poster: Poster = post) -> tuple[str, set[str]]:
+    """A fresh access token and the scopes the grant carries.
+
+    Raises:
+        MailError: the refresh failed (network, revoked grant).
+    """
+    client_id, client_secret, refresh_token = credentials
+    try:
+        status, payload = poster(TOKEN_URL, urllib.parse.urlencode({
+            "client_id": client_id, "client_secret": client_secret, "refresh_token": refresh_token,
+            "grant_type": "refresh_token"}).encode("ascii"), {"Content-Type": "application/x-www-form-urlencoded"})
+    except (OSError, http.client.HTTPException):
+        raise MailError("network-error") from None
+    if status != 200 or not payload.get("access_token"):
+        raise MailError("token-refresh-failed" if status != 400 else "login-required")
+    return str(payload["access_token"]), set(str(payload.get("scope", "")).split())
+
+
+_ID = re.compile(r"[0-9A-Za-z]{6,40}")
+_THREAD_HEADERS = ("From", "Subject", "Message-ID", "References", SMITH_HEADER)
+
+
+def thread_of(token: str, message_id: str, *, getter: Getter = get) -> str:
+    """The thread of one message Smith sent (no body is fetched)."""
+    return str(_read(token, f"messages/{_checked(message_id)}?format=minimal", getter).get("threadId", ""))
+
+
+def thread_headers(token: str, thread_id: str, *, getter: Getter = get) -> dict[str, Any]:
+    """A thread's messages with labels and a few headers only; bodies are not fetched."""
+    headers = "".join(f"&metadataHeaders={h}" for h in _THREAD_HEADERS)
+    return _read(token, f"threads/{_checked(thread_id)}?format=metadata{headers}", getter)
+
+
+def message_body(token: str, message_id: str, *, getter: Getter = get) -> dict[str, Any]:
+    """The full payload of one message already approved as the client's question."""
+    return _read(token, f"messages/{_checked(message_id)}?format=full", getter).get("payload", {})
+
+
+def _checked(identifier: str) -> str:
+    if not _ID.fullmatch(identifier or ""):
+        raise MailError("invalid-id")
+    return identifier
+
+
+def _read(token: str, path: str, getter: Getter) -> dict[str, Any]:
+    """The only Gmail read: users/me/messages or threads by id (see the three functions above)."""
+    try:
+        status, payload = getter(f"{API_URL}/{path}", {"Authorization": f"Bearer {token}"})
+    except (OSError, http.client.HTTPException):
+        raise MailError("network-error") from None
+    if status != 200:
+        raise MailError(f"http-{status}")
+    return payload
+
+
 def send(credentials: tuple[str, str, str], *, recipient: str, subject: str, html: str, text: str,
-         poster: Poster = post) -> str:
+         poster: Poster = post, thread_id: str | None = None, in_reply_to: str | None = None,
+         references: str | None = None) -> str:
     """Send one message to the configured recipient and return Gmail's message id.
 
     Raises:
@@ -146,11 +226,16 @@ def send(credentials: tuple[str, str, str], *, recipient: str, subject: str, htm
     message = EmailMessage()
     message["To"] = recipient
     message["Subject"] = subject
+    message[SMITH_HEADER] = "1"
+    if in_reply_to:  # A reply stays in the client's thread.
+        message["In-Reply-To"] = in_reply_to
+        message["References"] = references or in_reply_to
     message.set_content(text)
     message.add_alternative(html, subtype="html")
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
+    body = {"raw": raw, **({"threadId": thread_id} if thread_id else {})}
     try:
-        status, payload = poster(SEND_URL, json.dumps({"raw": raw}).encode("utf-8"),
+        status, payload = poster(SEND_URL, json.dumps(body).encode("utf-8"),
                                  {"Authorization": f"Bearer {payload['access_token']}",
                                   "Content-Type": "application/json"})
     except (OSError, http.client.HTTPException):

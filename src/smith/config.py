@@ -55,7 +55,32 @@ def load_config(path: Path) -> dict:
     mail = config.get("mail", {})
     if not isinstance(mail, dict) or ("recipient" in mail and not _is_email(mail["recipient"])):
         raise ValueError("mail.recipient must be one email address")
+    if not isinstance(mail.get("answer_replies", False), bool):
+        raise ValueError("mail.answer_replies must be a boolean")
+    _check_household(config.get("household", {}))
+    if "properties" in config:
+        from smith.realestate import RealEstateError, validate_properties
+        try:
+            validate_properties(config["properties"])
+        except RealEstateError as error:
+            raise ValueError(f"Invalid property setting ({error.code})") from None
     return config
+
+
+def _check_household(household: object) -> None:
+    """Optional `[household]` facts: wrong types would silently change tax and retirement figures."""
+    if not isinstance(household, dict):
+        raise ValueError("household must be a table")
+    for field in ("birth_year", "partner_birth_year"):
+        value = household.get(field)
+        if value is not None and (not isinstance(value, int) or isinstance(value, bool) or not 1900 <= value <= 2100):
+            raise ValueError(f"household.{field} must be a year")
+    spend = household.get("retirement_monthly_spend")
+    if spend is not None and (not isinstance(spend, int) or isinstance(spend, bool) or spend <= 0):
+        raise ValueError("household.retirement_monthly_spend must be a positive whole number of won")
+    for field in ("marriage_registered", "cohabiting"):
+        if not isinstance(household.get(field, False), bool):
+            raise ValueError(f"household.{field} must be a boolean")
 
 
 def _is_email(value: object) -> bool:

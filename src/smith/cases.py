@@ -256,17 +256,23 @@ def _monthly_outflow(view: LedgerView, accept: Any) -> Decimal | None:
 
 
 def _monthly_net_cash_flow(view: LedgerView, *, owner_id: str) -> Decimal | None:
+    """Monthly income minus spending, less transfers into restricted accounts (pension contributions):
+    that money cannot be used for a home or a deposit return."""
+    restricted = {r.record_id for r in view.records if r.kind is Kind.ASSET and r.fields["liquidity"] == "restricted"}
     records = [r for r in view.records if r.kind is Kind.CASHFLOW and r.owner_id == owner_id
-               and _is_active_recurring(view, r) and r.fields["category"] not in TRANSFER_CATEGORIES]
+               and _is_active_recurring(view, r)]
     values = []
     for record in records:
+        category = record.fields["category"]
+        if category in TRANSFER_CATEGORIES and record.fields.get("target_record_id") not in restricted:
+            continue
         amount = base_amount(view, record)
         if amount is None:
             return None
         monthly = amount / _MONTHS[record.fields["frequency"]]
-        if record.fields["category"] in INFLOW_CATEGORIES:
+        if category in INFLOW_CATEGORIES:
             values.append(monthly)
-        elif record.fields["category"] in OUTFLOW_CATEGORIES:
+        elif category in OUTFLOW_CATEGORIES or category in TRANSFER_CATEGORIES:
             values.append(-monthly)
     return sum(values, Decimal(0))
 

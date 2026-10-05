@@ -34,6 +34,25 @@ class ConfigTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         load_config(path)
 
+    def test_local_household_mail_and_property_sections_are_typed(self):
+        good = ('\n[mail]\nanswer_replies = true\n[household]\nbirth_year = 1990\nretirement_monthly_spend = 5000000\n'
+                'marriage_registered = false\n[properties.home]\nlawd_cd = "11110"\napt_name = "예시마을"\n'
+                'exclusive_area_m2 = 59.9\n')
+        bad = [('answer_replies = true', 'answer_replies = "yes"'), ('birth_year = 1990', 'birth_year = "1990"'),
+               ('retirement_monthly_spend = 5000000', 'retirement_monthly_spend = 5000000.5'),
+               ('marriage_registered = false', 'marriage_registered = "no"'),
+               ('exclusive_area_m2 = 59.9', 'exclusive_area_m2 = "59.9"')]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "local.toml"
+            base = EXAMPLE.read_text(encoding="utf-8") + good
+            path.write_text(base, encoding="utf-8")
+            self.assertTrue(load_config(path)["mail"]["answer_replies"])
+            for before, after in bad:
+                with self.subTest(after=after):
+                    path.write_text(base.replace(before, after), encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        load_config(path)
+
     def test_schedule_can_change_without_code(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "custom.toml"

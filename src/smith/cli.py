@@ -59,8 +59,9 @@ def main(argv: list[str] | None = None) -> int:
     macro.add_argument("--db", type=Path, default=DEFAULT_DB)
     macro.add_argument("--days", type=int, default=400, help="sync: history window in days (default: 400)")
     macro.add_argument("--as-of", type=date.fromisoformat, help="show: YYYY-MM-DD (default: today)")
-    from smith import advise_command, followup_command, mail_command, report_command
+    from smith import advise_command, followup_command, mail_command, realestate_command, report_command
     advise_command.add_parser(sub, DEFAULT_DB)
+    realestate_command.add_parser(sub, DEFAULT_DB)
     report_command.add_parser(sub, DEFAULT_DB)
     followup_command.add_parser(sub, DEFAULT_DB)
     mail_command.add_parser(sub)
@@ -68,7 +69,8 @@ def main(argv: list[str] | None = None) -> int:
     commands = {"check-config": _check_config, "import": _import, "records": _records, "toss": _toss,
                 "summary": _summary, "evidence": _evidence, "advise": advise_command.run,
                 "report": report_command.run, "mail": mail_command.run,
-                "research": followup_command.run_research, "proposal": followup_command.run_proposal}
+                "research": followup_command.run_research, "proposal": followup_command.run_proposal,
+                "realestate": realestate_command.run}
     return commands[args.command](args)
 
 

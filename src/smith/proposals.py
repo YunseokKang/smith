@@ -10,9 +10,12 @@ from datetime import date
 from decimal import ROUND_CEILING, Decimal
 from typing import Any
 
+from smith import tax
 from smith.fmt import percent, short_won
 from smith.payload import LedgerView, base_amount
+from smith.realestate import MIN_BASIS
 from smith.records import Kind
+from smith.summary import recurring_active
 
 # Assumptions and tax constants are explicit so the reader can question them.
 INTEREST_TAX = Decimal("0.154")           # Interest income tax incl. local tax (Korea, standard rate).
@@ -63,7 +66,7 @@ class Track:
 
 
 def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
-          active: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+          active: dict[str, dict[str, Any]] | None = None, household: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return proposals (most urgent first), the strategy tracks and the follow-up of earlier proposals.
 
     `active` maps proposal identities to their current instance (ledger.active_proposals). Unless the
@@ -71,7 +74,9 @@ def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
     `in_progress`, and an open one carries how often it was shown.
     """
     facts = _facts(view, kpis, sectors)
-    rules = (_lease_return, _emergency_reserve, _surplus_plan, _pension_credit, _prepayment, _variable_rate)
+    facts["tax"] = tax.facts(view, facts["today"], household)
+    rules = (_lease_return, _emergency_reserve, _surplus_plan, _pension_credit, _overseas_harvest, _isa, _prepayment,
+             _variable_rate)
     found = [(i, p) for i, rule in enumerate(rules) if (p := rule(facts)) is not None]
     ranked = [p for _, p in sorted(found, key=lambda item: (item[1].priority, item[0]))]
     active = active or {}
@@ -87,7 +92,8 @@ def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
             proposals.append(replace(proposal, times_shown=current["times_shown"], renewed=False))
     decided = [item for item in active.values() if item["status"] in ("declined", "done")]
     return {"proposals": proposals, "in_progress": in_progress, "decided": decided,
-            "strategy": _strategy(facts), "assumptions": _assumptions()}
+            "strategy": _strategy(facts), "assumptions": _assumptions() + tax.assumptions(),
+            "tax_notes": tax.notes(facts["tax"]), "tax_checklist": tax.checklist(facts["tax"])}
 
 
 def materially_changed(proposal: Proposal, anchor: dict[str, str]) -> bool:
@@ -125,7 +131,11 @@ def _facts(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any]) -> d
             due = date.fromisoformat(f["maturity"])
             months = _months_between(today, due)
             if 0 < months <= LEASE_HORIZON_MONTHS:
-                leases.append({"due": due, "months": months, "amount": base_amount(view, record)})
+                market = next((p.get("market") for p in sectors["real_estate"]["properties"]
+                               if p["record_id"] == f.get("collateral_record_id")), None)
+                leases.append({"due": due, "months": months, "amount": base_amount(view, record),
+                               "jeonse": None if market is None else market["jeonse"],
+                               "jeonse_basis": 0 if market is None else market["jeonse_basis"]})
     # Inputs come from report_data, where a total that includes an unconverted amount is None.
     # Rules skip or say "unknown" rather than turn a partial total into a confident figure.
     liquidity = sectors["cash"]["liquidity"]
@@ -135,9 +145,29 @@ def _facts(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any]) -> d
                if r.kind is Kind.ASSET and r.fields.get("account_type") in _PENSION_ACCOUNTS]
     pension_total = None if not pension or any(v is None for v in pension) else sum(pension, Decimal(0))
     return {"today": today, "summary": summary, "kpis": kpis, "sectors": sectors, "leases": leases,
-            "liquid": liquid, "surplus": kpis["monthly_net"], "pension_accounts": len(pension),
+            "liquid": liquid, "surplus": kpis["monthly_net"],
+            # What can actually pile up as cash: the surplus minus standing transfers (for example pension
+            # contributions, which become restricted money).
+            # Money moved to restricted accounts (pensions) cannot fund a deposit return or a home; money
+            # moved to liquid accounts still can. Unallocated surplus subtracts every standing transfer.
+            "available": None if kpis["monthly_net"] is None else kpis["monthly_net"] - _restricted_transfers(view),
+            "unallocated": None if kpis["monthly_net"] is None else kpis["monthly_net"] - summary.monthly_transfers,
+            "pension_accounts": len(pension),
             "pension_total": pension_total, "cd": _series(view, CD_SERIES),
             "base_rate": _series(view, BASE_RATE_SERIES)}
+
+
+def _restricted_transfers(view: LedgerView) -> Decimal:
+    """Monthly transfers into restricted (for example pension) accounts."""
+    restricted = {r.record_id for r in view.records if r.kind is Kind.ASSET and r.fields["liquidity"] == "restricted"}
+    total = Decimal(0)
+    for r in view.records:
+        f = r.fields
+        if r.kind is Kind.CASHFLOW and f["category"] == "internal_transfer" and f.get("target_record_id") in restricted \
+                and f["frequency"] in ("monthly", "quarterly", "annual") and recurring_active(f, view.as_of.date()):
+            amount = base_amount(view, r)
+            total += Decimal(0) if amount is None else amount / {"monthly": 1, "quarterly": 3, "annual": 12}[f["frequency"]]
+    return total
 
 
 def _series(view: LedgerView, series_id: str) -> dict[str, Any] | None:
@@ -154,9 +184,9 @@ def _months_between(start: date, end: date) -> int:
 
 def _accumulated(facts: dict[str, Any], months: int) -> Decimal | None:
     """Liquid assets plus the monthly surplus saved until then; unknown if either input is unknown."""
-    if facts["liquid"] is None or facts["surplus"] is None:
+    if facts["liquid"] is None or facts["available"] is None:
         return None
-    return facts["liquid"] + max(facts["surplus"], Decimal(0)) * months
+    return facts["liquid"] + max(facts["available"], Decimal(0)) * months
 
 
 def _add_months(day: date, months: int) -> date:
@@ -170,7 +200,7 @@ def _lease_return(facts: dict[str, Any]) -> Proposal | None:
     if not facts["leases"]:
         return None
     lease = min(facts["leases"], key=lambda item: item["due"])
-    amount, months, surplus = lease["amount"], lease["months"], facts["surplus"]
+    amount, months, surplus = lease["amount"], lease["months"], facts["available"]
     if amount is None:
         return None
     accumulated = _accumulated(facts, months)
@@ -187,27 +217,39 @@ def _lease_return(facts: dict[str, Any]) -> Proposal | None:
         readiness = (f" 지금 며칠 안에 현금으로 바꿀 수 있는 자산 {short_won(facts['liquid'])}에 매월 여유 "
                      f"{short_won(surplus)}이 그대로 쌓인다고 보면, 만기 때 약 {short_won(accumulated)}으로 필요액의 "
                      f"{percent(coverage, 0)}입니다.{overlap}")
+    jeonse, gap = lease["jeonse"], None
+    market = ""
+    if jeonse is not None and lease["jeonse_basis"] >= MIN_BASIS:
+        gap = amount - jeonse
+        market = (f" 같은 단지·같은 면적의 최근 6개월 전세 계약 {lease['jeonse_basis']}건의 중간값은 {short_won(jeonse)}으로, "
+                  + (f"지금 시세로 새 세입자를 받으면 약 {short_won(gap)}을 직접 마련해야 합니다(역전세)." if gap > 0
+                     else "지금 시세라면 새 세입자의 보증금으로 돌려드릴 수 있는 수준입니다."))
+    elif jeonse is not None:
+        # One or two contracts: shown for reference, but too few to put a gap figure on.
+        market = (f" 같은 단지·같은 면적의 최근 6개월 전세 계약은 {lease['jeonse_basis']}건뿐이라(중간값 "
+                  f"{short_won(jeonse)}) 참고용으로만 보시고, 역전세 차액은 계산하지 않았습니다.")
     return Proposal(
         key="lease-return", priority=priority, identity=f"lease-return:{lease['due']}",
         watch=("amount", "accumulated"), tolerance=Decimal("0.15"),
         title=f"{lease['due']:%Y년 %m월} 돌려드려야 할 전세보증금 {short_won(amount)}의 반환 방법을 "
               f"{deadline:%Y년 %m월}까지 정해 두시길 권합니다.",
         why=(f"전세보증금은 계약이 끝나면 세입자에게 돌려줘야 하는, 날짜와 금액이 정해진 큰 지출입니다(남은 기간 {months}개월)."
-             + readiness),
+             + readiness + market),
         effect=("반환 방법(재계약, 새 세입자의 보증금, 매도, 보유 자금)을 미리 정해 두면 만기 직전에 주식을 불리한 시세에 "
                 "팔거나 급히 대출을 받는 일을 피할 수 있습니다."),
         risks=("새 세입자의 보증금이 지금보다 낮으면(이른바 역전세) 그 차액을 직접 마련해야 합니다. 아무것도 정하지 않으면 "
                "만기 무렵의 시세와 금리에 따라 선택지가 좁아집니다."),
         timing=f"{deadline:%Y.%m}까지 방법 결정(만기 {DECISION_LEAD_MONTHS}개월 전)",
         reconsider="주변 전세 시세가 크게 바뀌거나, 재계약·매도 여부가 정해지면 다시 계산합니다.",
-        certainty="계산(현재 잔액과 현금흐름이 유지된다는 가정)",
+        certainty="계산(현재 잔액과 현금흐름이 유지된다는 가정)" + (", 국토교통부 실거래가" if market else ""),
         figures={"amount": amount, "months": Decimal(months),
-                 **({} if accumulated is None else {"accumulated": accumulated})})
+                 **({} if accumulated is None else {"accumulated": accumulated}),
+                 **({} if gap is None else {"jeonse_gap": gap})})
 
 
 def _emergency_reserve(facts: dict[str, Any]) -> Proposal | None:
     cash = facts["sectors"]["cash"]
-    gap, surplus = cash["reserve_gap"], facts["surplus"]
+    gap, surplus = cash["reserve_gap"], facts["available"]
     if not gap or surplus is None:  # Met, or unknown because an amount could not be converted.
         return None
     months_cover = facts["kpis"]["immediate_months"]
@@ -232,13 +274,19 @@ def _emergency_reserve(facts: dict[str, Any]) -> Proposal | None:
 
 def _surplus_plan(facts: dict[str, Any]) -> Proposal | None:
     summary, surplus = facts["summary"], facts["surplus"]
-    if surplus is None or surplus <= 0 or summary.monthly_transfers > 0:
+    if surplus is None:
         return None
+    allocated = summary.monthly_transfers
+    surplus = facts["unallocated"]  # Transfers (for example pension contributions) are already allocated.
+    if surplus < Decimal(500_000):
+        return None
+    already = (f" 이 가운데 {short_won(allocated)}은 연금 등으로 이미 매월 이체되고 있고, 나머지는" if allocated
+               else " 그런데 이 돈이")
     return Proposal(
         key="surplus-plan", priority=2, watch=("surplus",),
         title=f"매월 남는 약 {short_won(surplus)}의 쓰임새를 정해 자동이체로 묶어 두시길 권합니다.",
         why=(f"수입 {short_won(summary.monthly_inflow)}에서 생활비·대출 상환·보험료 {short_won(summary.monthly_outflow)}을 "
-             f"빼면 매월 {short_won(surplus)}이 남습니다. 그런데 이 돈이 어디로 가는지(저축·투자 이체)는 기록되어 있지 않습니다. "
+             f"빼면 매월 {short_won(surplus + allocated)}이 남습니다.{already} 어디로 가는지(저축·투자 이체)가 기록되어 있지 않습니다. "
              "정해 두지 않은 돈은 이자가 거의 없는 통장에 머물거나 소비로 흘러가기 쉽습니다."),
         effect=(f"1년이면 {short_won(surplus * 12)}입니다. 순서는 비상금 → 전세보증금 반환 자금 → 주택 이전 자금처럼 "
                 "날짜가 가까운 목표부터 채우는 것이 일반적입니다."),
@@ -250,23 +298,82 @@ def _surplus_plan(facts: dict[str, Any]) -> Proposal | None:
 
 
 def _pension_credit(facts: dict[str, Any]) -> Proposal | None:
+    """Fill this year's pension credit room (IRP) and split future contributions to use the limits."""
     if not facts["pension_accounts"]:
         return None
-    today = facts["today"]
-    maximum = PENSION_CREDIT_LIMIT * PENSION_CREDIT_RATE
+    today, plan = facts["today"], tax.pension_plan(facts["tax"])
+    if not plan["irp_room"] and not plan["excess"]:
+        return None
+    title = (f"{today.year}년 12월 31일까지 IRP에 {short_won(plan['irp_room'])}을 넣어 세액공제 한도를 채우시길 권합니다."
+             if plan["irp_room"] else "연금 납입을 연금저축과 IRP로 나눠 공제 한도를 넘는 납입을 줄이시길 권합니다.")
+    excess = (f" 올해 납입 예상은 연금저축 {short_won(plan['savings_paid'])}, IRP {short_won(plan['irp_paid'])}으로, "
+              f"공제 한도를 넘는 {short_won(plan['excess'])}은 올해 공제를 받지 못합니다." if plan["excess"] else "")
+    split = (f" 내년부터는 월 {short_won(plan['monthly'])}을 연금저축 {short_won(plan['next_savings'])}, IRP "
+             f"{short_won(plan['next_irp'])}으로 나누고, 나머지 {short_won(plan['next_rest'])}은 ISA처럼 다른 절세 계좌에 넣으면 "
+             "공제를 빠짐없이 받습니다." if plan["monthly"] else "")
     return Proposal(
-        key="pension-credit", priority=1 if today.month >= 10 else 3, identity=f"pension-credit:{today.year}",
-        title=f"올해 연금저축·IRP 납입액을 확인해 세액공제 한도를 {today.year}년 12월 31일 전에 채우시길 권합니다.",
+        key="pension-credit", priority=1 if today.month >= 10 else 2, identity=f"pension-credit:{today.year}",
+        watch=("irp_room", "excess"), tolerance=Decimal("0.2"),
+        title=title,
         why=("연금저축과 IRP(개인형 퇴직연금)에 넣은 돈은 합해서 연 900만 원(연금저축만은 600만 원)까지 세금을 돌려받습니다"
-             f"(세액공제). 총급여가 5,500만 원을 넘으면 공제율은 13.2%(소득세 12%와 지방소득세 1.2%를 합한 실효율)로, "
-             f"한도를 채우면 최대 약 {short_won(maximum)}입니다. "
-             "올해 납입분은 올해 말까지 넣어야 인정됩니다."),
-        effect="올해 이미 넣은 금액을 알려 주시면 남은 한도와 돌려받을 금액을 정확히 계산해 드리겠습니다.",
-        risks="연금 계좌의 돈은 55세 전에 꺼내면 공제받은 세금을 다시 내야 합니다. 가까운 큰 지출(보증금 반환)에 쓸 돈을 넣지는 마십시오.",
-        timing=f"{today.year}.12.31까지",
-        reconsider="올해 한도를 이미 채우셨다면 내년 초에 다시 알려 드립니다.",
-        certainty="세법 기준(현행 법령 확인 필요) + 자료 요청",
-        figures={"max_credit": maximum})
+             "(세액공제, 공제율 13.2%: 소득세 12%와 지방소득세 1.2%를 합한 실효율)." + excess
+             + (f" IRP에는 올해 {short_won(plan['irp_paid'])}이 들어가 공제 한도가 {short_won(plan['irp_room'])} 남아 있습니다."
+                if plan["irp_room"] else "")),
+        effect=((f"남은 한도를 채우면 세금이 최대 약 {short_won(plan['refund_gain'])} 줄어듭니다(실제 감소액은 내실 세금 "
+                 "범위 안에서 정해집니다)." if plan["irp_room"] else "") + split),
+        risks=("연금 계좌의 돈은 55세 전에 꺼내면 공제받은 세금을 다시 내야 합니다. 가까운 큰 지출(보증금 반환)에 쓸 돈은 넣지 "
+               "마십시오. 한도를 넘게 낸 연금저축 납입분은 다음 해 공제로 돌려 신청할 수 있는지 금융회사에 확인하십시오."),
+        timing=f"{today.year}.12.31까지(올해 공제분)",
+        reconsider="올해 IRP에 이미 넣은 금액이 있거나 납입 계획이 바뀌면 다시 계산합니다.",
+        certainty=(f"계산(정기 이체를 공제 대상 납입으로 가정) + 세법 기준 {tax.RULES_YEAR}년(현행 법령 확인 필요)"),
+        figures={"irp_room": plan["irp_room"], "excess": plan["excess"], "refund_gain": plan["refund_gain"]})
+
+
+def _overseas_harvest(facts: dict[str, Any]) -> Proposal | None:
+    """Realize overseas gains up to the yearly basic deduction, so they never reach the 22% tax."""
+    plan = tax.harvest_plan(facts["tax"])
+    today = facts["today"]
+    if plan is None or plan["realize"] <= 0:
+        return None
+    return Proposal(
+        key="overseas-harvest", priority=1 if today.month >= 11 else 3, identity=f"overseas-harvest:{today.year}",
+        watch=("realize",), tolerance=Decimal("0.3"),
+        title=(f"올해 주식을 팔아 이익을 낸 적이 없다면, 연말 전에 미국 주식 이익 {short_won(plan['realize'])}만큼을 "
+               "팔았다가 다시 사서 해외주식 양도세 기본공제를 쓰시는 방안을 검토해 보십시오."),
+        why=(f"해외 주식(과세 대상 국내 주식 포함)은 한 해 이익 {short_won(tax.OVERSEAS_DEDUCTION)}까지 세금이 없고, 넘는 부분에 "
+             f"22%가 붙습니다. 지금 이익이 난 미국 주식의 평가이익은 약 {short_won(plan['gains'])}입니다"
+             + (f"(손실 중인 종목 {short_won(-plan['losses'])}은 팔기 전까지 상계되지 않습니다)" if plan["losses"] else "")
+             + ". 공제는 해마다 새로 주어지고 이월되지 않습니다."),
+        effect=(f"이익이 난 종목만 {short_won(plan['realize'])}만큼 실현하고 다시 사면, 나중에 낼 세금이 최대 약 "
+                f"{short_won(plan['saving'])} 줄어드는 시나리오입니다."),
+        risks=("올해 이미 실현한 주식 손익을 Smith는 모릅니다. 그 손익과 합쳐 공제가 한 번만 적용되므로, 증권사 양도소득 내역을 먼저 "
+               "확인하십시오. 원화 손익은 현재 환율로 계산한 근사값이며, 실제 세금은 사고판 날의 환율로 계산됩니다. 매매 수수료·환전 "
+               "비용과 다시 사는 사이의 가격 변동도 있습니다."
+               + (f" 매입 원가를 모르는 종목 {int(plan['unknown'])}개는 계산에서 빠졌습니다." if plan["unknown"] else "")),
+        timing=f"{today.year}년 12월 결제일 기준 마감 전(증권사 해외주식 연말 결제 일정 확인)",
+        reconsider="올해 해외 주식 매도 이익이 이미 있거나, 장기 보유 종목의 비중을 바꿀 계획이면 다시 계산합니다.",
+        certainty=f"조건부 시나리오(올해 실현 손익 없음·현재 환율 가정) + 세법 기준 {tax.RULES_YEAR}년(현행 법령 확인 필요)",
+        figures={"realize": plan["realize"], "saving": plan["saving"], "gains": plan["gains"]})
+
+
+def _isa(facts: dict[str, Any]) -> Proposal | None:
+    """Without an ISA, the tax-free allowance and the extra pension credit at maturity go unused."""
+    t = facts["tax"]
+    if t["has_isa"] or facts["surplus"] is None or facts["surplus"] <= 0:
+        return None
+    return Proposal(
+        key="isa-open", priority=3, identity="isa-open",
+        title="ISA(개인종합자산관리계좌)를 열어 연금 한도를 넘는 투자금을 그곳에서 굴리시길 권합니다.",
+        why=("ISA는 3년 이상 유지하면 계좌 안에서 난 이익 중 200만 원까지 세금이 없고, 넘는 부분도 9.9%로 낮게 과세되는 "
+             "계좌입니다(일반 계좌 이자·배당은 15.4%). 만기 때 연금계좌로 옮기면 옮긴 금액의 10%, 최대 300만 원까지 "
+             "추가 세액공제도 받습니다. 지금은 ISA가 없습니다."),
+        effect=(f"연금 한도를 넘는 투자금이나 매월 남는 여유 자금을 ISA로 돌리면 배당·이자 세금을 줄이고, 만기 후 연금 이전으로 "
+                f"최대 약 {short_won(tax.ISA_TRANSFER_CREDIT_CAP * tax.CREDIT_RATE_HIGH)}의 세금을 더 돌려받을 수 있습니다."),
+        risks="3년 안에 깨면 혜택이 사라집니다. 2026년 세법개정안에 ISA 개편 내용이 있어, 가입 전 확정 내용을 확인하십시오.",
+        timing="개편 확정 후 또는 연내",
+        reconsider="ISA 제도 개편 내용이 확정되면 다시 계산합니다.",
+        certainty=f"세법 기준 {tax.RULES_YEAR}년(현행 법령 확인 필요)",
+        figures={})
 
 
 def _prepayment(facts: dict[str, Any]) -> Proposal | None:
@@ -355,10 +462,21 @@ def _strategy(facts: dict[str, Any]) -> list[Track]:
             f"{lease['due']:%Y년 %m월} {short_won(lease['amount'])}, 만기 때 예상 가용 자금 {short_won(accumulated)}",
             "주택 이전 목표와 같은 자금을 나눠 써야 하므로, 두 목표를 합친 자금 계획이 필요합니다." if home else ""))
     pension = facts["pension_total"]
+    plan = tax.retirement(facts["tax"])
+    if plan is None or not plan["paths"]:
+        tracks.append(Track(
+            "노후 준비", "unknown",
+            f"연금 계좌 {short_won(pension)}" if pension is not None else "연금 계좌 정보 없음",
+            "은퇴 시기와 은퇴 후 월 생활비 목표가 없어 궤도를 판단할 수 없습니다. 알려 주시면 필요한 적립액을 계산해 드리겠습니다."))
+        return tracks
+    mid = next((p for p in plan["paths"] if p["age"] == 60), plan["paths"][-1])
+    paths = ", ".join(f"{p['age']}세 {percent(p['ratio'], 0)}" for p in plan["paths"])
     tracks.append(Track(
-        "노후 준비", "unknown",
-        f"연금 계좌 {short_won(pension)}" if pension is not None else "연금 계좌 정보 없음",
-        "은퇴 시기와 은퇴 후 월 생활비 목표가 없어 궤도를 판단할 수 없습니다. 알려 주시면 필요한 적립액을 계산해 드리겠습니다."))
+        "노후 준비", "on_track" if mid["ratio"] >= 1 else "attention",
+        f"월 {short_won(plan['spend'])}(현재 가치) 생활에 필요한 자금 약 {short_won(plan['need'])}, 연금 계좌만으로는 {paths}",
+        (f"지금 연금 계좌 {short_won(pension)}에 매년 {short_won(plan['yearly'])}씩 더하고 실질 연 3%로 불린다고 가정했습니다"
+         "(국민연금·퇴직금·부동산 제외). 은퇴 시기를 정하시면 부족분을 무엇으로 채울지(부동산 축소, 추가 적립, 국민연금) "
+         "구체적으로 계산해 드리겠습니다.")))
     return tracks
 
 

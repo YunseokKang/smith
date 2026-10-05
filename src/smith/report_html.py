@@ -17,6 +17,7 @@ from typing import Any
 
 from smith.fmt import short_won as _short
 from smith.proposals import Proposal, Track
+from smith.realestate import MIN_BASIS
 from smith.report_data import CATEGORY_LABELS, COMPONENT_LABELS
 
 # Design tokens (docs/design-reference.md).
@@ -69,8 +70,8 @@ def render(data: dict[str, Any]) -> tuple[str, str]:
     bands = [_band(DARK, _header(data, status) + _judgement(story) + _overview(data) + _callout(advice["proposals"])),
              _band(CANVAS, _proposals(advice["proposals"], full), border=True)]
     if full and advice["strategy"]:
-        bands.append(_band(DARK, _strategy(advice["strategy"], story.get("direction", ""))))
-    sections = [_changes_outside(story), _follow_up(advice), _change(data), _timeline(data)]
+        bands.append(_band(DARK, _strategy(advice["strategy"], story.get("direction", ""), story.get("direction_memo", ""))))
+    sections = [_changes_outside(story), _follow_up(advice), _tax(advice, data, full), _change(data), _timeline(data)]
     if full:
         sectors = data["sectors"]
         sections += [_allocation(data), _cash(sectors["cash"], data), _debt(sectors["debt"]),
@@ -322,13 +323,21 @@ def _judgement(story: dict[str, Any]) -> str:
                     if _plain_link(url))
     return (f'<tr><td style="padding-top:16px"><div style="font-size:12px;font-weight:600;color:{ON_DARK_SOFT};'
             f'margin-bottom:6px">Smith의 판단</div><div style="font-size:16px;line-height:1.65;color:{ON_DARK}">'
-            f'{escape(story["situation"])}</div>{basis}'
+            f'{escape(story["situation"])}</div>{_memo(story.get("situation_memo"), dark=True)}{basis}'
             + (f'<div style="font-size:12px;color:{ON_DARK_SOFT};margin-top:4px">출처{links}</div>' if links else "")
             + '</td></tr>')
 
 
 def _plain_link(url: str) -> bool:
     return url.startswith("https://") and not any(ch.isspace() or ord(ch) < 32 or ch in "\"'<>\x7f" for ch in url)
+
+
+def _memo(memo: str | None, *, dark: bool = False) -> str:
+    """A short caveat from code verification, shown under the block it concerns."""
+    if not memo:
+        return ""
+    color = ON_DARK_SOFT if dark else MUTED
+    return f'<div style="font-size:12px;color:{color};margin-top:4px">자동 점검 메모: {escape(memo)}</div>'
 
 
 def _sources(links: Any) -> str:
@@ -351,13 +360,38 @@ def _changes_outside(story: dict[str, Any]) -> str:
                       f'margin-bottom:4px">{escape(item["title"])}</div>'
                       f'<div style="font-size:14px;line-height:1.6;color:{BODY}">{escape(item["body"])}</div>'
                       f'<div style="font-size:14px;line-height:1.6;color:{INK};margin-top:6px"><b style="font-weight:600">'
-                      f'우리 집에 주는 의미</b> — {escape(item["implication"])}</div>{_sources(item["links"])}</div>')
+                      f'우리 집에 주는 의미</b> — {escape(item["implication"])}</div>{_memo(item.get("memo"))}'
+                      f'{_sources(item["links"])}</div>')
     if watch:
         rows = "".join(f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin:4px 0">· <b style="font-weight:600;'
-                       f'color:{INK}">{escape(w["item"])}</b> — {escape(w["why"])}{_sources(w["links"])}</div>' for w in watch)
+                       f'color:{INK}">{escape(w["item"])}</b> — {escape(w["why"])}{_memo(w.get("memo"))}'
+                       f'{_sources(w["links"])}</div>' for w in watch)
         blocks.append(f'<div style="font-size:12px;font-weight:600;color:{MUTED};margin:8px 0 4px">다음 보고까지 지켜볼 것</div>{rows}')
     lead = "이번 주 조사한 정책·시장 변화 가운데 고객님 자산과 직접 연결되는 것만 골랐습니다. 출처를 누르면 원문을 보실 수 있습니다."
     return _section("이번 주 눈여겨볼 변화", lead, "".join(blocks))
+
+
+def _tax(advice: dict[str, Any], data: dict[str, Any], full: bool) -> str:
+    """After-tax view: strategy notes (Monday) and the year-end settlement checklist (Q4, both editions)."""
+    notes, rows = advice.get("tax_notes") or [], advice.get("tax_checklist") or []
+    year_end = data["as_of"].month >= 10
+    if not (full and notes) and not (year_end and rows):
+        return ""
+    inner = ""
+    if full:
+        inner += "".join(f'<div style="margin:6px 0 14px"><div style="font-size:15px;font-weight:600;color:{INK};'
+                         f'margin-bottom:4px">{escape(n.title)}</div><div style="font-size:14px;line-height:1.6;color:{BODY}">'
+                         f'{escape(n.body)}</div><div style="font-size:12px;color:{MUTED};margin-top:4px">시점: '
+                         f'{escape(n.when)} · {escape(n.certainty)}</div></div>' for n in notes)
+    if year_end and rows:
+        inner += (f'<div style="font-size:12px;font-weight:600;color:{MUTED};margin:8px 0 0">올해 연말정산 점검표</div>'
+                  + _table(["항목", "올해 상황", "할 일"], [list(row) for row in rows]))
+    lead = ("같은 돈이라도 어느 계좌에 두고 언제 실현하느냐에 따라 세후 결과가 달라집니다. 고객님 상황에 해당하는 세금 규칙과 "
+            "그 의미를 정리했습니다. 세법은 자주 바뀌므로 실행 전 현행 기준을 확인하셔야 합니다.")
+    from smith import tax as tax_rules
+    inner += (f'<div style="font-size:12px;color:{MUTED};margin-top:8px">근거(세법 기준 {tax_rules.RULES_YEAR}년, '
+              f'{tax_rules.RULES_CHECKED} 확인): ' + " · ".join(_cell(item) for item in tax_rules.sources()) + "</div>")
+    return _section("세금 관점 전략", lead, inner)
 
 
 def _follow_up(advice: dict[str, Any]) -> str:
@@ -374,7 +408,7 @@ def _follow_up(advice: dict[str, Any]) -> str:
     return _section("지난 제안 점검", lead, "".join(rows))
 
 
-def _strategy(tracks: list[Track], direction: str = "") -> str:
+def _strategy(tracks: list[Track], direction: str = "", direction_memo: str = "") -> str:
     """Monday: whether each long-range goal is on track, as raised cards on the dark band."""
     rows = []
     for track in tracks:
@@ -387,7 +421,7 @@ def _strategy(tracks: list[Track], direction: str = "") -> str:
                     f'<div style="font-size:13px;line-height:1.6;color:{ON_DARK_SOFT}">{escape(track.detail)}</div>'
                     f'</div></td></tr>')
     lead = (f'<div style="font-size:15px;line-height:1.65;color:{ON_DARK_SOFT};margin-bottom:6px">{escape(direction)}</div>'
-            if direction else "")
+            if direction else "") + _memo(direction_memo, dark=True)
     return (f'<tr><td>{_eyebrow("전략 방향", color=ON_DARK, background=DARK_RAISED)}'
             f'{_heading("목표까지 지금 궤도에 있습니까", color=ON_DARK, size=28)}{lead}'
             f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{"".join(rows)}</table></td></tr>')
@@ -530,7 +564,30 @@ def _real_estate(estate: dict[str, Any]) -> str:
     bars = _bars([(p["label"], p["value"], i == 0) for i, p in enumerate(props)])
     table = _table(["부동산", "평가액", "관련 부채", "LTV"],
                    [[p["label"], _short(p["value"]), _short(p["debt"]), _pct(p["ltv"])] for p in props])
+    market = [p for p in props if p.get("market")]
+    if market:
+        lines = []
+        for p in market:
+            m = p["market"]
+            if m["estimate"] is not None and p["value"]:
+                diff = p["value"] / m["estimate"] - 1
+                lines.append(f"{p['label']}: 최근 6개월 같은 단지·같은 면적 실거래 {m['estimate_basis']}건의 중간값은 "
+                             f"<b>{_short(m['estimate'])}</b>으로, 원장 평가액보다 {_pct(abs(diff), 0)} "
+                             f"{'낮습니다' if diff > 0 else '높습니다'}"
+                             + (" (거래가 적어 참고용)" if m["estimate_basis"] < MIN_BASIS else "") + ".")
+            if m["jeonse"] is not None:
+                lines.append(f"{p['label']}: 최근 6개월 전세 중간값 <b>{_short(m['jeonse'])}</b>"
+                             f"(계약 {m['jeonse_basis']}건, {_short(m['jeonse_range'][0])}~{_short(m['jeonse_range'][1])}"
+                             + (", 계약이 적어 참고용" if m["jeonse_basis"] < MIN_BASIS else "") + ").")
+        lead += " " + " ".join(lines) + " 평가액을 실거래 기준으로 바꿀지는 고객님 판단으로 정해 주십시오."
+        table += _table(["부동산", "실거래 추정(6개월 중간값)", "6개월 전 대비", "12개월 거래"],
+                        [[p["label"], _short(p["market"]["estimate"]), _delta_pct(p["market"]["change_6m"]),
+                          f"{p['market']['trades_12m']}건"] for p in market])
     return _section("부동산·주거", lead, bars + table)
+
+
+def _delta_pct(ratio: Decimal | None) -> str:
+    return "-" if ratio is None else f"{'+' if ratio > 0 else ''}{ratio * 100:.1f}%"
 
 
 def _pension(pi: dict[str, Any]) -> str:
@@ -612,9 +669,9 @@ def _ai_lines(ai: dict[str, Any] | None) -> list[str]:
     else:
         lines = ["정책·시장 조사: 이번 보고에 쓸 수 있는 조사 결과가 없어 외부 정책·시장 변화는 반영하지 않았습니다."]
     if ai["outcome"] == "success":
-        removed = len(ai.get("dropped") or [])
-        lines.append("AI 해석: 계산값과 출처로 검증한 서술만 실었습니다"
-                     + (f"(근거가 확인되지 않은 {removed}개 항목은 뺐습니다)." if removed else "."))
+        flagged = len(ai.get("dropped") or [])
+        lines.append("AI 해석: 계산값과 출처로 자동 점검했습니다"
+                     + (f"(확인되지 않은 부분이 있는 {flagged}개 항목에는 '자동 점검 메모'를 붙였습니다)." if flagged else "."))
     else:
         lines.append(f"AI 해석: 이번에는 실패해({ai.get('error_code', '원인 미상')}) 계산 결과만으로 작성했습니다.")
     return lines

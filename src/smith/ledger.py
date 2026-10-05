@@ -25,7 +25,7 @@ from smith.records import (
 logger = logging.getLogger(__name__)
 _END_OF_TIME = datetime.max.replace(tzinfo=timezone.utc)
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 13
 _V1 = (
     """CREATE TABLE imports (
         import_id TEXT PRIMARY KEY,
@@ -227,7 +227,81 @@ _V10 = (
         SELECT 'legacy-' || key, last_shown_at, 'shown', last_report_id, NULL, note FROM proposal_log""",
     "DROP TABLE proposal_log",
 )
-_MIGRATIONS = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8, 9: _V9, 10: _V10}
+# Official apartment transactions (MOLIT) matched to a property record by complex and floor area.
+# Only records of the same complex and size are kept; building and unit numbers are never stored.
+_V11 = (
+    """CREATE TABLE property_deals (
+        property_ref TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('trade', 'rent')),
+        deal_date TEXT NOT NULL,
+        area TEXT NOT NULL,
+        price TEXT NOT NULL,
+        monthly_rent TEXT NOT NULL,
+        floor TEXT NOT NULL,
+        contract_type TEXT,
+        cancelled INTEGER NOT NULL,
+        fetched_at TEXT NOT NULL,
+        PRIMARY KEY (property_ref, kind, deal_date, area, price, monthly_rent, floor)
+    )""",
+)
+# Questions the client sent as replies to report e-mails (FR-18). A question is claimed before its
+# answer is sent, so it is never answered twice; an interrupted or uncertain answer is not retried.
+_V12 = (
+    """CREATE TABLE mail_questions (
+        message_id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        report_id TEXT,
+        received_at TEXT NOT NULL,
+        claimed_at TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('answering', 'answered', 'failed', 'unknown', 'skipped')),
+        answer_message_id TEXT,
+        error_code TEXT,
+        finished_at TEXT
+    )""",
+)
+# property_deals: identical deals (no building number is kept) are counted instead of merged, and a sync
+# replaces whole months so withdrawn or corrected records disappear. mail_questions: a sending state and
+# attempts, so clean failures are retried and interrupted runs are recovered like reports.
+_V13 = (
+    """CREATE TABLE property_deals_v13 (
+        property_ref TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('trade', 'rent')),
+        month TEXT NOT NULL,
+        deal_date TEXT NOT NULL,
+        area TEXT NOT NULL,
+        price TEXT NOT NULL,
+        monthly_rent TEXT NOT NULL,
+        floor TEXT NOT NULL,
+        contract_type TEXT,
+        active_count INTEGER NOT NULL,
+        cancelled_count INTEGER NOT NULL,
+        fetched_at TEXT NOT NULL,
+        PRIMARY KEY (property_ref, kind, deal_date, area, price, monthly_rent, floor)
+    )""",
+    """INSERT INTO property_deals_v13 SELECT property_ref, kind, substr(replace(deal_date, '-', ''), 1, 6), deal_date,
+        area, price, monthly_rent, floor, contract_type, 1 - cancelled, cancelled, fetched_at FROM property_deals""",
+    "DROP TABLE property_deals",
+    "ALTER TABLE property_deals_v13 RENAME TO property_deals",
+    """CREATE TABLE mail_questions_v13 (
+        message_id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        report_id TEXT,
+        received_at TEXT NOT NULL,
+        claimed_at TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('answering', 'sending', 'answered', 'failed', 'unknown', 'skipped')),
+        attempts INTEGER NOT NULL,
+        answer_message_id TEXT,
+        error_code TEXT,
+        finished_at TEXT,
+        sending_at TEXT
+    )""",
+    """INSERT INTO mail_questions_v13 SELECT message_id, thread_id, report_id, received_at, claimed_at, status, 1,
+        answer_message_id, error_code, finished_at, NULL FROM mail_questions""",
+    "DROP TABLE mail_questions",
+    "ALTER TABLE mail_questions_v13 RENAME TO mail_questions",
+)
+_MIGRATIONS = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8, 9: _V9, 10: _V10, 11: _V11, 12: _V12,
+               13: _V13}
 _COLUMNS = ("record_id, revision, kind, owner_id, source, status, change_type, corrects_revision, "
             "reason, effective_at, recorded_at, import_id, fields")
 
@@ -828,6 +902,133 @@ def decide_proposal(conn: sqlite3.Connection, *, key: str, status: str, decided_
         raise
     conn.execute("COMMIT")
     return row is not None
+
+
+_DEAL_COLUMNS = ("property_ref", "kind", "month", "deal_date", "area", "price", "monthly_rent", "floor",
+                 "contract_type", "active_count", "cancelled_count")
+_DEAL_KEY = ("property_ref", "kind", "deal_date", "area", "price", "monthly_rent", "floor")
+
+
+def replace_deals(conn: sqlite3.Connection, deals: list[dict[str, Any]], *, months: set[tuple[str, str, str]],
+                  properties: set[str], fetched_at: datetime) -> int:
+    """Make the stored deals match one sync exactly: every fetched (property, kind, YYYYMM) is replaced
+    as a whole, and properties no longer configured are removed. Identical deals are counted (active and
+    cancelled separately), so the result does not depend on the order the API lists them in.
+    Returns the number of stored rows after the sync."""
+    grouped: dict[tuple, dict[str, Any]] = {}
+    for deal in deals:
+        key = tuple(deal[c] for c in _DEAL_KEY)
+        row = grouped.setdefault(key, {**{c: deal[c] for c in _DEAL_KEY}, "month": deal["deal_date"][:7].replace("-", ""),
+                                       "contract_type": deal.get("contract_type"), "active_count": 0, "cancelled_count": 0})
+        row["cancelled_count" if deal["cancelled"] else "active_count"] += 1
+        row["contract_type"] = row["contract_type"] or deal.get("contract_type")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for ref, kind, month in months:
+            conn.execute("DELETE FROM property_deals WHERE property_ref = ? AND kind = ? AND month = ?", (ref, kind, month))
+        placeholders = ", ".join("?" for _ in properties) or "''"
+        conn.execute(f"DELETE FROM property_deals WHERE property_ref NOT IN ({placeholders})", tuple(properties))
+        for row in grouped.values():
+            conn.execute(f"INSERT INTO property_deals ({', '.join(_DEAL_COLUMNS)}, fetched_at) VALUES "
+                         f"({', '.join('?' for _ in _DEAL_COLUMNS)}, ?)",
+                         (*(row[c] for c in _DEAL_COLUMNS), _db_time(fetched_at)))
+        stored = conn.execute("SELECT count(*) FROM property_deals").fetchone()[0]
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+    return stored
+
+
+def load_deals(conn: sqlite3.Connection, *, since: date) -> list[dict[str, Any]]:
+    rows = conn.execute(f"SELECT {', '.join(_DEAL_COLUMNS)} FROM property_deals WHERE deal_date >= ? ORDER BY deal_date",
+                        (since.isoformat(),)).fetchall()
+    return [dict(zip(_DEAL_COLUMNS, row)) for row in rows]
+
+
+def latest_advice(conn: sqlite3.Connection, *, use_case: str) -> dict[str, Any] | None:
+    """The newest successful audited model output for a use case (parsed JSON), or None."""
+    row = conn.execute("SELECT created_at, advice FROM advice_runs WHERE use_case = ? AND outcome = 'success' "
+                       "AND advice IS NOT NULL ORDER BY created_at DESC, rowid DESC LIMIT 1", (use_case,)).fetchone()
+    return None if row is None else {"created_at": datetime.fromisoformat(row[0]), "content": json.loads(row[1])}
+
+
+MAX_ANSWER_ATTEMPTS = 3
+QUESTION_LEASE = timedelta(minutes=30)
+
+
+def claim_question(conn: sqlite3.Connection, *, message_id: str, thread_id: str, report_id: str | None,
+                   received_at: datetime, now: datetime, daily_limit: int | None = None) -> bool:
+    """Atomically claim a question for answering: a new question, or a clean failure with attempts left.
+    With `daily_limit`, the claim is refused once that many answers were claimed in the last 24 hours."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if daily_limit is not None and _answers_since(conn, now - timedelta(days=1)) >= daily_limit:
+            conn.execute("ROLLBACK")
+            return False
+        row = conn.execute("SELECT status, attempts FROM mail_questions WHERE message_id = ?", (message_id,)).fetchone()
+        if row is None:
+            conn.execute("INSERT INTO mail_questions (message_id, thread_id, report_id, received_at, claimed_at, status, "
+                         "attempts) VALUES (?, ?, ?, ?, ?, 'answering', 1)",
+                         (message_id, thread_id, report_id, _db_time(received_at), _db_time(now)))
+        elif row[0] == "failed" and row[1] < MAX_ANSWER_ATTEMPTS:
+            conn.execute("UPDATE mail_questions SET status = 'answering', attempts = attempts + 1, claimed_at = ?, "
+                         "error_code = NULL, finished_at = NULL, sending_at = NULL WHERE message_id = ?",
+                         (_db_time(now), message_id))
+        else:
+            conn.execute("ROLLBACK")
+            return False
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+    return True
+
+
+def skip_question(conn: sqlite3.Connection, *, message_id: str, thread_id: str, now: datetime, reason: str) -> None:
+    conn.execute("INSERT OR IGNORE INTO mail_questions (message_id, thread_id, report_id, received_at, claimed_at, status, "
+                 "attempts, error_code, finished_at) VALUES (?, ?, NULL, ?, ?, 'skipped', 0, ?, ?)",
+                 (message_id, thread_id, _db_time(now), _db_time(now), reason, _db_time(now)))
+
+
+def start_answer(conn: sqlite3.Connection, *, message_id: str, now: datetime) -> bool:
+    """Mark the point after which the reply may have been sent; False if the claim was lost."""
+    cursor = conn.execute("UPDATE mail_questions SET status = 'sending', sending_at = ? WHERE message_id = ? AND "
+                          "status = 'answering'", (_db_time(now), message_id))
+    return cursor.rowcount == 1
+
+
+def finish_question(conn: sqlite3.Connection, *, message_id: str, status: str, now: datetime,
+                    answer_message_id: str | None = None, error_code: str | None = None) -> None:
+    conn.execute("UPDATE mail_questions SET status = ?, answer_message_id = ?, error_code = ?, finished_at = ? "
+                 "WHERE message_id = ?", (status, answer_message_id, error_code, _db_time(now), message_id))
+
+
+def recover_questions(conn: sqlite3.Connection, *, now: datetime) -> list[dict[str, Any]]:
+    """Interrupted answers: `answering` (no reply sent yet) becomes a retryable failure; `sending` may have
+    been delivered, so it becomes unknown and is never resent."""
+    cutoff = _db_time(now - QUESTION_LEASE)
+    stale = conn.execute("SELECT message_id, status FROM mail_questions WHERE (status = 'answering' AND claimed_at < ?) "
+                         "OR (status = 'sending' AND sending_at < ?)", (cutoff, cutoff)).fetchall()
+    for message_id, status in stale:
+        outcome, code = ("failed", "interrupted-before-send") if status == "answering" else ("unknown", "interrupted-during-send")
+        finish_question(conn, message_id=message_id, status=outcome, now=now, error_code=code)
+    return [{"message_id": m, "was": status} for m, status in stale]
+
+
+def seen_questions(conn: sqlite3.Connection) -> set[str]:
+    """Messages not to pick up again: everything except clean failures that still have attempts left."""
+    return {row[0] for row in conn.execute("SELECT message_id FROM mail_questions WHERE NOT (status = 'failed' AND "
+                                           "attempts < ?)", (MAX_ANSWER_ATTEMPTS,))}
+
+
+def answer_message_ids(conn: sqlite3.Connection) -> set[str]:
+    return {row[0] for row in conn.execute("SELECT answer_message_id FROM mail_questions WHERE answer_message_id IS NOT NULL")}
+
+
+def _answers_since(conn: sqlite3.Connection, since: datetime) -> int:
+    return conn.execute("SELECT count(*) FROM mail_questions WHERE status IN ('answering', 'sending', 'answered', "
+                        "'unknown') AND claimed_at >= ?", (_db_time(since),)).fetchone()[0]
 
 
 def last_sent_report(conn: sqlite3.Connection) -> dict[str, Any] | None:

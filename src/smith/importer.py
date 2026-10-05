@@ -174,6 +174,9 @@ _KIND_FIELDS: dict[Kind, dict[str, _Field]] = {
         "start_date": _Field(_date),
         "end_date": _Field(_date, nullable=True),
         "liability_record_id": _Field(_reference, nullable=True),
+        # The asset an internal transfer pays into (for example a pension account), so contributions
+        # can be counted per account type for tax limits.
+        "target_record_id": _Field(_reference, nullable=True),
         "commitment": _Field(_enum(COMMITMENTS), nullable=True),
     },
     Kind.GOAL: {
@@ -390,6 +393,8 @@ def _check_cashflow(fields: dict[str, str | None], path: str, problems: _Problem
         problems.add(f"{path}.liability_record_id", "is required for category loan_payment")
     elif category is not None and category != "loan_payment" and linked:
         problems.add(f"{path}.liability_record_id", "is only allowed for category loan_payment")
+    if fields.get("target_record_id") is not None and category is not None and category not in TRANSFER_CATEGORIES:
+        problems.add(f"{path}.target_record_id", "is only allowed for category internal_transfer")
     start, end = fields.get("start_date"), fields.get("end_date")
     if fields.get("frequency") == "once" and end is not None:
         problems.add(f"{path}.end_date", "must be omitted for a one-time cash flow")

@@ -100,7 +100,8 @@ def record_failure(db: Path, *, now: datetime, slot: datetime | None, missed: li
 
 def publish(db: Path, *, recipient: str, credentials: tuple[str, str, str], now: datetime, slot: datetime | None,
             missed: list[datetime], kind: str, sender: Sender = gmail.send, tz: str = DEFAULT_TIMEZONE,
-            sync_failures: list[str] | None = None, narrator: Narrator | None = None) -> dict[str, Any]:
+            sync_failures: list[str] | None = None, narrator: Narrator | None = None,
+            household: dict[str, Any] | None = None) -> dict[str, Any]:
     """Claim, build, send and record one report. Returns the final run record fields.
 
     `narrator(data)` adds the verified narrative (6c/6d) to the report data in place; it handles its own
@@ -122,7 +123,8 @@ def publish(db: Path, *, recipient: str, credentials: tuple[str, str, str], now:
     started = time.monotonic()
     try:
         with closing(ledger.connect_read_only(db)) as conn:
-            data = build_report(conn, as_of=now, known_at=now, baseline=baseline, kind=kind, tz=tz)
+            data = build_report(conn, as_of=now, known_at=now, baseline=baseline, kind=kind, tz=tz,
+                                household=household)
         if narrator is not None:
             narrator(data)
         # Lateness is judged at send time: the narrative stage can take many minutes after `now`.

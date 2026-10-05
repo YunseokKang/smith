@@ -10,6 +10,8 @@ _GMAIL = "smith.gmail"
 _GMAIL_NAMES = ("client_id", "client_secret", "refresh_token")
 # Public statistics APIs: read-only data keys, still kept out of files and logs.
 EVIDENCE_PROVIDERS = ("ecos", "fred")
+# Official real-estate APIs: data.go.kr (MOLIT transaction prices) and the Korea Real Estate Board (R-ONE).
+REAL_ESTATE_PROVIDERS = ("datagokr", "rone")
 
 
 def load_toss_client() -> tuple[str, str] | None:
@@ -34,7 +36,7 @@ def all_secrets() -> list[str]:
     """Every secret Smith stores, so outbound checks can refuse a model payload that contains one."""
     toss = load_toss_client() or ()
     gmail = load_gmail() or ()
-    return [*toss, *gmail, *(load_api_key(p) or "" for p in EVIDENCE_PROVIDERS)]
+    return [*toss, *gmail, *(load_api_key(p) or "" for p in EVIDENCE_PROVIDERS + REAL_ESTATE_PROVIDERS)]
 
 
 def load_api_key(provider: str) -> str | None:
