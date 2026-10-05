@@ -16,7 +16,7 @@ from html import escape
 from typing import Any
 
 from smith.fmt import short_won as _short
-from smith.proposals import Proposal, Track
+from smith.proposals import Track
 from smith.realestate import MIN_BASIS
 from smith.report_data import CATEGORY_LABELS, COMPONENT_LABELS
 
@@ -63,12 +63,12 @@ TERMS = {
 
 def render(data: dict[str, Any]) -> tuple[str, str]:
     """Return (subject, html). Monday is the full edition; Thursday shows proposals, changes and schedule."""
-    status = _status(data)
+    status, reasons = _status(data)
     full = data["kind"] != "thursday"
     advice = data.get("advice") or {"proposals": [], "strategy": [], "assumptions": []}
     story = data.get("narrative") or {}
-    bands = [_band(DARK, _header(data, status) + _judgement(story) + _overview(data) + _callout(advice["proposals"])),
-             _band(CANVAS, _proposals(advice["proposals"], full), border=True)]
+    bands = [_band(DARK, _header(data, status, reasons) + _judgement(story) + _overview(data) + _callout(advice)),
+             _band(CANVAS, _proposals(advice, full), border=True)]
     if full and advice["strategy"]:
         bands.append(_band(DARK, _strategy(advice["strategy"], story.get("direction", ""), story.get("direction_memo", ""))))
     sections = [_changes_outside(story), _follow_up(advice), _tax(advice, data, full), _change(data), _timeline(data)]
@@ -77,7 +77,7 @@ def render(data: dict[str, Any]) -> tuple[str, str]:
         sections += [_allocation(data), _cash(sectors["cash"], data), _debt(sectors["debt"]),
                      _securities(sectors["securities"]), _real_estate(sectors["real_estate"]),
                      _pension(sectors["pension_insurance"]), _macro(sectors["macro"])]
-    sections.append(_glossary())
+    sections += [_requests(data.get("requests") or [], full), _glossary()]
     bands.append(_band(CANVAS, "".join(sections), border=True))
     bands.append(_band(SOFT, _footer(data, advice["assumptions"], story.get("status"))))
     spacer = '<tr><td style="height:12px;line-height:12px;font-size:0">&nbsp;</td></tr>'
@@ -91,10 +91,25 @@ def render(data: dict[str, Any]) -> tuple[str, str]:
     return _subject(data, status), html
 
 
-def _status(data: dict[str, Any]) -> str:
+def _status(data: dict[str, Any]) -> tuple[str, list[str]]:
+    """(status, reasons). 대응 필요: a proposal to act on now. 주의: data that failed, is incomplete or
+    stale, or a missing input the judgements need (a "must" request). 안정 only when none of these hold."""
     failed_sync = any(s["last_failure"] and (not s["last_success"] or s["last_failure"] > s["last_success"])
                       for s in data["sync"])
-    return "watch" if not data["completeness"]["complete"] or failed_sync or data["warnings"] else "stable"
+    urgent = [p for p in (data.get("advice") or {}).get("proposals") or [] if p.priority == 1]
+    must = [r for r in data.get("requests") or [] if r.priority == "must"]
+    reasons = []
+    if urgent:
+        reasons.append(f"지금 실행을 권하는 제안이 {len(urgent)}건 있습니다.")
+    if not data["completeness"]["complete"] or failed_sync or data["warnings"]:
+        reasons.append("일부 데이터가 불완전하거나 오래되었거나 동기화에 실패했습니다(맨 아래 '데이터 상태').")
+    if must:
+        reasons.append(f"판단에 꼭 필요한 자료 {len(must)}건이 비어 있습니다('다음에 확인할 것').")
+    if urgent:
+        return "act", reasons
+    if reasons:
+        return "watch", reasons
+    return "stable", ["데이터가 최신이고, 판단에 꼭 필요한 자료가 갖춰져 있습니다."]
 
 
 def _subject(data: dict[str, Any], status: str) -> str:
@@ -210,11 +225,10 @@ def _cell(cell: str | tuple[str, str]) -> str:
 
 # --- top bands --------------------------------------------------------------------------------------------
 
-def _header(data: dict[str, Any], status: str) -> str:
+def _header(data: dict[str, Any], status: str, reasons: list[str]) -> str:
     edition = "월요 종합 보고" if data["kind"] != "thursday" else "목요 변화 점검"
     icon, label, color = STATUS[status]
-    reason = ("데이터가 모두 최신이며 누락이 없습니다." if status == "stable"
-              else "일부 데이터가 불완전하거나 동기화에 실패했습니다. 맨 아래 '데이터 상태'를 확인하시기 바랍니다.")
+    reason = escape(" ".join(reasons))
     note = ""
     if data.get("delivery_note"):
         note = (f'<div style="font-size:13px;line-height:1.6;color:{ON_DARK};background:{DARK_RAISED};border-radius:16px;'
@@ -249,28 +263,38 @@ def _overview(data: dict[str, Any]) -> str:
             f'cellspacing="0">{grid}</table></td></tr>')
 
 
-def _callout(proposals: list[Proposal]) -> str:
-    """The single most important message, once per report, closing the dark hero."""
+def _callout(advice: dict[str, Any]) -> str:
+    """The single most important message, once per report, closing the dark hero. "Nothing to do" is
+    said only when every rule could judge; a rule stopped by unknown inputs is named instead."""
+    proposals, undetermined = advice.get("proposals") or [], advice.get("undetermined") or []
+    certainty = ""
     if proposals:
         top = proposals[0]
-        title, why = top.title, _first_sentence(top.why)
+        title, why, certainty = top.title, _first_sentence(top.why), top.certainty
+    elif undetermined:
+        title = "이번 주 새 제안은 없지만, 자료가 부족해 판단하지 못한 부분이 있습니다."
+        why = "판단하지 못한 것: " + " · ".join(f"{u.topic}({u.missing})" for u in undetermined)
     else:
         title = "이번 주에는 새로 실행하실 일이 없습니다. 지금의 전략을 유지하시는 것이 합리적입니다."
         why = "현금 여유, 대출 부담, 목표 일정 모두 기준 안에 있어 바꿀 이유가 확인되지 않았습니다."
+    label = (f'<div style="font-size:12px;color:{ON_DARK_SOFT};margin-top:8px">근거의 성격: {escape(certainty)}</div>'
+             if certainty else "")
     return (f'<tr><td style="padding-top:10px"><div style="background:{DARK_RAISED};border-radius:24px;padding:22px 20px">'
             f'{_eyebrow("이번 주 가장 중요한 한 가지", color=ON_DARK, background=BLUE)}'
             f'<div style="font-family:{SANS};font-weight:400;font-size:22px;line-height:1.35;letter-spacing:-0.4px;'
             f'color:{ON_DARK}">{escape(title)}</div>'
             f'<div style="font-size:14px;line-height:1.6;color:{ON_DARK_SOFT};margin-top:10px">{escape(why)}</div>'
-            f'</div></td></tr>')
+            f'{label}</div></td></tr>')
 
 
-def _proposals(proposals: list[Proposal], full: bool) -> str:
-    """The proposal cards: why now, effect, risks, timing, what would change the judgement, certainty."""
+def _proposals(advice: dict[str, Any], full: bool) -> str:
+    """The proposal cards: why now, effect, risks, timing, what would change the judgement, certainty.
+    Thursday cards are short but keep the certainty label. Judgements stopped by unknown inputs follow."""
+    proposals = advice.get("proposals") or []
     head = f'<tr><td>{_eyebrow("이번 주 제안")}{_heading("고객님께 드리는 제안", size=28)}</td></tr>'
     if not proposals:
         return head + (f'<tr><td style="font-size:15px;line-height:1.6;color:{BODY}">새 제안이 없습니다. 제안이 없는 것도 '
-                       '판단입니다. 다음 보고에서 변화가 있으면 다시 말씀드리겠습니다.</td></tr>')
+                       '판단입니다. 다음 보고에서 변화가 있으면 다시 말씀드리겠습니다.</td></tr>') + _undetermined(advice)
     cards = []
     for number, p in enumerate(proposals[:3], 1):
         badge = (f'<span style="display:inline-block;background:{BLUE};color:#ffffff;font-size:12px;font-weight:600;'
@@ -293,7 +317,8 @@ def _proposals(proposals: list[Proposal], full: bool) -> str:
                              f'padding:6px 0">{v}</td></tr>' for k, v in rows)
             detail = f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{detail}</table>'
         else:
-            detail = f'<div style="font-size:14px;line-height:1.6;color:{BODY}">{escape(_first_sentence(p.why))}</div>'
+            detail = (f'<div style="font-size:14px;line-height:1.6;color:{BODY}">{escape(_first_sentence(p.why))}</div>'
+                      f'<div style="font-size:12px;color:{MUTED};margin-top:6px">근거의 성격: {escape(p.certainty)}</div>')
         cards.append(f'<tr><td style="padding-top:12px"><div style="background:{CANVAS};border:1px solid {HAIRLINE};'
                      f'border-radius:24px;padding:20px 20px">{badge}{title}{detail}</div></td></tr>')
     rest = proposals[3:]
@@ -305,7 +330,18 @@ def _proposals(proposals: list[Proposal], full: bool) -> str:
     if not full:
         more += (f'<tr><td style="padding-top:12px;font-size:12px;color:{MUTED}">목요 보고는 요약입니다. 근거와 위험은 월요 보고에서 '
                  '자세히 말씀드립니다.</td></tr>')
-    return head + "".join(cards) + more
+    return head + "".join(cards) + more + _undetermined(advice)
+
+
+def _undetermined(advice: dict[str, Any]) -> str:
+    """Rules that could not judge because an input is unknown: said plainly, never read as all clear."""
+    items = advice.get("undetermined") or []
+    if not items:
+        return ""
+    rows = "".join(f'<div style="font-size:13px;line-height:1.6;color:{BODY}">· <b style="font-weight:600;color:{INK}">'
+                   f'{escape(u.topic)}</b> — {escape(u.missing)}</div>' for u in items)
+    return (f'<tr><td style="padding-top:16px"><div style="font-size:12px;font-weight:600;color:{MUTED};'
+            f'margin-bottom:4px">자료가 부족해 이번에 판단하지 못한 것</div>{rows}</td></tr>')
 
 
 def _judgement(story: dict[str, Any]) -> str:
@@ -438,7 +474,8 @@ def _change(data: dict[str, Any]) -> str:
     change = data["change"]
     if change is None:
         return _section("지난 보고 이후 변화", "첫 보고서입니다. 이번 수치를 앞으로 변화를 비교할 <b>기준선</b>으로 삼습니다.", "")
-    parts = [(COMPONENT_LABELS[key], value) for key, value in change["parts"].items() if value]
+    balanced = change.get("balanced", True)
+    parts = [(COMPONENT_LABELS[key], value) for key, value in change["parts"].items() if value] if balanced else []
     parts.sort(key=lambda item: -abs(item[1]))
     direction = "증가" if change["total"] > 0 else "감소" if change["total"] < 0 else "변동 없음"
     lead = (f"지난 보고 이후 <b>순자산</b>(가진 것 − 갚을 것)이 <b>{_short(abs(change['total']))} {direction}</b>했습니다."
@@ -446,9 +483,17 @@ def _change(data: dict[str, Any]) -> str:
     if parts:
         lead += f" 가장 큰 요인은 <b>{escape(parts[0][0])}</b>입니다."
         lead += " 며칠 사이의 시세 등락은 흔한 일이며, 장기 목표 대비 흐름으로 판단하시기 바랍니다."
+    if not balanced:
+        lead += " 원인별 분해의 합계가 전체 변화와 맞지 않아 이번에는 분해를 싣지 않았습니다(Smith 계산 점검이 필요합니다)."
     if not change["complete"]:
         lead += " 환율이 없는 통화가 있어 분해가 일부 불완전합니다."
+    correction = change.get("correction") or Decimal(0)
+    if correction:
+        lead += (f" 과거 입력을 바로잡아 지난 보고의 출발점이 {_signed_short(correction)} 달라졌습니다. 이는 실제 변동이 "
+                 "아니어서 위 변화에 넣지 않았습니다.")
     rows = [[label, _won(value)] for label, value in parts] + [["합계", _won(change["total"])]]
+    if correction:
+        rows.append(["(참고) 과거 입력 정정 · 합계 제외", _won(correction)])
     return _section("지난 보고 이후 변화", lead, (_diverging(parts) if parts else "") + _table(["요인", "금액"], rows))
 
 
@@ -514,9 +559,33 @@ def _cash(cash: dict[str, Any], data: dict[str, Any]) -> str:
                 f"비상금 기준(월 지출 {cash['emergency_months_assumption']}개월, 가정)인 {_short(cash['reserve_target'])}"
                 + (f"까지 <b>{_short(cash['reserve_gap'])}</b>이 부족합니다." if cash["reserve_gap"] else "을 충족합니다."))
     lead += " <b>유동성</b>(얼마나 빨리 현금으로 바꿀 수 있는지)별 분포는 아래와 같습니다."
+    if cash.get("hermes"):
+        lead += (" Hermes가 운용하는 자산은 Smith가 매각·변경을 권하지 않으므로 쓸 수 있는 돈에 넣지 않고 "
+                 "따로 표시했습니다.")
+    lead += _toss_cash_note(cash.get("toss_cash") or {})
     ladder = cash["ladder"]
     bars = _bars([(label, value, label == "즉시") for label, value in ladder])
     return _section("현금·유동성", lead, bars + _table(["현금화 속도", "금액"], [[l, _won(v)] for l, v in ladder]))
+
+
+def _toss_cash_note(toss: dict[str, Any]) -> str:
+    """The Toss API reports buying power, not the cash balance: say so instead of showing a silent gap."""
+    if not toss.get("synced"):
+        return ""
+    note = " 토스증권 예수금(현금)은 API로 제공되지 않아 자동으로 수집하지 않습니다(<b>미수집</b>)."
+    if toss["manual_records"]:
+        note += f" 증권 계좌 현금은 직접 입력하신 값(기준일 {toss['manual_as_of']:%Y.%m.%d})을 썼습니다."
+    else:
+        note += " 직접 입력한 증권 계좌 현금도 없어, 즉시 쓸 수 있는 돈에서 증권 계좌 현금은 빠져 있습니다."
+    power = toss["buying_power"]
+    krw = [p["value"] for p in power if p["currency"] == "KRW"]
+    usd = [p["value"] for p in power if p["currency"] == "USD"]
+    if krw or usd:
+        latest = max(p["observed_at"] for p in power)
+        amounts = ([_won(sum(krw, Decimal(0)))] if krw else []) + ([f"{sum(usd, Decimal(0)):,.2f}달러"] if usd else [])
+        note += (f" 참고로 토스의 매수 가능 금액은 {' · '.join(amounts)}({latest:%m.%d} 기준)이며, 예수금이나 "
+                 "출금 가능액과 다를 수 있습니다.")
+    return note
 
 
 def _debt(debt: dict[str, Any]) -> str:
@@ -549,6 +618,9 @@ def _securities(sec: dict[str, Any]) -> str:
     if sec["unrealized_gain"] is not None and sec["unrealized_gain_missing"]:
         lead += (f" 이 손익은 매입 원가를 아는 {sec['unrealized_gain_counted']}개 종목만의 <b>부분 합계</b>이며, "
                  f"원가를 모르는 {sec['unrealized_gain_missing']}개 종목은 빠져 있습니다.")
+    if sec.get("hermes"):
+        lead += (f" 이 가운데 Hermes가 운용하는 자산은 {_short(sec['hermes'])}이며, Smith는 이 자산의 매각·변경을 "
+                 "권하지 않습니다(필요하면 Hermes와 상의하십시오).")
     bars = _bars([(str(p["name"])[:14], p["value"], i < 3) for i, p in enumerate(positions)])
     table = _table(["종목", "평가액", "증권 내 비중"], [[str(p["name"]), _won(p["value"]), _pct(p["share"])] for p in positions])
     return _section("주식·증권", lead, bars + table)
@@ -630,6 +702,30 @@ def _pp(value: Decimal) -> str:
     return f"{arrow} {value:+.2f}%p"
 
 
+REQUEST_LABELS = {"must": "꼭 필요", "should": "있으면 더 정확", "nice": "참고"}
+
+
+def _requests(requests: list[Any], full: bool) -> str:
+    """What the client could provide next (checklist.requests). Thursday lists only the essential ones."""
+    shown = requests if full else [r for r in requests if r.priority == "must"]
+    if not shown:
+        return ""
+    rows = []
+    for r in shown:
+        strong = r.priority == "must"
+        badge = (f'<span style="display:inline-block;background:{BLUE if strong else STRONG};'
+                 f'color:{"#ffffff" if strong else INK};font-size:11px;font-weight:600;border-radius:100px;'
+                 f'padding:2px 10px;margin-right:6px">{REQUEST_LABELS[r.priority]}</span>')
+        rows.append(f'<div style="margin:6px 0 14px"><div style="font-size:15px;font-weight:600;color:{INK};'
+                    f'line-height:1.5">{badge}{escape(r.title)}</div>'
+                    f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin-top:4px">{escape(r.why)}</div>'
+                    f'<div style="font-size:12px;color:{MUTED};margin-top:4px">입력: {escape(r.how)}</div></div>')
+    rest = len(requests) - len(shown)
+    lead = ("알려 주시면 보고서의 판단이 더 정확해지는 자료입니다. '꼭 필요'는 지금 판단이 비어 있거나 틀릴 수 있는 "
+            "항목입니다.") + (f" 나머지 {rest}건은 월요 보고에서 안내합니다." if rest else "")
+    return _section("다음에 확인할 것", lead, "".join(rows))
+
+
 def _glossary() -> str:
     inner = "".join(f'<div style="font-size:13px;line-height:1.6;color:{BODY};margin:3px 0"><b style="font-weight:600;'
                     f'color:{INK}">{escape(term)}</b> — {escape(text)}</div>' for term, text in TERMS.items())
@@ -643,6 +739,10 @@ def _footer(data: dict[str, Any], assumptions: list[str], ai: dict[str, Any] | N
     lines += [f"동기화 · {_source(s['source'])}: 최근 성공 {s['last_success'].date() if s['last_success'] else '없음'}"
               for s in data["sync"]]
     lines += [f"경고: {w}" for w in data["warnings"]]
+    toss = data["sectors"]["cash"].get("toss_cash") or {}
+    if toss.get("synced"):
+        lines.append("토스증권 예수금: API가 제공하지 않아 미수집 — " + ("증권 계좌 현금은 직접 입력하신 값 사용"
+                                                          if toss["manual_records"] else "현금 잔액이 반영되지 않음"))
     if not data["completeness"]["complete"]:
         lines.append(f"불완전 영역: {', '.join(data['completeness']['areas'])}")
     lines += [f"가정: {a}" for a in assumptions]

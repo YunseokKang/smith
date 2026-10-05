@@ -17,7 +17,9 @@ insight, watch item):
   research items the block itself cites (not URLs, not other items). Small counts, months and years
   without a unit are allowed.
 A failing block is returned to the model once with its reasons. Blocks that passed the first time are
-kept exactly; only rejected ones are taken from the repair. What still fails is dropped and counted.
+kept exactly; only rejected ones are taken from the repair. What still fails is kept from the first output
+with a short caveat (자동 점검 메모) and counted; only unusable blocks (unknown proposal keys, duplicates)
+are left out.
 Every call is recorded in `advice_runs` (payload, raw output, verified output, reasons), failures too.
 """
 import json
@@ -37,7 +39,7 @@ from smith.fmt import short_won
 from smith.payload import build_context, check_outbound, won
 from smith.proposals import Proposal
 
-PROMPT_VERSION = "narrative-v2"
+PROMPT_VERSION = "narrative-v3"
 MODEL = "fable"
 BUDGET_USD = "5.00"
 TIMEOUT_SECONDS = 600  # Two calls at most (write and repair): 20 minutes, inside the 30-minute lease.
@@ -78,6 +80,10 @@ Input JSON:
 - proposals: this week's proposals, computed by code, with their figures and texts. They are the
   backbone of the report. You may reorder them (order) and add context, but not change their figures.
 - strategy: long-range goal tracks computed by code.
+- undetermined: judgements code could not make because an input is unknown. Never describe these areas
+  as fine or under control; say the judgement is pending the missing information.
+- change_since_last_report.correction_of_past_inputs (when present): a fix of an earlier typo. It is not a
+  real gain or loss and is not in the total; never present it as one.
 - ownership_notes: what is and is not known about legal ownership and household registration.
 - household_profile: the client's age, whether the marriage is registered, retirement spending goal, and
   risk_preference (the client's stated appetite, e.g. growth_aggressive: lean toward growth in direction
@@ -130,8 +136,12 @@ def build_payload(view: Any, data: dict[str, Any], brief: dict[str, Any] | None)
         "edition": data["kind"],
         "household": build_context(view, {}, include_positions=True),
         "change_since_last_report": None if change is None else {
-            "total": won(change["total"]), "parts": {k: won(v) for k, v in change["parts"].items() if v}},
+            "total": won(change["total"]),
+            "parts": {k: won(v) for k, v in change["parts"].items() if v} if change.get("balanced", True) else {},
+            # Restates the starting point; not a real change and not part of the total.
+            **({"correction_of_past_inputs": won(change["correction"])} if change.get("correction") else {})},
         "proposals": [_proposal(p) for p in advice["proposals"]],
+        "undetermined": [{"topic": u.topic, "missing": u.missing} for u in advice.get("undetermined", [])],
         "proposals_in_progress": [p.title for p in advice.get("in_progress", [])],
         "strategy": [{"name": t.name, "status": t.status, "headline": t.headline, "detail": t.detail}
                      for t in advice["strategy"]],
@@ -220,9 +230,10 @@ def write(view: Any, data: dict[str, Any], brief: dict[str, Any] | None, *, secr
             verified, dropped = merge(verified, dropped, repaired)
             _record(audit, "report-narrative-repair", repair_text, "success", None, cost2,
                     {"raw": second, "verified": repaired, "dropped": still, "merged_dropped": dropped})
-            output = second
     # The report is for the client alone: a block that still fails is kept with a short caveat (자동 점검 메모)
     # rather than deleted. Only unusable blocks (unknown proposal keys, duplicates) are left out.
+    # `merge` returns the first output's entries, whose paths index the first output: restore from it, or a
+    # repair with fewer list items would bring back the wrong block or none at all.
     verified, memos = restore(verified, dropped, output)
     total = None if any(c is None for c in costs) else str(sum(Decimal(c) for c in costs))
     return {"output": verified, "dropped": dropped, "memos": memos, "cost_usd": total}

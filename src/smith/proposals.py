@@ -65,6 +65,14 @@ class Track:
     detail: str
 
 
+@dataclass(frozen=True)
+class Undetermined:
+    """A judgement a rule could not make because an input it needs is unknown. This is not "nothing to
+    do": the report must not reassure the client about it."""
+    topic: str     # What could not be judged.
+    missing: str   # Which input is unknown.
+
+
 def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
           active: dict[str, dict[str, Any]] | None = None, household: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return proposals (most urgent first), the strategy tracks and the follow-up of earlier proposals.
@@ -77,7 +85,9 @@ def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
     facts["tax"] = tax.facts(view, facts["today"], household)
     rules = (_lease_return, _emergency_reserve, _surplus_plan, _pension_credit, _overseas_harvest, _isa, _prepayment,
              _variable_rate)
-    found = [(i, p) for i, rule in enumerate(rules) if (p := rule(facts)) is not None]
+    outcomes = [(i, rule(facts)) for i, rule in enumerate(rules)]
+    found = [(i, p) for i, p in outcomes if isinstance(p, Proposal)]
+    undetermined = [p for _, p in outcomes if isinstance(p, Undetermined)]
     ranked = [p for _, p in sorted(found, key=lambda item: (item[1].priority, item[0]))]
     active = active or {}
     proposals, in_progress = [], []
@@ -91,7 +101,7 @@ def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
         elif current["status"] == "open":
             proposals.append(replace(proposal, times_shown=current["times_shown"], renewed=False))
     decided = [item for item in active.values() if item["status"] in ("declined", "done")]
-    return {"proposals": proposals, "in_progress": in_progress, "decided": decided,
+    return {"proposals": proposals, "in_progress": in_progress, "decided": decided, "undetermined": undetermined,
             "strategy": _strategy(facts), "assumptions": _assumptions() + tax.assumptions(),
             "tax_notes": tax.notes(facts["tax"]), "tax_checklist": tax.checklist(facts["tax"])}
 
@@ -196,13 +206,13 @@ def _add_months(day: date, months: int) -> date:
 
 # --- rules ------------------------------------------------------------------------------------------------
 
-def _lease_return(facts: dict[str, Any]) -> Proposal | None:
+def _lease_return(facts: dict[str, Any]) -> Proposal | Undetermined | None:
     if not facts["leases"]:
         return None
     lease = min(facts["leases"], key=lambda item: item["due"])
     amount, months, surplus = lease["amount"], lease["months"], facts["available"]
     if amount is None:
-        return None
+        return Undetermined("전세보증금 반환 계획", "보증금 금액을 원화로 환산하지 못했습니다(환율 없음).")
     accumulated = _accumulated(facts, months)
     coverage = accumulated / amount if accumulated is not None and amount else None
     deadline = _add_months(lease["due"], -DECISION_LEAD_MONTHS)
@@ -247,15 +257,17 @@ def _lease_return(facts: dict[str, Any]) -> Proposal | None:
                  **({} if gap is None else {"jeonse_gap": gap})})
 
 
-def _emergency_reserve(facts: dict[str, Any]) -> Proposal | None:
+def _emergency_reserve(facts: dict[str, Any]) -> Proposal | Undetermined | None:
     cash = facts["sectors"]["cash"]
     gap, surplus = cash["reserve_gap"], facts["available"]
-    if not gap or surplus is None:  # Met, or unknown because an amount could not be converted.
+    if gap == 0:  # Met.
         return None
+    if gap is None or surplus is None:
+        return Undetermined("비상금", "현금이나 월 현금흐름 가운데 원화로 환산하지 못한 금액이 있습니다.")
     months_cover = facts["kpis"]["immediate_months"]
     fill_months = None if surplus <= 0 else (gap / surplus).to_integral_value(rounding=ROUND_CEILING)
     priority = 1 if months_cover is not None and months_cover < 1 else 2
-    days = facts["summary"].by_liquidity.get("days", Decimal(0))
+    days = cash["liquidity"].get("days")  # Hermes-managed assets are not counted (never proposed for sale).
     return Proposal(
         key="emergency-reserve", priority=priority, watch=("gap", "target"), tolerance=Decimal("0.25"),
         title=f"바로 꺼내 쓸 수 있는 비상금을 {short_won(cash['reserve_target'])}까지 {short_won(gap)} 더 마련하시길 권합니다.",
@@ -272,10 +284,10 @@ def _emergency_reserve(facts: dict[str, Any]) -> Proposal | None:
         figures={"gap": gap, "target": cash["reserve_target"]})
 
 
-def _surplus_plan(facts: dict[str, Any]) -> Proposal | None:
+def _surplus_plan(facts: dict[str, Any]) -> Proposal | Undetermined | None:
     summary, surplus = facts["summary"], facts["surplus"]
     if surplus is None:
-        return None
+        return Undetermined("매월 남는 돈의 쓰임새", "월 현금흐름 가운데 원화로 환산하지 못한 항목이 있습니다.")
     allocated = summary.monthly_transfers
     surplus = facts["unallocated"]  # Transfers (for example pension contributions) are already allocated.
     if surplus < Decimal(500_000):
@@ -329,10 +341,14 @@ def _pension_credit(facts: dict[str, Any]) -> Proposal | None:
         figures={"irp_room": plan["irp_room"], "excess": plan["excess"], "refund_gain": plan["refund_gain"]})
 
 
-def _overseas_harvest(facts: dict[str, Any]) -> Proposal | None:
-    """Realize overseas gains up to the yearly basic deduction, so they never reach the 22% tax."""
-    plan = tax.harvest_plan(facts["tax"])
+def _overseas_harvest(facts: dict[str, Any]) -> Proposal | Undetermined | None:
+    """Realize overseas gains up to the yearly basic deduction, so they never reach the 22% tax.
+    Hermes-managed positions are left out (Smith never proposes selling them)."""
+    t = facts["tax"]
+    plan = tax.harvest_plan(t)
     today = facts["today"]
+    if plan is None and t["us_positions"] and t["us_unknown"] == t["us_positions"]:
+        return Undetermined("해외주식 양도세 기본공제 활용", "미국 주식의 매입 단가가 없어 평가이익을 계산하지 못했습니다.")
     if plan is None or plan["realize"] <= 0:
         return None
     return Proposal(
@@ -349,7 +365,9 @@ def _overseas_harvest(facts: dict[str, Any]) -> Proposal | None:
         risks=("올해 이미 실현한 주식 손익을 Smith는 모릅니다. 그 손익과 합쳐 공제가 한 번만 적용되므로, 증권사 양도소득 내역을 먼저 "
                "확인하십시오. 원화 손익은 현재 환율로 계산한 근사값이며, 실제 세금은 사고판 날의 환율로 계산됩니다. 매매 수수료·환전 "
                "비용과 다시 사는 사이의 가격 변동도 있습니다."
-               + (f" 매입 원가를 모르는 종목 {int(plan['unknown'])}개는 계산에서 빠졌습니다." if plan["unknown"] else "")),
+               + (f" 매입 원가를 모르는 종목 {int(plan['unknown'])}개는 계산에서 빠졌습니다." if plan["unknown"] else "")
+               + (" Hermes가 운용하는 종목은 매도 대상에서 뺐지만, 그 계좌에서 올해 실현한 이익도 같은 기본공제를 함께 "
+                  "쓰므로 Hermes와 상의해 확인하십시오." if t.get("hermes_managed") else "")),
         timing=f"{today.year}년 12월 결제일 기준 마감 전(증권사 해외주식 연말 결제 일정 확인)",
         reconsider="올해 해외 주식 매도 이익이 이미 있거나, 장기 보유 종목의 비중을 바꿀 계획이면 다시 계산합니다.",
         certainty=f"조건부 시나리오(올해 실현 손익 없음·현재 환율 가정) + 세법 기준 {tax.RULES_YEAR}년(현행 법령 확인 필요)",
@@ -376,12 +394,14 @@ def _isa(facts: dict[str, Any]) -> Proposal | None:
         figures={})
 
 
-def _prepayment(facts: dict[str, Any]) -> Proposal | None:
+def _prepayment(facts: dict[str, Any]) -> Proposal | Undetermined | None:
     """The marginal effect of prepaying is set by the highest-rate loan that can be repaid, fixed or not."""
     loans = [l for l in facts["sectors"]["debt"]["loans"] if l["category"] in REPAYABLE and l["rate"] > 0]
     cd = facts["cd"]
-    if not loans or cd is None:
+    if not loans:
         return None
+    if cd is None:
+        return Undetermined("대출 추가 상환과 예금 비교", "비교 기준인 CD 금리 자료가 없습니다(금리 동기화를 확인하십시오).")
     loan = max(loans, key=lambda l: l["rate"])
     rate, label = loan["rate"], loan["label"]
     deposit = cd["value"] / 100 * (1 - INTEREST_TAX)
@@ -414,11 +434,16 @@ def _prepayment(facts: dict[str, Any]) -> Proposal | None:
         figures={"loan_rate": rate, "deposit_after_tax": deposit})
 
 
-def _variable_rate(facts: dict[str, Any]) -> Proposal | None:
+def _variable_rate(facts: dict[str, Any]) -> Proposal | Undetermined | None:
     debt, cd = facts["sectors"]["debt"], facts["cd"]
     total = debt["variable_total"]
-    if not total or cd is None or cd["change_12m"] is None:
+    topic = "변동금리 대출 이자 변화"
+    if total is None:
+        return Undetermined(topic, "변동금리 대출 가운데 원화로 환산하지 못한 대출이 있습니다.")
+    if not total:
         return None
+    if cd is None or cd["change_12m"] is None:
+        return Undetermined(topic, "CD 금리의 1년 변화 자료가 없습니다(금리 동기화를 확인하십시오).")
     change = cd["change_12m"] / 100
     monthly = total * change / 12
     one = next(s["monthly_increase"] for s in debt["shocks"] if s["shock"] == Decimal("0.01"))

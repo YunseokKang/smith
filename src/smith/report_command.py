@@ -1,4 +1,5 @@
-"""`smith report preview`: build a report from the ledger and save it as an HTML file. Never sends."""
+"""`smith report`: preview (saves HTML, never sends), scheduled and manual publication (run-due, send-now),
+delivery status and schedule activation."""
 import argparse
 import io
 import sqlite3
@@ -255,6 +256,10 @@ def _publish_once(args: argparse.Namespace) -> int:
         with closing(ledger.connect(args.db)) as conn:
             for run_ in delivery.recover(conn, now):
                 _say(args.db, f"Interrupted run {run_['report_id']} ({run_['slot'] or 'manual'}, was {run_['was']}) closed.")
+            changed, marked = delivery.reconcile_schedule(conn, config, now)
+            if changed:
+                _say(args.db, "Schedule changed; it applies from now" + (
+                    f" (passed slot {marked.astimezone(ZoneInfo(tz)):%m-%d %H:%M} will not be sent late)." if marked else "."))
             found = delivery.due(conn, config, now)
         if config.get("mail", {}).get("answer_replies"):
             # Replies to report e-mails: a few Gmail reads every run, a model call only for a real question.
@@ -291,7 +296,9 @@ def _publish_once(args: argparse.Namespace) -> int:
         return 2
     # Refresh data first. Failures are recorded in sync_runs and named in the report's delivery note.
     sync_failures = []
-    if cli_main(["toss", "sync", "--db", str(args.db)]) != 0:
+    # A successful snapshot is complete (any failed or malformed response aborts it), so a position it no
+    # longer reports was sold and is closed. Without this one sale would block every later sync.
+    if cli_main(["toss", "sync", "--close-missing", "--db", str(args.db)]) != 0:
         sync_failures.append("토스증권 보유 내역")
     if cli_main(["evidence", "sync", "--db", str(args.db)]) != 0:
         sync_failures.append("금리·공식 발표")
@@ -314,4 +321,19 @@ def _publish_once(args: argparse.Namespace) -> int:
                   f"{result.get('error_code') or ''}".rstrip())
     if result.get("subject"):
         print(f"Subject: {result['subject']}")
+    if result["status"] == "sent" and (config.get("backup") or {}).get("dir"):
+        _backup_after_send(args.db, config["backup"])
     return 0 if result["status"] in ("sent", "skipped") else 1
+
+
+def _backup_after_send(db: Path, settings: dict[str, Any]) -> None:
+    """A verified ledger copy after each sent report; a failed copy is logged and never fails the run."""
+    from smith import backup_command
+
+    try:
+        path, _, _ = backup_command.backup(db, Path(settings["dir"]), now=datetime.now(timezone.utc),
+                                           keep=settings.get("keep", backup_command.DEFAULT_KEEP))
+    except (backup_command.BackupError, OSError) as error:
+        _say(db, f"Backup failed: {type(error).__name__}: {error}")
+        return
+    _say(db, f"Backup written: {path.name}")

@@ -74,7 +74,8 @@ def funding_facts(view: LedgerView, *, amount: Decimal, us_tax_rate: Decimal = D
                         "value": won(value), "unrealized_gain": won(_unrealized_gain(view, record)),
                         "restricted": restricted})
     by_class: dict[str, list[Any]] = {}
-    for record in (r for r in view.records if r.kind is Kind.ASSET and r.owner_id == "self"):
+    # Hermes-managed assets are not counted as reachable money; they appear only as their own tier.
+    for record in (r for r in view.records if r.kind is Kind.ASSET and r.owner_id == "self" and not _hermes(r)):
         by_class.setdefault(record.fields["liquidity"], []).append(record)
     # Overseas stock gains are taxed on the year's net result, so losses offset gains.
     us_records = [r for r in view.records if r.kind is Kind.ASSET and r.owner_id == "self"
@@ -200,7 +201,7 @@ def home_facts(view: LedgerView, *, target_price: Decimal, target_date: date,
     principal_monthly = (max(Decimal(0), mortgage_payments - mortgage_interest)
                          if mortgage_payments is not None and mortgage_interest is not None else None)
     liquid_records = [r for r in view.records if r.kind is Kind.ASSET and r.owner_id == "self"
-                      and r.fields["liquidity"] in ("immediate", "days")]
+                      and r.fields["liquidity"] in ("immediate", "days") and not _hermes(r)]
     liquid = _sum_values(view, liquid_records)
     monthly_net = _monthly_net_cash_flow(view, owner_id="self")
     savings = monthly_net * months if monthly_net is not None else None
@@ -230,7 +231,7 @@ def home_facts(view: LedgerView, *, target_price: Decimal, target_date: date,
         "liquid_assets_self": won(liquid), "projected_savings_from_monthly_net": won(savings),
         "monthly_net_cash_flow_self": won(monthly_net),
         "partner_property_equity": won(partner_equity),
-        "excluded": "restricted pension and housing-subscription balances are not counted",
+        "excluded": "restricted pension and housing-subscription balances and Hermes-managed assets are not counted",
         "assumptions": {"buy_cost_rate": str(buy_cost_rate), "sell_cost_rate": str(sell_cost_rate),
                         "savings": "current monthly net cash flow continues unchanged",
                         "cash_flow_scope": "self-owned recurring cash flows only; future and ended flows are excluded",
@@ -332,6 +333,11 @@ def _partner_property_equity(view: LedgerView) -> Decimal | None:
 def _sum_values(view: LedgerView, records: list[Any]) -> Decimal | None:
     values = [base_amount(view, record) for record in records]
     return None if any(value is None for value in values) else sum(values, Decimal(0))
+
+
+def _hermes(record: Any) -> bool:
+    """Managed by Hermes: never proposed for sale, so not counted as money the client can draw on."""
+    return record.fields.get("managed_by") == "hermes"
 
 
 def _unknown_amount_refs(view: LedgerView) -> list[str]:

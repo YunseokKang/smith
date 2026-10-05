@@ -48,7 +48,9 @@ def main(argv: list[str] | None = None) -> int:
     toss.add_argument("--owner", default=DEFAULT_OWNER, help=f"sync: owner id (default: {DEFAULT_OWNER})")
     toss.add_argument("--dry-run", action="store_true", help="sync: show planned changes without writing")
     toss.add_argument("--close-missing", action="store_true",
-                      help="sync: close positions that the snapshot no longer reports")
+                      help="sync: close positions that the snapshot no longer reports (sold)")
+    toss.add_argument("--allow-empty", action="store_true",
+                      help="sync: with --close-missing, accept an answer with no holdings at all (you sold everything)")
     report = sub.add_parser("summary", help="Net worth, allocation, liquidity and cash flow from the ledger")
     report.add_argument("--db", type=Path, default=DEFAULT_DB)
     report.add_argument("--as-of", type=_aware_datetime, help="ISO 8601 time with UTC offset (default: now)")
@@ -59,9 +61,10 @@ def main(argv: list[str] | None = None) -> int:
     macro.add_argument("--db", type=Path, default=DEFAULT_DB)
     macro.add_argument("--days", type=int, default=400, help="sync: history window in days (default: 400)")
     macro.add_argument("--as-of", type=date.fromisoformat, help="show: YYYY-MM-DD (default: today)")
-    from smith import (advise_command, doctor_command, followup_command, mail_command, realestate_command,
-                       report_command)
+    from smith import (advise_command, backup_command, doctor_command, followup_command, mail_command,
+                       realestate_command, report_command)
     advise_command.add_parser(sub, DEFAULT_DB)
+    backup_command.add_parser(sub, DEFAULT_DB)
     doctor_command.add_parser(sub, DEFAULT_DB)
     realestate_command.add_parser(sub, DEFAULT_DB)
     report_command.add_parser(sub, DEFAULT_DB)
@@ -72,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
                 "summary": _summary, "evidence": _evidence, "advise": advise_command.run,
                 "report": report_command.run, "mail": mail_command.run,
                 "research": followup_command.run_research, "proposal": followup_command.run_proposal,
-                "realestate": realestate_command.run, "doctor": doctor_command.run}
+                "realestate": realestate_command.run, "doctor": doctor_command.run, "backup": backup_command.run}
     return commands[args.command](args)
 
 
@@ -136,6 +139,14 @@ def _toss(args: argparse.Namespace) -> int:
         code = error.code if isinstance(error, TossError) else "invalid-response"
         if not args.dry_run:
             _record_sync(args.db, attempted_at, "failure", code)
+        return 1
+    if args.close_missing and not batch.records and not args.allow_empty:
+        # An empty but well-formed answer would close every position at once. Real "sold everything"
+        # is rare and confirmed by hand; a provider hiccup must not wipe the holdings.
+        print("Toss returned no holdings. Not closing every position; if you sold everything, run "
+              "`smith toss sync --close-missing --allow-empty`.")
+        if not args.dry_run:
+            _record_sync(args.db, attempted_at, "failure", "empty-snapshot")
         return 1
     result = _apply_batch(batch, args.db, dry_run=args.dry_run, close_missing=args.close_missing,
                           list_records=args.show_values)

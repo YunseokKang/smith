@@ -71,6 +71,25 @@ class DeliveryTests(unittest.TestCase):
         self.assertIsNone(self.due(THU - timedelta(minutes=30)))       # Monday passed before activation.
         self.assertEqual(self.due(NEXT_MON + timedelta(hours=2)), (NEXT_MON, [THU]))  # Missed after: sent late.
 
+    def test_a_schedule_edit_applies_from_now_without_duplicate_or_phantom_reports(self):
+        with closing(ledger.connect(self.db)) as conn:
+            self.assertEqual(delivery.reconcile_schedule(conn, CONFIG, MON), (False, None))  # First run adopts it.
+        self.publish(MON + timedelta(minutes=5), MON)
+        cases = [  # (edited schedule, when the next run sees it, slot it marks, next slot then sent on time)
+            ({"time": "08:00"}, datetime(2026, 10, 7, 7, 0, tzinfo=KST), MON.replace(hour=8), THU.replace(hour=8)),
+            ({"weekdays": ["monday", "wednesday", "thursday"]}, THU - timedelta(hours=1),
+             datetime(2026, 10, 7, 6, 0, tzinfo=KST), THU),
+        ]
+        for edit, seen, marked, following in cases:
+            with self.subTest(edit=edit):
+                config = {**CONFIG, "reports": {**CONFIG["reports"], **edit}}
+                with closing(ledger.connect(self.db)) as conn:
+                    self.assertEqual(delivery.reconcile_schedule(conn, config, seen), (True, marked))
+                    self.assertIsNone(delivery.due(conn, config, seen))   # Nothing before the edit goes out.
+                    self.assertEqual(delivery.due(conn, config, following + timedelta(minutes=5)), (following, []))
+                    self.assertEqual(delivery.reconcile_schedule(conn, config, seen), (False, None))
+                    delivery.reconcile_schedule(conn, CONFIG, seen)    # Back to Monday/Thursday 06:00.
+
     def test_clean_failures_retry_up_to_the_limit(self):
         for attempt in range(ledger.MAX_SEND_ATTEMPTS):
             self.assertEqual(self.due(MON + timedelta(minutes=attempt)), (MON, []))

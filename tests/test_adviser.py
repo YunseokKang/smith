@@ -111,7 +111,8 @@ class AdviserTests(unittest.TestCase):
     def test_case_facts_are_computed_in_code(self):
         funding = cases.funding_facts(self.view, amount=Decimal(100_000_000))
         self.assertEqual(funding["reachable_by_liquidity"]["immediate"], {"cumulative": "50000000", "covers_target": False})
-        self.assertEqual(funding["reachable_by_liquidity"]["days"], {"cumulative": "140000000", "covers_target": True})
+        # The 10M Hermes account is not reachable money (never proposed for sale); it stays a tier of its own.
+        self.assertEqual(funding["reachable_by_liquidity"]["days"], {"cumulative": "130000000", "covers_target": True})
         tiers = [(t["tier"], t["cumulative"], t["covers_target"]) for t in funding["funding_tiers"]]
         self.assertEqual(tiers, [("cash", "50000000", False), ("kr_listed_stocks", "130000000", True),
                                  ("hermes_managed", "140000000", True), ("restricted", "180000000", True),

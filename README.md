@@ -35,11 +35,12 @@ py -3.10 -m uv pip install --python .venv -e .
 | `records [--as-of TIME] [--known-at TIME] [--db PATH]` | 지정 시각에 유효한 레코드 목록. `--known-at`은 그 시각까지 기록된 내용만 사용 |
 | `toss login` / `toss logout` | 토스 client ID·secret을 OS 자격 증명 저장소에 저장·삭제. 입력은 화면에 표시되지 않는다 |
 | `toss check [--show-values]` | 허용된 조회 API를 한 번씩 호출해 연결 점검. 기본은 금액·종목을 숨긴다 |
-| `toss sync [--dry-run] [--close-missing]` | 토스 보유 주식을 snapshot으로 원장에 저장. 매수 가능 금액·환율은 참고 관측값 |
+| `toss sync [--dry-run] [--close-missing] [--allow-empty]` | 토스 보유 주식을 snapshot으로 원장에 저장. 매수 가능 금액·환율은 참고 관측값. `--close-missing`은 매도된 종목을 종료(정기 실행은 항상 사용), 보유 종목이 0개인 응답은 `--allow-empty`가 있을 때만 반영 |
 | `evidence login` / `evidence sync [--days N]` / `evidence show [--as-of DATE]` | ECOS·FRED 금리 근거 저장·조회. 키는 OS 자격 증명 저장소 |
 | `advise --case portfolio\|funding\|home [--question] [--show-payload]` | 비식별 payload로 headless 자문. 주택 목표일은 원장의 주택 목표가 있으면 그 날짜, 없으면 실행일로부터 3년 뒤. `--show-payload`는 보낼 내용만 표시 |
 | `report preview [--kind monday\|thursday] [--since TIME] [--out PATH] [--narrative] [--research]` | 시각화 보고서 HTML 미리보기(발송 안 함, `reports/`에 저장). `--narrative`는 AI 서술, `--research`는 웹 조사부터 |
-| `report run-due` / `report send-now` / `report status` | 정기 회차 발송(스케줄러용, 중복 방지·지연 발송), 즉시 발행, 발행 이력. 발행은 웹 조사와 AI 서술을 포함 |
+| `report run-due` / `report send-now` / `report status` / `report activate` | 정기 회차 발송(스케줄러용, 중복 방지·지연 발송), 즉시 발행, 발행 이력, 정기 발행 시작(이미 지난 회차는 보내지 않음). 발행은 웹 조사와 AI 서술을 포함. 설정의 요일·시각을 바꾸면 다음 정기 실행부터 새 일정이 적용되고 지난 회차는 소급하지 않는다 |
+| `backup [--out DIR] [--keep N]` | 원장의 일관된 사본을 만들고 무결성 검사를 통과한 것만 남긴다(기본 `data/backups`, 14개). `[backup] dir`을 설정하면 정기 발송 뒤 자동으로 만든다. 사본은 실제 재무 정보이므로 외장 디스크 등 직접 관리하는 곳에 둔다 |
 | `research run\|show\|topics` | 개인 정보 없이 정책·시장 웹 조사 실행·결과 보기·조사 주제 보기 |
 | `proposal list` / `proposal accept\|decline\|done KEY [--note]` | 지난 제안 목록, 제안에 대한 결정 기록(다음 보고서의 후속 점검에 반영) |
 | `realestate login\|status\|logout\|sync\|show` | 공공데이터포털·R-ONE 키 저장(화면 비표시), 보유 단지 실거래가 수집과 시세·전세 요약 |

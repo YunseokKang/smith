@@ -25,7 +25,7 @@ from smith.records import (
 logger = logging.getLogger(__name__)
 _END_OF_TIME = datetime.max.replace(tzinfo=timezone.utc)
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 _V1 = (
     """CREATE TABLE imports (
         import_id TEXT PRIMARY KEY,
@@ -305,8 +305,17 @@ _V13 = (
 # against the report they reply to.
 _LINEAGE_COLUMNS = ("known_at", "brief_id", "advice_run_ids", "config_sha256", "code_version", "data_sha256")
 _V14 = tuple(f"ALTER TABLE report_runs ADD COLUMN {column} TEXT" for column in _LINEAGE_COLUMNS)
+# The report schedule in force (weekdays, time, timezone), so a schedule edit is noticed and starts from
+# the moment it is seen instead of turning slots it never had into missed reports.
+_V15 = (
+    """CREATE TABLE schedule_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        fingerprint TEXT NOT NULL,
+        since TEXT NOT NULL
+    )""",
+)
 _MIGRATIONS = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8, 9: _V9, 10: _V10, 11: _V11, 12: _V12,
-               13: _V13, 14: _V14}
+               13: _V13, 14: _V14, 15: _V15}
 _COLUMNS = ("record_id, revision, kind, owner_id, source, status, change_type, corrects_revision, "
             "reason, effective_at, recorded_at, import_id, fields")
 
@@ -1090,6 +1099,18 @@ def mark_slot(conn: sqlite3.Connection, *, slot: datetime, kind: str, now: datet
     conn.execute(f"INSERT OR IGNORE INTO report_runs ({_REPORT_COLUMNS}) "
                  "VALUES (?, ?, ?, 'scheduled', ?, ?, NULL, '[]', NULL, NULL, 'merged', 0, NULL, ?, ?)",
                  (f"marker-{_db_time(slot)}", _db_time(slot), kind, _db_time(now), _db_time(now), reason, _db_time(now)))
+
+
+def schedule_in_force(conn: sqlite3.Connection) -> str | None:
+    """The fingerprint of the report schedule last seen by the scheduler, or None before the first run."""
+    row = conn.execute("SELECT fingerprint FROM schedule_state WHERE id = 1").fetchone()
+    return None if row is None else row[0]
+
+
+def set_schedule(conn: sqlite3.Connection, *, fingerprint: str, now: datetime) -> None:
+    conn.execute("INSERT INTO schedule_state (id, fingerprint, since) VALUES (1, ?, ?) "
+                 "ON CONFLICT(id) DO UPDATE SET fingerprint = excluded.fingerprint, since = excluded.since",
+                 (fingerprint, _db_time(now)))
 
 
 def known_slots(conn: sqlite3.Connection) -> set[str]:

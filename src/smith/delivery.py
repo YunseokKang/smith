@@ -73,12 +73,42 @@ def due(conn: Any, config: dict[str, Any], now: datetime) -> tuple[datetime, lis
 def activate(conn: Any, config: dict[str, Any], now: datetime) -> datetime | None:
     """Start scheduled delivery at `now`: the latest slot that already passed is marked so it is not
     sent late. Slots after activation that are missed (PC off) are still sent late."""
+    slot = _mark_latest(conn, config, now, "before-activation")
+    ledger.set_schedule(conn, fingerprint=schedule_fingerprint(config), now=now)
+    return slot
+
+
+def schedule_fingerprint(config: dict[str, Any]) -> str:
+    """What decides the slots: weekdays (order-insensitive), time and timezone."""
+    reports = config["reports"]
+    return json.dumps({"weekdays": sorted(reports["weekdays"], key=_WEEKDAY_INDEX.__getitem__),
+                       "time": reports["time"], "timezone": config["app"]["timezone"]}, sort_keys=True)
+
+
+def reconcile_schedule(conn: Any, config: dict[str, Any], now: datetime) -> tuple[bool, datetime | None]:
+    """Make an edited schedule apply from now, as activation does. Returns (changed, marked slot).
+
+    Slots are recomputed from the current config, so without this a time moved from 06:00 to 08:00 on a
+    day already reported would make that day's 08:00 slot look missed and send the report again, and a
+    newly added weekday that already passed would go out late as if the PC had been off. The latest slot
+    the new schedule would already have had is marked instead, so nothing before the change is sent.
+    The first call only records the schedule in force.
+    """
+    fingerprint = schedule_fingerprint(config)
+    previous = ledger.schedule_in_force(conn)
+    if previous == fingerprint:
+        return False, None
+    marked = None if previous is None else _mark_latest(conn, config, now, "schedule-changed")
+    ledger.set_schedule(conn, fingerprint=fingerprint, now=now)  # After the marker: a crash re-marks (idempotent).
+    return previous is not None, marked
+
+
+def _mark_latest(conn: Any, config: dict[str, Any], now: datetime, reason: str) -> datetime | None:
     recent = slots_between(config["reports"], config["app"]["timezone"], now - timedelta(days=8), now)
     if not recent:
         return None
     slot = recent[-1]
-    ledger.mark_slot(conn, slot=slot, kind="thursday" if slot.weekday() == 3 else "monday", now=now,
-                     reason="before-activation")
+    ledger.mark_slot(conn, slot=slot, kind="thursday" if slot.weekday() == 3 else "monday", now=now, reason=reason)
     return slot
 
 

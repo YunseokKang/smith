@@ -94,7 +94,10 @@ def facts(view: LedgerView, today: date, household: dict[str, Any] | None) -> di
     pensions = [base_amount(view, r) for r in mine
                 if r.kind is Kind.ASSET and r.fields.get("account_type") in ("pension_savings", "irp")]
     unconverted += sum(1 for amount in pensions if amount is None)
-    us = [r for r in mine if r.kind is Kind.ASSET and r.fields.get("market") == "US" and r.fields.get("symbol")]
+    # Hermes-managed positions are never proposed for sale; their realized gains still share the yearly
+    # deduction, which the harvest proposal says (`hermes_us`).
+    listed = [r for r in mine if r.kind is Kind.ASSET and r.fields.get("market") == "US" and r.fields.get("symbol")]
+    us = [r for r in listed if r.fields.get("managed_by") != "hermes"]
     gains = [_gain(view, r) for r in us]
     known = [g for g in gains if g is not None]
     return {
@@ -105,6 +108,7 @@ def facts(view: LedgerView, today: date, household: dict[str, Any] | None) -> di
         "has_irp": "irp" in accounts.values(), "has_isa": "isa" in accounts.values(),
         "us_gains": sum((g for g in known if g > 0), Decimal(0)), "us_losses": sum((g for g in known if g < 0), Decimal(0)),
         "us_unknown": len(gains) - len(known), "us_positions": len(us),
+        "hermes_managed": any(r.fields.get("managed_by") == "hermes" for r in mine if r.kind is Kind.ASSET),
         "homes": [(r.owner_id, base_amount(view, r), r.fields.get("occupancy")) for r in view.records
                   if r.kind is Kind.ASSET and r.fields["category"] == "real_estate"],
         "home_records": [{"record_id": r.record_id, "owner": r.owner_id, "value": base_amount(view, r),

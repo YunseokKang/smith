@@ -33,7 +33,7 @@ from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import check_outbound, mask_identifiers
 from smith.report_data import build_report
 
-PROMPT_VERSION = "mail-answer-v1"
+PROMPT_VERSION = "mail-answer-v2"
 MODEL = "fable"
 BUDGET_USD = "3.00"
 TIMEOUT_SECONDS = 600
@@ -74,7 +74,9 @@ Hard rules (checked by code; a failing answer is rejected):
   announcement, or "tax" (Smith's own tax rules in the input), and "현행 법령 확인 필요". Refs go only in
   refs, never in the prose.
 - No certainty about prices, rates, returns, approvals or guarantees. Never state the client's legal
-  home count as a fact."""
+  home count as a fact.
+- Assets managed by Hermes (managed_by "hermes") are never to be sold or changed directly: say to discuss
+  them with Hermes. Assets of household_member_* are not the client's legal property."""
 
 
 @dataclass(frozen=True)

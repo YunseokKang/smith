@@ -189,6 +189,25 @@ class NarrativeTests(unittest.TestCase):
         self.assertEqual([a[0] for a in audits], ["report-narrative", "report-narrative-repair"])
         self.assertEqual(audits[0][2]["raw"], first)                           # Raw output is audited too.
 
+    def test_a_block_failing_twice_is_restored_from_the_output_its_path_indexes(self):
+        # The repair returns fewer insights than the first output; the still-failing second insight must come
+        # back from the first output with its memo, not vanish (or be swapped for another block).
+        data = self.data()
+        good = {"title": "금리 흐름", "body": "시장 금리가 움직이고 있습니다.",
+                "implication": "변동금리 대출 이자에 영향을 줄 수 있습니다.", "refs": ["R1"]}
+        unsourced = {"title": "정책 변화", "body": "정부 정책이 바뀌었습니다.", "implication": "주의가 필요합니다.",
+                     "refs": []}
+        outputs = [dict(EMPTY, insights=[good, unsourced]), dict(EMPTY, insights=[dict(unsourced, title="다른 제목")])]
+        calls = []
+
+        def run(args, **kwargs):
+            calls.append(1)
+            return runner_returning(outputs[len(calls) - 1])(args, **kwargs)
+        result = narrative.write(data["view"], data, self.brief(), secrets=[], executable=Path("claude.exe"), runner=run)
+        self.assertEqual(result["dropped"], ["insights[1]:no-source"])
+        titles = [(item["title"], item.get("memo")) for item in result["output"]["insights"]]
+        self.assertEqual(titles, [("금리 흐름", None), ("정책 변화", narrative.MEMOS["no-source"])])
+
     def test_narrate_uses_the_pinned_brief_and_falls_back_only_for_the_same_topics(self):
         view = self.data()["view"]
         topics = [{"ref": t.ref, "title": t.title, "question": t.question} for t in research.topics(view)]

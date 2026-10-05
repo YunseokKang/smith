@@ -61,17 +61,35 @@ class ReportTests(unittest.TestCase):
             ledger.apply_import(self.conn, batch, recorded_at=at)
 
     def test_change_decomposition_adds_up_and_separates_causes(self):
-        change = build_report(self.conn, as_of=T1, known_at=T1, baseline=T0, kind="monday")["change"]
+        data = build_report(self.conn, as_of=T1, known_at=T1, baseline=T0, kind="monday")
+        change = data["change"]
         parts = change["parts"]
         # Start: 10*100*1300 + 1,000,000 - 500,000 = 1,800,000. End: 1320*1400 + 1,500,000 - 400,000 + 1,000,000.
         self.assertEqual((change["start"], change["end"]), (Decimal(1_800_000), Decimal(3_948_000)))
-        self.assertEqual(parts["correction"], Decimal(100_000))
+        # The typo fix restates the start to 1,900,000; it is reported apart and is not part of the change.
+        self.assertEqual((change["correction"], change["restated_start"]), (Decimal(100_000), Decimal(1_900_000)))
+        self.assertNotIn("correction", parts)
         self.assertEqual(parts["market"], Decimal(130_000))      # 10 shares x 10 USD x 1300
         self.assertEqual(parts["trades"], Decimal(286_000 + 1_000_000))  # 2 shares x 110 x 1300, new house
         self.assertEqual(parts["fx"], Decimal(132_000))          # 1320 USD x 100
         self.assertEqual(parts["cash_savings"], Decimal(400_000))  # 1,100,000 restated -> 1,500,000
         self.assertEqual(parts["debt"], Decimal(100_000))
         self.assertEqual(sum(parts.values()), change["total"])
+        self.assertEqual((change["total"], data["kpis"]["net_worth_change"]), (Decimal(2_048_000), Decimal(2_048_000)))
+        self.assertIn("실제 변동이 아니어서", render(data)[1])
+
+    def test_a_breakdown_that_does_not_add_up_is_withheld_not_fatal(self):
+        from unittest import mock
+
+        from smith import report_data
+        with mock.patch.object(report_data, "_record_change", return_value={"market": Decimal(1)}), \
+                self.assertLogs("smith.report_data", level="WARNING") as logs:
+            data = build_report(self.conn, as_of=T1, known_at=T1, baseline=T0, kind="monday")
+        self.assertNotRegex(" ".join(logs.output), r"\d{4,}")    # No amounts in the log.
+        self.assertFalse(data["change"]["balanced"])
+        _, html = render(data)
+        self.assertIn("분해를 싣지 않았습니다", html)
+        self.assertNotIn("시장 손익(시세 변동)", html)
 
     def test_first_report_is_a_baseline_and_thursday_is_short(self):
         data = build_report(self.conn, as_of=T1, known_at=T1, baseline=None, kind="thursday")
@@ -126,8 +144,47 @@ class ReportTests(unittest.TestCase):
         self.assertIn("이어가시는 것이 합리적", proposals["prepayment"].title)  # 5% loan > 2.5% x (1 - 15.4%).
         subject, html = render(data)
         self.assertIn("제안 3건", subject)
+        self.assertIn("대응 필요", subject)          # Act-now proposals: the status says so.
         self.assertIn("이번 주 가장 중요한 한 가지", html)
         self.assertIn("목표까지 지금 궤도에 있습니까", html)
+
+    def test_status_names_missing_inputs_and_judgements_it_could_not_make(self):
+        data = build_report(self.conn, as_of=T1, known_at=T1, baseline=None, kind="thursday")
+        self.assertIn("cash-flows", [r.key for r in data["requests"] if r.priority == "must"])
+        # A variable loan but no CD rate evidence: undetermined, never "all clear".
+        self.assertEqual({u.topic for u in data["advice"]["undetermined"]},
+                         {"대출 추가 상환과 예금 비교", "변동금리 대출 이자 변화"})
+        subject, html = render(data)
+        self.assertIn("주의", subject)
+        for text in ("판단에 꼭 필요한 자료 1건", "다음에 확인할 것", "자료가 부족해 이번에 판단하지 못한 것",
+                     "근거의 성격"):                   # Thursday cards keep the certainty label.
+            self.assertIn(text, html)
+        self.assertNotIn("데이터가 모두 최신이며 누락이 없습니다", html)
+
+    def test_hermes_assets_are_never_spendable_or_proposed_for_sale(self):
+        later = datetime(2026, 10, 2, tzinfo=timezone.utc)
+        self.apply("h1", later, [rec("kis", "asset", 1, later, category="stock", account_type="brokerage",
+                                     currency="USD", value="2000", valuation_method="market", liquidity="days",
+                                     symbol="HRM", market="US", quantity="10", unit_price="200", average_cost="100",
+                                     managed_by="hermes")])
+        data = build_report(self.conn, as_of=later, known_at=later, baseline=None, kind="monday")
+        cash = data["sectors"]["cash"]
+        self.assertEqual(cash["liquidity"]["days"], Decimal(1320 * 1400))    # The client's own US shares only.
+        self.assertEqual(cash["hermes"], Decimal(2000 * 1400))
+        harvest = next(p for p in data["advice"]["proposals"] if p.key == "overseas-harvest")
+        self.assertEqual(harvest.figures["gains"], Decimal(12 * 20 * 1400))  # The Hermes gain is left out.
+        self.assertIn("Hermes와 상의", harvest.risks)
+        self.assertIn("Hermes 운용", render(data)[1])
+
+    def test_toss_cash_is_shown_as_not_collected(self):
+        data = build_report(self.conn, as_of=T1, known_at=T1, baseline=None, kind="monday")
+        data["sectors"]["cash"]["toss_cash"] = {"synced": True, "manual_records": 0, "manual_as_of": None,
+                                                "buying_power": [{"currency": "KRW", "value": Decimal(500_000),
+                                                                  "observed_at": T1}]}
+        _, html = render(data)
+        self.assertIn("<b>미수집</b>", html)
+        self.assertIn("매수 가능 금액은 500,000원", html)
+        self.assertIn("토스증권 예수금: API가 제공하지 않아 미수집", html)
 
     def test_proposals_never_treat_unconverted_amounts_as_known(self):
         later = datetime(2026, 10, 2, tzinfo=timezone.utc)

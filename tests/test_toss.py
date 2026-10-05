@@ -153,6 +153,28 @@ class TossSyncTests(unittest.TestCase):
         states = ledger.record_states(self.conn, as_of=now, known_at=now)
         self.assertEqual([s.record.status for s in states], [Status.ACTIVE])
 
+    def test_the_scheduled_sync_closes_sold_positions_but_never_all_at_once(self):
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+        from pathlib import Path
+
+        from smith import cli
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        db = Path(directory.name) / "smith.db"
+
+        def run(*items: dict, extra: tuple = ()) -> int:
+            batch = collect_snapshot(TossClient("id", "secret", transport=sync_transport(*items)), owner_id="self",
+                                     collected_at=datetime.now(timezone.utc))
+            with mock.patch("smith.credentials.load_toss_client", return_value=("id", "secret")), \
+                    mock.patch("smith.toss_sync.collect_snapshot", return_value=batch), redirect_stdout(io.StringIO()):
+                return cli.main(["toss", "sync", "--close-missing", "--db", str(db), *extra])
+        self.assertEqual(run(holding("AAA", "1000"), holding("BBB", "2000")), 0)
+        self.assertEqual(run(holding("AAA", "1000")), 0)              # BBB was sold: closed, sync not blocked.
+        self.assertEqual(run(), 1)                                     # No holdings at all: refused.
+        self.assertEqual(run(extra=("--allow-empty",)), 0)             # Confirmed by hand.
+
     def test_unsupported_currency_aborts_the_whole_sync(self):
         with self.assertRaises(SyncError):
             self.sync(5, holding("AAA", "1000"), holding("HKX", "10", currency="HKD"))

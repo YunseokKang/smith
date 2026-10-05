@@ -20,3 +20,9 @@ weekdays = ["monday", "thursday"]
 time = "06:00"
 delivery = "gmail"
 # Actual recipient and credentials belong in ignored local configuration.
+
+# Optional, in the local config: a verified ledger copy after each sent report (see `smith backup`).
+# Backups hold real financial data; prefer a drive you control, never Git or a shared cloud folder.
+# [backup]
+# dir = "E:/smith-backups"
+# keep = 14

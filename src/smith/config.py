@@ -19,6 +19,7 @@ KNOWN_KEYS = {
     "reports": {"enabled", "weekdays", "time", "delivery"},
     "mail": {"recipient", "answer_replies"},
     "household": {"birth_year", "partner_birth_year", "retirement_monthly_spend", "marriage_registered", "cohabiting"},
+    "backup": {"dir", "keep"},
 }
 PROPERTY_KEYS = {"lawd_cd", "dong", "apt_name", "exclusive_area_m2", "acquired_year", "acquired_price"}
 
@@ -74,6 +75,7 @@ def load_config(path: Path) -> dict:
     if not isinstance(mail.get("answer_replies", False), bool):
         raise ValueError("mail.answer_replies must be a boolean")
     _check_household(config.get("household", {}))
+    _check_backup(config.get("backup", {}))
     if "properties" in config:
         from smith.realestate import RealEstateError, validate_properties
         try:
@@ -112,6 +114,17 @@ def _check_household(household: object) -> None:
     for field in ("marriage_registered", "cohabiting"):
         if not isinstance(household.get(field, False), bool):
             raise ValueError(f"household.{field} must be a boolean")
+
+
+def _check_backup(backup: object) -> None:
+    """Optional `[backup]`: where `run-due` copies the ledger after each sent report, and how many to keep."""
+    if not isinstance(backup, dict):
+        raise ValueError("backup must be a table")
+    if "dir" in backup and (not isinstance(backup["dir"], str) or not backup["dir"].strip()):
+        raise ValueError("backup.dir must be a folder path")
+    keep = backup.get("keep", 1)
+    if not isinstance(keep, int) or isinstance(keep, bool) or not 1 <= keep <= 1000:
+        raise ValueError("backup.keep must be a whole number from 1 to 1000")
 
 
 def _is_email(value: object) -> bool:

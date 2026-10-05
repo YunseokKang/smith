@@ -3,17 +3,20 @@
 Every number a report shows is computed here from one ledger snapshot (see docs/report-design.md
 §4-§6). The narrative layer may explain these numbers but never produces new ones.
 """
+import logging
 import sqlite3
 from collections.abc import Iterable
 from datetime import date, datetime, timedelta
 from decimal import Decimal, localcontext
 from typing import Any
 
-from smith import cases, ledger, proposals, realestate
+from smith import cases, checklist, ledger, proposals, realestate
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import LedgerView, base_amount, load_view
 from smith.records import Kind, RecordInput, Status
 from smith.summary import BASE_CURRENCY, DECIMAL_PRECISION, build_summary, recurring_active
+
+logger = logging.getLogger(__name__)
 
 CATEGORY_LABELS = {
     "cash": "현금", "deposit": "예금", "installment_savings": "적금·청약", "stock": "주식", "fund": "펀드",
@@ -21,10 +24,11 @@ CATEGORY_LABELS = {
     "crypto": "가상자산", "unclassified": "구성 미상 증권", "other": "기타",
 }
 LIQUIDITY_LABELS = {"immediate": "즉시", "days": "수일 내", "months": "수개월", "restricted": "인출 제한"}
+HERMES_LABEL = "Hermes 운용"
+# Real changes only: a correction of a past input restates the start and is shown apart (design §6).
 COMPONENT_LABELS = {
     "market": "시장 손익(시세 변동)", "fx": "환율 효과", "trades": "매매·입출금·신규(추정)",
     "cash_savings": "현금·예금 증감", "revaluation": "재평가(부동산 등)", "debt": "부채 상환",
-    "correction": "과거 입력 정정",
 }
 _CASH_LIKE = ("cash", "deposit", "installment_savings")
 _MONTHS = {"monthly": 1, "quarterly": 3, "annual": 12}
@@ -61,6 +65,7 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     return {"kind": kind, "as_of": as_of, "baseline": baseline, "kpis": kpis,
             "change": change, "timeline": _timeline(view), "sectors": sectors,
             "advice": proposals.build(view, kpis, sectors, active=ledger.active_proposals(conn), household=household),
+            "requests": checklist.requests(view, household),
             "household_profile": _profile(household, as_of),
             "completeness": {"complete": view.summary.complete, "areas": view.summary.incomplete_areas,
                              "unconverted": view.summary.unconverted},
@@ -69,10 +74,13 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
 
 
 def decompose(conn: sqlite3.Connection, t0: datetime, t1: datetime, known_at: datetime) -> dict[str, Any]:
-    """Split the net-worth change between t0 and t1 into causes whose sum equals the change.
+    """Split the real net-worth change between t0 and t1 into causes whose sum equals it.
 
-    Corrections recorded after t0 restate the starting point; their effect is reported separately
-    and is not a real change. Positions with quantity and price split into market, trade and FX parts.
+    Corrections recorded after t0 restate the starting point. They are not a real change (design §6),
+    so `total` runs from the restated start and the restatement is reported apart as `correction`.
+    Positions with quantity and price split into market, trade and FX parts. If the parts do not add up
+    (a defect, never rounding), `balanced` is False and the report shows the total without the parts:
+    one wrong breakdown must not stop the report from going out.
     """
     with ledger.snapshot(conn):
         original = _active(conn, t0, t0)
@@ -89,17 +97,18 @@ def decompose(conn: sqlite3.Connection, t0: datetime, t1: datetime, known_at: da
         context.prec = DECIMAL_PRECISION
         start = _net_worth(original, rates0, unconverted)
         restated_start = _net_worth(restated, rates0_restated, unconverted)
-        parts["correction"] = restated_start - start
         for record_id in sorted(set(restated) | set(current)):
             before, after = restated.get(record_id), current.get(record_id)
             for key, amount in _record_change(before, after, rates0_restated, rates1, unconverted).items():
                 parts[key] += amount
         end = _net_worth(current, rates1, unconverted)
-        total = end - start
-        if not unconverted and abs(sum(parts.values()) - total) > Decimal("0.5"):
-            raise AssertionError("change components do not add up")
-    return {"start": start, "end": end, "total": total, "parts": parts, "complete": not unconverted,
-            "unconverted_currencies": sorted(unconverted)}
+        total = end - restated_start
+        balanced = bool(unconverted) or abs(sum(parts.values()) - total) <= Decimal("0.5")
+    if not balanced:
+        logger.warning("Net-worth change components do not add up; the breakdown is withheld from the report")
+    return {"start": start, "restated_start": restated_start, "end": end, "total": total,
+            "correction": restated_start - start, "parts": parts, "balanced": balanced,
+            "complete": not unconverted, "unconverted_currencies": sorted(unconverted)}
 
 
 def _active(conn: sqlite3.Connection, as_of: datetime, known_at: datetime) -> dict[str, RecordInput]:
@@ -175,10 +184,13 @@ def _profile(household: dict[str, Any] | None, as_of: datetime) -> dict[str, Any
 
 
 def _liquidity(view: LedgerView) -> dict[str, Decimal | None]:
-    """Asset totals by liquidity; a bucket holding an amount without an FX rate is unknown, not partial."""
+    """Asset totals by liquidity; a bucket holding an amount without an FX rate is unknown, not partial.
+
+    Hermes-managed assets are left out: Smith never proposes selling or changing them, so they are not
+    money the client can draw on for a reserve, a deposit return or a home (see `_hermes_total`)."""
     totals: dict[str, Decimal | None] = {key: Decimal(0) for key in LIQUIDITY_LABELS}
     for record in view.records:
-        if record.kind is not Kind.ASSET:
+        if record.kind is not Kind.ASSET or is_hermes(record):
             continue
         key, amount = record.fields["liquidity"], base_amount(view, record)
         current = totals.get(key, Decimal(0))
@@ -254,9 +266,33 @@ def _cash_sector(view: LedgerView) -> dict[str, Any]:
     reserve = None if outflow is None else outflow * EMERGENCY_MONTHS
     immediate = liquidity["immediate"]
     gap = None if reserve is None or immediate is None else max(Decimal(0), reserve - immediate)
-    return {"ladder": [(LIQUIDITY_LABELS[k], liquidity[k]) for k in ("immediate", "days", "months", "restricted")],
-            "liquidity": liquidity, "immediate": immediate, "reserve_target": reserve, "reserve_gap": gap,
-            "emergency_months_assumption": EMERGENCY_MONTHS}
+    ladder = [(LIQUIDITY_LABELS[k], liquidity[k]) for k in ("immediate", "days", "months", "restricted")]
+    hermes = _hermes_total(view)
+    if hermes != 0:
+        ladder.append((HERMES_LABEL, hermes))
+    return {"ladder": ladder, "liquidity": liquidity, "immediate": immediate, "reserve_target": reserve,
+            "reserve_gap": gap, "emergency_months_assumption": EMERGENCY_MONTHS, "hermes": hermes,
+            "toss_cash": _toss_cash(view)}
+
+
+def is_hermes(record: RecordInput) -> bool:
+    """Managed by Hermes, the separate fund manager: never proposed for sale or counted as spendable."""
+    return record.fields.get("managed_by") == "hermes"
+
+
+def _hermes_total(view: LedgerView) -> Decimal | None:
+    return _total(base_amount(view, r) for r in view.records if r.kind is Kind.ASSET and is_hermes(r))
+
+
+def _toss_cash(view: LedgerView) -> dict[str, Any]:
+    """The Toss API has no cash balance (only buying power), so brokerage cash is never collected
+    automatically. Report that plainly, with buying power as a reference and any manual cash records."""
+    toss = any(s["source"] == "toss" for s in view.summary.freshness)
+    power = [r for r in view.summary.reference if r["metric"] == "cash_buying_power"]
+    manual = [r for r in view.records if r.kind is Kind.ASSET and r.fields["category"] == "cash"
+              and r.fields.get("account_type") == "brokerage"]
+    return {"synced": toss, "buying_power": power, "manual_records": len(manual),
+            "manual_as_of": max((r.effective_at for r in manual), default=None)}
 
 
 def _total(amounts: Iterable[Decimal | None]) -> Decimal | None:
@@ -296,8 +332,7 @@ def _securities_sector(view: LedgerView) -> dict[str, Any]:
             "positions": positions, "unclassified": _dec(facts["unclassified_securities"]),
             "unrealized_gain": sum(known, Decimal(0)) if known else None,
             "unrealized_gain_counted": len(known), "unrealized_gain_missing": len(gains) - len(known),
-            "hermes": _total(base_amount(view, r) for r in view.records
-                             if r.kind is Kind.ASSET and r.fields.get("managed_by") == "hermes")}
+            "hermes": _hermes_total(view)}
 
 
 def _real_estate_sector(view: LedgerView) -> dict[str, Any]:
