@@ -95,10 +95,7 @@ def _facts(view: Any, args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _secrets() -> list[str]:
-    """Every secret Smith stores, so the outbound check can refuse a payload that contains one."""
-    toss = credentials.load_toss_client() or ()
-    gmail = credentials.load_gmail() or ()
-    return [*toss, *gmail, *(credentials.load_api_key(p) or "" for p in credentials.EVIDENCE_PROVIDERS)]
+    return credentials.all_secrets()
 
 
 def _ask(args: argparse.Namespace, view: Any, question: str, context: dict[str, Any], payload: str,

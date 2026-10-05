@@ -5,7 +5,7 @@ Every amount here is computed in code from one ledger snapshot. The narrative st
 reorder and explain these proposals with policy and market briefs, but it never invents an amount.
 Text is formal Korean addressed to the client; terms are explained where they first appear.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import ROUND_CEILING, Decimal
 from typing import Any
@@ -41,6 +41,16 @@ class Proposal:
     reconsider: str    # The condition that would change this judgement.
     certainty: str     # 계산 / 가정 / 세법 기준(확인 필요) / 자료 요청
     figures: dict[str, Decimal] = field(default_factory=dict)  # Inputs for verification (6d).
+    # Follow-up lifecycle (§10.6): the identity names what a decision is about (for example the lease due
+    # date or the tax year); a decision stands until the identity changes or a watched figure moves by more
+    # than `tolerance` (relative) from the figures the proposal was raised on.
+    identity: str = ""
+    watch: tuple[str, ...] = ()
+    tolerance: Decimal = Decimal("0.2")
+    times_shown: int = 0  # Delivered reports that already carried this instance.
+    renewed: bool = True  # New identity or materially changed figures: a new instance when delivered.
+    context: str = ""     # Market and policy context added by the narrative stage (verified, sourced).
+    links: tuple[tuple[str, str], ...] = ()  # (title, https URL) sources for `context`.
 
 
 @dataclass(frozen=True)
@@ -52,13 +62,55 @@ class Track:
     detail: str
 
 
-def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any]) -> dict[str, Any]:
-    """Return proposals (most urgent first) and the strategy tracks for the Monday edition."""
+def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
+          active: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Return proposals (most urgent first), the strategy tracks and the follow-up of earlier proposals.
+
+    `active` maps proposal identities to their current instance (ledger.active_proposals). Unless the
+    proposal is renewed, a declined or done instance is not raised again, an accepted one moves to
+    `in_progress`, and an open one carries how often it was shown.
+    """
     facts = _facts(view, kpis, sectors)
     rules = (_lease_return, _emergency_reserve, _surplus_plan, _pension_credit, _prepayment, _variable_rate)
     found = [(i, p) for i, rule in enumerate(rules) if (p := rule(facts)) is not None]
-    proposals = [p for _, p in sorted(found, key=lambda item: (item[1].priority, item[0]))]
-    return {"proposals": proposals, "strategy": _strategy(facts), "assumptions": _assumptions()}
+    ranked = [p for _, p in sorted(found, key=lambda item: (item[1].priority, item[0]))]
+    active = active or {}
+    proposals, in_progress = [], []
+    for proposal in ranked:
+        proposal = replace(proposal, identity=proposal.identity or proposal.key)
+        current = active.get(proposal.identity)
+        if current is None or materially_changed(proposal, current["figures"]):
+            proposals.append(replace(proposal, renewed=True))
+        elif current["status"] == "accepted":
+            in_progress.append(proposal)
+        elif current["status"] == "open":
+            proposals.append(replace(proposal, times_shown=current["times_shown"], renewed=False))
+    decided = [item for item in active.values() if item["status"] in ("declined", "done")]
+    return {"proposals": proposals, "in_progress": in_progress, "decided": decided,
+            "strategy": _strategy(facts), "assumptions": _assumptions()}
+
+
+def materially_changed(proposal: Proposal, anchor: dict[str, str]) -> bool:
+    """True when a watched figure moved by more than the tolerance from the anchor (the figures the
+    instance was raised on). Comparing with the anchor, not the last report, adds hysteresis."""
+    for name in proposal.watch:
+        if name not in proposal.figures:
+            continue
+        if name not in anchor:
+            return True
+        base, now = Decimal(anchor[name]), proposal.figures[name]
+        if base == 0:
+            if now != 0:
+                return True
+        elif abs(now - base) / abs(base) > proposal.tolerance:
+            return True
+    return False
+
+
+def snapshot(proposal: Proposal) -> dict[str, Any]:
+    """What the ledger keeps about a delivered proposal."""
+    return {"key": proposal.key, "identity": proposal.identity or proposal.key, "renewed": proposal.renewed,
+            "figures": {name: str(value) for name, value in proposal.figures.items()}}
 
 
 # --- facts ------------------------------------------------------------------------------------------------
@@ -136,7 +188,8 @@ def _lease_return(facts: dict[str, Any]) -> Proposal | None:
                      f"{short_won(surplus)}이 그대로 쌓인다고 보면, 만기 때 약 {short_won(accumulated)}으로 필요액의 "
                      f"{percent(coverage, 0)}입니다.{overlap}")
     return Proposal(
-        key="lease-return", priority=priority,
+        key="lease-return", priority=priority, identity=f"lease-return:{lease['due']}",
+        watch=("amount", "accumulated"), tolerance=Decimal("0.15"),
         title=f"{lease['due']:%Y년 %m월} 돌려드려야 할 전세보증금 {short_won(amount)}의 반환 방법을 "
               f"{deadline:%Y년 %m월}까지 정해 두시길 권합니다.",
         why=(f"전세보증금은 계약이 끝나면 세입자에게 돌려줘야 하는, 날짜와 금액이 정해진 큰 지출입니다(남은 기간 {months}개월)."
@@ -162,7 +215,7 @@ def _emergency_reserve(facts: dict[str, Any]) -> Proposal | None:
     priority = 1 if months_cover is not None and months_cover < 1 else 2
     days = facts["summary"].by_liquidity.get("days", Decimal(0))
     return Proposal(
-        key="emergency-reserve", priority=priority,
+        key="emergency-reserve", priority=priority, watch=("gap", "target"), tolerance=Decimal("0.25"),
         title=f"바로 꺼내 쓸 수 있는 비상금을 {short_won(cash['reserve_target'])}까지 {short_won(gap)} 더 마련하시길 권합니다.",
         why=(f"비상금은 실직·질병처럼 예상하지 못한 일에 대비해 손해 없이 바로 꺼낼 수 있는 돈입니다. 지금은 월 지출의 "
              f"{'미상' if months_cover is None else f'{months_cover:.1f}개월'}분({short_won(cash['immediate'])})입니다. "
@@ -182,7 +235,7 @@ def _surplus_plan(facts: dict[str, Any]) -> Proposal | None:
     if surplus is None or surplus <= 0 or summary.monthly_transfers > 0:
         return None
     return Proposal(
-        key="surplus-plan", priority=2,
+        key="surplus-plan", priority=2, watch=("surplus",),
         title=f"매월 남는 약 {short_won(surplus)}의 쓰임새를 정해 자동이체로 묶어 두시길 권합니다.",
         why=(f"수입 {short_won(summary.monthly_inflow)}에서 생활비·대출 상환·보험료 {short_won(summary.monthly_outflow)}을 "
              f"빼면 매월 {short_won(surplus)}이 남습니다. 그런데 이 돈이 어디로 가는지(저축·투자 이체)는 기록되어 있지 않습니다. "
@@ -202,7 +255,7 @@ def _pension_credit(facts: dict[str, Any]) -> Proposal | None:
     today = facts["today"]
     maximum = PENSION_CREDIT_LIMIT * PENSION_CREDIT_RATE
     return Proposal(
-        key="pension-credit", priority=1 if today.month >= 10 else 3,
+        key="pension-credit", priority=1 if today.month >= 10 else 3, identity=f"pension-credit:{today.year}",
         title=f"올해 연금저축·IRP 납입액을 확인해 세액공제 한도를 {today.year}년 12월 31일 전에 채우시길 권합니다.",
         why=("연금저축과 IRP(개인형 퇴직연금)에 넣은 돈은 합해서 연 900만 원(연금저축만은 600만 원)까지 세금을 돌려받습니다"
              f"(세액공제). 총급여가 5,500만 원을 넘으면 공제율은 13.2%(소득세 12%와 지방소득세 1.2%를 합한 실효율)로, "
@@ -237,7 +290,8 @@ def _prepayment(facts: dict[str, Any]) -> Proposal | None:
                "close": (f"차이가 {percent(DECISION_MARGIN, 1)}p보다 작아 어느 쪽도 뚜렷이 낫지 않습니다. 이럴 때는 필요할 때 "
                          "다시 꺼내 쓸 수 있는 예금이 더 유연합니다.")}
     return Proposal(
-        key="prepayment", priority=2 if verdict == "deposit" else 3,
+        key="prepayment", priority=2 if verdict == "deposit" else 3, identity=f"prepayment:{verdict}",
+        watch=("loan_rate", "deposit_after_tax"), tolerance=Decimal("0.15"),
         title=titles[verdict],
         why=(f"갚을 수 있는 대출 중 금리가 가장 높은 것은 {label}({percent(rate)})입니다. 대출을 갚으면 그만큼의 이자를 확실히 "
              f"아끼는 '세금 없는 수익'과 같습니다. 같은 1,000만 원을 단기 예금에 두면 연 {short_won(example * deposit)}"
@@ -263,7 +317,7 @@ def _variable_rate(facts: dict[str, Any]) -> Proposal | None:
     one = next(s["monthly_increase"] for s in debt["shocks"] if s["shock"] == Decimal("0.01"))
     direction = "내렸습니다" if change < 0 else "올랐습니다" if change > 0 else "그대로입니다"
     return Proposal(
-        key="variable-rate", priority=3,
+        key="variable-rate", priority=3, watch=("variable_total", "monthly_change"), tolerance=Decimal("0.3"),
         title="다음 대출 금리 재산정 때 월 이자가 얼마나 바뀔지 미리 확인해 두시길 권합니다.",
         why=(f"변동금리 대출 {short_won(total)}은 몇 달마다 시장 금리에 맞춰 이자율이 다시 정해집니다. 지난 1년 단기 시장 금리"
              f"(CD 91일물)는 {abs(cd['change_12m']):.2f}%p {direction}. 대출 금리가 같은 폭으로 바뀌면 월 이자는 약 "

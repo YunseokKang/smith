@@ -25,7 +25,7 @@ from smith.records import (
 logger = logging.getLogger(__name__)
 _END_OF_TIME = datetime.max.replace(tzinfo=timezone.utc)
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 10
 _V1 = (
     """CREATE TABLE imports (
         import_id TEXT PRIMARY KEY,
@@ -172,7 +172,62 @@ _V8 = (
     "ALTER TABLE report_runs_v8 RENAME TO report_runs",
     "CREATE UNIQUE INDEX report_runs_slot ON report_runs(slot) WHERE slot IS NOT NULL",
 )
-_MIGRATIONS = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8}
+# Research briefs (web findings gathered without household data) and the proposal follow-up log.
+_V9 = (
+    """CREATE TABLE research_briefs (
+        brief_id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        topics TEXT NOT NULL,
+        outcome TEXT NOT NULL CHECK (outcome IN ('success', 'failure')),
+        error_code TEXT,
+        model TEXT,
+        cost_usd TEXT,
+        brief TEXT
+    )""",
+    """CREATE TABLE proposal_log (
+        key TEXT PRIMARY KEY,
+        fingerprint TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('open', 'accepted', 'declined', 'done')),
+        first_shown_at TEXT NOT NULL,
+        last_shown_at TEXT NOT NULL,
+        last_report_id TEXT NOT NULL,
+        times_shown INTEGER NOT NULL,
+        decided_at TEXT,
+        note TEXT
+    )""",
+)
+# Proposal history: an instance per (rule, identity) with the figures it was raised on, and an
+# append-only event log (shown, decisions, supersession). Replaces the overwrite-in-place proposal_log.
+_V10 = (
+    """CREATE TABLE proposal_instances (
+        instance_id TEXT PRIMARY KEY,
+        key TEXT NOT NULL,
+        identity TEXT NOT NULL,
+        figures TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('open', 'accepted', 'declined', 'done', 'superseded')),
+        created_at TEXT NOT NULL,
+        status_at TEXT NOT NULL,
+        times_shown INTEGER NOT NULL,
+        last_shown_at TEXT,
+        last_report_id TEXT
+    )""",
+    """CREATE TABLE proposal_events (
+        event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        instance_id TEXT NOT NULL REFERENCES proposal_instances(instance_id),
+        at TEXT NOT NULL,
+        event TEXT NOT NULL CHECK (event IN ('shown', 'accepted', 'declined', 'done', 'superseded')),
+        report_id TEXT,
+        figures TEXT,
+        note TEXT
+    )""",
+    # Earlier rows carry no figures, so the next report raises them again as new instances.
+    """INSERT INTO proposal_instances SELECT 'legacy-' || key, key, key, '{}', status, first_shown_at,
+        COALESCE(decided_at, last_shown_at), times_shown, last_shown_at, last_report_id FROM proposal_log""",
+    """INSERT INTO proposal_events (instance_id, at, event, report_id, figures, note)
+        SELECT 'legacy-' || key, last_shown_at, 'shown', last_report_id, NULL, note FROM proposal_log""",
+    "DROP TABLE proposal_log",
+)
+_MIGRATIONS = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8, 9: _V9, 10: _V10}
 _COLUMNS = ("record_id, revision, kind, owner_id, source, status, change_type, corrects_revision, "
             "reason, effective_at, recorded_at, import_id, fields")
 
@@ -592,9 +647,9 @@ def start_sending(conn: sqlite3.Connection, *, report_id: str, now: datetime, su
 
 def finish_report(conn: sqlite3.Connection, *, report_id: str, status: str, finished_at: datetime,
                   subject: str | None = None, html_sha256: str | None = None, message_id: str | None = None,
-                  error_code: str | None = None) -> None:
-    """Record the final outcome. A delivered (or possibly delivered) run settles its missed slots in the
-    same transaction; after a clean failure they stay open and are reported again on retry."""
+                  error_code: str | None = None, shown_proposals: list[dict[str, Any]] | None = None) -> None:
+    """Record the final outcome. A delivered (or possibly delivered) run settles its missed slots and
+    records the proposals it carried in the same transaction; after a clean failure nothing else changes."""
     conn.execute("BEGIN IMMEDIATE")
     try:
         conn.execute("UPDATE report_runs SET status = ?, finished_at = ?, subject = COALESCE(?, subject), "
@@ -602,6 +657,7 @@ def finish_report(conn: sqlite3.Connection, *, report_id: str, status: str, fini
                      (status, _db_time(finished_at), subject, html_sha256, message_id, error_code, report_id))
         if status in _DELIVERED:
             _settle_missed(conn, report_id, finished_at)
+            _record_shown(conn, report_id, finished_at, shown_proposals or [])
     except BaseException:
         conn.execute("ROLLBACK")
         raise
@@ -665,6 +721,113 @@ def unresolved_runs(conn: sqlite3.Connection, *, since: datetime | None) -> list
     floor = "" if since is None else _db_time(since)
     runs = [r for r in report_runs(conn, limit=1000) if r["created_at"] > floor and r["status"] == "unknown"]
     return sorted(runs, key=lambda r: r["created_at"])
+
+
+def record_research(conn: sqlite3.Connection, *, brief_id: str, created_at: datetime, topics: list[dict[str, str]],
+                    outcome: str, error_code: str | None = None, model: str | None = None, cost_usd: str | None = None,
+                    brief: dict[str, Any] | None = None) -> None:
+    """Store one research run. Topics and briefs never contain household amounts or identifiers."""
+    conn.execute("INSERT INTO research_briefs VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                 (brief_id, _db_time(created_at), json.dumps(topics, ensure_ascii=False), outcome, error_code, model,
+                  cost_usd, None if brief is None else json.dumps(brief, ensure_ascii=False)))
+
+
+def latest_research(conn: sqlite3.Connection, *, since: datetime,
+                    topics: list[dict[str, str]] | None = None) -> dict[str, Any] | None:
+    """The newest successful brief created at or after `since`; with `topics`, only one researched for
+    exactly that topic set."""
+    rows = conn.execute("SELECT brief_id, created_at, topics, model, brief FROM research_briefs WHERE outcome = "
+                        "'success' AND created_at >= ? ORDER BY created_at DESC", (_db_time(since),)).fetchall()
+    for row in rows:
+        found = _brief(row)
+        if topics is None or found["topics"] == topics:
+            return found
+    return None
+
+
+def get_research(conn: sqlite3.Connection, brief_id: str) -> dict[str, Any] | None:
+    """One successful brief by id (the brief a report is pinned to)."""
+    row = conn.execute("SELECT brief_id, created_at, topics, model, brief FROM research_briefs WHERE brief_id = ? "
+                       "AND outcome = 'success'", (brief_id,)).fetchone()
+    return None if row is None else _brief(row)
+
+
+def _brief(row: tuple) -> dict[str, Any]:
+    brief_id, created_at, topics, model, brief = row
+    return {"brief_id": brief_id, "created_at": datetime.fromisoformat(created_at), "topics": json.loads(topics),
+            "model": model, "brief": json.loads(brief)}
+
+
+PROPOSAL_DECISIONS = ("accepted", "declined", "done")
+_INSTANCE_COLUMNS = ("instance_id", "key", "identity", "figures", "status", "created_at", "status_at", "times_shown",
+                     "last_shown_at", "last_report_id")
+
+
+def active_proposals(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    """The current (not superseded) instance per proposal identity, with its anchor figures."""
+    rows = conn.execute(f"SELECT {', '.join(_INSTANCE_COLUMNS)} FROM proposal_instances WHERE status != 'superseded' "
+                        "ORDER BY created_at").fetchall()
+    found = {}
+    for row in rows:
+        item = dict(zip(_INSTANCE_COLUMNS, row))
+        item["figures"] = json.loads(item["figures"])
+        found[item["identity"]] = item
+    return found
+
+
+def proposal_events(conn: sqlite3.Connection, *, limit: int = 50) -> list[dict[str, Any]]:
+    columns = ("event_id", "instance_id", "at", "event", "report_id", "note")
+    rows = conn.execute(f"SELECT e.{', e.'.join(columns)}, i.key FROM proposal_events e JOIN proposal_instances i "
+                        "USING (instance_id) ORDER BY e.event_id DESC LIMIT ?", (limit,)).fetchall()
+    return [dict(zip(columns + ("key",), row)) for row in rows]
+
+
+def _record_shown(conn: sqlite3.Connection, report_id: str, at: datetime, shown: list[dict[str, Any]]) -> None:
+    """Inside the caller's transaction: a renewed proposal (new identity or materially changed figures)
+    supersedes the previous instance and starts a new one; otherwise the instance is shown again."""
+    active = active_proposals(conn)
+    for proposal in shown:
+        current = active.get(proposal["identity"])
+        figures = json.dumps(proposal["figures"], ensure_ascii=False, sort_keys=True)
+        if current is None or proposal["renewed"]:
+            if current is not None:
+                conn.execute("UPDATE proposal_instances SET status = 'superseded', status_at = ? WHERE instance_id = ?",
+                             (_db_time(at), current["instance_id"]))
+                conn.execute("INSERT INTO proposal_events (instance_id, at, event, report_id) VALUES (?, ?, "
+                             "'superseded', ?)", (current["instance_id"], _db_time(at), report_id))
+            instance_id = f"{report_id}-{proposal['key']}"
+            conn.execute(f"INSERT INTO proposal_instances ({', '.join(_INSTANCE_COLUMNS)}) "
+                         "VALUES (?, ?, ?, ?, 'open', ?, ?, 1, ?, ?)",
+                         (instance_id, proposal["key"], proposal["identity"], figures, _db_time(at), _db_time(at),
+                          _db_time(at), report_id))
+        else:
+            instance_id = current["instance_id"]
+            conn.execute("UPDATE proposal_instances SET times_shown = times_shown + 1, last_shown_at = ?, "
+                         "last_report_id = ? WHERE instance_id = ?", (_db_time(at), report_id, instance_id))
+        conn.execute("INSERT INTO proposal_events (instance_id, at, event, report_id, figures) VALUES (?, ?, 'shown', "
+                     "?, ?)", (instance_id, _db_time(at), report_id, figures))
+
+
+def decide_proposal(conn: sqlite3.Connection, *, key: str, status: str, decided_at: datetime,
+                    note: str | None = None) -> bool:
+    """Record the client's decision on the latest current instance of a proposal. The decision is an
+    event; nothing earlier is overwritten. Returns False when no such proposal was delivered."""
+    if status not in PROPOSAL_DECISIONS:
+        raise ValueError(f"status must be one of {', '.join(PROPOSAL_DECISIONS)}")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute("SELECT instance_id FROM proposal_instances WHERE key = ? AND status != 'superseded' "
+                           "ORDER BY created_at DESC LIMIT 1", (key,)).fetchone()
+        if row is not None:
+            conn.execute("UPDATE proposal_instances SET status = ?, status_at = ? WHERE instance_id = ?",
+                         (status, _db_time(decided_at), row[0]))
+            conn.execute("INSERT INTO proposal_events (instance_id, at, event, note) VALUES (?, ?, ?, ?)",
+                         (row[0], _db_time(decided_at), status, note))
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+    return row is not None
 
 
 def last_sent_report(conn: sqlite3.Connection) -> dict[str, Any] | None:

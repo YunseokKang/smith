@@ -65,11 +65,12 @@ def render(data: dict[str, Any]) -> tuple[str, str]:
     status = _status(data)
     full = data["kind"] != "thursday"
     advice = data.get("advice") or {"proposals": [], "strategy": [], "assumptions": []}
-    bands = [_band(DARK, _header(data, status) + _overview(data) + _callout(advice["proposals"])),
+    story = data.get("narrative") or {}
+    bands = [_band(DARK, _header(data, status) + _judgement(story) + _overview(data) + _callout(advice["proposals"])),
              _band(CANVAS, _proposals(advice["proposals"], full), border=True)]
     if full and advice["strategy"]:
-        bands.append(_band(DARK, _strategy(advice["strategy"])))
-    sections = [_change(data), _timeline(data)]
+        bands.append(_band(DARK, _strategy(advice["strategy"], story.get("direction", ""))))
+    sections = [_changes_outside(story), _follow_up(advice), _change(data), _timeline(data)]
     if full:
         sectors = data["sectors"]
         sections += [_allocation(data), _cash(sectors["cash"], data), _debt(sectors["debt"]),
@@ -77,7 +78,7 @@ def render(data: dict[str, Any]) -> tuple[str, str]:
                      _pension(sectors["pension_insurance"]), _macro(sectors["macro"])]
     sections.append(_glossary())
     bands.append(_band(CANVAS, "".join(sections), border=True))
-    bands.append(_band(SOFT, _footer(data, advice["assumptions"])))
+    bands.append(_band(SOFT, _footer(data, advice["assumptions"], story.get("status"))))
     spacer = '<tr><td style="height:12px;line-height:12px;font-size:0">&nbsp;</td></tr>'
     html = (f'<!doctype html><html lang="ko"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>Smith 보고서</title></head>'
@@ -275,14 +276,20 @@ def _proposals(proposals: list[Proposal], full: bool) -> str:
                  f'border-radius:100px;padding:4px 11px;margin-right:6px">{number}</span>'
                  f'<span style="display:inline-block;background:{STRONG};color:{INK};font-size:12px;font-weight:600;'
                  f'border-radius:100px;padding:4px 12px">{PRIORITY_LABELS.get(p.priority, "")}</span>')
+        if p.times_shown:
+            badge += (f'<span style="display:inline-block;background:{STRONG};color:{MUTED};font-size:12px;font-weight:600;'
+                      f'border-radius:100px;padding:4px 12px;margin-left:6px">지난 보고에 이어 {p.times_shown + 1}번째</span>')
         title = (f'<div style="font-size:18px;font-weight:600;line-height:1.4;color:{INK};margin:12px 0 8px">'
                  f'{escape(p.title)}</div>')
         if full:
-            rows = [("왜 지금", p.why), ("예상 효과", p.effect), ("위험과 대안", p.risks), ("시점", p.timing),
-                    ("다시 판단할 조건", p.reconsider), ("근거의 성격", p.certainty)]
+            rows = [("왜 지금", escape(p.why))]
+            if p.context:
+                rows.append(("시장·정책 맥락", escape(p.context) + _sources(p.links)))
+            rows += [("예상 효과", escape(p.effect)), ("위험과 대안", escape(p.risks)), ("시점", escape(p.timing)),
+                     ("다시 판단할 조건", escape(p.reconsider)), ("근거의 성격", escape(p.certainty))]
             detail = "".join(f'<tr><td style="width:92px;vertical-align:top;font-size:12px;font-weight:600;color:{MUTED};'
                              f'padding:6px 8px 6px 0">{escape(k)}</td><td style="font-size:14px;line-height:1.6;color:{BODY};'
-                             f'padding:6px 0">{escape(v)}</td></tr>' for k, v in rows)
+                             f'padding:6px 0">{v}</td></tr>' for k, v in rows)
             detail = f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{detail}</table>'
         else:
             detail = f'<div style="font-size:14px;line-height:1.6;color:{BODY}">{escape(_first_sentence(p.why))}</div>'
@@ -300,7 +307,74 @@ def _proposals(proposals: list[Proposal], full: bool) -> str:
     return head + "".join(cards) + more
 
 
-def _strategy(tracks: list[Track]) -> str:
+def _judgement(story: dict[str, Any]) -> str:
+    """The narrative's bottom line, under the date and status in the dark hero."""
+    if not story.get("situation"):
+        return ""
+    brief = (story.get("status") or {}).get("brief")
+    basis = ""
+    if brief:
+        basis = f"{brief['created_at']:%m월 %d일 %H시} 조사 자료 기준" + (" (이번 보고에서 새로 조사하지 못해 다시 사용)"
+                                                                     if brief.get("reused") else "")
+        basis = f'<div style="font-size:12px;color:{ON_DARK_SOFT};margin-top:6px">{escape(basis)}</div>'
+    links = "".join(f' · <a href="{escape(url, quote=True)}" style="color:{ON_DARK_SOFT}">{escape(title)}</a>'
+                    for url, title in dict((u, t) for t, u in story.get("situation_links", [])).items()
+                    if _plain_link(url))
+    return (f'<tr><td style="padding-top:16px"><div style="font-size:12px;font-weight:600;color:{ON_DARK_SOFT};'
+            f'margin-bottom:6px">Smith의 판단</div><div style="font-size:16px;line-height:1.65;color:{ON_DARK}">'
+            f'{escape(story["situation"])}</div>{basis}'
+            + (f'<div style="font-size:12px;color:{ON_DARK_SOFT};margin-top:4px">출처{links}</div>' if links else "")
+            + '</td></tr>')
+
+
+def _plain_link(url: str) -> bool:
+    return url.startswith("https://") and not any(ch.isspace() or ord(ch) < 32 or ch in "\"'<>\x7f" for ch in url)
+
+
+def _sources(links: Any) -> str:
+    """Small source links after a sourced statement."""
+    unique = {url: title for title, url in reversed(list(links))}  # One link per page, first title wins.
+    items = [_cell((title, url)) for url, title in reversed(list(unique.items()))][:4]
+    if not items:
+        return ""
+    return (f'<div style="font-size:12px;color:{MUTED};margin-top:4px">출처: ' + " · ".join(items) + "</div>")
+
+
+def _changes_outside(story: dict[str, Any]) -> str:
+    """Insights from the research brief that matter for this household, and what to watch next."""
+    insights, watch = story.get("insights") or [], story.get("watch") or []
+    if not insights and not watch:
+        return ""
+    blocks = []
+    for item in insights:
+        blocks.append(f'<div style="margin:6px 0 16px"><div style="font-size:16px;font-weight:600;color:{INK};'
+                      f'margin-bottom:4px">{escape(item["title"])}</div>'
+                      f'<div style="font-size:14px;line-height:1.6;color:{BODY}">{escape(item["body"])}</div>'
+                      f'<div style="font-size:14px;line-height:1.6;color:{INK};margin-top:6px"><b style="font-weight:600">'
+                      f'우리 집에 주는 의미</b> — {escape(item["implication"])}</div>{_sources(item["links"])}</div>')
+    if watch:
+        rows = "".join(f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin:4px 0">· <b style="font-weight:600;'
+                       f'color:{INK}">{escape(w["item"])}</b> — {escape(w["why"])}{_sources(w["links"])}</div>' for w in watch)
+        blocks.append(f'<div style="font-size:12px;font-weight:600;color:{MUTED};margin:8px 0 4px">다음 보고까지 지켜볼 것</div>{rows}')
+    lead = "이번 주 조사한 정책·시장 변화 가운데 고객님 자산과 직접 연결되는 것만 골랐습니다. 출처를 누르면 원문을 보실 수 있습니다."
+    return _section("이번 주 눈여겨볼 변화", lead, "".join(blocks))
+
+
+def _follow_up(advice: dict[str, Any]) -> str:
+    """Proposals the client accepted (in progress) and earlier decisions (§10.6)."""
+    in_progress, decided = advice.get("in_progress") or [], advice.get("decided") or []
+    if not in_progress and not decided:
+        return ""
+    labels = {"declined": "보류하기로 하셨습니다", "done": "완료하셨습니다"}
+    rows = [f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin:4px 0">· <b style="font-weight:600;color:{INK}">'
+            f'진행 중</b> — {escape(p.title)}</div>' for p in in_progress]
+    rows += [f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin:4px 0">· {escape(e["key"])}: '
+             f'{labels[e["status"]]}({(e["decided_at"] or "")[:10]})</div>' for e in decided]
+    lead = "지난 보고에서 드린 제안의 진행 상황입니다. 수치가 크게 바뀌면 다시 말씀드립니다."
+    return _section("지난 제안 점검", lead, "".join(rows))
+
+
+def _strategy(tracks: list[Track], direction: str = "") -> str:
     """Monday: whether each long-range goal is on track, as raised cards on the dark band."""
     rows = []
     for track in tracks:
@@ -312,8 +386,10 @@ def _strategy(tracks: list[Track]) -> str:
                     f'{escape(track.headline)}</div>'
                     f'<div style="font-size:13px;line-height:1.6;color:{ON_DARK_SOFT}">{escape(track.detail)}</div>'
                     f'</div></td></tr>')
+    lead = (f'<div style="font-size:15px;line-height:1.65;color:{ON_DARK_SOFT};margin-bottom:6px">{escape(direction)}</div>'
+            if direction else "")
     return (f'<tr><td>{_eyebrow("전략 방향", color=ON_DARK, background=DARK_RAISED)}'
-            f'{_heading("목표까지 지금 궤도에 있습니까", color=ON_DARK, size=28)}'
+            f'{_heading("목표까지 지금 궤도에 있습니까", color=ON_DARK, size=28)}{lead}'
             f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{"".join(rows)}</table></td></tr>')
 
 
@@ -503,7 +579,7 @@ def _glossary() -> str:
     return _section("용어 풀이", "", inner)
 
 
-def _footer(data: dict[str, Any], assumptions: list[str]) -> str:
+def _footer(data: dict[str, Any], assumptions: list[str], ai: dict[str, Any] | None = None) -> str:
     """Soft footer: where the numbers came from, their limits, and what Smith never does."""
     lines = [f"{_source(f['source'])}: {f['records']}건, 기준일 {f['oldest'].date()}~{f['newest'].date()}"
              for f in data["freshness"]]
@@ -513,12 +589,35 @@ def _footer(data: dict[str, Any], assumptions: list[str]) -> str:
     if not data["completeness"]["complete"]:
         lines.append(f"불완전 영역: {', '.join(data['completeness']['areas'])}")
     lines += [f"가정: {a}" for a in assumptions]
+    lines += _ai_lines(ai)
     items = "".join(f'<div style="font-size:12px;line-height:1.6;color:{MUTED}">· {escape(line)}</div>' for line in lines)
     return (f'<tr><td>{_eyebrow("데이터 상태")}'
             f'<div style="font-size:13px;color:{BODY};margin-bottom:8px">이 보고서가 사용한 데이터의 기준 시점과 한계입니다.</div>'
             f'{items}<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-top:14px;padding-top:12px;'
             f'border-top:1px solid {HAIRLINE}">Smith는 조회 전용 자문입니다. 매매·이체·대출 신청을 실행하지 않으며, '
             f'세금과 법령은 실행 전 현행 기준을 확인하셔야 합니다.</div></td></tr>')
+
+
+def _ai_lines(ai: dict[str, Any] | None) -> list[str]:
+    """How the AI stages went: research brief, narrative, and what code verification removed."""
+    if not ai:
+        return ["AI 해석: 이번 보고서는 계산 결과만으로 작성했습니다."]
+    brief = ai.get("brief")
+    if brief:
+        line = (f"정책·시장 조사: {brief['created_at']:%m월 %d일} 웹 조사 {brief['items']}건(공식 출처 {brief.get('official', 0)}건). "
+                "금액·종목·계좌·직접 식별자 없이, 승인된 시·구와 자산·부채 유형만으로 조사했습니다.")
+        if brief.get("reused"):
+            line += " 이번 보고에서 새로 조사하지 못해, 같은 주제로 앞서 조사한 자료를 다시 사용했습니다."
+        lines = [line]
+    else:
+        lines = ["정책·시장 조사: 이번 보고에 쓸 수 있는 조사 결과가 없어 외부 정책·시장 변화는 반영하지 않았습니다."]
+    if ai["outcome"] == "success":
+        removed = len(ai.get("dropped") or [])
+        lines.append("AI 해석: 계산값과 출처로 검증한 서술만 실었습니다"
+                     + (f"(근거가 확인되지 않은 {removed}개 항목은 뺐습니다)." if removed else "."))
+    else:
+        lines.append(f"AI 해석: 이번에는 실패해({ai.get('error_code', '원인 미상')}) 계산 결과만으로 작성했습니다.")
+    return lines
 
 
 def _source(source: str) -> str:

@@ -7,6 +7,7 @@ message that lists the missed slots, which are settled only once that message is
 nothing is backfilled on the very first run.
 """
 import hashlib
+import time
 import uuid
 from collections.abc import Callable
 from contextlib import closing
@@ -17,12 +18,14 @@ from zoneinfo import ZoneInfo
 
 from smith import gmail, ledger
 from smith.config import DEFAULT_TIMEZONE, local_time
+from smith.proposals import snapshot
 from smith.report_data import build_report
 from smith.report_html import render
 
 _WEEKDAY_INDEX = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6}
 LATE_AFTER = timedelta(minutes=30)
 Sender = Callable[..., str]
+Narrator = Callable[[dict[str, Any]], None]
 
 
 def slots_between(reports: dict[str, Any], tz_name: str, start: datetime, end: datetime) -> list[datetime]:
@@ -92,13 +95,16 @@ def record_failure(db: Path, *, now: datetime, slot: datetime | None, missed: li
                                    trigger="manual" if slot is None else "scheduled", created_at=now, as_of=now,
                                    baseline=None, missed_slots=missed):
             return {"report_id": None, "status": "skipped"}
-    return _finish(db, report_id, "failed", now, error_code=code)
+    return _finish(db, report_id, "failed", error_code=code)
 
 
 def publish(db: Path, *, recipient: str, credentials: tuple[str, str, str], now: datetime, slot: datetime | None,
             missed: list[datetime], kind: str, sender: Sender = gmail.send, tz: str = DEFAULT_TIMEZONE,
-            sync_failures: list[str] | None = None) -> dict[str, Any]:
+            sync_failures: list[str] | None = None, narrator: Narrator | None = None) -> dict[str, Any]:
     """Claim, build, send and record one report. Returns the final run record fields.
+
+    `narrator(data)` adds the verified narrative (6c/6d) to the report data in place; it handles its own
+    failures, so a report always goes out with at least its deterministic content.
 
     The run is `building` until the message is rendered and `sending` from just before the Gmail
     request, so an interrupted run can be told apart: the first is retried, the second never is.
@@ -113,19 +119,23 @@ def publish(db: Path, *, recipient: str, credentials: tuple[str, str, str], now:
                                       baseline=baseline, missed_slots=missed)
     if not claimed:
         return {"report_id": None, "status": "skipped"}
-    local_now = local_time(now, tz)
+    started = time.monotonic()
     try:
         with closing(ledger.connect_read_only(db)) as conn:
             data = build_report(conn, as_of=now, known_at=now, baseline=baseline, kind=kind, tz=tz)
+        if narrator is not None:
+            narrator(data)
+        # Lateness is judged at send time: the narrative stage can take many minutes after `now`.
+        send_at = now + timedelta(seconds=time.monotonic() - started)
         data["delivery_note"] = _delivery_note(None if slot is None else local_time(slot, tz),
-                                               [local_time(m, tz) for m in missed], local_now,
+                                               [local_time(m, tz) for m in missed], local_time(send_at, tz),
                                                [r for r in unresolved if r["report_id"] != report_id], tz,
                                                sync_failures or [])
         subject, html = render(data)
-        if slot is not None and now - slot > LATE_AFTER:
+        if slot is not None and send_at - slot > LATE_AFTER:
             subject = subject.replace("[Smith]", "[Smith · 지연 발송]", 1)
     except Exception as error:  # noqa: BLE001 - any build failure must release the claim as a clean failure.
-        return _finish(db, report_id, "failed", now, error_code=f"build-{type(error).__name__}")
+        return _finish(db, report_id, "failed", error_code=f"build-{type(error).__name__}")
     digest = hashlib.sha256(html.encode("utf-8")).hexdigest()
     with closing(ledger.connect(db)) as conn:
         holds_claim = ledger.start_sending(conn, report_id=report_id, now=datetime.now(timezone.utc),
@@ -133,19 +143,23 @@ def publish(db: Path, *, recipient: str, credentials: tuple[str, str, str], now:
     if not holds_claim:
         # Fencing: this run outlived its lease and was recovered or superseded; another run owns the slot.
         return {"report_id": report_id, "status": "skipped", "subject": subject, "error_code": "claim-lost"}
+    # The proposals the message carried are recorded in the same transaction as its final status.
+    shown = [snapshot(p) for p in data["advice"]["proposals"]]
     try:
         message_id = sender(credentials, recipient=recipient, subject=subject, html=html, text=_text(subject))
     except gmail.MailError as error:
-        status = "unknown" if error.uncertain else "failed"
-        return _finish(db, report_id, status, now, subject=subject, digest=digest, error_code=error.code)
-    return _finish(db, report_id, "sent", now, subject=subject, digest=digest, message_id=message_id)
+        return _finish(db, report_id, "unknown" if error.uncertain else "failed", subject=subject, digest=digest,
+                       error_code=error.code, shown=shown)
+    return _finish(db, report_id, "sent", subject=subject, digest=digest, message_id=message_id, shown=shown)
 
 
-def _finish(db: Path, report_id: str, status: str, now: datetime, *, subject: str | None = None,
-            digest: str | None = None, message_id: str | None = None, error_code: str | None = None) -> dict[str, Any]:
+def _finish(db: Path, report_id: str, status: str, *, subject: str | None = None, digest: str | None = None,
+            message_id: str | None = None, error_code: str | None = None,
+            shown: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     with closing(ledger.connect(db)) as conn:
         ledger.finish_report(conn, report_id=report_id, status=status, finished_at=datetime.now(timezone.utc),
-                             subject=subject, html_sha256=digest, message_id=message_id, error_code=error_code)
+                             subject=subject, html_sha256=digest, message_id=message_id, error_code=error_code,
+                             shown_proposals=shown)
     return {"report_id": report_id, "status": status, "subject": subject, "error_code": error_code}
 
 

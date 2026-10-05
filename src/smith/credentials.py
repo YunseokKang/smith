@@ -30,6 +30,13 @@ def delete_toss_client() -> None:
     _delete(_TOSS, ("client_id", "client_secret"))
 
 
+def all_secrets() -> list[str]:
+    """Every secret Smith stores, so outbound checks can refuse a model payload that contains one."""
+    toss = load_toss_client() or ()
+    gmail = load_gmail() or ()
+    return [*toss, *gmail, *(load_api_key(p) or "" for p in EVIDENCE_PROVIDERS)]
+
+
 def load_api_key(provider: str) -> str | None:
     return keyring.get_password(f"smith.{provider}", "api_key") or None
 

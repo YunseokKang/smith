@@ -4,6 +4,7 @@ import unittest
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 from zoneinfo import ZoneInfo
 
 from smith import delivery, gmail, ledger
@@ -146,6 +147,12 @@ class DeliveryTests(unittest.TestCase):
             conn.execute("UPDATE report_runs SET status = 'sending', send_started_at = NULL WHERE report_id = 'v7'")
             delivery.recover(conn, MON + timedelta(hours=1))
             self.assertEqual(ledger.report_runs(conn)[0]["status"], "unknown")
+
+    def test_lateness_is_judged_when_the_message_is_sent(self):
+        # Built 5 minutes after the slot, but the narrative took 40 more minutes: the report is late.
+        with mock.patch("smith.delivery.time.monotonic", side_effect=[0.0, 2400.0]):
+            self.publish(MON + timedelta(minutes=5), MON)
+        self.assertIn("지연 발송", self.sent[-1])
 
     def test_missing_setup_is_recorded_for_unattended_runs(self):
         result = delivery.record_failure(self.db, now=MON, slot=MON, missed=[], kind="monday",

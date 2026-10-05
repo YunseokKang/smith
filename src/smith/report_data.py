@@ -52,7 +52,7 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     kpis, sectors = _kpis(view, change), _sectors(view)
     return {"kind": kind, "as_of": as_of, "baseline": baseline, "kpis": kpis,
             "change": change, "timeline": _timeline(view), "sectors": sectors,
-            "advice": proposals.build(view, kpis, sectors),
+            "advice": proposals.build(view, kpis, sectors, active=ledger.active_proposals(conn)),
             "completeness": {"complete": view.summary.complete, "areas": view.summary.incomplete_areas,
                              "unconverted": view.summary.unconverted},
             "warnings": view.summary.warnings, "freshness": view.summary.freshness, "sync": view.summary.sync,

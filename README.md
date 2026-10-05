@@ -37,8 +37,10 @@ py -3.10 -m uv pip install --python .venv -e .
 | `toss sync [--dry-run] [--close-missing]` | 토스 보유 주식을 snapshot으로 원장에 저장. 매수 가능 금액·환율은 참고 관측값 |
 | `evidence login` / `evidence sync [--days N]` / `evidence show [--as-of DATE]` | ECOS·FRED 금리 근거 저장·조회. 키는 OS 자격 증명 저장소 |
 | `advise --case portfolio\|funding\|home [--question] [--show-payload]` | 비식별 payload로 headless 자문. 주택 목표일은 원장의 주택 목표가 있으면 그 날짜, 없으면 실행일로부터 3년 뒤. `--show-payload`는 보낼 내용만 표시 |
-| `report preview [--kind monday\|thursday] [--since TIME] [--out PATH]` | 시각화 보고서 HTML 미리보기(발송 안 함, `reports/`에 저장) |
-| `report run-due` / `report send-now` / `report status` | 정기 회차 발송(스케줄러용, 중복 방지·지연 발송), 즉시 발행, 발행 이력 |
+| `report preview [--kind monday\|thursday] [--since TIME] [--out PATH] [--narrative] [--research]` | 시각화 보고서 HTML 미리보기(발송 안 함, `reports/`에 저장). `--narrative`는 AI 서술, `--research`는 웹 조사부터 |
+| `report run-due` / `report send-now` / `report status` | 정기 회차 발송(스케줄러용, 중복 방지·지연 발송), 즉시 발행, 발행 이력. 발행은 웹 조사와 AI 서술을 포함 |
+| `research run\|show\|topics` | 개인 정보 없이 정책·시장 웹 조사 실행·결과 보기·조사 주제 보기 |
+| `proposal list` / `proposal accept\|decline\|done KEY [--note]` | 지난 제안 목록, 제안에 대한 결정 기록(다음 보고서의 후속 점검에 반영) |
 | `mail login --client-file PATH` / `mail status` / `mail test` / `mail logout` | Gmail 발송 전용 권한 연결·확인·시험 발송. 받는 주소는 Git 제외 `config/smith.local.toml` |
 | `summary [--as-of TIME] [--known-at TIME] [--json]` | 순자산, 자산 배분, 유동성, 월 현금흐름, 목표, 데이터 신선도와 경고 |
 

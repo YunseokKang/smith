@@ -1,39 +1,23 @@
-"""Run the adviser through Claude Code headless inside a narrow boundary.
+"""Run the adviser through the shared Claude Code headless boundary (`smith.headless`).
 
-Boundary (verified against Claude Code 2.1.195 `claude --help` on 2026-10-04):
-- `-p` with the prompt on stdin, so financial data never appears in arguments or process lists.
-- `--tools ""` disables every tool: no shell, files, web or MCP, so the model cannot call Smith
-  (no recursive launch) or reach secrets. `--safe-mode` skips user CLAUDE.md, hooks, plugins and MCP.
-- `--no-session-persistence` keeps the conversation off disk; `--system-prompt` replaces the
-  default prompt, which would otherwise describe the working directory and environment.
-- `--json-schema` asks for structured output, which is validated again here as untrusted input.
-- An empty temporary working directory, an allowlisted environment, a timeout and a spend cap.
-- The native `claude.exe` is launched directly; a `.cmd` launcher would route arguments through
-  cmd.exe, so it is never executed.
+Advice calls see sanitized household data, so they always run with every tool disabled.
 """
 import json
-import os
 import re
-import shutil
 import subprocess
-import tempfile
-from collections.abc import Callable
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from smith import headless
+from smith.headless import HEADLESS_ENV, HeadlessError as AdviserError, find_claude  # noqa: F401 - re-exported
+
 PROMPT_VERSION = "advice-v4"
-HEADLESS_ENV = "SMITH_HEADLESS"
 # The household uses a flat-rate subscription and asked for the most capable reasoning model
 # (2026-10-05). Fable runs about 2.5x the notional cost of Opus; the cap only bounds a runaway call.
 DEFAULT_MODEL = "fable"
 DEFAULT_BUDGET_USD = "5.00"
 _TIMEOUT_SECONDS = 300
-_MAX_OUTPUT_BYTES = 1_000_000
 _MAX_TEXT = 4000
-_ENV_KEEP = ("PATH", "PATHEXT", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "TEMP", "TMP", "USERPROFILE",
-             "HOMEDRIVE", "HOMEPATH", "HOME", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES", "OS",
-             "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "LANG", "ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR")
 
 _TEXT = {"type": "string", "maxLength": _MAX_TEXT}
 _TEXTS = {"type": "array", "items": _TEXT, "maxItems": 10}
@@ -96,57 +80,14 @@ refs per item; at most 10 items in pros, cons, reconsider_if and data_limitation
 4000 characters."""
 
 
-class AdviserError(Exception):
-    """The adviser could not produce validated advice. Carries a short code and, for validation
-    failures, a detail made only of field paths or ref names (never amounts or text)."""
-
-    def __init__(self, code: str, detail: str | None = None) -> None:
-        super().__init__(code if detail is None else f"{code}: {detail}")
-        self.code, self.detail = code, detail
-
-
-Runner = Callable[..., subprocess.CompletedProcess]
-
-
-def find_claude() -> Path:
-    """Locate the native Claude Code executable, never a cmd.exe launcher."""
-    found = shutil.which("claude")
-    if found is None:
-        raise AdviserError("claude-not-found")
-    path = Path(found)
-    if path.suffix.lower() == ".exe":
-        return path
-    native = path.parent / "node_modules" / "@anthropic-ai" / "claude-code" / "bin" / "claude.exe"
-    if path.suffix.lower() in (".cmd", ".bat") and native.is_file():
-        return native
-    if os.name != "nt" and path.suffix == "":
-        return path
-    raise AdviserError("unsafe-launcher")
-
-
-def cli_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    """The schema with only types and required fields. With length, count or additionalProperties
-    constraints the CLI's structured-output retries failed on real payloads
-    (error_max_structured_output_retries); those rules are enforced locally by `prune` and `validate`."""
-    loose = {key: value for key, value in schema.items() if key not in ("maxLength", "maxItems", "additionalProperties")}
-    if "properties" in loose:
-        loose["properties"] = {key: cli_schema(value) for key, value in loose["properties"].items()}
-    if "items" in loose:
-        loose["items"] = cli_schema(loose["items"])
-    return loose
-
-
 def run_adviser(question: str, context: dict[str, Any], *, executable: Path, budget_usd: str = DEFAULT_BUDGET_USD,
                 model: str | None = DEFAULT_MODEL, prompt: str | None = None,
-                runner: Runner = subprocess.run) -> dict[str, Any]:
+                runner: headless.Runner = subprocess.run) -> dict[str, Any]:
     """Ask for advice and return the validated structured output plus run metadata.
 
     Raises:
         AdviserError: the run failed, timed out, or returned output that fails validation.
     """
-    if os.environ.get(HEADLESS_ENV):
-        raise AdviserError("recursive-launch")  # Defense in depth; the model has no tools anyway.
-    _validate_budget(budget_usd)
     expected = {"question": question, "context": context}
     if prompt is None:
         prompt = json.dumps(expected, ensure_ascii=False)
@@ -157,100 +98,15 @@ def run_adviser(question: str, context: dict[str, Any], *, executable: Path, bud
             raise AdviserError("invalid-input") from None
         if supplied != expected:
             raise AdviserError("input-mismatch")
-    args = [str(executable), "-p", "--tools", "", "--safe-mode", "--no-session-persistence",
-            "--output-format", "json", "--json-schema", json.dumps(cli_schema(ADVICE_SCHEMA)), "--system-prompt", SYSTEM_PROMPT,
-            "--max-budget-usd", budget_usd]
-    if model:
-        args += ["--model", model]
-    env = {key: os.environ[key] for key in _ENV_KEEP if key in os.environ}
-    env[HEADLESS_ENV] = "1"
-    with tempfile.TemporaryDirectory(prefix="smith-advice-") as workdir:
-        try:
-            proc = runner(args, input=prompt, capture_output=True, text=True, encoding="utf-8", env=env,
-                          cwd=workdir, timeout=_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            raise AdviserError("timeout") from None
-        except OSError:
-            raise AdviserError("launch-failed") from None
-    if proc.returncode != 0:
-        raise AdviserError(f"exit-{proc.returncode}", _error_subtype(proc.stdout))
-    if len(proc.stdout.encode("utf-8")) > _MAX_OUTPUT_BYTES:
-        raise AdviserError("output-too-large")
-    try:
-        envelope = json.loads(proc.stdout)
-    except ValueError:
-        raise AdviserError("invalid-output") from None
-    if not isinstance(envelope, dict) or envelope.get("is_error") or envelope.get("subtype") != "success":
-        raise AdviserError("model-error")
-    advice = prune(envelope.get("structured_output"), ADVICE_SCHEMA)
-    problems = validate(advice, ADVICE_SCHEMA, "advice")
-    if problems:
-        raise AdviserError("schema-violation", ", ".join(problems[:5]))
+    advice, cost = headless.run(prompt, system_prompt=SYSTEM_PROMPT, schema=ADVICE_SCHEMA, executable=executable,
+                                model=model, budget_usd=budget_usd, timeout_seconds=_TIMEOUT_SECONDS, runner=runner)
     unknown = unknown_refs(advice, context)
     if unknown:
         raise AdviserError("unknown-refs", ", ".join(sorted(set(unknown))[:10]))
-    cost = _validated_cost(envelope.get("total_cost_usd"))
-    return {"advice": advice, "cost_usd": cost, "prompt_version": PROMPT_VERSION,
-            "model": model or "default"}
+    return {"advice": advice, "cost_usd": cost, "prompt_version": PROMPT_VERSION, "model": model or "default"}
 
 
-def _validate_budget(value: str) -> None:
-    try:
-        budget = Decimal(value)
-    except (InvalidOperation, ValueError):
-        raise AdviserError("invalid-budget") from None
-    if not budget.is_finite() or budget <= 0:
-        raise AdviserError("invalid-budget")
-
-
-def _validated_cost(value: Any) -> str | None:
-    """A missing cost is recorded as unknown; a malformed one is an error."""
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        raise AdviserError("invalid-cost")
-    try:
-        cost = Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        raise AdviserError("invalid-cost") from None
-    if not cost.is_finite() or cost < 0:
-        raise AdviserError("invalid-cost")
-    return str(cost)
-
-
-def _error_subtype(stdout: str) -> str | None:
-    """The CLI's result subtype (for example error_max_budget_usd), which names the failure safely."""
-    try:
-        envelope = json.loads(stdout)
-    except ValueError:
-        return None
-    subtype = envelope.get("subtype") if isinstance(envelope, dict) else None
-    return subtype if isinstance(subtype, str) and subtype.replace("_", "").isalnum() else None
-
-
-def prune(value: Any, schema: dict[str, Any]) -> Any:
-    """Drop object keys the schema does not define; only known fields are ever used or stored."""
-    if schema["type"] == "object" and isinstance(value, dict):
-        return {key: prune(item, schema["properties"][key]) for key, item in value.items() if key in schema["properties"]}
-    if schema["type"] == "array" and isinstance(value, list):
-        return [prune(item, schema["items"]) for item in value]
-    return value
-
-
-def validate(value: Any, schema: dict[str, Any], path: str) -> list[str]:
-    """Check the subset of JSON Schema used by ADVICE_SCHEMA. Model output is untrusted input."""
-    kind = schema["type"]
-    if kind == "string":
-        ok = isinstance(value, str) and len(value) <= schema.get("maxLength", _MAX_TEXT)
-        return [] if ok else [path]
-    if kind == "array":
-        if not isinstance(value, list) or not schema.get("minItems", 0) <= len(value) <= schema.get("maxItems", 100):
-            return [path]
-        return [p for i, item in enumerate(value) for p in validate(item, schema["items"], f"{path}[{i}]")]
-    if not isinstance(value, dict) or set(value) - set(schema["properties"]) or set(schema["required"]) - set(value):
-        return [path]
-    return [p for key, sub in schema["properties"].items() if key in value
-            for p in validate(value[key], sub, f"{path}.{key}")]
+_validated_cost = headless.validated_cost
 
 
 def unknown_refs(advice: dict[str, Any], context: dict[str, Any]) -> list[str]:

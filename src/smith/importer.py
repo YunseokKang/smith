@@ -24,6 +24,13 @@ _MANUAL_SOURCE = re.compile(r"manual(-[a-z0-9]+)*")
 _DECIMAL = re.compile(r"-?\d{1,15}(\.\d{1,8})?")
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _SYMBOL = re.compile(r"[A-Za-z0-9.\-]{1,20}")
+# Optional province-level unit, optional city, then a city, county or district: "경기도 수원시 영통구",
+# "서울특별시 강남구", "세종특별자치시". Neighbourhoods (동·읍·면·리), apartment names and numbers never match.
+_REGION = re.compile(
+    r"(?:[가-힣]{1,8}(?:특별시|광역시|특별자치시|특별자치도|도)(?= |$))?"
+    r"(?:(?:^| )[가-힣]{1,8}시(?= ))?"
+    r"(?:(?:^| )[가-힣]{1,8}(?:시|군|구))?"
+)
 _REASON_MAX = 200
 _NAME_MAX = 100
 
@@ -94,6 +101,15 @@ def _name(value: Any, path: str, problems: _Problems) -> str | None:
     return None
 
 
+def _region(value: Any, path: str, problems: _Problems) -> str | None:
+    # Administrative units only (see _REGION), so it can never carry a neighbourhood, street address,
+    # building or unit number.
+    if isinstance(value, str) and value.strip() == value and value and _REGION.fullmatch(value):
+        return value
+    problems.add(path, 'must name a province, city, county or district only, e.g. "경기도 수원시 영통구"')
+    return None
+
+
 def _currency(value: Any, path: str, problems: _Problems) -> str | None:
     if isinstance(value, str) and value in CURRENCIES:
         return value
@@ -134,6 +150,8 @@ _KIND_FIELDS: dict[Kind, dict[str, _Field]] = {
         # Real estate use matters for housing scenarios and tax treatment.
         "occupancy": _Field(_enum(OCCUPANCY), nullable=True),
         "managed_by": _Field(_enum(MANAGERS), nullable=True),
+        # Coarse location for local-policy matching; approved by the user at city/district level only.
+        "region": _Field(_region, nullable=True),
     },
     Kind.LIABILITY: {
         "category": _Field(_enum(LIABILITY_CATEGORIES)),

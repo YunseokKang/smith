@@ -177,7 +177,7 @@ def _asset(view: LedgerView, record: RecordInput, include_positions: bool) -> di
             "account_type": f.get("account_type"), "currency": f["currency"], "value": won(base_amount(view, record)),
             "liquidity": f["liquidity"], "valuation_method": f["valuation_method"],
             "valued_on": record.effective_at.date().isoformat(), "occupancy": f.get("occupancy"),
-            "managed_by": f.get("managed_by")}
+            "managed_by": f.get("managed_by"), "region": f.get("region")}
     if include_positions and f.get("symbol"):
         item.update(symbol=f["symbol"], market=f.get("market"))
     return item
@@ -230,6 +230,14 @@ def redact(view: LedgerView, text: str) -> str:
     for private, alias in sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True):
         token = rf"(?<![A-Za-z0-9._-]){re.escape(private)}(?![A-Za-z0-9._-])"
         text = re.sub(token, lambda _: alias, text)
+    return text
+
+
+def mask_identifiers(text: str) -> str:
+    """Replace anything matching an identifier rule (for example a press contact's phone number in a
+    web page) so that external text can later pass `check_outbound`."""
+    for pattern in _PII_PATTERNS.values():
+        text = pattern.sub("[식별정보 제거]", text)
     return text
 
 

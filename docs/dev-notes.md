@@ -179,3 +179,10 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
 - 원인: headless 창의 최소 폭이 약 500px이다. 이미지만 390px로 잘린다.
 - 해결: 보고서를 `<iframe style="width:375px">`로 감싼 페이지를 찍는다. 넘침을 찾을 때는 `getBoundingClientRect().right`가
   화면 폭을 넘는 요소를 페이지 위에 출력하는 스크립트를 넣고 스크린샷으로 읽는다(`--dump-dom` 출력은 PowerShell에서 비어 있었다).
+
+### TS-017 Git Bash heredoc이 "unexpected EOF while looking for matching quote"로 실패 (2026-10-05)
+
+- 증상: `python - <<'PYEOF' ... PYEOF`처럼 따옴표 친 heredoc 안에 Python 편집 스크립트를 넣었는데, 내용에 따라
+  Bash가 따옴표 짝을 찾다가 실패했다(같은 형식이 다른 내용에서는 성공해 원인을 특정하지 못함).
+- 해결: 길거나 따옴표가 많은 편집 스크립트는 Write 도구로 scratchpad에 `.py` 파일을 만든 뒤 실행한다.
+  Python 문자열에 `\x7f` 같은 이스케이프를 쓰면 실제 제어문자로 저장될 수 있으니, 저장 후 `repr`로 확인한다.
