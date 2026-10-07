@@ -81,13 +81,16 @@ def answer(db: Path, config_path: Path, *, verbose: bool = False) -> int:
     def build(report: dict[str, Any] | None) -> dict[str, Any]:
         return qa.rebuild(db, report, now=now, tz=tz, household=household)
     try:
-        results = qa.poll(db, recipient=to, credentials=stored, now=now, build=build, secrets=credentials.all_secrets())
+        results = qa.poll(db, recipient=to, credentials=stored, now=now, build=build, secrets=credentials.all_secrets(),
+                          tz=tz)
     except gmail.MailError as error:
         if verbose or error.code != "no-read-scope":
             print(f"Answering questions failed ({error.code}).")
         return 1
     for item in results:
-        print(f"Question {item['message_id'][:8]}...: {item['status']}")
+        kept = f", remembered {item['remembered']}" if item.get("remembered") else ""
+        failed = f", memory not saved ({item['memory_error']})" if item.get("memory_error") else ""
+        print(f"Question {item['message_id'][:8]}...: {item['status']}{kept}{failed}")
     if verbose and not results:
         print("No new questions.")
     return 0

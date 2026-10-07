@@ -11,24 +11,30 @@ from zoneinfo import ZoneInfo
 
 from smith import ledger
 from smith.config import DEFAULT_TIMEZONE
+from smith.narrative import PIPELINES
 from smith.report_data import build_report
 from smith.report_html import render
 
 
 def add_parser(sub: Any, default_db: Path) -> None:
     report = sub.add_parser("report", help="Report preview (never sends) and publication (run-due, send-now)")
-    report.add_argument("action", choices=("preview", "run-due", "send-now", "status", "activate"),
-                        help="preview: save HTML only; run-due: send the due scheduled report (for the task "
-                             "scheduler); send-now: publish immediately; status: list recent runs")
+    report.add_argument("action", choices=("preview", "compare", "run-due", "send-now", "status", "activate"),
+                        help="preview: save HTML only; compare: save the single and team narratives of one "
+                             "snapshot side by side (never sends); run-due: send the due scheduled report (for "
+                             "the task scheduler); send-now: publish immediately; status: list recent runs")
     report.add_argument("--kind", choices=("monday", "thursday"),
                         help="Edition (default: thursday on Thursdays, otherwise monday)")
     report.add_argument("--since", type=_aware_datetime,
                         help="Compare against the ledger as known at this time (default: first report, no comparison)")
-    report.add_argument("--out", type=Path, help="Output HTML path (default: reports/preview-<time>.html)")
+    report.add_argument("--out", type=Path, help="Output HTML path (default: reports/preview-<time>.html); "
+                                                 "compare: output folder (default: reports/compare-<time>)")
     report.add_argument("--narrative", action="store_true",
                         help="preview: add the AI narrative (uses the latest research brief; run-due and "
                              "send-now always research and narrate)")
-    report.add_argument("--research", action="store_true", help="preview: research the web first (implies --narrative)")
+    report.add_argument("--research", action="store_true",
+                        help="preview/compare: research the web first (implies --narrative)")
+    report.add_argument("--pipeline", choices=PIPELINES,
+                        help="preview: how the narrative is written (default: single; team is the compare experiment)")
     report.add_argument("--db", type=Path, default=default_db)
     report.add_argument("--config", type=Path, default=Path("config/smith.local.toml"),
                         help="run-due/send-now: local config with schedule and [mail] recipient")
@@ -60,21 +66,36 @@ def run(args: argparse.Namespace) -> int:
         if args.research:
             researched = _research(args.db, now, reuse_fresh=False)
             brief_id = researched["brief_id"] if researched["outcome"] == "success" else None
+        if args.action == "compare":
+            return _compare(args, now=now, kind=kind, tz=tz, config=config, brief_id=brief_id)
         with closing(ledger.connect_read_only(args.db)) as conn:
             data = build_report(conn, as_of=now, known_at=now, baseline=args.since, kind=kind, tz=tz,
                                 household=profile(config) if config else None)
     except (sqlite3.Error, ledger.LedgerError) as error:
         print(f"Ledger error ({type(error).__name__}): not a readable Smith ledger.")
         return 1
-    if args.narrative or args.research:
-        _narrator(args.db, now, brief_id)(data)
-        print(f"Narrative: {data['narrative']['status']['outcome']}")
+    if args.narrative or args.research or args.pipeline:
+        _narrator(args.db, now, brief_id, args.pipeline or "single")(data)
+        print(f"Narrative ({data['narrative']['status']['pipeline']}): {data['narrative']['status']['outcome']}")
     subject, html = render(data)
     out = args.out or Path("reports") / f"preview-{local:%Y%m%d-%H%M%S}.html"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(html, encoding="utf-8")
     print(f"Preview saved (not sent): {out}")
     print(f"Subject: {subject}")
+    return 0
+
+
+def _compare(args: argparse.Namespace, *, now: datetime, kind: str, tz: str, config: dict[str, Any] | None,
+             brief_id: str | None) -> int:
+    from smith import compare, credentials
+
+    out_dir = args.out or Path("reports") / f"compare-{now.astimezone(ZoneInfo(tz)):%Y%m%d-%H%M%S}"
+    print("Writing both narratives from one snapshot (single and team, at the same time). Nothing is sent.")
+    page = compare.run(args.db, now=now, kind=kind, tz=tz, baseline=args.since,
+                       household=profile(config) if config else None, brief_id=brief_id,
+                       secrets=credentials.all_secrets(), out_dir=out_dir)
+    print(f"Comparison saved (not sent): {page}")
     return 0
 
 
@@ -201,13 +222,14 @@ def _research(db: Path, now: datetime, *, reuse_fresh: bool = True) -> dict[str,
                                        secrets=credentials.all_secrets())
 
 
-def _narrator(db: Path, now: datetime, brief_id: str | None = None) -> Any:
+def _narrator(db: Path, now: datetime, brief_id: str | None = None, pipeline: str = "single") -> Any:
     """The narrative stage as a callback on report data (6c/6d), pinned to `brief_id` when research
     succeeded; failures leave deterministic content."""
     from smith import credentials, narrative
 
     secrets = credentials.all_secrets()
-    return lambda data: narrative.narrate(db, data["view"], data, now=now, secrets=secrets, brief_id=brief_id)
+    return lambda data: narrative.narrate(db, data["view"], data, now=now, secrets=secrets, brief_id=brief_id,
+                                          pipeline=pipeline)
 
 
 def _log_path(db: Path) -> Path:

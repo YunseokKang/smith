@@ -224,3 +224,14 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
 - 증상: `smith doctor`의 스케줄러 상태가 모두 `?`. 콘솔에서는 영어 필드명(UTF-8)인데, 콘솔 없이
   (`CREATE_NO_WINDOW`) 실행하면 한국어 필드명(cp949)으로 나온다. `text=True`는 cp949 디코딩 오류로 실패했다.
 - 해결: PowerShell `Get-ScheduledTask`·`Get-ScheduledTaskInfo` 결과를 `ConvertTo-Json`으로 받아 고정된 필드명으로 읽는다.
+
+### TS-023 스크립트 문자열 치환이 일부 파일에서만 "찾을 수 없음"으로 실패 (2026-10-07)
+
+- 증상: Python으로 `read_bytes().decode()` 후 여러 줄 문자열을 `replace`하는 편집이 어떤 파일에서는 되고 어떤 파일에서는
+  일치 0건으로 실패했다(`payload.py`, `docs/architecture.md` 등).
+- 원인: 작업 트리의 줄바꿈이 파일마다 다르다(`core.autocrlf = true`라 체크아웃 파일은 CRLF, 도구가 새로 쓴 파일은 LF).
+  `\n`으로 쓴 검색 문자열은 CRLF 파일과 맞지 않는다. Git Bash의 `grep -c $'\r$'`·`sed -n p | od`는 CR을 제대로
+  보여 주지 않아 판별에도 쓸 수 없었다.
+- 해결: 여러 줄 편집은 편집 도구로 한다(줄바꿈을 보존). 판별은 PowerShell
+  `[regex]::Matches([IO.File]::ReadAllText(path), "`r`n").Count`로 한다. `sed -i`로 한 줄을 바꿀 때 `\r?$`를 쓰면 그 줄의
+  CR이 사라져 줄바꿈이 섞이니 피한다. 커밋 시에는 `autocrlf`가 LF로 맞추므로 저장소 내용은 영향이 없다.

@@ -223,6 +223,38 @@ class LedgerTests(unittest.TestCase):
                 # Same tables, columns and constraints as a ledger created at the current version.
                 self.assertEqual(schema(conn), expected)
 
+    def test_v16_keeps_earlier_answers_as_thread_turns_only_when_unambiguous(self):
+        with closing(sqlite3.connect(":memory:", isolation_level=None)) as conn:
+            for step in range(1, 16):
+                for statement in ledger._MIGRATIONS[step]:
+                    conn.execute(statement)
+            at = {n: f"2026-10-05T1{n}:00:00.000000+00:00" for n in range(1, 6)}   # One poll's claim time each.
+            # (message, minute received, claim time, status): every question of one poll shares its claim time.
+            questions = (("q1", 1, 1, "answered"), ("s1", 2, 1, "skipped"),          # A skipped message has no run.
+                         ("q2", 3, 2, "answered"), ("q3", 4, 2, "answered"),         # Two answers: which run is whose?
+                         ("q4", 5, 3, "answered"), ("q5", 6, 3, "failed"),           # A failure ran the model too.
+                         ("q6", 7, 4, "answered"), ("q7", 8, 5, "answered"))         # q7 failed at 4, retried at 5.
+            for message_id, minute, claim, status in questions:
+                conn.execute("INSERT INTO mail_questions (message_id, thread_id, report_id, received_at, claimed_at, "
+                             "status, attempts) VALUES (?, 't1', 'r1', ?, ?, ?, 1)",
+                             (message_id, f"2026-10-05T09:0{minute}:00.000000+00:00", at[claim], status))
+            runs = (("mail-answer", 1, "질문 1", "첫 답"), ("mail-answer-repair", 1, "질문 1", "고친 답"),
+                    ("mail-answer", 2, "질문 2", "답 2"), ("mail-answer", 2, "질문 3", "답 3"),
+                    ("mail-answer", 3, "질문 4", "답 4"), ("mail-answer", 3, "질문 5", "보내지 못한 답 5"),
+                    ("mail-answer", 4, "질문 6", "답 6"), ("mail-answer", 4, "질문 7", "보내지 못한 답 7"),
+                    ("mail-answer", 5, "질문 7", "다시 쓴 답 7"))
+            for i, (use_case, claim, question, answer) in enumerate(runs):
+                ledger.record_advice_run(conn, run_id=f"a{i}", created_at=datetime.fromisoformat(at[claim]),
+                                         use_case=use_case, question="monday",
+                                         payload=json.dumps({"client_question": question}, ensure_ascii=False),
+                                         prompt_version="v", model="m", cost_usd=None, outcome="success",
+                                         advice=json.dumps({"answer": {"text": answer, "refs": []}}, ensure_ascii=False))
+            conn.execute("PRAGMA user_version = 15")
+            ledger._migrate(conn)
+            turns = ledger.thread_turns(conn, thread_id="t1", before=LATER, limit=10)
+        # Filled only where the claim time names one question on both sides; the repaired text was the one sent.
+        self.assertEqual(turns, [{"client": "질문 1", "smith": "고친 답"}, {"client": "질문 7", "smith": "다시 쓴 답 7"}])
+
     def test_snapshot_gives_reads_one_consistent_view(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "ledger.db"

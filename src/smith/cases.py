@@ -8,7 +8,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from smith.payload import LedgerView, base_amount, owner_alias, won
+from smith.payload import LedgerView, base_amount, owner_alias, unrealized_gain, won
 from smith.records import INFLOW_CATEGORIES, OUTFLOW_CATEGORIES, TRANSFER_CATEGORIES, Kind
 from smith.summary import recurring_active
 
@@ -71,7 +71,7 @@ def funding_facts(view: LedgerView, *, amount: Decimal, us_tax_rate: Decimal = D
         sources.append({"ref": view.aliases[record.record_id], "category": f["category"],
                         "account_type": f.get("account_type"), "owner": owner_alias(view, record.owner_id),
                         "liquidity": f["liquidity"],
-                        "value": won(value), "unrealized_gain": won(_unrealized_gain(view, record)),
+                        "value": won(value), "unrealized_gain": won(unrealized_gain(view, record)),
                         "restricted": restricted})
     by_class: dict[str, list[Any]] = {}
     # Hermes-managed assets are not counted as reachable money; they appear only as their own tier.
@@ -297,16 +297,8 @@ def _compound(rate: Decimal, years: Decimal) -> Decimal:
     return (1 + rate) ** years
 
 
-def _unrealized_gain(view: LedgerView, record: Any) -> Decimal | None:
-    f = record.fields
-    if any(f.get(field) is None for field in ("quantity", "unit_price", "average_cost")) \
-            or f["currency"] not in view.rates:
-        return None
-    return (Decimal(f["unit_price"]) - Decimal(f["average_cost"])) * Decimal(f["quantity"]) * view.rates[f["currency"]]
-
-
 def _sum_unrealized_gains(view: LedgerView, records: list[Any]) -> Decimal | None:
-    gains = [_unrealized_gain(view, record) for record in records]
+    gains = [unrealized_gain(view, record) for record in records]
     return None if any(gain is None for gain in gains) else sum(gains, Decimal(0))
 
 

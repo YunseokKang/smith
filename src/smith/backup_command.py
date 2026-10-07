@@ -4,8 +4,9 @@ The copy is taken with SQLite's online backup API from a read-only connection, s
 while a scheduled run writes, and it never changes the ledger. Each copy is written under a temporary
 name, checked with `PRAGMA integrity_check`, and only then given its final name; a copy that fails the
 check is deleted.
-Old copies made by this command (named `smith-<UTC time>.db`) beyond `keep` are removed; other files in
-the folder are never touched.
+The client memory (`data/memory/*.md`, FR-19) is copied with it as `smith-<UTC time>.memory/`.
+Old copies made by this command (named `smith-<UTC time>.db` and `.memory`) beyond `keep` are removed;
+other files in the folder are never touched.
 
 Backups hold the same real financial data as the ledger: keep them on a drive you control (an external
 disk is a good second place) and out of Git and shared cloud folders unless you decide otherwise.
@@ -13,11 +14,14 @@ With `[backup] dir` in the local config, `smith report run-due` also makes a cop
 """
 import argparse
 import re
+import shutil
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from smith import memory
 
 DEFAULT_DIR = Path("data/backups")
 DEFAULT_KEEP = 14
@@ -52,7 +56,8 @@ def run(args: argparse.Namespace) -> int:
     except BackupError as error:
         print(f"Backup failed: {error}. The ledger itself was not changed.")
         return 1
-    print(f"Backup written: {path} (schema v{version}, integrity ok, {path.stat().st_size:,} bytes)"
+    kept = ", with client memory" if path.with_suffix(".memory").is_dir() else ""
+    print(f"Backup written: {path} (schema v{version}, integrity ok, {path.stat().st_size:,} bytes{kept})"
           + (f"; removed {removed} older cop{'y' if removed == 1 else 'ies'}" if removed else ""))
     return 0
 
@@ -79,15 +84,24 @@ def backup(db: Path, out_dir: Path, *, now: datetime, keep: int) -> tuple[Path, 
         partial.unlink(missing_ok=True)
         raise BackupError("the copy failed its integrity check")
     partial.replace(target)
+    notes = memory.directory(db)
+    if notes.is_dir():
+        try:
+            shutil.copytree(notes, target.with_suffix(".memory"))
+        except OSError as error:
+            raise BackupError(f"the ledger was copied but the client memory was not ({type(error).__name__})") from None
     return target, version, _prune(out_dir, keep)
 
 
 def _prune(out_dir: Path, keep: int) -> int:
-    """Remove the oldest copies made by this command beyond `keep`. Names sort by time."""
+    """Remove the oldest copies made by this command beyond `keep`, with their memory copies. Names sort by
+    time."""
     copies = sorted(p for p in out_dir.iterdir() if p.is_file() and _NAME.fullmatch(p.name))
     old = copies[:-keep]
     for path in old:
         path.unlink()
+        if path.with_suffix(".memory").is_dir():
+            shutil.rmtree(path.with_suffix(".memory"))
     return len(old)
 
 

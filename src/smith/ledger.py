@@ -25,7 +25,7 @@ from smith.records import (
 logger = logging.getLogger(__name__)
 _END_OF_TIME = datetime.max.replace(tzinfo=timezone.utc)
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 _V1 = (
     """CREATE TABLE imports (
         import_id TEXT PRIMARY KEY,
@@ -314,8 +314,31 @@ _V15 = (
         since TEXT NOT NULL
     )""",
 )
+# The text of each e-mail question (identifiers masked, as sent to the model) and of the answer Smith sent,
+# so a follow-up in the same thread is answered with the conversation so far. Answers sent before this
+# version are filled from their audited model runs only when the claim time identifies one question on
+# both sides: every question of one poll shares its claim time, a question claimed with an answered one
+# may have its own (successful) model run, and a retried question leaves its earlier runs behind at the
+# old time. Skipped messages never have a run. The production ledger was checked after the fact
+# (2026-10-07): every row it filled met this stricter rule.
+_V16 = (
+    "ALTER TABLE mail_questions ADD COLUMN question_text TEXT",
+    "ALTER TABLE mail_questions ADD COLUMN answer_text TEXT",
+    """UPDATE mail_questions SET
+        question_text = (SELECT json_extract(a.payload, '$.client_question') FROM advice_runs a
+                         WHERE a.use_case = 'mail-answer' AND a.created_at = mail_questions.claimed_at
+                         ORDER BY a.rowid DESC LIMIT 1),
+        answer_text = (SELECT json_extract(a.advice, '$.answer.text') FROM advice_runs a
+                       WHERE a.use_case IN ('mail-answer', 'mail-answer-repair') AND a.outcome = 'success'
+                       AND a.created_at = mail_questions.claimed_at ORDER BY a.rowid DESC LIMIT 1)
+        WHERE status = 'answered'
+        AND (SELECT count(*) FROM mail_questions m
+             WHERE m.claimed_at = mail_questions.claimed_at AND m.status != 'skipped') = 1
+        AND (SELECT count(DISTINCT json_extract(a.payload, '$.client_question')) FROM advice_runs a
+             WHERE a.use_case = 'mail-answer' AND a.created_at = mail_questions.claimed_at) = 1""",
+)
 _MIGRATIONS = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8, 9: _V9, 10: _V10, 11: _V11, 12: _V12,
-               13: _V13, 14: _V14, 15: _V15}
+               13: _V13, 14: _V14, 15: _V15, 16: _V16}
 _COLUMNS = ("record_id, revision, kind, owner_id, source, status, change_type, corrects_revision, "
             "reason, effective_at, recorded_at, import_id, fields")
 
@@ -972,9 +995,11 @@ QUESTION_LEASE = timedelta(minutes=30)
 
 
 def claim_question(conn: sqlite3.Connection, *, message_id: str, thread_id: str, report_id: str | None,
-                   received_at: datetime, now: datetime, daily_limit: int | None = None) -> bool:
+                   received_at: datetime, now: datetime, daily_limit: int | None = None,
+                   question_text: str | None = None) -> bool:
     """Atomically claim a question for answering: a new question, or a clean failure with attempts left.
-    With `daily_limit`, the claim is refused once that many answers were claimed in the last 24 hours."""
+    With `daily_limit`, the claim is refused once that many answers were claimed in the last 24 hours.
+    `question_text` is the question as sent to the model (identifiers masked), kept for later turns."""
     conn.execute("BEGIN IMMEDIATE")
     try:
         if daily_limit is not None and _answers_since(conn, now - timedelta(days=1)) >= daily_limit:
@@ -983,12 +1008,13 @@ def claim_question(conn: sqlite3.Connection, *, message_id: str, thread_id: str,
         row = conn.execute("SELECT status, attempts FROM mail_questions WHERE message_id = ?", (message_id,)).fetchone()
         if row is None:
             conn.execute("INSERT INTO mail_questions (message_id, thread_id, report_id, received_at, claimed_at, status, "
-                         "attempts) VALUES (?, ?, ?, ?, ?, 'answering', 1)",
-                         (message_id, thread_id, report_id, _db_time(received_at), _db_time(now)))
+                         "attempts, question_text) VALUES (?, ?, ?, ?, ?, 'answering', 1, ?)",
+                         (message_id, thread_id, report_id, _db_time(received_at), _db_time(now), question_text))
         elif row[0] == "failed" and row[1] < MAX_ANSWER_ATTEMPTS:
             conn.execute("UPDATE mail_questions SET status = 'answering', attempts = attempts + 1, claimed_at = ?, "
-                         "error_code = NULL, finished_at = NULL, sending_at = NULL WHERE message_id = ?",
-                         (_db_time(now), message_id))
+                         "error_code = NULL, finished_at = NULL, sending_at = NULL, "
+                         "question_text = coalesce(?, question_text) WHERE message_id = ?",
+                         (_db_time(now), question_text, message_id))
         else:
             conn.execute("ROLLBACK")
             return False
@@ -1005,10 +1031,11 @@ def skip_question(conn: sqlite3.Connection, *, message_id: str, thread_id: str, 
                  (message_id, thread_id, _db_time(now), _db_time(now), reason, _db_time(now)))
 
 
-def start_answer(conn: sqlite3.Connection, *, message_id: str, now: datetime) -> bool:
-    """Mark the point after which the reply may have been sent; False if the claim was lost."""
-    cursor = conn.execute("UPDATE mail_questions SET status = 'sending', sending_at = ? WHERE message_id = ? AND "
-                          "status = 'answering'", (_db_time(now), message_id))
+def start_answer(conn: sqlite3.Connection, *, message_id: str, now: datetime, answer_text: str | None = None) -> bool:
+    """Mark the point after which the reply may have been sent, with the text being sent; False if the
+    claim was lost."""
+    cursor = conn.execute("UPDATE mail_questions SET status = 'sending', sending_at = ?, answer_text = ? "
+                          "WHERE message_id = ? AND status = 'answering'", (_db_time(now), answer_text, message_id))
     return cursor.rowcount == 1
 
 
@@ -1034,6 +1061,15 @@ def seen_questions(conn: sqlite3.Connection) -> set[str]:
     """Messages not to pick up again: everything except clean failures that still have attempts left."""
     return {row[0] for row in conn.execute("SELECT message_id FROM mail_questions WHERE NOT (status = 'failed' AND "
                                            "attempts < ?)", (MAX_ANSWER_ATTEMPTS,))}
+
+
+def thread_turns(conn: sqlite3.Connection, *, thread_id: str, before: datetime, limit: int) -> list[dict[str, Any]]:
+    """The latest `limit` earlier questions of an e-mail thread, oldest first, as {"client", "smith"}.
+    "smith" is the answer only when it was confirmed sent; otherwise None (not answered, or delivery unknown)."""
+    rows = conn.execute("SELECT question_text, CASE WHEN status = 'answered' THEN answer_text END FROM mail_questions "
+                        "WHERE thread_id = ? AND received_at < ? AND question_text IS NOT NULL "
+                        "ORDER BY received_at DESC, rowid DESC LIMIT ?", (thread_id, _db_time(before), limit)).fetchall()
+    return [{"client": question, "smith": answer} for question, answer in reversed(rows)]
 
 
 def answer_message_ids(conn: sqlite3.Connection) -> set[str]:

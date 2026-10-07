@@ -71,7 +71,11 @@
   `insurance`, `crypto_exchange`, `none`(부동산·보증금처럼 계좌가 없음), `other`
 - 선택 필드(종목 단위 세부): `symbol`(영문·숫자·`.`·`-` 20자 이하), `instrument_name`(100자 이하),
   `market`(`KR`, `US`, `other`), `quantity`, `unit_price`, `average_cost`, `value_after_costs`
-  (세금·수수료 공제 후 평가액). 토스 동기화가 채우며 수동 입력에도 쓸 수 있다.
+  (세금·수수료 공제 후 평가액). 토스 동기화가 채우며 수동 입력에도 쓸 수 있다. `unit_price`(현재가)와
+  `average_cost`(평균 매입 단가)는 **1주당, 그 자산의 `currency` 기준**이다(미국 주식이면 달러). 수익률
+  `(unit_price − average_cost) / average_cost`는 환율 없이 계산하고, 원화 미실현 손익만 환율이 있을 때 계산한다.
+  토스 값의 통화는 2026-10-07 저장된 실제 데이터로 확인했다: 원화·달러 모든 종목에서 `value = quantity × unit_price`가
+  정확히 맞고, `average_cost / unit_price`는 0.24~3.1배여서 통화가 섞였다면 나왔을 약 1,400배 차이가 없다.
 - 선택 필드 `occupancy`(부동산 용도): `owner_occupied`(실거주), `leased_out`(임대), `vacant`, `other`.
 - 선택 필드 `managed_by`(운용 주체): `self`, `hermes`(별도 fund manager가 운용), `other`.
 - 선택 필드 `region`(부동산 소재 지역, 시·구 수준): 행정구역 단위만 받는다. 시·도(…특별시·광역시·특별자치시·도)는

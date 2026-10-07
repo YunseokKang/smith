@@ -1,6 +1,7 @@
 import json
 import subprocess
 import tempfile
+import threading
 import unittest
 from contextlib import closing
 from dataclasses import replace
@@ -8,7 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from smith import headless, ledger, narrative, research
+from smith import compare, headless, ledger, memory, narrative, research
 from smith.importer import parse_import
 from smith.payload import check_outbound
 from smith.proposals import Proposal, materially_changed, snapshot
@@ -250,6 +251,119 @@ class NarrativeTests(unittest.TestCase):
         with closing(ledger.connect_read_only(self.db)) as conn:
             rows = list(conn.execute("SELECT use_case, outcome FROM advice_runs"))
         self.assertEqual(rows, [("report-narrative", "failure")])
+
+    def test_listed_holdings_carry_gain_and_return_on_cost_only_when_known(self):
+        def holding(symbol, currency, quantity, price, cost):
+            return rec(symbol.lower(), "asset", category="stock", account_type="brokerage", currency=currency,
+                       value=str(Decimal(quantity) * Decimal(price)), valuation_method="market", liquidity="days",
+                       symbol=symbol, market="US", quantity=quantity, unit_price=price, average_cost=cost)
+        doc = {"schema_version": 1, "import_id": "m2", "source": "manual", "mode": "patch", "as_of": AT.isoformat(),
+               "owners": [{"id": "self"}], "records": [
+                   holding("AAPL", "USD", "10", "120", "45"), holding("MSFT", "USD", "1", "200", "100"),
+                   holding("TSLA", "USD", "1", "32.45", "100"), holding("SONY", "JPY", "1", "1500", "1000")]}
+        with closing(ledger.connect(self.db)) as conn:
+            ledger.apply_import(conn, parse_import(json.dumps(doc)), recorded_at=AT)
+        data = self.data()
+        payload = narrative.build_payload(data["view"], data, None)
+        held = {a["symbol"]: a for a in payload["household"]["assets"] if a.get("symbol")}
+        # 75 USD x 10 x 1,400; the return is in dollars, so the exchange rate does not distort it.
+        self.assertEqual((held["AAPL"]["unrealized_gain"], held["AAPL"]["return_on_cost"]), ("1050000", "1.6667"))
+        self.assertNotIn("unrealized_gain", held["VOO"])                     # No cost basis: unknown, not zero.
+        # Without a JPY rate the gain in won is unknown, but the return needs no rate.
+        self.assertEqual(("unrealized_gain" in held["SONY"], held["SONY"]["return_on_cost"]), (False, "0.5000"))
+        securities = payload["sector_metrics"]["securities"]
+        self.assertEqual((securities["unrealized_gain"], securities["positions_without_cost_basis"]), ("1095430", 2))
+        # A "%" is compared only with percentages the inputs state, rounded to the digits written, same sign.
+        for text, grounded in (("수익률 166.67%", True), ("수익률 166.7%", True), ("수익률 167%", True),
+                               ("수익률 -167%", False), ("수익률 169%", False),
+                               ("수익률 100%", True),                                   # 1.0000 keeps its value.
+                               ("손실률 -67.6%", True), ("손실률 -0.7%", False),        # Not the ratio itself...
+                               ("손실률 -0.6755%", False),                              # ...nor its raw digits.
+                               ("CD 금리 2.5%", True), ("CD 금리 250%", False)):        # Already in %: not x100.
+            with self.subTest(text=text):
+                self.assertEqual(narrative.check_block([text], [], payload) is None, grounded)
+
+    def test_only_inputs_and_the_clients_statements_are_evidence(self):
+        data = self.data()
+        payload = dict(narrative.build_payload(data["view"], data, None), client_question="수수료가 55.5%라면?",
+                       recent_report={"situation": "비중이 77.7%입니다"},
+                       conversation=[{"client": "지난번 질문", "smith": "수익률 42.4%였습니다"}],
+                       specialist_findings=[{"what": "점유율 88.8%"}])
+        for text, grounded in (("수수료 55.5%", True), ("비중 77.7%", False), ("수익률 42.4%", False),
+                               ("점유율 88.8%", False)):
+            with self.subTest(text=text):    # Model outputs are never evidence, whatever key they arrive under.
+                self.assertEqual(narrative.check_block([text], [], payload) is None, grounded)
+
+    def test_team_specialists_see_their_area_and_cannot_vouch_for_figures(self):
+        seen, lock = {}, threading.Lock()
+        finding = {"headline": "현금 1,000만 원은 비상금입니다", "what": "보유 현금 1,000만 원", "why_it_matters": "버팀목",
+                   "so_what": "유지", "severity": "HIGH", "certainty": "fact", "refs": []}
+        made_up = dict(finding, headline="투자 여력 9,999만 원", what="여력 9,999만 원", severity="urgent")
+        specialist = {"findings": [finding, made_up], "cross_sector": ["보증금 반환과 투자가 상충"], "data_gaps": []}
+        editor = dict(EMPTY, situation=block("고객님은 여유 자금 9,999만 원을 투자에 쓰실 수 있습니다."))
+
+        def runner(args, **kwargs):
+            prompt = args[args.index("--system-prompt") + 1]
+            if "Your area: " not in prompt:
+                return runner_returning(editor)(args, **kwargs)
+            area = prompt.split("Your area: ")[1].split()[0].rstrip(":,")
+            with lock:
+                seen[area] = json.loads(kwargs["input"])
+            if area == "debt":
+                return subprocess.CompletedProcess(args, 1, "{}", "")      # One specialist fails.
+            return runner_returning(specialist)(args, **kwargs)
+        data = self.data()
+        narrative.narrate(self.db, data["view"], data, now=AT, secrets=[], executable=Path("claude.exe"), runner=runner,
+                          pipeline="team")
+        status = data["narrative"]["status"]
+        self.assertEqual((status["pipeline"], status["outcome"]), ("team", "success"))
+        # Each specialist reads only its area's records.
+        symbols = lambda area: {a.get("symbol") or a["category"] for a in seen[area]["household"]["assets"]}  # noqa: E731
+        self.assertEqual(symbols("investments"), {"VOO"})
+        self.assertEqual(symbols("liquidity"), {"cash"})
+        self.assertEqual(symbols("real"), {"real_estate"})
+        self.assertNotIn("tax", seen["liquidity"])
+        by_area = {s["area"]: s for s in status["specialists"]}
+        self.assertEqual(by_area["debt"]["status"], "failed")
+        liquidity = by_area["liquidity"]["findings"]
+        self.assertEqual([f["severity"] for f in liquidity], ["high", "medium"])
+        self.assertNotIn("check_failed", liquidity[0])                       # 1,000만 원 is the ledger's cash.
+        self.assertTrue(liquidity[1]["check_failed"].startswith("ungrounded-number"))
+        with closing(ledger.connect_read_only(self.db)) as conn:
+            runs = dict(conn.execute("SELECT use_case, payload FROM advice_runs WHERE use_case NOT LIKE '%repair'"))
+        self.assertEqual(sorted(runs), ["report-narrative", "report-specialist-debt", "report-specialist-investment",
+                                        "report-specialist-liquidity", "report-specialist-real_estate",
+                                        "report-specialist-tax_pension"])
+        sent = json.loads(runs["report-narrative"])
+        self.assertEqual({s["area"]: s["status"] for s in sent["specialist_findings"]}["debt"], "failed")
+        # The editor repeated a specialist's made-up figure: findings are not evidence, so it is flagged.
+        self.assertIn("확인되지 않은 수치", data["narrative"]["situation_memo"])
+
+    def test_reports_receive_the_client_memory(self):
+        memory.add(memory.directory(self.db), "property", "솔방울은 거주 중인 집을 말한다", on=TODAY, source="메일")
+        data = self.data()
+        narrative.narrate(self.db, data["view"], data, now=AT, secrets=[], executable=Path("claude.exe"),
+                          runner=runner_returning(EMPTY))
+        self.assertEqual(data["narrative"]["status"]["memory"], {"stored": 1, "sent": 1})
+        with closing(ledger.connect_read_only(self.db)) as conn:
+            sent = json.loads(conn.execute("SELECT payload FROM advice_runs WHERE use_case = 'report-narrative'").fetchone()[0])
+        self.assertEqual([m["fact"] for m in sent["client_memory"]], ["솔방울은 거주 중인 집을 말한다"])
+
+    def test_compare_builds_both_reports_from_one_snapshot_without_sending(self):
+        calls = []
+
+        def narrate(db, view, data, **kwargs):
+            calls.append((kwargs["pipeline"], kwargs["now"], kwargs["brief_id"]))
+            narrative.attach(data, None, None, {"brief": None, "model": "m", "pipeline": kwargs["pipeline"],
+                                                "outcome": "failure", "error_code": "x", "dropped": [], "run_ids": []})
+        with tempfile.TemporaryDirectory() as directory:
+            page = compare.run(self.db, now=AT, kind="monday", tz="Asia/Seoul", baseline=None, household=None,
+                               brief_id=None, secrets=[], out_dir=Path(directory), narrate=narrate)
+            self.assertEqual(sorted(p.name for p in Path(directory).iterdir()), ["index.html", "single.html", "team.html"])
+            html = page.read_text(encoding="utf-8")
+        self.assertEqual(sorted(calls), [("single", AT, None), ("team", AT, None)])   # Same instant and brief.
+        self.assertIn('src="team.html"', html)
+        self.assertIn("전문가 단계가 실행되지 않았습니다", html)
 
     def deliver(self, report_id, proposals, at=AT):
         with closing(ledger.connect(self.db)) as conn:

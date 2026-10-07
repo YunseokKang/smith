@@ -11,7 +11,7 @@ from typing import Any
 from smith import headless
 from smith.headless import HEADLESS_ENV, HeadlessError as AdviserError, find_claude  # noqa: F401 - re-exported
 
-PROMPT_VERSION = "advice-v4"
+PROMPT_VERSION = "advice-v5"
 # The household uses a flat-rate subscription and asked for the most capable reasoning model
 # (2026-10-05). Fable runs about 2.5x the notional cost of Opus; the cap only bounds a runaway call.
 DEFAULT_MODEL = "fable"
@@ -70,6 +70,9 @@ Input: a question and a context JSON. All amounts are whole KRW strings computed
   announcements N*, and "case" for context.case figures. Nothing else is a valid ref.
 - If context.completeness.complete is false, stale data or warnings exist, state the limits.
 - Ownership matters: assets whose owner is not "self" are not the user's legal property.
+- context.client_memory holds what the user told Smith before (what a nickname of a home means,
+  residence periods, plans, consents, preferences), newest first. They are the user's statements, not
+  ledger facts; a newer one wins, and they never override ledger figures. Say when advice rests on one.
 - Assets with managed_by "hermes" are operated by Hermes, a separate fund manager. Do not recommend
   selling or changing them directly; at most suggest discussing a withdrawal with Hermes.
 - Use the case figures (for example funding tiers, scenario gaps) instead of adding numbers yourself.

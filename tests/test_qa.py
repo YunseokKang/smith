@@ -7,7 +7,7 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from smith import gmail, ledger, qa
+from smith import gmail, ledger, memory, qa
 from smith.importer import parse_import
 
 AT = datetime(2026, 10, 5, 3, 0, tzinfo=timezone.utc)
@@ -69,6 +69,7 @@ class QaTests(unittest.TestCase):
     def poll(self, output=None, now=AT):
         output = output or {"answer": {"text": "비상금은 바로 꺼낼 수 있는 계좌에 두시는 것이 좋습니다.", "refs": []},
                             "follow_up": ["얼마나 모아야 하나요?"]}
+        output = {"remember": [], **output}
 
         def runner(args, **kwargs):
             envelope = {"subtype": "success", "is_error": False, "structured_output": output, "total_cost_usd": 0.2}
@@ -113,13 +114,14 @@ class QaTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "no-read-scope")
 
     def test_ledger_amounts_pass_and_client_assumptions_are_flagged(self):
-        self.thread[1] = message("question01", text="IRP가 10억 원이면 어떻게 하나요?")
+        self.thread[1] = message("question01", text="IRP가 10억이면 어떻게 하나요?")   # Clients often omit "원".
         output = {"answer": {"text": "현금 1,000만 원은 비상금으로 두십시오. IRP 10억 원이라면 연금 비중이 큽니다.", "refs": []},
                   "follow_up": []}
         self.poll(output)
         html = self.sent[0]["html"]
         self.assertIn("1,000만 원은 비상금으로", html)          # "1,000만 원" matches the ledger's 10,000,000.
-        self.assertIn("질문에서 말씀하신 수치(10억 원)", html)   # The client's premise, not a ledger fact.
+        self.assertIn("말씀하신 수치(10억)", html)      # The client's premise, not a ledger fact...
+        self.assertNotIn("확인되지 않은 수치", html)     # ...and not an ungrounded figure either.
 
     def test_clean_failures_are_retried_and_interrupted_answers_recovered(self):
         def failing(credentials, **kwargs):
@@ -157,6 +159,52 @@ class QaTests(unittest.TestCase):
         self.assertIn("보고서의 판단", sent)
         self.assertNotIn("더 새로운 판단", sent)
         self.assertIn("보고서 시점의 원장 기준", self.sent[0]["html"])           # The ledger has moved on since.
+
+    def test_a_follow_up_continues_the_thread_without_trusting_earlier_answers(self):
+        self.thread[1] = message("question01", text="분양가가 15억 원이면 집을 팔고 들어갈까요?")
+        follow_up = message("question02", text="그럼 둘 중 어느 쪽이 나을까요?")
+        follow_up["internalDate"] = str(int(follow_up["internalDate"]) + 60_000)
+        self.thread.insert(1, follow_up)            # Listed first but sent later: answered after question01.
+        output = {"answer": {"text": "15억 원 분양은 차익 7억 원을 전제로 합니다.", "refs": []}, "follow_up": []}
+        results = self.poll(output)
+        self.assertEqual([r["message_id"] for r in results], ["question01", "question02"])
+        self.assertEqual(self.sent[1]["in_reply_to"], "<question02@mail>")
+        with closing(ledger.connect_read_only(self.db)) as conn:
+            payloads = [json.loads(r[0]) for r in conn.execute(
+                "SELECT payload FROM advice_runs WHERE use_case = 'mail-answer' ORDER BY rowid")]
+        self.assertEqual(payloads[0]["conversation"], [])
+        turn, = payloads[1]["conversation"]
+        self.assertEqual(turn["client"], "분양가가 15억 원이면 집을 팔고 들어갈까요?")
+        self.assertIn("차익 7억 원", turn["smith"])                # What Smith actually sent, from the ledger.
+        second = self.sent[1]["html"]
+        self.assertIn("말씀하신 수치(15억 원)", second)       # The client's earlier premise, still flagged.
+        self.assertIn("확인되지 않은 수치가 있습니다(7억 원)", second)  # Smith's own earlier figure is no evidence.
+
+    def test_facts_the_client_states_are_remembered_for_later_calls(self):
+        self.thread[1] = message("question01", text="솔방울은 푸른마을아파트 303동이야. 분양가 15억 원이면 어떨까?")
+        stated = [{"topic": "property", "fact": "솔방울은 푸른마을아파트 303동을 말한다."},
+                  {"topic": "nonsense", "fact": "분양가 15억 원 수준의 청약을 검토 중이다."}]
+        self.poll({"answer": {"text": "검토해 보겠습니다.", "refs": []}, "follow_up": [], "remember": stated})
+        reply = self.sent[0]["html"]
+        self.assertIn("기억해 두겠습니다", reply)                              # The client sees what is kept.
+        self.assertIn("솔방울은 푸른마을아파트 (동·호 생략)을 말한다.", reply)        # Building number never kept.
+        folder = memory.directory(self.db)
+        self.assertEqual(sorted(f.topic for f in memory.load(folder)), ["other", "property"])
+        self.assertIn("- 2026-10-05 · 메일 · 솔방울은", (folder / "property.md").read_text(encoding="utf-8"))
+        # A later question gets the memory (read from the files, not from the thread), and its figure counts as
+        # the client's statement.
+        self.thread = [message("reportmsg01"), message("question02", text="그럼 푸른마을을 팔까?")]
+        self.thread[1]["internalDate"] = str(int(self.thread[1]["internalDate"]) + 60_000)
+        self.poll({"answer": {"text": "15억 원 청약이라면 순서를 정해야 합니다.", "refs": []}, "follow_up": [],
+                   "remember": stated[:1]})                                       # Repeated: not stored twice.
+        with closing(ledger.connect_read_only(self.db)) as conn:
+            sent = json.loads(conn.execute("SELECT payload FROM advice_runs WHERE use_case = 'mail-answer' "
+                                           "ORDER BY rowid DESC").fetchone()[0])
+        self.assertEqual({m["fact"] for m in sent["client_memory"]},
+                         {"솔방울은 푸른마을아파트 (동·호 생략)을 말한다.", "분양가 15억 원 수준의 청약을 검토 중이다."})
+        self.assertIn("말씀하신 수치(15억 원)", self.sent[1]["html"])
+        self.assertNotIn("기억해 두겠습니다", self.sent[1]["html"])
+        self.assertEqual(len(memory.load(folder)), 2)
 
     def test_quotes_are_stripped(self):
         self.assertEqual(qa.strip_quote("질문입니다\n> 인용\nOn Mon, Oct 5, 2026 at 6:00 AM Smith wrote:\n원문"), "질문입니다")

@@ -15,7 +15,7 @@ from smith.config import DEFAULT_TIMEZONE
 
 from keyring.errors import KeyringError
 
-from smith import adviser, cases, credentials, ledger
+from smith import adviser, cases, credentials, ledger, memory
 from smith.payload import PayloadRejected, build_context, check_outbound, load_view, redact
 
 CASES = ("portfolio", "funding", "home")
@@ -69,6 +69,12 @@ def run(args: argparse.Namespace) -> int:
     question = args.question or DEFAULT_QUESTIONS[args.case].format(
         amount=f"{args.amount:,.0f}", price=f"{args.target_price:,.0f}", date=args.target_date.isoformat())
     question = redact(view, question)
+    try:
+        stored = memory.load(memory.directory(args.db))
+    except (OSError, UnicodeDecodeError) as error:
+        print(f"Client memory unreadable ({type(error).__name__}); advising without it.")
+        stored = []
+    context["client_memory"] = memory.for_model(memory.retrieve(stored, question))
     payload = json.dumps({"question": question, "context": context}, ensure_ascii=False, indent=1)
     try:
         secrets = _secrets()

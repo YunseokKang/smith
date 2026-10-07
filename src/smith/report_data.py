@@ -12,7 +12,7 @@ from typing import Any
 
 from smith import cases, checklist, ledger, proposals, realestate
 from smith.config import DEFAULT_TIMEZONE, local_time
-from smith.payload import LedgerView, base_amount, load_view
+from smith.payload import LedgerView, base_amount, load_view, unrealized_gain
 from smith.records import Kind, RecordInput, Status
 from smith.summary import BASE_CURRENCY, DECIMAL_PRECISION, build_summary, recurring_active
 
@@ -325,7 +325,7 @@ def _securities_sector(view: LedgerView) -> dict[str, Any]:
     positions = [{"name": labels.get(p["ref"]) or p["symbol"], "value": Decimal(p["value"]),
                   "share": Decimal(p["share_of_securities"])} for p in facts["top_positions"]
                  if p["value"] is not None and p["share_of_securities"] is not None]
-    gains = [cases._unrealized_gain(view, r) for r in view.records if r.kind is Kind.ASSET and r.fields.get("symbol")]
+    gains = [unrealized_gain(view, r) for r in view.records if r.kind is Kind.ASSET and r.fields.get("symbol")]
     known = [g for g in gains if g is not None]
     # Positions without a cost basis are left out; their count is kept so the sum reads as partial.
     return {"total": None if facts["securities_total"] is None else Decimal(facts["securities_total"]),

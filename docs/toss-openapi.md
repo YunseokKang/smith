@@ -53,6 +53,8 @@
 - 금액·수량은 decimal 문자열이다. 종목별로 `symbol`, `name`, `marketCountry`, `currency`,
   `quantity`, `lastPrice`, `averagePurchasePrice`, `marketValue{purchaseAmount, amount,
   amountAfterCost}`, `profitLoss`, `dailyProfitLoss`, `cost{commission, tax|null}`.
+- `lastPrice`·`averagePurchasePrice`의 통화는 문서에 명시돼 있지 않다. 저장된 실제 응답 값으로 종목 `currency` 기준임을
+  확인했다(2026-10-07, `docs/data-contract.md` 종목 단위 필드 참고). `purchaseAmount`·`profitLoss`는 저장하지 않는다.
 - 요약 금액은 통화별(`krw`, `usd`) 합이며 통화 간 환산 합산을 하지 않는다. 해외 종목이 없으면 `usd`는 null.
 - **응답에 평가 기준 시각이 없다.** Smith는 수집 시각을 기록하고, 평가 시각은
   "수집 시각 기준 근사"로 표시한다.

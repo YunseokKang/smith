@@ -34,17 +34,20 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from smith import adviser, headless, ledger, research
+from smith import adviser, headless, ledger, memory, research
 from smith.fmt import short_won
 from smith.payload import build_context, check_outbound, won
 from smith.proposals import Proposal
 
-PROMPT_VERSION = "narrative-v3"
+PROMPT_VERSION = "narrative-v4"
 MODEL = "fable"
 BUDGET_USD = "5.00"
 TIMEOUT_SECONDS = 600  # Two calls at most (write and repair): 20 minutes, inside the 30-minute lease.
 BRIEF_REUSE_AGE = timedelta(days=4)  # A failed research run may fall back to a brief this recent.
-
+# One writer, or five specialists and an editor (smith.team). The team is an experiment kept for
+# `smith report compare` and previews; scheduled and manual sends always use the single writer
+# (user decision 2026-10-07: no quality gain for twice the time, and it can outlast the report lease).
+PIPELINES = ("single", "team")
 _TEXT = lambda limit: {"type": "string", "maxLength": limit}  # noqa: E731 - schema shorthand
 _REFS = {"type": "array", "maxItems": 8, "items": _TEXT(64)}
 _BLOCK = lambda limit: {"type": "object", "additionalProperties": False, "required": ["text", "refs"],  # noqa: E731
@@ -91,6 +94,14 @@ Input JSON:
 - property_market: official transaction figures for each property (same complex and size): recent trade
   median, jeonse median, counts. Use them for price and reverse-jeonse judgements; few trades mean weak
   evidence.
+- sector_metrics: each area's indicators computed by code (cash available now and the emergency-reserve
+  gap, what rate rises cost per month, unrealized gains, loan-to-value, locked money and premiums). Listed
+  holdings in household.assets carry unrealized_gain and return_on_cost (a decimal ratio in the holding's
+  own currency) when their cost basis is known; a holding without them has an unknown gain, not zero.
+- client_memory: what the client told Smith before (by e-mail or directly), newest first: what a nickname
+  of a home means, residence periods, plans, consents, preferences. They are the client's statements, not
+  ledger facts, and a newer one wins over an older one. Use them to understand the household and its
+  intentions; when a judgement rests on one, say so ("고객님 말씀 기준"). They never override ledger figures.
 - tax: tax strategy notes and the year-end checklist computed by code. Use them to explain the after-tax
   logic of the proposals (which account, when to realize gains, marriage-registration timing).
 - brief.items_untrusted: web research findings with refs R1, R2, ... Each has a source, a date and a
@@ -129,7 +140,9 @@ Hard rules (checked by code; a block that breaks one is deleted):
 
 # --- payload ----------------------------------------------------------------------------------------------
 
-def build_payload(view: Any, data: dict[str, Any], brief: dict[str, Any] | None) -> dict[str, Any]:
+def build_payload(view: Any, data: dict[str, Any], brief: dict[str, Any] | None,
+                  client_memory: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """The narrative's input. `client_memory` is the memory retrieved for this call (memory.for_model)."""
     advice = data["advice"]
     change = data["change"]
     return {
@@ -148,12 +161,47 @@ def build_payload(view: Any, data: dict[str, Any], brief: dict[str, Any] | None)
         "assumptions": advice["assumptions"],
         "ownership_notes": OWNERSHIP_NOTES,
         "property_market": _property_market(view, data),
+        "sector_metrics": sector_metrics(view, data),
         "household_profile": data.get("household_profile"),
+        "client_memory": client_memory or [],
         "tax": {"notes": [{"title": n.title, "body": n.body, "when": n.when} for n in advice.get("tax_notes", [])],
                 "year_end_checklist": [list(row) for row in advice.get("tax_checklist", [])]},
         "brief": None if brief is None else {
             "researched_at": brief["created_at"].date().isoformat(),
             "items_untrusted": brief["brief"]["items"], "gaps": brief["brief"]["gaps"]},
+    }
+
+
+def sector_metrics(view: Any, data: dict[str, Any]) -> dict[str, Any]:
+    """Each area's deterministic indicators (report design §4.3), as computed for the report's charts.
+    Ratios are decimal strings; unknown values stay None."""
+    s = data["sectors"]
+    cash, debt, securities = s["cash"], s["debt"], s["securities"]
+    estate, pension = s["real_estate"], s["pension_insurance"]
+
+    def ratio(value: Decimal | None) -> str | None:
+        return None if value is None else f"{value:.4f}"
+    return {
+        "cash": {"immediate": won(cash["immediate"]), "reserve_target": won(cash["reserve_target"]),
+                 "reserve_gap": won(cash["reserve_gap"]),
+                 "emergency_months_assumption": str(cash["emergency_months_assumption"]),
+                 "hermes_managed": won(cash["hermes"])},
+        "debt": {"variable_rate_total": won(debt["variable_total"]),
+                 "monthly_interest_estimate": won(debt["monthly_interest_estimate"]),
+                 "rate_shocks": [{"rate_rise": str(x["shock"]), "monthly_interest_increase": won(x["monthly_increase"])}
+                                 for x in debt["shocks"]]},
+        "securities": {"total": won(securities["total"]), "unclassified": won(securities["unclassified"]),
+                       "unrealized_gain": won(securities["unrealized_gain"]),
+                       "unrealized_gain_positions": securities["unrealized_gain_counted"],
+                       "positions_without_cost_basis": securities["unrealized_gain_missing"],
+                       "hermes_managed": won(securities["hermes"])},
+        "real_estate": {"share_of_assets": ratio(estate["share_of_assets"]),
+                        "properties": [{"ref": view.aliases.get(p["record_id"]), "loan_to_value": ratio(p["ltv"])}
+                                       for p in estate["properties"]]},
+        "pension_insurance": {"restricted_total": won(pension["restricted_total"]),
+                              "monthly_premiums": won(pension["monthly_premiums"]),
+                              "premium_to_income": ratio(pension["premium_to_income"]),
+                              "surrender_values_known": pension["surrender_values_known"]},
     }
 
 
@@ -198,30 +246,38 @@ Audit = Callable[[str, str, str, str | None, str | None, Any], bool]
 
 def write(view: Any, data: dict[str, Any], brief: dict[str, Any] | None, *, secrets: list[str], executable: Path,
           runner: headless.Runner = subprocess.run, model: str = MODEL,
-          audit: Audit | None = None) -> dict[str, Any]:
+          audit: Audit | None = None, system_prompt: str = SYSTEM_PROMPT,
+          notes: dict[str, Any] | None = None, timeout_seconds: int = TIMEOUT_SECONDS,
+          client_memory: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Ask for the narrative, verify it, repair rejected blocks once, and return
     {"output": verified output, "dropped": [...], "cost_usd"}. `audit(use_case, payload, outcome,
     error_code, cost, content)` records every call and returns False if the record could not be saved.
+
+    `notes` (the team editor's specialist findings) are added to what the model reads but not to what
+    verification accepts as evidence: they are other models' output, so their figures must still be
+    grounded in the inputs.
 
     Raises:
         headless.HeadlessError: the first call failed or its output failed the schema.
         PayloadRejected: the outgoing payload matched an identifier or secret rule.
         AuditError: a call could not be recorded, so its output is withheld.
     """
-    payload = build_payload(view, data, brief)
-    text = json.dumps(payload, ensure_ascii=False)
+    payload = build_payload(view, data, brief, client_memory)
+    sent = payload if notes is None else {**payload, **notes}
+    text = json.dumps(sent, ensure_ascii=False)
     check_outbound(text, secrets)
-    output, cost = _call(text, "report-narrative", executable, model, runner, audit)
+    output, cost = _call(text, "report-narrative", executable, model, runner, audit, system_prompt, timeout_seconds)
     verified, dropped = verify(output, payload)
     _record(audit, "report-narrative", text, "success", None, cost,
             {"raw": output, "verified": verified, "dropped": dropped})
     costs = [cost]
     if dropped:
-        repair = dict(payload, previous_output=output, rejected=[_rejection_reason(d) for d in dropped])
+        repair = dict(sent, previous_output=output, rejected=[_rejection_reason(d) for d in dropped])
         repair_text = json.dumps(repair, ensure_ascii=False)
         check_outbound(repair_text, secrets)
         try:
-            second, cost2 = _call(repair_text, "report-narrative-repair", executable, model, runner, audit)
+            second, cost2 = _call(repair_text, "report-narrative-repair", executable, model, runner, audit,
+                                  system_prompt, timeout_seconds)
         except headless.HeadlessError:
             second = None
         if second is not None:
@@ -296,10 +352,11 @@ class AuditError(Exception):
 
 
 def _call(text: str, use_case: str, executable: Path, model: str, runner: headless.Runner,
-          audit: Audit | None) -> tuple[Any, str | None]:
+          audit: Audit | None, system_prompt: str = SYSTEM_PROMPT,
+          timeout_seconds: int = TIMEOUT_SECONDS) -> tuple[Any, str | None]:
     try:
-        return headless.run(text, system_prompt=SYSTEM_PROMPT, schema=NARRATIVE_SCHEMA, executable=executable,
-                            model=model, budget_usd=BUDGET_USD, timeout_seconds=TIMEOUT_SECONDS, runner=runner)
+        return headless.run(text, system_prompt=system_prompt, schema=NARRATIVE_SCHEMA, executable=executable,
+                            model=model, budget_usd=BUDGET_USD, timeout_seconds=timeout_seconds, runner=runner)
     except headless.HeadlessError as error:
         _record(audit, use_case, text, "failure", str(error.code)[:80], None, None)
         raise
@@ -375,9 +432,9 @@ def verify(output: dict[str, Any], payload: dict[str, Any]) -> tuple[dict[str, A
     official = {ref for ref, item in brief_items.items() if item.get("tier") == "official"}
     internal = _internal_text(payload)
     corpus, figures = _numbers(internal), _figures(internal) | _formatted_amounts(payload)
-    amounts = _amounts(internal)
-    item_numbers = {ref: (_numbers(_item_text(item)), _figures(_item_text(item)), _amounts(_item_text(item)))
-                    for ref, item in brief_items.items()}
+    amounts, percents = _amounts(internal), _percents(_evidence(payload))
+    item_numbers = {ref: (_numbers(_item_text(item)), _figures(_item_text(item)), _amounts(_item_text(item)),
+                          _written_percents(_item_text(item))) for ref, item in brief_items.items()}
     keys = [p["key"] for p in payload["proposals"]]
     dropped: list[str] = []
 
@@ -385,12 +442,14 @@ def verify(output: dict[str, Any], payload: dict[str, Any]) -> tuple[dict[str, A
         reason = _problem(texts, refs, known_refs, official, outside)
         if reason is None:
             allowed_numbers, allowed_figures, allowed_amounts = set(corpus), set(figures), set(amounts)
+            allowed_percents = set(percents)
             for ref in refs:
                 if ref in item_numbers:
                     allowed_numbers |= item_numbers[ref][0]
                     allowed_figures |= item_numbers[ref][1]
                     allowed_amounts |= item_numbers[ref][2]
-            stray = _stray(texts, allowed_numbers, allowed_figures, allowed_amounts)
+                    allowed_percents |= item_numbers[ref][3]
+            stray = _stray(texts, allowed_numbers, allowed_figures, allowed_amounts, allowed_percents)
             reason = f"ungrounded-number:{','.join(stray[:5])}" if stray else None
         if reason:
             dropped.append(f"{path}:{reason}")
@@ -429,13 +488,14 @@ def check_block(texts: list[str], refs: list[str], payload: dict[str, Any], *, o
         return reason
     internal = _internal_text(payload)
     numbers, figures = _numbers(internal), _figures(internal) | _formatted_amounts(payload)
-    amounts = _amounts(internal)
+    amounts, percents = _amounts(internal), _percents(_evidence(payload))
     for ref in refs:
         if ref in brief_items:
             numbers |= _numbers(_item_text(brief_items[ref]))
             figures |= _figures(_item_text(brief_items[ref]))
             amounts |= _amounts(_item_text(brief_items[ref]))
-    stray = _stray(texts, numbers, figures, amounts)
+            percents |= _written_percents(_item_text(brief_items[ref]))
+    stray = _stray(texts, numbers, figures, amounts, percents)
     return f"ungrounded-number:{','.join(stray[:5])}" if stray else None
 
 
@@ -477,15 +537,28 @@ def _known_refs(payload: dict[str, Any]) -> set[str]:
     return known
 
 
-def _internal_text(payload: dict[str, Any]) -> str:
-    """The payload without the research brief and without URLs: numbers in links or in research items a
-    block does not cite are not evidence for that block."""
+# The only parts of a payload whose numbers a block may use without citing a research item: deterministic
+# inputs computed by code and the client's own statements. Anything else (the research brief, cited per
+# block; model outputs such as recent_report, previous_output, specialist findings and Smith's earlier
+# answers) is excluded by default, so a new payload key is not evidence until it is listed here.
+_EVIDENCE_KEYS = ("edition", "change_since_last_report", "proposals", "undetermined", "proposals_in_progress",
+                  "strategy", "assumptions", "ownership_notes", "property_market", "sector_metrics",
+                  "household_profile", "tax", "report_date", "message_date", "client_question", "client_memory")
+
+
+def _evidence(payload: dict[str, Any]) -> dict[str, Any]:
+    """The allowlisted payload, without URLs (numbers in links are not evidence) and with only the client's
+    side of an e-mail conversation."""
     household = dict(payload["household"])
     household["announcements"] = [{k: v for k, v in a.items() if k != "link"} for a in household.get("announcements", [])]
     household["evidence"] = [{k: v for k, v in e.items() if k != "source"} for e in household.get("evidence", [])]
-    # The client's own question counts as input: its figures may be quoted back.
-    rest = {k: v for k, v in payload.items() if k not in ("brief", "household", "previous_output", "rejected")}
-    return json.dumps({**rest, "household": household}, ensure_ascii=False)
+    kept = {key: payload[key] for key in _EVIDENCE_KEYS if key in payload}
+    kept["conversation"] = [turn.get("client") for turn in payload.get("conversation", [])]
+    return {**kept, "household": household}
+
+
+def _internal_text(payload: dict[str, Any]) -> str:
+    return json.dumps(_evidence(payload), ensure_ascii=False)
 
 
 def _item_text(item: dict[str, str]) -> str:
@@ -506,16 +579,46 @@ def _numbers(text: str) -> set[str]:
 
 
 def _figures(text: str) -> set[str]:
-    """Numbers that are figures in the inputs: written with a unit, decimals, long amounts, and decimal
-    rates as percentages (0.0361 -> 3.61). Date fragments are not figures."""
-    found = set()
-    for number, unit in _matches(text):
-        plain = number.lstrip("-")
-        if unit.startswith(_FIGURE_UNITS) or "." in plain or len(plain) >= 5:
+    """Numbers that are figures in the inputs: written with a unit, decimals and long amounts. Date fragments
+    are not figures. Percentages are kept apart (`_percents`)."""
+    return {number for number, unit in _matches(text)
+            if unit.startswith(_FIGURE_UNITS) or "." in number or len(number.lstrip("-")) >= 5}
+
+
+# Ratios computed by code are decimal fractions (0.0361 is 3.61%); these keys hold them.
+_RATIO_KEYS = frozenset({"share", "share_of_assets", "share_of_securities", "usd_share_of_assets", "return_on_cost",
+                         "loan_to_value", "liabilities_to_assets", "premium_to_income", "change_vs_previous_6m",
+                         "annual_rate", "rate_rise"})
+_SERIES_VALUES = ("value", "change_3m", "change_12m")
+_PERCENT = re.compile(r"(?<![\w.])([-+−]?)(\d[\d,]*(?:\.\d+)?)\s*%")
+_DECIMAL = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def _percents(value: Any, key: str | None = None, unit: str | None = None, figures: bool = False) -> set[Decimal]:
+    """The percentages the inputs state, kept apart from other figures so that a "%" in prose is compared
+    only with them: decimal ratios under ratio keys and proposal figures below one (times 100), values of
+    series measured in "%" (as they are), and "N%" written in any text."""
+    if isinstance(value, dict):
+        unit = value["unit"] if "unit" in value else unit
+        return {p for k, v in value.items() for p in _percents(v, k, unit, figures or k == "figures")}
+    if isinstance(value, list):
+        return {p for item in value for p in _percents(item, key, unit, figures)}
+    if not isinstance(value, str):
+        return set()
+    found = _written_percents(value)
+    if _DECIMAL.fullmatch(value):
+        number = Decimal(value)
+        if key in _RATIO_KEYS or (figures and "." in value and abs(number) < 1):
+            found.add(number * 100)
+        elif unit == "%" and key in _SERIES_VALUES:
             found.add(number)
-        if "." in plain and Decimal(plain) < 1:
-            found.add(("-" if number.startswith("-") else "") + _normalize(str(Decimal(plain) * 100)))
     return found
+
+
+def _written_percents(text: str) -> set[Decimal]:
+    """Every "N%" (and "N%p") written in a text, with its sign."""
+    return {Decimal(("-" if sign in ("-", "−") else "") + number.replace(",", ""))
+            for sign, number in _PERCENT.findall(text)}
 
 
 def _formatted_amounts(payload: dict[str, Any]) -> set[str]:
@@ -533,15 +636,18 @@ def _formatted_amounts(payload: dict[str, Any]) -> set[str]:
 
 
 _MONEY = re.compile(r"((?:\d[\d,]*(?:\.\d+)?\s*(?:조|억|만)\s*)+)(\d[\d,]*)?\s*원|(?<![\d.,])(\d[\d,]*)\s*원")
+# Clients write "분양가21억수준": as evidence (and to recognize a client's figure), a unit amount needs no "원".
+_LOOSE_MONEY = re.compile(r"((?:\d[\d,]*(?:\.\d+)?\s*(?:조|억|만)\s*)+)(?:(\d[\d,]*)?\s*원)?|(?<![\d.,])(\d[\d,]*)\s*원")
 _MONEY_PART = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*(조|억|만)")
 _MONEY_UNITS = {"조": Decimal(10) ** 12, "억": Decimal(10) ** 8, "만": Decimal(10) ** 4}
 
 
-def _money(text: str) -> list[tuple[int, int, Decimal, Decimal]]:
+def _money(text: str, *, loose: bool = False) -> list[tuple[int, int, Decimal, Decimal]]:
     """Won amounts written in Korean units ("1억 350만 원", "3.4억 원", "85,000원"):
-    (start, end, value, half the precision of the written form)."""
+    (start, end, value, half the precision of the written form). `loose` also takes "21억" without "원";
+    prose a block writes is always read strictly."""
     found = []
-    for match in _MONEY.finditer(text):
+    for match in (_LOOSE_MONEY if loose else _MONEY).finditer(text):
         if match.group(3):
             value = Decimal(match.group(3).replace(",", ""))
             found.append((match.start(), match.end(), value, Decimal("0.5")))
@@ -562,10 +668,11 @@ def _money(text: str) -> list[tuple[int, int, Decimal, Decimal]]:
 def _amounts(text: str) -> set[Decimal]:
     """Amounts available as evidence: whole numbers of 1,000 or more (ledger figures) and written amounts."""
     found = {abs(Decimal(n)) for n, _ in _matches(text) if n.lstrip("-").isdigit() and len(n.lstrip("-")) >= 4}
-    return found | {abs(value) for _, _, value, _ in _money(text)}
+    return found | {abs(value) for _, _, value, _ in _money(text, loose=True)}
 
 
-def _stray(texts: list[str], numbers: set[str], figures: set[str], amounts: set[Decimal] = frozenset()) -> list[str]:
+def _stray(texts: list[str], numbers: set[str], figures: set[str], amounts: set[Decimal] = frozenset(),
+           percents: set[Decimal] = frozenset()) -> list[str]:
     stray = []
     for text in texts:
         masked = list(text)
@@ -575,8 +682,10 @@ def _stray(texts: list[str], numbers: set[str], figures: set[str], amounts: set[
             masked[start:end] = " " * (end - start)
         text = "".join(masked)
         for number, unit in _matches(text):
-            if unit.startswith(_FIGURE_UNITS):
-                ok = number in figures  # A figure keeps its sign: "-3.4%" is not "3.4% 상승".
+            if unit.startswith("%"):
+                ok = _rounded_percent(number, percents)
+            elif unit.startswith(_FIGURE_UNITS):
+                ok = number in figures  # A figure keeps its sign: "-3.4억" is not "3.4억 증가".
             else:
                 plain = number.lstrip("-")
                 ok = number in numbers or (not number.startswith("-") and plain.isdigit()
@@ -584,6 +693,16 @@ def _stray(texts: list[str], numbers: set[str], figures: set[str], amounts: set[
             if not ok:
                 stray.append(number + unit[:1])
     return stray
+
+
+def _rounded_percent(written: str, percents: set[Decimal]) -> bool:
+    """A percentage the inputs state, possibly written with fewer decimals ("-67.6%" for a return of -0.6755):
+    within half a unit of its last written digit of a known percentage with the same sign ("-3.4%" is not
+    "3.4% 상승"), like amounts."""
+    value = Decimal(written)
+    decimals = len(written.split(".")[1]) if "." in written else 0
+    half = Decimal(5) / Decimal(10) ** (decimals + 1)
+    return any((known < 0) == (value < 0) and abs(known - value) <= half for known in percents)
 
 
 def _normalize(token: str) -> str:
@@ -659,11 +778,36 @@ def pinned_brief(db: Path, view: Any, *, now: datetime, brief_id: str | None) ->
     return found, reused
 
 
+def report_memory(db: Path, data: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """(client memory for this report, status). The report's own topics are the retrieval query. An
+    unreadable memory folder is reported, not fatal: the report goes out without memory."""
+    advice = data["advice"]
+    query = " ".join([p.title for p in advice["proposals"]] + [t.headline for t in advice["strategy"]]
+                     + [u.topic for u in advice.get("undetermined", [])])
+    try:
+        facts = memory.load(memory.directory(db))
+    except (OSError, UnicodeDecodeError) as error:
+        return [], {"stored": None, "sent": 0, "error_code": type(error).__name__}
+    chosen = memory.retrieve(facts, query)
+    return memory.for_model(chosen), {"stored": len(facts), "sent": len(chosen)}
+
+
 def narrate(db: Path, view: Any, data: dict[str, Any], *, now: datetime, secrets: list[str],
             brief_id: str | None = None, executable: Path | None = None,
-            runner: headless.Runner = subprocess.run) -> None:
+            runner: headless.Runner = subprocess.run, pipeline: str = "single") -> None:
     """Run the narrative stage for one report and attach its result. Never raises for a model failure:
-    the report then goes out with its deterministic content and says so in the data-status footer."""
+    the report then goes out with its deterministic content and says so in the data-status footer.
+
+    `pipeline` "single" is one writer; "team" is specialists and an editor (smith.team) with the same
+    output, verification and attachment.
+    """
+    if pipeline not in PIPELINES:
+        raise ValueError(f"unknown narrative pipeline: {pipeline}")
+    if pipeline == "team":
+        from smith import team  # The team builds on this module.
+        writer, version = team.write, team.PROMPT_VERSION
+    else:
+        writer, version = write, PROMPT_VERSION
     brief, reused = pinned_brief(db, view, now=now, brief_id=brief_id)
     official = 0 if brief is None else sum(1 for i in brief["brief"]["items"] if i.get("tier") == "official")
     checks = [] if brief is None else [i["check"]["status"] for i in brief["brief"]["items"] if i.get("check")]
@@ -671,7 +815,7 @@ def narrate(db: Path, view: Any, data: dict[str, Any], *, now: datetime, secrets
                                                     "official": official, "reused": reused,
                                                     # Source pages fetched and compared (smith.sources).
                                                     "checked": len(checks), "matched": checks.count("matched")},
-              "model": MODEL, "outcome": "skipped", "dropped": [],
+              "model": MODEL, "pipeline": pipeline, "outcome": "skipped", "dropped": [],
               # Lineage: the brief and audited model runs behind this report (stored with the report run).
               "brief_id": None if brief is None else brief.get("brief_id"), "run_ids": []}
 
@@ -680,7 +824,7 @@ def narrate(db: Path, view: Any, data: dict[str, Any], *, now: datetime, secrets
         try:
             with closing(ledger.connect(db)) as conn:
                 ledger.record_advice_run(conn, run_id=run_id, created_at=now, use_case=use_case,
-                                         question=data["kind"], payload=payload, prompt_version=PROMPT_VERSION,
+                                         question=data["kind"], payload=payload, prompt_version=version,
                                          model=MODEL, cost_usd=cost, outcome=outcome, error_code=code,
                                          advice=None if content is None else json.dumps(content, ensure_ascii=False))
             status["run_ids"].append(run_id)
@@ -688,13 +832,16 @@ def narrate(db: Path, view: Any, data: dict[str, Any], *, now: datetime, secrets
         except Exception:  # noqa: BLE001 - reported to the caller as a failed audit.
             return False
 
+    remembered, status["memory"] = report_memory(db, data)
     try:
-        result = write(view, data, brief, secrets=secrets, executable=executable or headless.find_claude(),
-                       runner=runner, audit=audit)
+        result = writer(view, data, brief, secrets=secrets, executable=executable or headless.find_claude(),
+                        runner=runner, audit=audit, client_memory=remembered)
     except Exception as error:  # noqa: BLE001 - the report must still go out.
         code = "audit-write-failed" if isinstance(error, AuditError) else getattr(error, "code", None) or type(error).__name__
         status.update(outcome="failure", error_code=str(code)[:80])
         attach(data, None, brief, status)
         return
     status.update(outcome="success", dropped=result["dropped"], cost_usd=result["cost_usd"])
+    if "specialists" in result:
+        status["specialists"] = result["specialists"]
     attach(data, result, brief, status)

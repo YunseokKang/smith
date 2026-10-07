@@ -118,6 +118,15 @@ def base_amount(view: LedgerView, record: RecordInput) -> Decimal | None:
     return Decimal(raw) * view.rates[currency]
 
 
+def unrealized_gain(view: LedgerView, record: RecordInput) -> Decimal | None:
+    """(price - average cost) x quantity in the base currency, or None when any input or the FX rate is
+    unknown (an unknown gain is never zero)."""
+    f = record.fields
+    if any(f.get(k) is None for k in ("quantity", "unit_price", "average_cost")) or f["currency"] not in view.rates:
+        return None
+    return (Decimal(f["unit_price"]) - Decimal(f["average_cost"])) * Decimal(f["quantity"]) * view.rates[f["currency"]]
+
+
 def won(value: Decimal | None) -> str | None:
     """Whole base-currency units as a string; the model never receives binary floats."""
     return None if value is None else str(value.quantize(Decimal(1), rounding=ROUND_HALF_UP))
@@ -180,6 +189,14 @@ def _asset(view: LedgerView, record: RecordInput, include_positions: bool) -> di
             "managed_by": f.get("managed_by"), "region": f.get("region")}
     if include_positions and f.get("symbol"):
         item.update(symbol=f["symbol"], market=f.get("market"))
+        # The return needs no exchange rate: price and average cost are both per unit in the holding's
+        # currency (data contract). Only the gain in won waits for a rate.
+        price, cost = f.get("unit_price"), f.get("average_cost")
+        if price is not None and cost is not None and Decimal(cost) > 0:
+            item["return_on_cost"] = f"{(Decimal(price) - Decimal(cost)) / Decimal(cost):.4f}"
+        gain = unrealized_gain(view, record)
+        if gain is not None:
+            item["unrealized_gain"] = won(gain)
     return item
 
 

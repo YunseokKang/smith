@@ -12,7 +12,7 @@ from decimal import Decimal
 from typing import Any
 
 from smith.fmt import percent, short_won
-from smith.payload import LedgerView, base_amount
+from smith.payload import LedgerView, base_amount, unrealized_gain
 from smith.records import Kind
 
 RULES_YEAR = 2026
@@ -98,7 +98,7 @@ def facts(view: LedgerView, today: date, household: dict[str, Any] | None) -> di
     # deduction, which the harvest proposal says (`hermes_us`).
     listed = [r for r in mine if r.kind is Kind.ASSET and r.fields.get("market") == "US" and r.fields.get("symbol")]
     us = [r for r in listed if r.fields.get("managed_by") != "hermes"]
-    gains = [_gain(view, r) for r in us]
+    gains = [unrealized_gain(view, r) for r in us]
     known = [g for g in gains if g is not None]
     return {
         "today": today, "year": today.year,
@@ -130,13 +130,6 @@ def _months_in_year(fields: dict[str, Any], year: int) -> int:
     start = max(date.fromisoformat(fields["start_date"]), date(year, 1, 1))
     end = min(date.fromisoformat(fields["end_date"]) if fields.get("end_date") else date(year, 12, 31), date(year, 12, 31))
     return 0 if end < start else (end.year - start.year) * 12 + end.month - start.month + 1
-
-
-def _gain(view: LedgerView, record: Any) -> Decimal | None:
-    f = record.fields
-    if any(f.get(k) is None for k in ("quantity", "unit_price", "average_cost")) or f["currency"] not in view.rates:
-        return None
-    return (Decimal(f["unit_price"]) - Decimal(f["average_cost"])) * Decimal(f["quantity"]) * view.rates[f["currency"]]
 
 
 # --- calculations behind proposals ------------------------------------------------------------------------
