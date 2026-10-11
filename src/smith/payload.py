@@ -65,18 +65,20 @@ class LedgerView:
     aliases: dict[str, str] = field(default_factory=dict)  # record id -> alias; stays local.
     owner_aliases: dict[str, str] = field(default_factory=dict)  # owner id -> role-preserving alias.
     source_aliases: dict[str, str] = field(default_factory=dict)  # source id -> alias for warnings.
+    record_sources: dict[str, str] = field(default_factory=dict)  # record id -> import source; stays local.
 
 
 def load_view(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetime) -> LedgerView:
     with ledger.snapshot(conn):
         summary = build_summary(conn, as_of=as_of, known_at=known_at)
-        records = [s.record for s in ledger.record_states(conn, as_of=as_of, known_at=known_at)
-                   if s.record.status is Status.ACTIVE]
+        states = [s for s in ledger.record_states(conn, as_of=as_of, known_at=known_at)
+                  if s.record.status is Status.ACTIVE]
         links = exposures(conn, as_of=as_of, known_at=known_at)
         series = evidence.describe(ledger.load_evidence(conn, known_at=known_at), as_of=as_of.date())
         news = ledger.load_announcements(conn, since=as_of - timedelta(days=90), until=as_of, known_at=known_at)
     rates = {BASE_CURRENCY: Decimal(1), **{f["subject"]: f["value"] for f in summary.fx}}
-    view = LedgerView(as_of, summary, records, rates, links, series, news)
+    view = LedgerView(as_of, summary, [s.record for s in states], rates, links, series, news,
+                      record_sources={s.record.record_id: s.source for s in states})
     view.aliases = _aliases(view)
     view.owner_aliases = _owner_aliases(view)
     sources = {row["source"] for row in summary.freshness} | {row["source"] for row in summary.sync}

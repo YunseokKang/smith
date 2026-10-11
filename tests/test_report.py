@@ -107,7 +107,7 @@ class ReportTests(unittest.TestCase):
         _, html = render(data)
         self.assertNotIn("<script>alert", html)
         self.assertIn("&lt;script&gt;", html)
-        for section in ("순자산", "자산 구성", "현금·유동성", "부채·금리", "주식·증권", "거시 환경", "용어 풀이"):
+        for section in ("순자산", "자산 구성", "현금·유동성", "부채·금리", "보유 종목 점검", "거시 환경", "용어 풀이"):
             self.assertIn(section, html)
         for internal in ("us-1", "loan", "variable_rate_debt", "manual"):
             self.assertNotIn(f">{internal}<", html)
@@ -131,7 +131,14 @@ class ReportTests(unittest.TestCase):
         data = build_report(self.conn, as_of=later, known_at=later, baseline=None, kind="monday")
         proposals = {p.key: p for p in data["advice"]["proposals"]}
         self.assertEqual(set(proposals), {"lease-return", "emergency-reserve", "surplus-plan", "pension-credit",
-                                          "prepayment", "variable-rate", "overseas-harvest", "isa-open"})
+                                          "prepayment", "variable-rate", "overseas-harvest", "isa-open",
+                                          "goal-stocks-glide"})
+        # Cash 1.5M plus 3M a month for 20 months cannot return the 3억 deposit, so all the shares
+        # (12 x 110 USD x 1,400) rest on that date: move them in 5 quarterly steps until 2027-12.
+        glide = proposals["goal-stocks-glide"]
+        self.assertEqual((glide.priority, glide.figures["from_stocks"], glide.figures["per_quarter"]),
+                         (2, Decimal(1_848_000), Decimal(369_600)))
+        self.assertEqual(glide.figures["stress"], Decimal(554_400))    # A 30% fall when they must be sold.
         # Act-now items: a deposit savings cannot cover within two years, cash under one month of spending,
         # and the year-end tax deadline in Q4.
         self.assertEqual([p.key for p in data["advice"]["proposals"][:3]],
@@ -147,6 +154,112 @@ class ReportTests(unittest.TestCase):
         self.assertIn("대응 필요", subject)          # Act-now proposals: the status says so.
         self.assertIn("이번 주 가장 중요한 한 가지", html)
         self.assertIn("목표까지 지금 궤도에 있습니까", html)
+
+    def test_glide_plan_moves_only_goal_money_that_cash_cannot_cover(self):
+        from smith.holdings import Need, glide_plan
+        today = date(2026, 10, 11)
+        a, b = Need("A", date(2027, 10, 1), Decimal(30)), Need("B", date(2029, 4, 1), Decimal(20))
+        far = Need("far", date(2030, 1, 1), Decimal(500))
+        soon = Need("soon", date(2026, 10, 30), Decimal(30))                     # Later this month.
+
+        def res(stocks, cash, monthly, **others):
+            return {"self": {"stocks": stocks, "cash": cash, "monthly": monthly}, **others}
+        partner = {"partner": {"stocks": Decimal(0), "cash": Decimal(100), "monthly": Decimal(0)}}
+        cases = [  # resources, needs -> [(label, from stocks, quarters, started)], "unknown" or None
+            (res(None, Decimal(10), Decimal(1)), [a], "unknown"),                 # Unconverted input.
+            (res(Decimal(100), Decimal(10), Decimal(1)), [far], None),            # Beyond three years.
+            (res(Decimal(100), Decimal(40), Decimal(1)), [a], None),              # Cash and savings cover it.
+            # One pool per owner: by A, 30 - (10 + 12) = 8; by B, 50 - (10 + 30) = 10 in all, so 2 more.
+            (res(Decimal(100), Decimal(10), Decimal(1)), [b, a], [("A", 8, 2, True), ("B", 2, 6, False)]),
+            (res(Decimal(5), Decimal(10), Decimal(1)), [a, b], [("A", 5, 2, True)]),  # Capped by the shares.
+            # A deficit shrinks the pool: 30 - (40 - 12) = 2 (review 2026-10-11: it was clipped to zero).
+            (res(Decimal(100), Decimal(40), Decimal(-1)), [a], [("A", 2, 2, True)]),
+            # Due later this month: no months of saving, moved now in one step (it was skipped as month 0).
+            (res(Decimal(100), Decimal(10), Decimal(1)), [soon], [("soon", 20, 1, True)]),
+            # Another member's cash never pays the client's goal (it used to make the plan vanish).
+            (res(Decimal(100), Decimal(0), Decimal(0), **partner), [Need("A", date(2027, 10, 1), Decimal(100))],
+             [("A", 100, 2, True)]),
+        ]
+        for resources, needs, expected in cases:
+            with self.subTest(expected=expected):
+                plan = glide_plan(today=today, needs=needs, resources=resources)
+                steps = None if plan is None else "unknown" if plan["unknown"] and not plan["steps"] else [
+                    (s["label"], s["from_stocks"], s["quarters"], s["started"]) for s in plan["steps"]]
+                self.assertEqual(steps, expected)
+        plan = glide_plan(today=today, needs=[a, b], resources=res(Decimal(100), Decimal(10), Decimal(1)))
+        self.assertEqual((plan["earmarked"], plan["stress"], plan["free"]), (Decimal(10), Decimal(3), Decimal(90)))
+        self.assertEqual((plan["steps"][1]["start"], plan["steps"][1]["end"]), (date(2027, 4, 1), date(2028, 10, 1)))
+
+    def test_lots_of_one_symbol_are_one_position(self):
+        from smith.holdings import review
+        later = datetime(2026, 10, 2, tzinfo=timezone.utc)
+        with_cost = dict(stock(1, later, "8", "110"), id="us-2", average_cost="120")
+        without_cost = {k: v for k, v in dict(with_cost, id="us-3").items() if k != "average_cost"}
+        # (12 x 90 + 8 x 120) / 20 = 102; a lot without a cost makes the whole position's cost unknown.
+        for import_id, record, expected in (("lot-a", with_cost, (Decimal(20), Decimal(102), 2)),
+                                            ("lot-b", without_cost, (Decimal(28), None, 3))):
+            with self.subTest(import_id):
+                self.apply(import_id, later, [record])
+                data = build_report(self.conn, as_of=later, known_at=later, baseline=None, kind="monday")
+                (position,) = review(data["view"])["positions"]
+                self.assertEqual((position["quantity"], position["average_cost"], position["lots"]), expected)
+                self.assertEqual(position["value"], expected[0] * 110 * 1400)
+
+    def test_principles_library_and_investment_policy(self):
+        from smith import principles
+        ids = [p.id for p in principles.LIBRARY]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertTrue(all(p.sources and p.principle and all(label and url.startswith("https://")
+                                                              for label, url in p.sources) for p in principles.LIBRARY))
+        self.assertEqual(len(principles.BY_ID["BUF-MR-MARKET"].sources), 2)     # 1987 and 2013, each with its URL.
+        self.assertEqual(principles.kind({"symbol": "SPYM", "name": "SPYM"}), "broad_index")  # Formerly SPLG.
+        for symbol, name, kind in (("VOO", "VOO", "broad_index"), ("069500", "KODEX 200", "broad_index"),
+                                   ("QQQ", "QQQ", "narrow_index"), ("SCHD", "SCHD", "fund"),
+                                   ("999999", "TIGER 2차전지테마", "fund"), ("123456", "예시전자", "stock")):
+            with self.subTest(symbol):
+                self.assertEqual(principles.kind({"symbol": symbol, "name": name}), kind)
+        data = build_report(self.conn, as_of=T1, known_at=T1, baseline=None, kind="monday")
+        checks = {c.key: c for c in data["policy"]}
+        self.assertTrue(all(i in principles.BY_ID for c in checks.values() for i in c.principles))
+        # One individual stock is all of the stocks: over the single-company limit, no index core, and a
+        # credit loan is outstanding while stocks are held.
+        self.assertEqual({k: c.status for k, c in checks.items()},
+                         {"reserve": "unknown", "leverage": "watch", "dated": "ok", "single": "breach", "core": "breach"})
+        self.assertEqual(checks["core"].current, "0.0%")
+        _, html = render(data)
+        self.assertIn("투자 원칙과 우리 집 투자 기준", html)
+        self.assertIn("어긋남", html)
+
+    def test_holdings_review_edges_from_the_review(self):
+        """Securities without a symbol are part of the stocks; one instrument per (market, symbol, currency,
+        manager); an unknown market is not overseas; a manual name stays local."""
+        from smith import principles, research
+        from smith.holdings import review
+        later = datetime(2026, 10, 2, tzinfo=timezone.utc)
+
+        def holding(rid, value, **extra):
+            return rec(rid, "asset", 1, later, category="stock", account_type="brokerage", currency="KRW", value=value,
+                       valuation_method="market", liquidity="days", **extra)
+        # Large enough that the fixture's own shares (about 1.8M won) do not matter.
+        self.apply("edges", later, [
+            holding("voo", "250000000", symbol="VOO", market="US", instrument_name="VOO"),
+            holding("plain", "750000000"),                                        # No symbol: make-up unknown.
+            holding("aaa", "10000000", symbol="AAA", market="US", instrument_name="김철수만 아는 비밀 종목"),
+            holding("aaa-h", "10000000", symbol="AAA", market="US", managed_by="hermes"),
+            holding("bbb", "5000000", symbol="BBB")])                             # No market recorded.
+        data = build_report(self.conn, as_of=later, known_at=later, baseline=None, kind="monday")
+        r = review(data["view"])
+        by = {(p["symbol"], p["hermes"]): p for p in r["positions"]}
+        self.assertEqual(r["unlisted"], Decimal(750_000_000))
+        self.assertEqual(by[("AAA", False)]["lots"], 1)                         # Hermes lot kept apart.
+        self.assertIsNone(by[("BBB", False)]["overseas"])
+        self.assertIsNone(r["overseas_share"])                                  # Unknown market: unknown share.
+        checks = {c.key: c for c in principles.policy(data)}
+        # VOO is far from half once the unlisted 75 counts, but those could be index funds: unknown, not met.
+        self.assertEqual((checks["core"].status, checks["single"].status), ("unknown", "unknown"))
+        topics = " ".join(t.title + t.question for t in research.holding_topics(data["view"]))
+        self.assertNotIn("김철수", topics)                                      # Manual names stay local.
+        self.assertIn("시장 미상", topics)
 
     def test_status_names_missing_inputs_and_judgements_it_could_not_make(self):
         data = build_report(self.conn, as_of=T1, known_at=T1, baseline=None, kind="thursday")

@@ -203,7 +203,7 @@ def home_facts(view: LedgerView, *, target_price: Decimal, target_date: date,
     liquid_records = [r for r in view.records if r.kind is Kind.ASSET and r.owner_id == "self"
                       and r.fields["liquidity"] in ("immediate", "days") and not _hermes(r)]
     liquid = _sum_values(view, liquid_records)
-    monthly_net = _monthly_net_cash_flow(view, owner_id="self")
+    monthly_net = monthly_net_cash_flow(view, owner_id="self")
     savings = monthly_net * months if monthly_net is not None else None
     partner_equity = _partner_property_equity(view)
     scenarios = []
@@ -256,7 +256,7 @@ def _monthly_outflow(view: LedgerView, accept: Any) -> Decimal | None:
     return _monthly_total(view, records)
 
 
-def _monthly_net_cash_flow(view: LedgerView, *, owner_id: str) -> Decimal | None:
+def monthly_net_cash_flow(view: LedgerView, *, owner_id: str) -> Decimal | None:
     """Monthly income minus spending, less transfers into restricted accounts (pension contributions):
     that money cannot be used for a home or a deposit return."""
     restricted = {r.record_id for r in view.records if r.kind is Kind.ASSET and r.fields["liquidity"] == "restricted"}

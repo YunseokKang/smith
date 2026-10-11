@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, localcontext
 from typing import Any
 
-from smith import cases, checklist, ledger, proposals, realestate
+from smith import cases, checklist, holdings, ledger, principles, proposals, realestate
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import LedgerView, base_amount, load_view, unrealized_gain
 from smith.records import Kind, RecordInput, Status
@@ -62,8 +62,8 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     market = realestate.analyze(ledger.load_deals(conn, since=as_of.date() - timedelta(days=400)), today=as_of.date())
     for prop in sectors["real_estate"]["properties"]:
         prop["market"] = market.get(prop["record_id"])
-    return {"kind": kind, "as_of": as_of, "baseline": baseline, "kpis": kpis,
-            "change": change, "timeline": _timeline(view), "sectors": sectors,
+    data = {"kind": kind, "as_of": as_of, "baseline": baseline, "kpis": kpis,
+            "change": change, "timeline": _timeline(view), "sectors": sectors, "holdings": holdings.review(view),
             "advice": proposals.build(view, kpis, sectors, active=ledger.active_proposals(conn), household=household),
             "requests": checklist.requests(view, household),
             "household_profile": _profile(household, as_of),
@@ -71,6 +71,8 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
                              "unconverted": view.summary.unconverted},
             "warnings": view.summary.warnings, "freshness": view.summary.freshness, "sync": view.summary.sync,
             "view": view}
+    data["policy"] = principles.policy(data)  # Investment policy checks (report design §13), from the data above.
+    return data
 
 
 def decompose(conn: sqlite3.Connection, t0: datetime, t1: datetime, known_at: datetime) -> dict[str, Any]:
@@ -230,9 +232,14 @@ def _home_progress(view: LedgerView) -> dict[str, Any] | None:
     required, available = Decimal(base["required_with_costs"]), Decimal(base["available_self"])
     with_partner = None if base["gap_including_partner_property_equity"] is None else \
         required - Decimal(base["gap_including_partner_property_equity"])
+    # What liquid money (grown at the scenario's return) and savings must cover once the home equity is
+    # used: the holdings glide plan (§12.4) asks how much of that rests on stocks.
+    grown = Decimal(facts["liquid_assets_self"]) * (1 + Decimal(base["assumptions"]["investment_return"])) ** (
+        Decimal(facts["months"]) / 12)
+    from_liquid = required - available + grown + Decimal(facts["projected_savings_from_monthly_net"])
     return {"target_date": goal["target_date"], "required": required, "available_self": available,
             "available_with_partner": with_partner, "ratio_self": available / required,
-            "scenarios": facts["scenarios"]}
+            "from_liquid": from_liquid, "scenarios": facts["scenarios"]}
 
 
 def _timeline(view: LedgerView) -> list[dict[str, Any]]:

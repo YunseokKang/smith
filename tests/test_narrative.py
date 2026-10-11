@@ -54,11 +54,23 @@ def runner_returning(output, calls=None):
     return run
 
 
+def by_prompt(market, holdings, calls=None):
+    """Answer the market research call and the holdings research call (told apart by their prompt)."""
+    def run(args, **kwargs):
+        prompt = args[args.index("--system-prompt") + 1]
+        output = holdings if prompt == research.HOLDINGS_PROMPT else market
+        if isinstance(output, Exception):
+            return subprocess.CompletedProcess(args, 1, "{}", "")
+        return runner_returning(output, calls)(args, **kwargs)
+    return run
+
+
 def block(text, refs=()):
     return {"text": text, "refs": list(refs)}
 
 
-EMPTY = {"situation": block(""), "direction": block(""), "order": [], "proposal_notes": [], "insights": [], "watch": []}
+EMPTY = {"situation": block(""), "direction": block(""), "portfolio": dict(block(""), principles=[]), "order": [],
+         "proposal_notes": [], "holdings": [], "insights": [], "watch": []}
 
 
 class NarrativeTests(unittest.TestCase):
@@ -105,8 +117,9 @@ class NarrativeTests(unittest.TestCase):
         text = json.dumps([t.__dict__ for t in research.topics(view)], ensure_ascii=False)
         self.assertIn("경기도 수원시 영통구", text)
         for amount in ("10000000", "1500000000", "200000000", "5000000", "2000000", "1000"):
-            self.assertNotIn(amount, text)               # No household amounts.
-        self.assertNotIn("VOO", text)                    # Holdings stay out of web searches.
+            self.assertNotIn(amount, text)               # No household amounts, quantities or values.
+        # Holdings go out by name, symbol and market only (user decision 2026-10-11), as their own topics.
+        self.assertEqual([t.title for t in research.topics(view) if t.ref.startswith("H")], ["VOO"])
         check_outbound(text, secrets=["s3cret-value"])
         calls = []
         bad = [dict(ITEM, source_url="http://insecure.example/x"), dict(ITEM, source_url="https://a.kr/x y"),
@@ -114,19 +127,36 @@ class NarrativeTests(unittest.TestCase):
                dict(ITEM, topic="T99"), dict(ITEM, published_on="2027-01-01"), dict(ITEM, published_on=""),
                dict(ITEM, published_on="2020-01-01"), dict(ITEM, kind="rumor")]
         news = dict(ITEM, source_url="https://news.example.com/1", published_on="2025-10")
+        company = dict(ITEM, topic="H1", headline="VOO 보수 0.03%", source_url="https://investor.vanguard.com/x")
         result = research.run_research(view, today=TODAY, secrets=[], executable=Path("claude.exe"),
-                                       runner=runner_returning({"items": [ITEM, news, *bad], "gaps": []}, calls),
+                                       runner=by_prompt({"items": [ITEM, news, *bad], "gaps": []},
+                                                        {"items": [dict(company, detail="가" * 3000)] + [company] * 4,
+                                                         "gaps": []}, calls),
                                        verifier=lambda items: (items, {}))   # Page checks: test_sources.
-        args = calls[0][0]
-        self.assertEqual(args[args.index("--tools") + 1], "WebSearch,WebFetch")
-        self.assertEqual(args[args.index("--permission-mode") + 1], "dontAsk")
-        self.assertEqual(args[args.index("--disallowedTools") + 1], "mcp__*")
-        self.assertNotIn("10000000", calls[0][1]["input"])
+        self.assertEqual(len(calls), 2)                  # Market and holdings researched separately.
+        for args, kwargs in calls:
+            self.assertEqual(args[args.index("--tools") + 1], "WebSearch,WebFetch")
+            self.assertEqual(args[args.index("--permission-mode") + 1], "dontAsk")
+            self.assertEqual(args[args.index("--disallowedTools") + 1], "mcp__*")
+            self.assertNotIn("10000000", kwargs["input"])
         items = result["brief"]["items"]
-        self.assertEqual([(i["ref"], i["tier"]) for i in items], [("R1", "official"), ("R2", "secondary")])
+        # A long detail is trimmed, not fatal to the call; a holding keeps its first three findings.
+        self.assertEqual([(i["ref"], i["topic"], i["tier"]) for i in items],
+                         [("R1", "T1", "official"), ("R2", "T1", "secondary"), ("R3", "H1", "secondary"),
+                          ("R4", "H1", "secondary"), ("R5", "H1", "secondary")])
+        self.assertEqual(len(items[2]["detail"]), 1200)
         self.assertNotIn("010-1234-5678", items[0]["detail"])
+        # One call failing keeps the other's findings and names the gap; both failing is a failed brief.
+        partial_result = research.run_research(view, today=TODAY, secrets=[], executable=Path("claude.exe"),
+                                               runner=by_prompt({"items": [ITEM], "gaps": []}, RuntimeError()),
+                                               verifier=lambda items: (items, {}))
+        self.assertEqual(len(partial_result["brief"]["items"]), 1)
+        self.assertTrue(partial_result["brief"]["gaps"][0].startswith("보유 종목 조사 실패"))
+        with self.assertRaises(headless.HeadlessError):
+            research.run_research(view, today=TODAY, secrets=[], executable=Path("claude.exe"),
+                                  runner=by_prompt(RuntimeError(), RuntimeError()), verifier=lambda items: (items, {}))
         self.assertEqual(result["brief"]["dropped"], {"bad-url": 4, "unknown-topic": 1, "future-date": 1, "no-date": 1,
-                                                      "stale": 1, "unknown-kind": 1})
+                                                      "stale": 1, "unknown-kind": 1, "over-topic-limit": 2})
         with self.assertRaises(headless.HeadlessError):
             headless.run("x", system_prompt="s", schema=research.BRIEF_SCHEMA, executable=Path("c.exe"), model=None,
                          budget_usd="1", timeout_seconds=1, tools=("Bash",), runner=runner_returning({}))
@@ -239,6 +269,80 @@ class NarrativeTests(unittest.TestCase):
         with closing(ledger.connect_read_only(self.db)) as conn:
             uses = [row[0] for row in conn.execute("SELECT use_case FROM advice_runs")]
         self.assertEqual(uses, ["report-narrative"])
+
+    def test_holding_opinions_are_checked_and_buying_more_carries_the_code_precondition(self):
+        data = self.data()
+        brief = self.brief()
+        brief["brief"]["items"].append({"ref": "R3", "topic": "H1", "headline": "VOO 총보수 0.03%", "detail": "S&P 500 추종",
+                                        "published_on": "2026-09-30", "publisher": "Vanguard", "source_title": "VOO",
+                                        "source_url": "https://investor.vanguard.com/voo", "kind": "fact",
+                                        "tier": "secondary"})
+        payload = narrative.build_payload(data["view"], data, brief)
+        self.assertEqual([(h["symbol"], h["research_topic"]) for h in payload["holdings"]], [("VOO", "H1")])
+        opinion = {"symbol": "VOO", "stance": "add", "reason": "S&P 500 전체에 나눠 투자하는 펀드라 쏠림이 없습니다.",
+                   "alternative": "", "reconsider": "비상금이 줄어들면 다시 판단합니다.", "refs": ["R3"],
+                   "principles": ["BUF-INDEX", "NOT-A-PRINCIPLE"]}
+        cases = [("invalid-holding", dict(opinion, symbol="AAPL")), ("invalid-holding", dict(opinion, stance="buy")),
+                 ("no-holding-source", dict(opinion, reason="실적이 좋아졌습니다.", refs=[]))]
+        for reason, item in cases:
+            with self.subTest(reason=reason):
+                _, dropped = narrative.verify(dict(EMPTY, holdings=[item]), payload)
+                self.assertEqual(dropped, [f"holdings[0]:{reason}"])
+        _, dropped = narrative.verify(dict(EMPTY, holdings=[opinion, dict(opinion, stance="hold")]), payload)
+        self.assertEqual(dropped, ["holdings[1]:duplicate"])
+        output = dict(EMPTY, portfolio=dict(block("주식은 넓게 나눠 담은 펀드 하나뿐이라 지금 구성을 유지하셔도 됩니다."),
+                                            principles=["BUF-INDEX", "VAN-BALANCE"]), holdings=[opinion])
+        with closing(ledger.connect(self.db)) as conn:
+            ledger.record_research(conn, brief_id="b", created_at=AT, topics=[], outcome="success", model="fable",
+                                   brief=brief["brief"])
+        narrative.narrate(self.db, data["view"], data, now=AT, secrets=[], brief_id="b", executable=Path("claude.exe"),
+                          runner=runner_returning(output))
+        held = data["narrative"]["holdings"]["VOO"]
+        # 10,000,000 cash against six months of 2,000,000 spending: the reserve comes first, says code.
+        self.assertIn("비상금 부족분 200만 원", held["condition"])
+        self.assertEqual(held["links"], [("Vanguard 2026-09-30", "https://investor.vanguard.com/voo")])
+        self.assertEqual([p.id for p in held["principles"]], ["BUF-INDEX"])      # Unknown ids are dropped.
+        # The policy: the only holding is a broad index fund (core met), but the reserve is short.
+        policy = {c.key: c.status for c in data["policy"]}
+        self.assertEqual((policy["core"], policy["single"], policy["reserve"]), ("ok", "ok", "breach"))
+        _, html = render(data)
+        for text in ("보유 종목 점검", "Smith의 투자 전략 · 주식 전체", "추가 매수 고려", "전제 조건", "종목 조사: 보유 종목 1개",
+                     "투자 원칙과 우리 집 투자 기준", "근거 원칙", "VOO (넓은 지수펀드)",
+                     'href="https://www.berkshirehathaway.com/letters/1996.html"'):
+            self.assertIn(text, html)
+        data["kind"] = "thursday"
+        _, html = render(data)
+        self.assertIn("보유 종목 의견", html)
+        self.assertIn("투자 기준 점검", html)                                  # Only the checks that are off.
+        self.assertNotIn("Smith의 투자 전략 · 주식 전체", html)
+
+    def test_holding_opinions_cite_their_own_research_and_obey_the_limit(self):
+        doc = {"schema_version": 1, "import_id": "aaa", "source": "manual", "mode": "patch", "as_of": AT.isoformat(),
+               "owners": [{"id": "self"}], "records": [
+                   rec("aaa", "asset", category="stock", account_type="brokerage", currency="KRW", value="50000000",
+                       valuation_method="market", liquidity="days", symbol="AAA", market="KR",
+                       instrument_name="수동으로 적은 이름")]}
+        with closing(ledger.connect(self.db)) as conn:
+            ledger.apply_import(conn, parse_import(json.dumps(doc)), recorded_at=AT)
+        data = self.data()
+        brief = self.brief()
+        for ref, topic in (("R3", "H1"), ("R4", "H2")):
+            brief["brief"]["items"].append(dict(brief["brief"]["items"][1], ref=ref, topic=topic, headline=f"{topic} 실적 개선"))
+        payload = narrative.build_payload(data["view"], data, brief)
+        held = {h["symbol"]: h for h in payload["holdings"]}
+        self.assertEqual((held["AAA"]["research_topic"], held["VOO"]["research_topic"]), ("H1", "H2"))
+        self.assertEqual(held["AAA"]["name"], "AAA")                             # A manual name stays local.
+        self.assertTrue(held["AAA"]["above_concentration_limit"])
+        base = {"alternative": "", "reconsider": "비중이 바뀌면 다시 봅니다.", "principles": []}
+        cases = [("other-holding-source", dict(base, symbol="VOO", stance="hold", reason="실적이 좋습니다.", refs=["R3"])),
+                 ("no-holding-source", dict(base, symbol="AAA", stance="hold", reason="실적이 좋습니다.", refs=["R2"])),
+                 ("add-over-limit", dict(base, symbol="AAA", stance="add", reason="더 사십시오.", refs=[]))]
+        for reason, item in cases:
+            with self.subTest(reason=reason):
+                _, dropped = narrative.verify(dict(EMPTY, holdings=[item]), payload)
+                self.assertEqual(dropped, [f"holdings[0]:{reason}"])
+        good = dict(base, symbol="AAA", stance="trim", reason="실적은 좋지만 한 회사에 너무 몰려 있습니다.", refs=["R3"])
+        self.assertEqual(narrative.verify(dict(EMPTY, holdings=[good]), payload)[1], [])
 
     def test_a_failed_narrative_is_audited_and_leaves_the_deterministic_report(self):
         data = self.data()

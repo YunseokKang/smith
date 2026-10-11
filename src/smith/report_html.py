@@ -16,6 +16,8 @@ from html import escape
 from typing import Any
 
 from smith.fmt import short_won as _short
+from smith import principles
+from smith.holdings import STANCES
 from smith.proposals import Track
 from smith.realestate import MIN_BASIS
 from smith.report_data import CATEGORY_LABELS, COMPONENT_LABELS
@@ -75,8 +77,10 @@ def render(data: dict[str, Any]) -> tuple[str, str]:
     if full:
         sectors = data["sectors"]
         sections += [_allocation(data), _cash(sectors["cash"], data), _debt(sectors["debt"]),
-                     _securities(sectors["securities"]), _real_estate(sectors["real_estate"]),
+                     _policy(data, story, full), _holdings(data, story, full), _real_estate(sectors["real_estate"]),
                      _pension(sectors["pension_insurance"]), _macro(sectors["macro"])]
+    else:
+        sections += [_policy(data, story, full), _holdings(data, story, full)]
     sections += [_requests(data.get("requests") or [], full), _glossary()]
     bands.append(_band(CANVAS, "".join(sections), border=True))
     bands.append(_band(SOFT, _footer(data, advice["assumptions"], story.get("status"))))
@@ -606,24 +610,158 @@ def _debt(debt: dict[str, Any]) -> str:
     return _section("부채·금리", lead, bars + table)
 
 
-def _securities(sec: dict[str, Any]) -> str:
-    positions = sec["positions"]
+STANCE_STYLE = {"add": (UP, "▲"), "hold": (MUTED, "●"), "trim": (BLUE, "▼"), "exit": (BLUE, "■")}
+
+
+def _holdings(data: dict[str, Any], story: dict[str, Any], full: bool) -> str:
+    """Holdings review (report design §12.7): the figures code computed, Smith's view of the whole, a table
+    with an opinion per holding, and cards for every opinion other than hold. Thursday lists only those."""
+    review, sec = data["holdings"], data["sectors"]["securities"]
+    positions = review["positions"]
+    opinions = story.get("holdings") or {}
+    active = [p for p in positions if _of(opinions, p).get("stance") not in (None, "hold")]
+    if not full:
+        if not active:
+            return ""
+        rows = "".join(f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin:4px 0">· <b style="font-weight:600;'
+                       f'color:{INK}">{escape(p["name"])}</b> {_stance(_of(opinions, p)["stance"])} — '
+                       f'{escape(_first_sentence(_of(opinions, p)["reason"]))}</div>' for p in active)
+        return _section("보유 종목 의견", "매수·정리 의견이 있는 종목만 짧게 말씀드립니다. 근거는 월요 보고에서 자세히 드립니다.", rows)
     if not positions:
-        return _section("주식·증권", "종목 단위 정보가 있는 증권이 없습니다.", "")
-    top = positions[0]
-    lead = (f"주식·증권 {_short(sec['total'])} 가운데 가장 큰 종목({escape(str(top['name']))})이 <b>{_pct(top['share'])}</b>를 "
-            f"차지합니다. 구성을 모르는 증권은 {_short(sec['unclassified'])}이며"
-            + (f", 종목별 <b>미실현 손익</b>(팔지 않아 확정되지 않은 손익) 합계는 {_signed_short(sec['unrealized_gain'])}입니다."
-               if sec["unrealized_gain"] is not None else "입니다."))
-    if sec["unrealized_gain"] is not None and sec["unrealized_gain_missing"]:
-        lead += (f" 이 손익은 매입 원가를 아는 {sec['unrealized_gain_counted']}개 종목만의 <b>부분 합계</b>이며, "
-                 f"원가를 모르는 {sec['unrealized_gain_missing']}개 종목은 빠져 있습니다.")
+        return _section("보유 종목 점검", "종목 단위 정보가 있는 증권이 없습니다.", "")
+    inner = _bars([(str(p["name"])[:14], p["value"], p["concentrated"]) for p in positions[:10]])
+    inner += _table(["종목", "평가액", "비중", "수익률", "Smith 의견"],
+                    [[_named(p), _short(p["value"]), _pct(p["share"]), _return(p["return_on_cost"]),
+                      "Hermes 운용" if p["hermes"] else STANCES.get(_of(opinions, p).get("stance"), "의견 없음")]
+                     for p in positions])
+    inner += "".join(_opinion_card(p, _of(opinions, p)) for p in active)
+    held = [p for p in positions if _of(opinions, p).get("stance") == "hold"]
+    if held:
+        rows = "".join(f'<div style="font-size:13px;line-height:1.6;color:{BODY};margin:3px 0">· <b style="font-weight:600;'
+                       f'color:{INK}">{escape(p["name"])}</b> — {escape(_first_sentence(_of(opinions, p)["reason"]))}'
+                       f'{_memo(_of(opinions, p).get("memo"))}</div>' for p in held)
+        inner += f'<div style="font-size:12px;font-weight:600;color:{MUTED};margin:16px 0 4px">유지 의견</div>{rows}'
+    return _section("보유 종목 점검", _holdings_lead(review, sec, bool(opinions)), inner)
+
+
+def _of(opinions: dict[str, Any], position: dict[str, Any]) -> dict[str, Any]:
+    """The opinion on a position; none for a Hermes-managed one, even when it shares the symbol."""
+    return {} if position["hermes"] else opinions.get(position["key"], {})
+
+
+def _holdings_lead(review: dict[str, Any], sec: dict[str, Any], opined: bool) -> str:
+    positions = [p for p in review["positions"] if not p["hermes"]]
+    lead = ""
+    if positions:
+        top = positions[0]
+        lead = (f"보유 종목 {len(positions)}개, {_short(review['total'])}입니다. 가장 큰 종목({escape(str(top['name']))})이 "
+                f"<b>{_pct(review['top1_share'])}</b>, 상위 5개가 <b>{_pct(review['top5_share'])}</b>를 차지하고, 해외 상장 종목 "
+                f"비중은 {_pct(review['overseas_share'])}입니다.")
+    if review["concentrated"]:
+        names = ", ".join(escape(str(p["name"])) for p in positions if p["concentrated"])
+        lead += (f" 한 종목이 주식의 {_pct(review['concentration_limit'], 0)}를 넘으면 그 회사 한 곳의 소식에 자산이 크게 "
+                 f"흔들리는 <b>집중</b> 상태로 봅니다(가정). 지금 여기에 해당하는 종목: {names}.")
+    if sec["unrealized_gain"] is not None:
+        lead += (f" 종목별 <b>미실현 손익</b>(팔지 않아 확정되지 않은 손익) 합계는 {_signed_short(sec['unrealized_gain'])}"
+                 + (f"이며, 매입 원가를 아는 {sec['unrealized_gain_counted']}개 종목만의 부분 합계입니다."
+                    if sec["unrealized_gain_missing"] else "입니다."))
+    if review["unlisted"]:
+        lead += (f" 종목 코드가 없는 증권 {_short(review['unlisted'])}은 비중 계산에는 넣었지만, 무엇인지 몰라 종목 의견에서는 "
+                 "빠졌습니다.")
     if sec.get("hermes"):
-        lead += (f" 이 가운데 Hermes가 운용하는 자산은 {_short(sec['hermes'])}이며, Smith는 이 자산의 매각·변경을 "
-                 "권하지 않습니다(필요하면 Hermes와 상의하십시오).")
-    bars = _bars([(str(p["name"])[:14], p["value"], i < 3) for i, p in enumerate(positions)])
-    table = _table(["종목", "평가액", "증권 내 비중"], [[str(p["name"]), _won(p["value"]), _pct(p["share"])] for p in positions])
-    return _section("주식·증권", lead, bars + table)
+        lead += (f" Hermes가 운용하는 자산 {_short(sec['hermes'])}에는 의견을 드리지 않습니다(필요하면 Hermes와 상의하십시오).")
+    if not opined:
+        lead += " 이번에는 종목별 의견을 만들지 못해 숫자만 보여 드립니다(맨 아래 '데이터 상태')."
+    return lead
+
+
+def _named(position: dict[str, Any]) -> str:
+    kind = principles.kind(position)
+    return str(position["name"]) + ("" if kind == "stock" else f" ({principles.KIND_LABELS[kind]})")
+
+
+CHECK_STATUS = {"ok": ("●", "충족", "#05b169"), "breach": ("■", "어긋남", "#cf202f"), "plan": ("▲", "계획 있음", "#b27b00"),
+                "watch": ("▲", "확인 필요", "#b27b00"), "unknown": ("○", "판단 불가", MUTED)}
+
+
+def _policy(data: dict[str, Any], story: dict[str, Any], full: bool) -> str:
+    """Investment principles and the household's policy (report design §13): the checks code computed, Smith's
+    strategy grounded in the principles, and the sources of every principle the report applied."""
+    checks = data.get("policy") or []
+    if not checks:
+        return ""
+    if not full:
+        off = [c for c in checks if c.status in ("breach", "plan", "watch")]
+        if not off:
+            return ""
+        rows = "".join(f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin:4px 0">· {_check_status(c.status)} '
+                       f'<b style="font-weight:600;color:{INK}">{escape(c.title)}</b> — {escape(c.current)}</div>' for c in off)
+        return _section("투자 기준 점검", "우리 집 투자 기준에서 벗어난 항목만 보여 드립니다. 원칙과 근거는 월요 보고에 있습니다.", rows)
+    table = _table(["기준", "우리 집 기준", "지금", "판정"],
+                   [[c.title, c.standard, c.current, CHECK_STATUS[c.status][1]] for c in checks])
+    view = ""
+    if story.get("portfolio"):
+        view = (f'<div style="background:{SOFT};border-radius:24px;padding:18px 20px;margin-top:14px">'
+                f'<div style="font-size:12px;font-weight:600;color:{MUTED};margin-bottom:6px">Smith의 투자 전략 · 주식 전체</div>'
+                f'<div style="font-size:15px;line-height:1.65;color:{INK}">{escape(story["portfolio"])}</div>'
+                f'{_principle_chips(story.get("portfolio_principles") or [])}'
+                f'{_memo(story.get("portfolio_memo"))}{_sources(story.get("portfolio_links") or [])}</div>')
+    used = principles.cited([i for c in checks for i in c.principles]
+                            + [p.id for p in story.get("portfolio_principles") or []]
+                            + [p.id for o in (story.get("holdings") or {}).values() for p in o.get("principles", [])])
+    sources = "".join(f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin:2px 0">· <b style="font-weight:600">'
+                      f'{escape(p.investor)} · {escape(p.title)}</b> — {escape(p.principle)} '
+                      f'({" · ".join(_cell(source) for source in p.sources)})</div>' for p in used)
+    lead = ("전설적인 투자자들이 직접 공개한 글(주주서한, 메모, 강연)에서 공통된 원칙을 골라 우리 집 투자 기준으로 바꿨습니다. "
+            "기준의 숫자(한 종목 한도, 지수펀드 비중, 비상금 개월 수)는 Smith의 가정이며 고객님 성향에 맞게 조정할 수 있습니다. "
+            "어긋난 항목부터 고치는 것이 순서입니다.")
+    return _section("투자 원칙과 우리 집 투자 기준", lead,
+                    table + view + f'<div style="font-size:12px;font-weight:600;color:{MUTED};margin:16px 0 4px">'
+                                   f'이번 보고에 쓴 원칙과 출처</div>{sources}')
+
+
+def _check_status(status: str) -> str:
+    icon, label, color = CHECK_STATUS[status]
+    return f'<span style="color:{color};font-weight:600">{icon} {label}</span>'
+
+
+def _principle_chips(cited: list[Any]) -> str:
+    """The principles an opinion applies, linked to their sources."""
+    if not cited:
+        return ""
+    items = " · ".join(_cell((f"{p.investor} · {p.title}", p.url)) for p in cited)
+    return f'<div style="font-size:12px;color:{MUTED};margin-top:6px">근거 원칙: {items}</div>'
+
+
+def _return(ratio: Decimal | None) -> str:
+    """Return on cost; unknown without an average cost (never 0%)."""
+    return "미상" if ratio is None else _delta_pct(ratio)
+
+
+def _stance(stance: str) -> str:
+    color, icon = STANCE_STYLE[stance]
+    return f'<span style="color:{color};font-weight:600">{icon} {STANCES[stance]}</span>'
+
+
+def _opinion_card(position: dict[str, Any], opinion: dict[str, Any]) -> str:
+    """An opinion other than hold: why, where the money goes, Smith's precondition, when to reconsider."""
+    rows = [("이유", escape(opinion["reason"]) + _sources(opinion["links"]))]
+    if opinion["alternative"]:
+        rows.append(("대안·순서", escape(opinion["alternative"])))
+    if opinion["condition"]:
+        rows.append(("전제 조건", escape(opinion["condition"])))
+    rows.append(("다시 판단할 조건", escape(opinion["reconsider"])))
+    if opinion.get("principles"):
+        rows.append(("근거 원칙", " · ".join(_cell((f"{p.investor} · {p.title}", p.url)) for p in opinion["principles"])))
+    detail = "".join(f'<tr><td style="width:92px;vertical-align:top;font-size:12px;font-weight:600;color:{MUTED};'
+                     f'padding:6px 8px 6px 0">{escape(k)}</td><td style="font-size:14px;line-height:1.6;color:{BODY};'
+                     f'padding:6px 0">{v}</td></tr>' for k, v in rows)
+    figures = (f'{_short(position["value"])} · 비중 {_pct(position["share"])} · 수익률 {_return(position["return_on_cost"])}')
+    return (f'<div style="border:1px solid {HAIRLINE};border-radius:24px;padding:18px 20px;margin-top:12px">'
+            f'<div style="font-size:16px;font-weight:600;color:{INK}">{escape(position["name"])} {_stance(opinion["stance"])}</div>'
+            f'<div style="font-family:{MONO};font-size:12px;color:{MUTED};margin:4px 0 6px">{escape(figures)}</div>'
+            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{detail}</table>'
+            f'{_memo(opinion.get("memo"))}</div>')
 
 
 def _real_estate(estate: dict[str, Any]) -> str:
@@ -762,13 +900,17 @@ def _ai_lines(ai: dict[str, Any] | None) -> list[str]:
     brief = ai.get("brief")
     if brief:
         line = (f"정책·시장 조사: {brief['created_at']:%m월 %d일} 웹 조사 {brief['items']}건(공식 출처 {brief.get('official', 0)}건). "
-                "금액·종목·계좌·직접 식별자 없이, 승인된 시·구와 자산·부채 유형만으로 조사했습니다.")
+                "금액·계좌·직접 식별자 없이, 승인된 시·구와 자산·부채 유형으로 조사했습니다.")
         if brief.get("checked"):
             line += (f" 출처 페이지를 직접 열어 {brief['checked']}건을 확인했고, 그중 {brief['matched']}건은 본문에서 "
                      "같은 수치를 찾았습니다(없어진 페이지의 항목은 뺐습니다).")
         if brief.get("reused"):
             line += " 이번 보고에서 새로 조사하지 못해, 같은 주제로 앞서 조사한 자료를 다시 사용했습니다."
         lines = [line]
+        if brief.get("holdings_topics"):
+            lines.append(f"종목 조사: 보유 종목 {brief['holdings_topics']}개를 이름·심볼·시장만으로 조사해 "
+                         f"{brief.get('holdings_covered', 0)}개 종목의 실적·전망 자료를 찾았습니다(수량·금액은 보내지 않음). "
+                         "자료가 없는 종목의 의견은 우리 집 숫자만으로 판단한 것입니다.")
     else:
         lines = ["정책·시장 조사: 이번 보고에 쓸 수 있는 조사 결과가 없어 외부 정책·시장 변화는 반영하지 않았습니다."]
     if ai["outcome"] == "success":

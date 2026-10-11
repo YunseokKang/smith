@@ -10,7 +10,7 @@ from datetime import date
 from decimal import ROUND_CEILING, Decimal
 from typing import Any
 
-from smith import tax
+from smith import holdings, tax
 from smith.fmt import percent, short_won
 from smith.payload import LedgerView, base_amount
 from smith.realestate import MIN_BASIS
@@ -83,8 +83,9 @@ def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
     """
     facts = _facts(view, kpis, sectors)
     facts["tax"] = tax.facts(view, facts["today"], household)
-    rules = (_lease_return, _emergency_reserve, _surplus_plan, _pension_credit, _overseas_harvest, _isa, _prepayment,
-             _variable_rate)
+    facts["glide"] = _glide(facts)
+    rules = (_lease_return, _emergency_reserve, _goal_stocks_glide, _surplus_plan, _pension_credit, _overseas_harvest,
+             _isa, _prepayment, _variable_rate)
     outcomes = [(i, rule(facts)) for i, rule in enumerate(rules)]
     found = [(i, p) for i, p in outcomes if isinstance(p, Proposal)]
     undetermined = [p for _, p in outcomes if isinstance(p, Undetermined)]
@@ -102,7 +103,7 @@ def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
             proposals.append(replace(proposal, times_shown=current["times_shown"], renewed=False))
     decided = [item for item in active.values() if item["status"] in ("declined", "done")]
     return {"proposals": proposals, "in_progress": in_progress, "decided": decided, "undetermined": undetermined,
-            "strategy": _strategy(facts), "assumptions": _assumptions() + tax.assumptions(),
+            "strategy": _strategy(facts), "glide": facts["glide"], "assumptions": _assumptions() + tax.assumptions(),
             "tax_notes": tax.notes(facts["tax"]), "tax_checklist": tax.checklist(facts["tax"])}
 
 
@@ -143,7 +144,7 @@ def _facts(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any]) -> d
             if 0 < months <= LEASE_HORIZON_MONTHS:
                 market = next((p.get("market") for p in sectors["real_estate"]["properties"]
                                if p["record_id"] == f.get("collateral_record_id")), None)
-                leases.append({"due": due, "months": months, "amount": base_amount(view, record),
+                leases.append({"due": due, "months": months, "amount": base_amount(view, record), "owner": record.owner_id,
                                "jeonse": None if market is None else market["jeonse"],
                                "jeonse_basis": 0 if market is None else market["jeonse_basis"]})
     # Inputs come from report_data, where a total that includes an unconverted amount is None.
@@ -164,7 +165,8 @@ def _facts(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any]) -> d
             "unallocated": None if kpis["monthly_net"] is None else kpis["monthly_net"] - summary.monthly_transfers,
             "pension_accounts": len(pension),
             "pension_total": pension_total, "cd": _series(view, CD_SERIES),
-            "base_rate": _series(view, BASE_RATE_SERIES)}
+            "base_rate": _series(view, BASE_RATE_SERIES),
+            "resources": holdings.owner_resources(view)}
 
 
 def _restricted_transfers(view: LedgerView) -> Decimal:
@@ -282,6 +284,71 @@ def _emergency_reserve(facts: dict[str, Any]) -> Proposal | Undetermined | None:
         reconsider="월 지출이 바뀌거나, 소득이 더 안정적이라 기준 개월 수를 낮추기로 하시면 다시 계산합니다.",
         certainty=f"가정(비상금 기준 월 지출 {cash['emergency_months_assumption']}개월)",
         figures={"gap": gap, "target": cash["reserve_target"]})
+
+
+def _glide(facts: dict[str, Any]) -> dict[str, Any] | None:
+    """Dated needs within the horizon that an owner pays from their own money, and how much of them rests on
+    that owner's stocks (holdings.glide_plan). A lease deposit belongs to the owner of the obligation and is
+    net of a new tenant's deposit when enough recent contracts show the market level; the home goal is the
+    client's (the home calculation is self-only) and is what liquid money must add to the home equity.
+    Another member's money is never assumed to pay the client's goal, nor the other way round."""
+    needs = []
+    for lease in facts["leases"]:
+        if lease["amount"] is None:
+            continue
+        own = lease["amount"]
+        if lease["jeonse"] is not None and lease["jeonse_basis"] >= MIN_BASIS:
+            own = max(Decimal(0), own - lease["jeonse"])
+        label = "전세보증금 반환" + ("" if lease["owner"] == "self" else "(가족 명의)")
+        needs.append(holdings.Need(label, lease["due"], own, lease["owner"]))
+    home = facts["kpis"]["home_progress"]
+    if home and home.get("from_liquid") is not None:
+        needs.append(holdings.Need("주택 이전", home["target_date"], home["from_liquid"], "self"))
+    return holdings.glide_plan(today=facts["today"], needs=needs, resources=facts["resources"])
+
+
+_GLIDE_RECONSIDER = {"전세보증금 반환": "보증금을 새 세입자 보증금이나 재계약으로 돌려드리기로 정하시면 그 부분은 빠집니다. ",
+                     "주택 이전": "주택 이전 시기·금액이나 자금 조달 방법(대출, 배우자 부동산)이 정해지면 다시 계산합니다. "}
+
+
+def _goal_stocks_glide(facts: dict[str, Any]) -> Proposal | Undetermined | None:
+    """Money needed at a known date within three years should not depend on the stock price that day:
+    move the part that rests on stocks to safe assets in quarterly steps (report design §12.4)."""
+    plan = facts["glide"]
+    if plan is None:
+        return None
+    if not plan["steps"]:
+        return Undetermined("목표 자금 안의 주식", "주식·현금·월 현금흐름 가운데 원화로 환산하지 못한 금액이 있습니다.")
+    first, rest = plan["steps"][0], plan["steps"][1:]
+    later = "".join(f" {s['due']:%Y년 %m월} {s['label']}에도 주식 {short_won(s['from_stocks'])}이 필요하며, "
+                    f"{s['start']:%Y년 %m월}부터 분기마다 약 {short_won(s['per_quarter'])}씩 옮기는 계획입니다." for s in rest)
+    begin = "부터 분기마다" if first["started"] else "부터(아직 시작 전) 분기마다"
+    return Proposal(
+        key="goal-stocks-glide", priority=2 if first["started"] else 3, identity=f"goal-stocks-glide:{first['due']}",
+        watch=("earmarked",), tolerance=Decimal("0.25"),
+        title=(f"{first['due']:%Y년 %m월} {first['label']}에 쓸 돈 가운데 약 {short_won(first['from_stocks'])}이 주식에 "
+               f"있습니다. {first['start']:%Y년 %m월}{begin} 약 {short_won(first['per_quarter'])}씩 예금·단기채 같은 안전 자산으로 "
+               "옮기시길 권합니다."),
+        why=(f"Smith는 {first['label']} 자금 계획에 주식을 지금 평가액 그대로 넣어 계산합니다. 지금 현금과 그때까지 모일 여유 "
+             f"자금만으로는 모자라, 그 날짜에 주식을 팔아야 하는 금액이 약 {short_won(first['from_stocks'])}입니다. 주식은 한 해에 "
+             f"{percent(plan['drawdown'], 0)} 넘게 떨어지는 해도 있어, 그때 팔게 되면 계획보다 약 {short_won(plan['stress'])}이 "
+             "모자랍니다. 날짜가 정해진 돈은 날짜가 가까워질수록 값이 덜 흔들리는 곳에 두는 것이 원칙입니다." + later),
+        effect=(f"목표 {holdings.GLIDE_END_MONTHS}개월 전까지 나눠 옮겨 두면, 그 사이 주가가 떨어져도 계획이 흔들리지 않습니다. "
+                + (f"나머지 주식 {short_won(plan['free'])}은 장기 성장 자산으로 그대로 둡니다. " if plan["free"] > 0 else
+                   "지금 보유한 주식 전부가 이 목표 자금에 해당합니다. 장기 성장 투자는 목표 이후에 쓸 돈(연금 계좌 등)에서 "
+                   "이어 가시는 것이 맞습니다. ")
+                + "한 번에 팔지 않고 나눠 옮기므로 특정 시점의 주가에 덜 좌우됩니다."),
+        risks=("옮긴 뒤 주가가 오르면 그만큼의 이익을 놓칩니다. 공격형 성향을 우선하신다면 옮기는 금액을 줄이는 대신, 부족할 때 쓸 "
+               "다른 재원(재계약, 대출 한도)을 미리 확인해 두는 방법도 있습니다. 미국 주식은 한 해 이익이 "
+               f"{short_won(tax.OVERSEAS_DEDUCTION)}을 넘으면 넘는 부분에 양도세 {percent(tax.OVERSEAS_RATE, 0)}가 붙으므로, 손실 종목이나 국내 종목부터 "
+               "팔거나 해마다 공제 한도 안에서 나눠 파는 편이 세금에 유리합니다(현행 법령 확인 필요)."),
+        timing=f"{first['start']:%Y.%m}~{first['end']:%Y.%m}, 분기마다 {first['quarters']}번",
+        reconsider=("".join(dict.fromkeys(_GLIDE_RECONSIDER[s["label"]] for s in plan["steps"]))
+                    + "월 여유 자금이 크게 달라지거나 주식 평가액이 크게 바뀌면 다시 계산합니다."),
+        certainty=(f"계산(현재 평가액·현금흐름 유지 가정) + 가정(주가 {percent(plan['drawdown'], 0)} 하락 스트레스, "
+                   "주택은 기준 시나리오)"),
+        figures={"earmarked": plan["earmarked"], "from_stocks": first["from_stocks"],
+                 "per_quarter": first["per_quarter"], "stress": plan["stress"]})
 
 
 def _surplus_plan(facts: dict[str, Any]) -> Proposal | Undetermined | None:

@@ -244,7 +244,8 @@ def answer(db: Path, data: dict[str, Any], question: Question, *, now: datetime,
     query = " ".join([question.text] + [turn["client"] or "" for turn in history or []])
     payload = narrative.build_payload(view, data, brief, memory.for_model(memory.retrieve(stored, query)))
     verified_report = (recent or {}).get("content", {}).get("verified") or {}
-    payload["recent_report"] = {k: verified_report.get(k) for k in ("situation", "direction", "insights", "watch")}
+    payload["recent_report"] = {k: verified_report.get(k) for k in ("situation", "direction", "portfolio", "holdings",
+                                                                     "insights", "watch")}
     payload["report_date"] = f"{at:%Y-%m-%d}"
     payload["client_question"] = mask_identifiers(question.text)
     payload["message_date"] = f"{local_time(question.received_at, tz):%Y-%m-%d}"
