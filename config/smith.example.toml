@@ -16,10 +16,20 @@ remove_personal_identifiers = true
 
 [reports]
 enabled = false
-weekdays = ["monday", "thursday"]
+weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]
 time = "06:00"
 delivery = "gmail"
 # Actual recipient and credentials belong in ignored local configuration.
+
+# One short report a day, each on its own theme (src/smith/editions.py). A day left out here uses this
+# same default plan. "monday" / "thursday" are the original full report and short change check.
+[reports.editions]
+monday = "overview"      # 주간 종합: 전체 그림, 이번 주 제안 요약
+tuesday = "markets"      # 투자·시장: 보유 종목 의견, 투자 기준, 환율
+wednesday = "property"   # 부동산: 실거래·전세, 보증금 반환, 주택 정책
+thursday = "rates"       # 금리·대출: 이자 부담, 추가 상환 판단
+friday = "tax"           # 세금·연금: 세액공제, 해외주식 공제, 연말정산
+saturday = "life"        # 생활·목표: 현금흐름, 비상금, 목표 진행 (웹 조사 없음)
 
 # Optional, in the local config: a verified ledger copy after each sent report (see `smith backup`).
 # Backups hold real financial data; prefer a drive you control, never Git or a shared cloud folder.

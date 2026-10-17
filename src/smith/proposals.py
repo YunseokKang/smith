@@ -71,6 +71,12 @@ class Undetermined:
     do": the report must not reassure the client about it."""
     topic: str     # What could not be judged.
     missing: str   # Which input is unknown.
+    key: str = ""  # The rule (proposal key) that could not judge; set by `build`, used by the daily editions.
+
+
+# The proposal rules in `build`, in order. A rule's proposals and undetermined judgements carry its key.
+RULE_KEYS = ("lease-return", "emergency-reserve", "goal-stocks-glide", "surplus-plan", "pension-credit",
+             "overseas-harvest", "isa-open", "prepayment", "variable-rate")
 
 
 def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
@@ -88,7 +94,7 @@ def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
              _isa, _prepayment, _variable_rate)
     outcomes = [(i, rule(facts)) for i, rule in enumerate(rules)]
     found = [(i, p) for i, p in outcomes if isinstance(p, Proposal)]
-    undetermined = [p for _, p in outcomes if isinstance(p, Undetermined)]
+    undetermined = [replace(p, key=RULE_KEYS[i]) for i, p in outcomes if isinstance(p, Undetermined)]
     ranked = [p for _, p in sorted(found, key=lambda item: (item[1].priority, item[0]))]
     active = active or {}
     proposals, in_progress = [], []

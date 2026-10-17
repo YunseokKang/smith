@@ -371,6 +371,20 @@ Gmail API, 기본 권한은 `gmail.send` 하나. 질의응답을 켜면 `--read`
   없는 경우). 결과 미상은 자동 재발송하지 않는다. `sent`는 받은편지함 도착 확인이 아니라 Gmail API가 Message를
   반환했다는 뜻이다.
 
+## 요일별 주제판 (`src/smith/editions.py`, report-design §14)
+
+- 월~토 하루 한 주제: `overview`(월), `markets`(화), `property`(수), `rates`(목), `tax`(금), `life`(토). 요일→판은
+  `[reports.editions]`(없으면 기본 계획), 판 이름은 `report_runs.kind`에 남는다. 원래의 `monday`·`thursday`도 유효하다.
+- 판이 정하는 것: 위 숫자 칸, 섹션 목록, 담을 제안 규칙(`report_data`에서 거름; 노출 기록·이력도 그 판 기준),
+  조사 주제 범주(`research.topics(view, kind)`; 종목 조사는 화요일만, 토요일은 조사 없음 → 모델 호출 없이 `skipped`),
+  서술 초점과 입력 범위(`narrative.build_payload`). 사전 조사(발행 1시간 전)도 다음 회차의 판 주제로 한다.
+- 비교 기준: 같은 계열(`editions.same_series`)의 마지막 발송 보고. 판이 바뀐 첫 회는 마지막 발송 보고.
+- 상태 배지는 가구 전체(`advice.household_urgent`), 미결 판단은 규칙 키(`Undetermined.key`, `proposals.RULE_KEYS`)로
+  그 판에 거른다. 숫자 칸 합계는 `report_data._edition_figures`(미상이 하나라도 있으면 합계 미상).
+- 메일 질문: 요일판 보고서에 대한 질문은 그 시점 전체 데이터(`monday` 형식)로 재구성하고, `report_kind`·`report_proposals`로
+  실제로 보낸 내용과 구분한다.
+- 일정 변경(요일 추가)은 `reconcile_schedule`이 이미 지난 회차를 표시해 늦게 보내지 않는다.
+
 ## 정기 발행 (6단계, `src/smith/delivery.py`, 원장 v8~ `report_runs`)
 
 - 회차: 설정의 요일·시각·시간대(기본 월·목 06:00 Asia/Seoul). 회차마다 행 하나(slot 유일).

@@ -4,13 +4,16 @@ from pathlib import Path
 from smith.config import load_config
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "config" / "smith.example.toml"
+SIX = '["monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]'
 
 
 class ConfigTests(unittest.TestCase):
     def test_schedule_and_disabled_delivery(self):
         config = load_config(EXAMPLE)
         self.assertEqual(config["app"]["timezone"], "Asia/Seoul")
-        self.assertEqual(config["reports"]["weekdays"], ["monday", "thursday"])
+        self.assertEqual(config["reports"]["weekdays"], ["monday", "tuesday", "wednesday", "thursday", "friday",
+                                                         "saturday"])
+        self.assertEqual(config["reports"]["editions"]["wednesday"], "property")
         self.assertEqual(config["reports"]["time"], "06:00")
         self.assertFalse(config["reports"]["enabled"])
 
@@ -22,8 +25,10 @@ class ConfigTests(unittest.TestCase):
             ('include_alternatives = true', 'include_alternatives = false'),
             ('time = "06:00"', 'time = "25:00"'),
             ('timezone = "Asia/Seoul"', 'timezone = "Invalid/Zone"'),
-            ('["monday", "thursday"]', '["monday", "monday"]'),
-            ('["monday", "thursday"]', '[1]'),
+            ('["monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]', '["monday", "monday"]'),
+            ('["monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]', '[1]'),
+            ('tuesday = "markets"', 'tuesday = "gossip"'),                  # Not an edition.
+            ('saturday = "life"', 'someday = "life"'),                      # Not a weekday.
             ('enabled = false', 'enabled = "false"'),
         ]
         with tempfile.TemporaryDirectory() as directory:
@@ -62,7 +67,7 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "custom.toml"
             text = EXAMPLE.read_text(encoding="utf-8")
-            path.write_text(text.replace('"monday", "thursday"', '"tuesday"').replace('06:00', '08:30'), encoding="utf-8")
+            path.write_text(text.replace(SIX, '["tuesday"]').replace('06:00', '08:30'), encoding="utf-8")
             config = load_config(path)
             self.assertEqual(config["reports"]["weekdays"], ["tuesday"])
             self.assertEqual(config["reports"]["time"], "08:30")

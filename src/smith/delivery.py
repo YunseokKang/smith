@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from smith import gmail, ledger
+from smith import editions, gmail, ledger
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.proposals import snapshot
 from smith.report_data import build_report
@@ -108,7 +108,7 @@ def _mark_latest(conn: Any, config: dict[str, Any], now: datetime, reason: str) 
     if not recent:
         return None
     slot = recent[-1]
-    ledger.mark_slot(conn, slot=slot, kind="thursday" if slot.weekday() == 3 else "monday", now=now, reason=reason)
+    ledger.mark_slot(conn, slot=slot, kind=editions.for_day(config, slot.date()), now=now, reason=reason)
     return slot
 
 
@@ -133,7 +133,8 @@ def record_failure(db: Path, *, now: datetime, slot: datetime | None, missed: li
 def publish(db: Path, *, recipient: str, credentials: tuple[str, str, str], now: datetime, slot: datetime | None,
             missed: list[datetime], kind: str, sender: Sender = gmail.send, tz: str = DEFAULT_TIMEZONE,
             sync_failures: list[str] | None = None, narrator: Narrator | None = None,
-            household: dict[str, Any] | None = None, lineage: dict[str, str | None] | None = None) -> dict[str, Any]:
+            household: dict[str, Any] | None = None, lineage: dict[str, str | None] | None = None,
+            plan: dict[str, str] | None = None) -> dict[str, Any]:
     """Claim, build, send and record one report. Returns the final run record fields.
 
     `lineage` carries the config hash and code version; with the ledger time, brief, model runs and a
@@ -148,7 +149,10 @@ def publish(db: Path, *, recipient: str, credentials: tuple[str, str, str], now:
     report_id = uuid.uuid4().hex
     with closing(ledger.connect(db)) as conn:
         last = ledger.last_sent_report(conn)
-        baseline = None if last is None else datetime.fromisoformat(last["as_of"])
+        # "Since last report" means last week's report on the same theme (a daily edition compared with
+        # yesterday's report on another subject would say little); the first of a series uses the last one.
+        same = ledger.last_sent_report(conn, kinds=editions.same_series(kind)) or last
+        baseline = None if same is None else datetime.fromisoformat(same["as_of"])
         unresolved = ledger.unresolved_runs(conn, since=None if last is None else datetime.fromisoformat(last["created_at"]))
         claimed = ledger.claim_report(conn, report_id=report_id, slot=slot, kind=kind,
                                       trigger="manual" if slot is None else "scheduled", created_at=now, as_of=now,
@@ -167,7 +171,7 @@ def publish(db: Path, *, recipient: str, credentials: tuple[str, str, str], now:
         data["delivery_note"] = _delivery_note(None if slot is None else local_time(slot, tz),
                                                [local_time(m, tz) for m in missed], local_time(send_at, tz),
                                                [r for r in unresolved if r["report_id"] != report_id], tz,
-                                               sync_failures or [])
+                                               sync_failures or [], kind=kind, plan=plan)
         subject, html = render(data)
         if slot is not None and send_at - slot > LATE_AFTER:
             subject = subject.replace("[Smith]", "[Smith · 지연 발송]", 1)
@@ -222,20 +226,36 @@ def _canonical(value: Any) -> Any:
 
 
 def _delivery_note(slot: datetime | None, missed: list[datetime], now: datetime, unresolved: list[dict[str, Any]],
-                   tz: str, sync_failures: list[str]) -> str | None:
+                   tz: str, sync_failures: list[str], kind: str = "monday",
+                   plan: dict[str, str] | None = None) -> str | None:
     """Times are local. Covers late delivery, missed slots, earlier runs that failed or may not have
-    arrived, and data sources that could not be refreshed before this report."""
+    arrived, and data sources that could not be refreshed before this report.
+
+    A daily edition covers only its own theme, so it never claims to include a missed or possibly lost
+    report on another theme: it names that theme and says it comes back in next week's report on it.
+    (The missed slot is still settled as `merged` once this report is delivered, so it is announced once.)"""
     parts = []
+    themed = editions.of(kind) is not None
+    schedule = {"reports": {"editions": plan or {}}}
     if slot is not None and now - slot > LATE_AFTER:
         parts.append(f"이 보고서는 정기 발행 시각({slot:%m월 %d일 %H:%M})보다 늦게 발송되었습니다"
                      "(발행 시각에 PC가 꺼져 있었거나 실행되지 못했습니다).")
-    if missed:
+    if missed and themed:
+        listed = ", ".join(f"{m:%m월 %d일}({editions.title(editions.for_day(schedule, m.date()), m.date())})"
+                           for m in missed)
+        parts.append(f"그 사이 보내드리지 못한 정기 보고가 있습니다: {listed}. 이 보고서는 오늘 주제만 다루며, 놓친 주제는 "
+                     "다음 주 같은 주제 보고에서 다룹니다.")
+    elif missed:
         listed = ", ".join(f"{m:%m월 %d일 %H:%M}" for m in missed)
         parts.append(f"그 사이 보내드리지 못한 정기 보고({listed})는 이 보고서에 합쳐 보고드립니다.")
     for run in unresolved:
         when = local_time(datetime.fromisoformat(run["slot"] or run["created_at"]), tz)
-        parts.append(f"{when:%m월 %d일 %H:%M} 보고는 발송 결과를 확인하지 못했습니다. 받은편지함에 없다면 "
-                     "이 보고서가 그 내용을 대신합니다.")
+        if themed and run["kind"] != kind:
+            parts.append(f"{when:%m월 %d일 %H:%M} {editions.title(run['kind'], when.date())} 보고는 발송 결과를 확인하지 "
+                         "못했습니다. 받은편지함에 없다면, 그 주제는 다음 주 같은 주제 보고에서 다룹니다.")
+        else:
+            parts.append(f"{when:%m월 %d일 %H:%M} 보고는 발송 결과를 확인하지 못했습니다. 받은편지함에 없다면 "
+                         "이 보고서가 그 내용을 대신합니다.")
     if sync_failures:
         parts.append(f"보고서 작성 전 일부 데이터({', '.join(sync_failures)})를 새로 받지 못해 이전 값을 사용했습니다.")
     return " ".join(parts) or None

@@ -160,10 +160,10 @@ def _ledger_state(conn: sqlite3.Connection, config: dict[str, Any] | None, now: 
     if trouble:
         message += ", since then " + ", ".join(f"{n} {s}" for s, n in sorted(trouble.items()))
     if config is not None and config["reports"]["enabled"]:
-        from smith import delivery
+        from smith import delivery, editions
         upcoming = delivery.slots_between(config["reports"], config["app"]["timezone"], now, now + timedelta(days=8))
         if upcoming:
-            message += f", next slot {upcoming[0]:%m-%d %H:%M}"
+            message += f", next slot {upcoming[0]:%m-%d %H:%M} ({editions.for_day(config, upcoming[0].date())})"
     results.append(("warn" if trouble else "ok", "reports", message))
     rows = conn.execute("SELECT status FROM mail_questions WHERE claimed_at >= ?",
                         ((now - timedelta(days=30)).isoformat(),)).fetchall()

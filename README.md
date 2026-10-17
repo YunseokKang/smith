@@ -8,7 +8,7 @@
 구현됨: 설정 검증, 수동 JSON 입력 검증과 SQLite 자산 원장(이력·멱등성·종료·정정·미리보기),
 토스증권 조회 전용 연결 점검과 원장 동기화, 순자산·자산 배분·유동성·현금흐름 요약,
 ECOS·FRED 금리 근거, 한국은행·Fed 공식 발표 목록, 개인 노출과 근거 연결, 비식별 headless 자문(세 사용 사례),
-시각화 HTML 보고서, Gmail 발송, 월·목 정기 발행(작업 스케줄러), 결정적 제안 계층과 제안 이력, 웹 조사 브리프(출처 페이지
+시각화 HTML 보고서, Gmail 발송, 월~토 요일별 주제 정기 발행(작업 스케줄러), 결정적 제안 계층과 제안 이력, 웹 조사 브리프(출처 페이지
 대조), 코드 검증을 거친 AI 서술, 세금 관점 전략, 국토부 실거래가, 메일 답장 질의응답, 보고서 계보(lineage), `doctor` 점검.
 진행 상황은 `docs/roadmap.md`.
 실제 개인정보·잔고·인증정보는 포함하지 않는다. 예시 데이터는 모두 가상이다.
@@ -38,7 +38,7 @@ py -3.10 -m uv pip install --python .venv -e .
 | `toss sync [--dry-run] [--close-missing] [--allow-empty]` | 토스 보유 주식을 snapshot으로 원장에 저장. 매수 가능 금액·환율은 참고 관측값. `--close-missing`은 매도된 종목을 종료(정기 실행은 항상 사용), 보유 종목이 0개인 응답은 `--allow-empty`가 있을 때만 반영 |
 | `evidence login` / `evidence sync [--days N]` / `evidence show [--as-of DATE]` | ECOS·FRED 금리 근거 저장·조회. 키는 OS 자격 증명 저장소 |
 | `advise --case portfolio\|funding\|home [--question] [--show-payload]` | 비식별 payload로 headless 자문. 주택 목표일은 원장의 주택 목표가 있으면 그 날짜, 없으면 실행일로부터 3년 뒤. `--show-payload`는 보낼 내용만 표시 |
-| `report preview [--kind monday\|thursday] [--since TIME] [--out PATH] [--narrative] [--research]` | 시각화 보고서 HTML 미리보기(발송 안 함, `reports/`에 저장). `--narrative`는 AI 서술, `--research`는 웹 조사부터 |
+| `report preview [--kind overview\|markets\|property\|rates\|tax\|life\|monday\|thursday] [--since TIME] [--out PATH] [--narrative] [--research]` | 시각화 보고서 HTML 미리보기(발송 안 함, `reports/`에 저장). `--narrative`는 AI 서술, `--research`는 웹 조사부터 |
 | `report run-due` / `report send-now` / `report status` / `report activate` | 정기 회차 발송(스케줄러용, 중복 방지·지연 발송), 즉시 발행, 발행 이력, 정기 발행 시작(이미 지난 회차는 보내지 않음). 발행은 웹 조사와 AI 서술을 포함. 설정의 요일·시각을 바꾸면 다음 정기 실행부터 새 일정이 적용되고 지난 회차는 소급하지 않는다 |
 | `backup [--out DIR] [--keep N]` | 원장의 일관된 사본을 만들고 무결성 검사를 통과한 것만 남긴다(기본 `data/backups`, 14개). `[backup] dir`을 설정하면 정기 발송 뒤 자동으로 만든다. 사본은 실제 재무 정보이므로 외장 디스크 등 직접 관리하는 곳에 둔다 |
 | `research run\|show\|topics` | 개인 정보 없이 정책·시장 웹 조사 실행·결과 보기·조사 주제 보기 |
@@ -64,7 +64,7 @@ py -3.10 -m uv pip install --python .venv -e .
 | `docs/toss-openapi.md` | 토스증권 Open API 확인 결과와 설계 반영 사항 |
 | `docs/roadmap.md` | 구현 순서와 검증 기준 |
 | `docs/dev-notes.md` | Windows 개발 환경, 트러블슈팅 기록 |
-| `config/smith.example.toml` | 월·목 06:00 KST 등 기본 설정 |
+| `config/smith.example.toml` | 월~토 06:00 KST 요일별 주제(`[reports.editions]`) 등 기본 설정 |
 | `examples/portfolio.example.json` | 가상의 수동 입력 예시(자산·부채·현금흐름·목표) |
 | `src/smith/` | CLI, 설정 검증, 원장, 동기화, 계산·제안·세금, 조사·서술·검증, 보고서·발송, 질의응답 |
 | `scripts/install-schedule.ps1` | Windows 작업 스케줄러 등록(재현 가능한 설치) |

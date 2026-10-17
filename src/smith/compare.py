@@ -34,7 +34,7 @@ def run(db: Path, *, now: datetime, kind: str, tz: str, baseline: datetime | Non
         reports = {p: build_report(conn, as_of=now, known_at=now, baseline=baseline, kind=kind, tz=tz,
                                    household=household) for p in narrative.PIPELINES}
     if brief_id is None:
-        brief, _ = narrative.pinned_brief(db, reports["single"]["view"], now=now, brief_id=None)
+        brief, _ = narrative.pinned_brief(db, reports["single"]["view"], now=now, brief_id=None, kind=kind)
         brief_id = None if brief is None else brief.get("brief_id")
 
     def write(pipeline: str) -> float:

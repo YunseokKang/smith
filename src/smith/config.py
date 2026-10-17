@@ -5,6 +5,8 @@ from pathlib import Path
 import tomllib
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from smith import editions
+
 # The household's local timezone for commands that run without a config file (preview, advise, summary).
 DEFAULT_TIMEZONE = "Asia/Seoul"
 WEEKDAYS = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
@@ -16,7 +18,7 @@ KNOWN_KEYS = {
     "app": {"timezone", "financial_access"},
     "advice": {"risk_preference", "include_alternatives", "require_macro_context"},
     "privacy": {"remove_personal_identifiers"},
-    "reports": {"enabled", "weekdays", "time", "delivery"},
+    "reports": {"enabled", "weekdays", "time", "delivery", "editions"},
     "mail": {"recipient", "answer_replies"},
     "household": {"birth_year", "partner_birth_year", "retirement_monthly_spend", "marriage_registered", "cohabiting"},
     "backup": {"dir", "keep"},
@@ -69,6 +71,15 @@ def load_config(path: Path) -> dict:
         raise ValueError("Report time must be a valid HH:MM") from None
     if reports.get("delivery") != "gmail":
         raise ValueError("Only the planned gmail delivery is supported by this scaffold")
+    plan = reports.get("editions", {})
+    if not isinstance(plan, dict):
+        raise ValueError("reports.editions must be a table of weekday = edition")
+    for day, edition in plan.items():
+        # A plan may name days that are not scheduled now (a day paused in `weekdays` keeps its theme).
+        if day not in WEEKDAYS:
+            raise ValueError(f"reports.editions.{day}: not a weekday name")
+        if edition not in editions.KINDS:
+            raise ValueError(f"reports.editions.{day} must be one of {', '.join(editions.KINDS)}")
     mail = config.get("mail", {})
     if not isinstance(mail, dict) or ("recipient" in mail and not _is_email(mail["recipient"])):
         raise ValueError("mail.recipient must be one email address")

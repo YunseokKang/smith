@@ -31,12 +31,12 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-from smith import gmail, headless, ledger, memory, narrative
+from smith import editions, gmail, headless, ledger, memory, narrative
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import check_outbound, mask_identifiers
 from smith.report_data import build_report
 
-PROMPT_VERSION = "mail-answer-v5"
+PROMPT_VERSION = "mail-answer-v6"  # v6: full snapshot vs the replied-to report's own proposals (report_kind).
 MODEL = "fable"
 BUDGET_USD = "3.00"
 TIMEOUT_SECONDS = 600
@@ -65,10 +65,13 @@ banker replying to a short message.
   with this household's numbers. Aim for about 400-700 Korean characters; go longer only if the question
   truly needs it. No greeting, no recap of the whole report, no headings or lists unless asked.
 - Then stop. Further topics go into follow_up as short questions the client might ask next.
-Use the same input as the report (household, proposals, strategy, tax, property_market, sector_metrics,
-brief; listed holdings carry unrealized_gain and return_on_cost when their cost basis is known) and the
-report's own judgement (recent_report). All figures are as of report_date, the report the client
-replied to; say "보고서 기준" when timing matters. If the input cannot answer the question, say exactly which
+The input is the full ledger snapshot at the time of the report the client replied to (household,
+proposals, strategy, tax, property_market, sector_metrics, brief; listed holdings carry unrealized_gain and
+return_on_cost when their cost basis is known), so every area can be answered. That report may have been a
+short themed one (report_kind): only the proposals in report_proposals were in it, and what it said is
+recent_report. Call a proposal "보고서에서 말씀드린 제안" only if it is in report_proposals; any other
+proposal is background you may explain, not something the report said. All figures are as of report_date;
+say "보고서 기준" when timing matters. If the input cannot answer the question, say exactly which
 information is needed instead of guessing.
 
 conversation: the earlier turns of this e-mail thread, oldest first. "client" is what the client wrote,
@@ -198,15 +201,17 @@ def strip_quote(text: str) -> str:
 def rebuild(db: Path, report: dict[str, Any] | None, *, now: datetime, tz: str = DEFAULT_TIMEZONE,
             household: dict[str, Any] | None = None) -> dict[str, Any]:
     """The data of the report a question replies to, rebuilt at that report's ledger time (the bitemporal
-    ledger keeps it reproducible). Without a run record (should not happen), current data."""
+    ledger keeps it reproducible). Without a run record (should not happen), current data in the full
+    report form, which carries every area."""
     if report is None:
-        at, known, baseline = now, now, None
-        kind = "thursday" if local_time(now, tz).weekday() == 3 else "monday"
+        at, known, baseline, kind = now, now, None, "monday"
     else:
         at = datetime.fromisoformat(report["as_of"])
         known = datetime.fromisoformat(report["known_at"] or report["as_of"])
         baseline = None if report["baseline"] is None else datetime.fromisoformat(report["baseline"])
-        kind = report["kind"]
+        # A question may be about any area, whatever that day's theme was: answers see the full data at the
+        # report's ledger time, and still use that report's own brief and narrative.
+        kind = "monday" if editions.of(report["kind"]) is not None else report["kind"]
     with closing(ledger.connect_read_only(db)) as conn:
         return build_report(conn, as_of=at, known_at=known, baseline=baseline, kind=kind, tz=tz, household=household)
 
@@ -232,7 +237,9 @@ def answer(db: Path, data: dict[str, Any], question: Question, *, now: datetime,
     """
     view = data["view"]
     at = data["as_of"]
-    brief, _ = narrative.pinned_brief(db, view, now=at, brief_id=(report or {}).get("brief_id"))
+    # The report's own brief; a day that researched nothing has none (no fallback to another day's brief).
+    brief, _ = narrative.pinned_brief(db, view, now=at, brief_id=(report or {}).get("brief_id"),
+                                      kind=(report or {}).get("kind") or data["kind"])
     with closing(ledger.connect_read_only(db)) as conn:
         if report is None:
             recent, moved = ledger.latest_advice(conn, use_case="report-narrative"), False
@@ -247,6 +254,11 @@ def answer(db: Path, data: dict[str, Any], question: Question, *, now: datetime,
     payload["recent_report"] = {k: verified_report.get(k) for k in ("situation", "direction", "portfolio", "holdings",
                                                                      "insights", "watch")}
     payload["report_date"] = f"{at:%Y-%m-%d}"
+    # The input is the full ledger snapshot at the report's time; a themed report showed only its own area.
+    # report_proposals are the proposals that report actually carried (the rest are background).
+    report_kind = (report or {}).get("kind") or data["kind"]
+    payload["report_kind"] = report_kind
+    payload["report_proposals"] = [p.key for p in data["advice"]["proposals"] if editions.carries(report_kind, p.key)]
     payload["client_question"] = mask_identifiers(question.text)
     payload["message_date"] = f"{local_time(question.received_at, tz):%Y-%m-%d}"
     payload["conversation"] = [{"client": mask_identifiers(turn["client"]),
@@ -254,14 +266,14 @@ def answer(db: Path, data: dict[str, Any], question: Question, *, now: datetime,
                                for turn in history or []]
     text = json.dumps(payload, ensure_ascii=False)
     check_outbound(text, secrets)
-    output, _ = _call(db, text, now, data, executable, runner, "mail-answer")
+    output, _ = _call(db, text, now, report_kind, executable, runner, "mail-answer")
     problem = _problems(output, payload)
     if problem:
         repair = dict(payload, previous_output=output, rejected=[{"field": "answer", "reason": problem}])
         repair_text = json.dumps(repair, ensure_ascii=False)
         check_outbound(repair_text, secrets)
         try:
-            output, _ = _call(db, repair_text, now, data, executable, runner, "mail-answer-repair")
+            output, _ = _call(db, repair_text, now, report_kind, executable, runner, "mail-answer-repair")
             problem = _problems(output, payload)
         except headless.HeadlessError:
             pass
@@ -312,8 +324,9 @@ def _problems(output: dict[str, Any], payload: dict[str, Any]) -> str | None:
     return narrative.check_block([output["answer"]["text"]], output["answer"]["refs"], payload)
 
 
-def _call(db: Path, text: str, now: datetime, data: dict[str, Any], executable: Path, runner: headless.Runner,
+def _call(db: Path, text: str, now: datetime, kind: str, executable: Path, runner: headless.Runner,
           use_case: str) -> tuple[Any, str | None]:
+    """One model call, audited under the kind of the report the question replies to."""
     outcome, code, output, cost = "failure", None, None, None
     try:
         output, cost = headless.run(text, system_prompt=SYSTEM_PROMPT, schema=ANSWER_SCHEMA, executable=executable,
@@ -326,7 +339,7 @@ def _call(db: Path, text: str, now: datetime, data: dict[str, Any], executable: 
     finally:
         with closing(ledger.connect(db)) as conn:
             ledger.record_advice_run(conn, run_id=uuid.uuid4().hex, created_at=now, use_case=use_case,
-                                     question=data["kind"], payload=text, prompt_version=PROMPT_VERSION, model=MODEL,
+                                     question=kind, payload=text, prompt_version=PROMPT_VERSION, model=MODEL,
                                      cost_usd=cost, outcome=outcome, error_code=code,
                                      advice=None if output is None else json.dumps(output, ensure_ascii=False))
 

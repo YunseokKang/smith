@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from smith import headless, holdings, ledger, sources
+from smith import editions, headless, holdings, ledger, sources
 from smith.payload import LedgerView, check_outbound, mask_identifiers
 from smith.records import Kind
 
@@ -131,39 +131,46 @@ class Topic:
     question: str
 
 
-def topics(view: LedgerView) -> list[Topic]:
+def topics(view: LedgerView, kind: str | None = None) -> list[Topic]:
     """Generalized research topics derived from the household's situation (T*), then the holdings (H*). No
-    amounts, account names or identifiers; regions only at the city/district level the user approved."""
+    amounts, account names or identifiers; regions only at the city/district level the user approved.
+
+    With a daily edition `kind`, only that edition's topic categories (and the holdings only on the
+    markets day) are researched; the original kinds and None research everything."""
     assets = [r for r in view.records if r.kind is Kind.ASSET]
     liabilities = [r for r in view.records if r.kind is Kind.LIABILITY]
     regions = sorted({r.fields["region"] for r in assets if r.fields["category"] == "real_estate" and r.fields.get("region")})
-    found: list[tuple[str, str]] = []
+    found: list[tuple[str, str, str]] = []  # (category, title, question)
     for region in regions:
-        found.append((f"{region} 주택 시장",
+        found.append(("housing_market", f"{region} 주택 시장",
                       f"{region} 아파트 매매·전세 가격과 거래량의 최근 흐름(한국부동산원·KB 주간/월간 지수, 실거래가)"))
-        found.append((f"{region} 부동산 규제·정책",
+        found.append(("housing_policy", f"{region} 부동산 규제·정책",
                       f"{region}에 적용되는 부동산 규제와 정책 변화: 토지거래허가구역, 조정대상지역 등 규제지역, "
                       "재건축·정비사업(노후계획도시 특별법 포함), 지자체 발표"))
     if any(r.fields["category"] == "mortgage" for r in liabilities):
-        found.append(("주택담보대출 규제·금리",
+        found.append(("mortgage", "주택담보대출 규제·금리",
                       "주택담보대출 규제(LTV·DSR, 스트레스 DSR)와 변동금리 기준금리(COFIX·은행채) 동향, "
                       "중도상환수수료 제도 변화"))
     if any(r.fields["category"] == "lease_deposit_obligation" for r in liabilities):
-        found.append(("전세 시장과 보증금 반환",
+        found.append(("jeonse", "전세 시장과 보증금 반환",
                       "전세 시장 동향과 집주인의 전세보증금 반환 관련 제도: 반환보증, 역전세 대책, 전세대출 규제"))
     if any(r.fields["category"] == "real_estate" for r in assets):
-        found.append(("주택 세제",
+        found.append(("home_tax", "주택 세제",
                       "1주택자·일시적 2주택·혼인 관련 주택 세제(양도소득세 비과세, 취득세, 종합부동산세)의 현행 기준과 "
                       "최근 개정 또는 개정안"))
     if any(r.fields.get("account_type") in ("pension_savings", "irp", "isa") for r in assets):
-        found.append(("연금·절세 계좌", "연금저축·IRP·ISA 세제 혜택(세액공제 한도·공제율·납입 한도)의 현행 기준과 개정 동향"))
-    found.append(("금리 전망", "한국은행 기준금리 결정과 향후 경로 전망, 시장 금리(국고채·CD) 흐름, 미국 연준 정책"))
+        found.append(("pension_tax", "연금·절세 계좌",
+                      "연금저축·IRP·ISA 세제 혜택(세액공제 한도·공제율·납입 한도)의 현행 기준과 개정 동향"))
+    found.append(("rates", "금리 전망", "한국은행 기준금리 결정과 향후 경로 전망, 시장 금리(국고채·CD) 흐름, 미국 연준 정책"))
     if any(r.fields.get("market") == "US" or r.fields["currency"] == "USD" for r in assets):
-        found.append(("미국 주식·환율", "미국 주식시장(S&P 500·나스닥 대형 기술주) 최근 흐름과 원/달러 환율 전망"))
+        found.append(("us_stocks", "미국 주식·환율", "미국 주식시장(S&P 500·나스닥 대형 기술주) 최근 흐름과 원/달러 환율 전망"))
     if any(r.fields.get("market") == "KR" for r in assets):
-        found.append(("국내 주식", "국내 주식시장(코스피·반도체 업종) 최근 흐름과 주요 정책(밸류업, 세제)"))
-    found.append(("가계 금융 정책", "가계부채 관리 방안 등 가계 자산·부채에 영향을 주는 최근 정부 금융 정책"))
-    return [Topic(f"T{i}", title, question) for i, (title, question) in enumerate(found, 1)] + holding_topics(view)
+        found.append(("kr_stocks", "국내 주식", "국내 주식시장(코스피·반도체 업종) 최근 흐름과 주요 정책(밸류업, 세제)"))
+    found.append(("household_policy", "가계 금융 정책", "가계부채 관리 방안 등 가계 자산·부채에 영향을 주는 최근 정부 금융 정책"))
+    wanted = editions.research_categories(kind)
+    chosen = [(title, question) for category, title, question in found if wanted is None or category in wanted]
+    held = holding_topics(view) if editions.researches_holdings(kind) else []
+    return [Topic(f"T{i}", title, question) for i, (title, question) in enumerate(chosen, 1)] + held
 
 
 def holding_topics(view: LedgerView) -> list[Topic]:
@@ -192,8 +199,10 @@ def _researched(view: LedgerView) -> list[tuple[str, dict[str, Any]]]:
 
 def run_research(view: LedgerView, *, today: date, secrets: list[str], executable: Path,
                  runner: headless.Runner = subprocess.run, model: str = MODEL,
-                 verifier: Callable[..., tuple[list[dict[str, Any]], dict[str, int]]] | None = None) -> dict[str, Any]:
-    """Research the topics and return {"topics", "brief", "cost_usd", "dropped"}.
+                 verifier: Callable[..., tuple[list[dict[str, Any]], dict[str, int]]] | None = None,
+                 kind: str | None = None) -> dict[str, Any]:
+    """Research the topics (of the edition `kind`, see `topics`) and return {"topics", "brief", "cost_usd",
+    "dropped"}.
 
     The market topics and the holdings are researched by two calls in parallel. When one call fails, the
     other's findings are kept and the failure is named in the brief's gaps.
@@ -204,12 +213,14 @@ def run_research(view: LedgerView, *, today: date, secrets: list[str], executabl
         headless.HeadlessError: every call failed, or together they produced no usable item.
         PayloadRejected: an outgoing prompt matched an identifier rule (it never should).
     """
-    subjects = topics(view)
+    subjects = topics(view, kind)
     market = [t for t in subjects if t.ref.startswith("T")]
     held = [t for t in subjects if t.ref.startswith("H")]
-    calls = [(market, SYSTEM_PROMPT, BRIEF_SCHEMA, "시장·정책")]
+    calls = [(market, SYSTEM_PROMPT, BRIEF_SCHEMA, "시장·정책")] if market else []
     if held:
         calls.append((held, HOLDINGS_PROMPT, brief_schema(PER_HOLDING_ITEMS * len(held) * 2, len(held) * 2), "보유 종목"))
+    if not calls:
+        raise headless.HeadlessError("no-topics")
     prompts = [json.dumps({"today": today.isoformat(), "topics": [asdict(t) for t in group]}, ensure_ascii=False)
                for group, *_ in calls]
     for prompt in prompts:
@@ -353,14 +364,18 @@ def _plain_https(url: str) -> bool:
 
 
 def research_and_store(db: Path, view: LedgerView, *, now: datetime, today: date, secrets: list[str],
-                       executable: Path | None = None, runner: headless.Runner = subprocess.run) -> dict[str, Any]:
+                       executable: Path | None = None, runner: headless.Runner = subprocess.run,
+                       kind: str | None = None) -> dict[str, Any]:
     """Run research and record the outcome (success or failure) in the ledger. Never raises for a
-    model failure: a report goes out without a brief rather than not at all."""
+    model failure: a report goes out without a brief rather than not at all. An edition with no topics
+    (the Saturday household edition) researches nothing: outcome "skipped", no model call."""
     brief_id = uuid.uuid4().hex
-    subjects = [asdict(t) for t in topics(view)]
+    subjects = [asdict(t) for t in topics(view, kind)]
+    if not subjects:
+        return {"brief_id": None, "outcome": "skipped", "items": 0}
     try:
         result = run_research(view, today=today, secrets=secrets, executable=executable or headless.find_claude(),
-                              runner=runner)
+                              runner=runner, kind=kind)
     except Exception as error:  # noqa: BLE001 - every failure is recorded and the report continues.
         code = getattr(error, "code", None) or type(error).__name__
         with closing(ledger.connect(db)) as conn:

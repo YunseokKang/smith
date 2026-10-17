@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from smith import ledger
+from smith import editions, ledger
 from smith.config import DEFAULT_TIMEZONE
 from smith.narrative import PIPELINES
 from smith.report_data import build_report
@@ -22,8 +22,10 @@ def add_parser(sub: Any, default_db: Path) -> None:
                         help="preview: save HTML only; compare: save the single and team narratives of one "
                              "snapshot side by side (never sends); run-due: send the due scheduled report (for "
                              "the task scheduler); send-now: publish immediately; status: list recent runs")
-    report.add_argument("--kind", choices=("monday", "thursday"),
-                        help="Edition (default: thursday on Thursdays, otherwise monday)")
+    report.add_argument("--kind", choices=editions.KINDS,
+                        help="Edition: overview (Mon), markets (Tue), property (Wed), rates (Thu), tax (Fri), "
+                             "life (Sat), or the original full 'monday' / short 'thursday' report "
+                             "(default: today's edition from [reports.editions])")
     report.add_argument("--since", type=_aware_datetime,
                         help="Compare against the ledger as known at this time (default: first report, no comparison)")
     report.add_argument("--out", type=Path, help="Output HTML path (default: reports/preview-<time>.html); "
@@ -57,14 +59,14 @@ def run(args: argparse.Namespace) -> int:
     tz = config["app"]["timezone"] if config else DEFAULT_TIMEZONE
     now = datetime.now(timezone.utc)
     local = now.astimezone(ZoneInfo(tz))
-    kind = args.kind or ("thursday" if local.weekday() == 3 else "monday")
+    kind = args.kind or editions.for_day(config, local.date())
     if args.since is not None and args.since >= now:
         print("Invalid --since: it must be in the past.")
         return 2
     try:
         brief_id = None
         if args.research:
-            researched = _research(args.db, now, reuse_fresh=False)
+            researched = _research(args.db, now, reuse_fresh=False, kind=kind)
             brief_id = researched["brief_id"] if researched["outcome"] == "success" else None
         if args.action == "compare":
             return _compare(args, now=now, kind=kind, tz=tz, config=config, brief_id=brief_id)
@@ -203,23 +205,24 @@ FRESH_BRIEF = timedelta(hours=3)
 PREPARE_AHEAD = timedelta(hours=1)
 
 
-def _research(db: Path, now: datetime, *, reuse_fresh: bool = True) -> dict[str, Any]:
-    """Research generalized topics on the web (no amounts, holdings, accounts or direct identifiers; only
-    the approved city/district and asset and debt types) and store the brief. Returns the outcome with
-    the brief_id the report must use."""
+def _research(db: Path, now: datetime, *, reuse_fresh: bool = True, kind: str | None = None) -> dict[str, Any]:
+    """Research generalized topics on the web (no amounts, accounts or direct identifiers; only the
+    approved city/district, asset and debt types, and holdings' public names on the markets day) and store
+    the brief. Only the topics of the edition `kind` are researched. Returns the outcome with the brief_id
+    the report must use ("skipped" with no brief for a day without research topics)."""
     from smith import credentials, research
     from smith.config import local_time
     from smith.payload import load_view
 
     with closing(ledger.connect_read_only(db)) as conn:
         view = load_view(conn, as_of=local_time(now), known_at=now)
-        topics = [{"ref": t.ref, "title": t.title, "question": t.question} for t in research.topics(view)]
-        fresh = ledger.latest_research(conn, since=now - FRESH_BRIEF, topics=topics) if reuse_fresh else None
+        topics = [{"ref": t.ref, "title": t.title, "question": t.question} for t in research.topics(view, kind)]
+        fresh = ledger.latest_research(conn, since=now - FRESH_BRIEF, topics=topics) if reuse_fresh and topics else None
     if fresh is not None:
         return {"brief_id": fresh["brief_id"], "outcome": "success", "items": len(fresh["brief"]["items"]),
                 "reused": True}
     return research.research_and_store(db, view, now=now, today=local_time(now).date(),
-                                       secrets=credentials.all_secrets())
+                                       secrets=credentials.all_secrets(), kind=kind)
 
 
 def _narrator(db: Path, now: datetime, brief_id: str | None = None, pipeline: str = "single") -> Any:
@@ -270,7 +273,7 @@ def _publish_once(args: argparse.Namespace) -> int:
     tz = config["app"]["timezone"]
     now = datetime.now(timezone.utc)
     slot, missed = None, []
-    kind = args.kind or ("thursday" if now.astimezone(ZoneInfo(tz)).weekday() == 3 else "monday")
+    kind = args.kind or editions.for_day(config, now.astimezone(ZoneInfo(tz)).date())
     if args.action == "run-due":
         if not config["reports"]["enabled"]:
             print("Scheduled reports are disabled (reports.enabled = false).")
@@ -300,14 +303,16 @@ def _publish_once(args: argparse.Namespace) -> int:
             upcoming = delivery.slots_between(config["reports"], tz, now, now + PREPARE_AHEAD)
             if upcoming:
                 # Prepare: research ahead of the scheduled time so the report itself is not delayed.
-                prepared = _research(args.db, now)
-                if not prepared.get("reused"):
-                    _say(args.db, f"Prepared research for {upcoming[0]:%m-%d %H:%M}: {prepared['outcome']}")
+                upcoming_kind = editions.for_day(config, upcoming[0].date())
+                prepared = _research(args.db, now, kind=upcoming_kind)
+                if not prepared.get("reused") and prepared["outcome"] != "skipped":
+                    _say(args.db, f"Prepared research for {upcoming[0]:%m-%d %H:%M} ({upcoming_kind}): "
+                                  f"{prepared['outcome']}")
                 return 0
             _say(args.db, "No report due.", log=False)  # Every 15 minutes: not worth a log line.
             return 0
         slot, missed = found
-        kind = "thursday" if slot.astimezone(ZoneInfo(tz)).weekday() == 3 else "monday"
+        kind = editions.for_day(config, slot.astimezone(ZoneInfo(tz)).date())
     recipient = config.get("mail", {}).get("recipient")
     stored = credentials.load_gmail()
     if recipient is None or stored is None:
@@ -329,15 +334,15 @@ def _publish_once(args: argparse.Namespace) -> int:
         if realestate_command.sync(args.db, args.config) != 0:
             sync_failures.append("아파트 실거래가")
     # Research before claiming the slot (it needs no lease), unless a fresh prepared brief exists.
-    researched = _research(args.db, datetime.now(timezone.utc))
-    _say(args.db, f"Research {researched['outcome']}{' (prepared)' if researched.get('reused') else ''}: "
+    researched = _research(args.db, datetime.now(timezone.utc), kind=kind)
+    _say(args.db, f"Research ({kind}) {researched['outcome']}{' (prepared)' if researched.get('reused') else ''}: "
                   f"{researched.get('items', researched.get('error_code'))}")
     brief_id = researched["brief_id"] if researched["outcome"] == "success" else None
     publish_at = datetime.now(timezone.utc)
     result = delivery.publish(args.db, recipient=recipient, credentials=stored, now=publish_at,
                               slot=slot, missed=missed, kind=kind, tz=tz, sync_failures=sync_failures,
                               narrator=_narrator(args.db, publish_at, brief_id), household=profile(config),
-                              lineage=lineage(args.config))
+                              lineage=lineage(args.config), plan=config["reports"].get("editions"))
     # The subject can carry an amount (net-worth change); the plain-text log gets only the run id and outcome.
     _say(args.db, f"Report {result['status']}: run {(result.get('report_id') or '-')[:8]} "
                   f"{result.get('error_code') or ''}".rstrip())

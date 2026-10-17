@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, localcontext
 from typing import Any
 
-from smith import cases, checklist, holdings, ledger, principles, proposals, realestate
+from smith import cases, checklist, editions, holdings, ledger, principles, proposals, realestate, tax
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import LedgerView, base_amount, load_view, unrealized_gain
 from smith.records import Kind, RecordInput, Status
@@ -62,9 +62,20 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     market = realestate.analyze(ledger.load_deals(conn, since=as_of.date() - timedelta(days=400)), today=as_of.date())
     for prop in sectors["real_estate"]["properties"]:
         prop["market"] = market.get(prop["record_id"])
+    advice = proposals.build(view, kpis, sectors, active=ledger.active_proposals(conn), household=household)
+    # The status badge stays household-wide: urgent proposals of every area, whatever today's theme.
+    advice["household_urgent"] = [p.key for p in advice["proposals"] if p.priority == 1]
+    # A daily edition carries only its own proposal rules and their pending judgements; each rule belongs
+    # to one themed day (the overview carries all of them).
+    advice["proposals"] = [p for p in advice["proposals"] if editions.carries(kind, p.key)]
+    advice["undetermined"] = [u for u in advice["undetermined"] if editions.carries(kind, u.key)]
+    plan = tax.facts(view, as_of.date(), household)
     data = {"kind": kind, "as_of": as_of, "baseline": baseline, "kpis": kpis,
             "change": change, "timeline": _timeline(view), "sectors": sectors, "holdings": holdings.review(view),
-            "advice": proposals.build(view, kpis, sectors, active=ledger.active_proposals(conn), household=household),
+            "advice": advice,
+            # This year's pension credit room and overseas gains, for the tax day's headline numbers.
+            "tax_plan": {**tax.pension_plan(plan), "us_gains": plan["us_gains"], "us_unknown": plan["us_unknown"],
+                         "us_positions": plan["us_positions"], "pension_unconverted": plan["pension_unconverted"]},
             "requests": checklist.requests(view, household),
             "household_profile": _profile(household, as_of),
             "completeness": {"complete": view.summary.complete, "areas": view.summary.incomplete_areas,
@@ -72,7 +83,30 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
             "warnings": view.summary.warnings, "freshness": view.summary.freshness, "sync": view.summary.sync,
             "view": view}
     data["policy"] = principles.policy(data)  # Investment policy checks (report design §13), from the data above.
+    data["figures"] = _edition_figures(data)
     return data
+
+
+def _edition_figures(data: dict[str, Any]) -> dict[str, Any]:
+    """The few sums the daily editions' headline tiles show beyond the sector data (report design §14). A
+    sum with an unknown part is unknown; the listed-holdings figures share one scope (not Hermes-managed)."""
+    props = data["sectors"]["real_estate"]["properties"]
+    listed = [p for p in data["holdings"]["positions"] if not p["hermes"]]
+    gains = [p["unrealized_gain"] for p in listed]
+    known = [g for g in gains if g is not None]
+    summary = data["view"].summary
+    net = data["kpis"]["monthly_net"]
+    return {
+        "property_value": _total(p["value"] for p in props) if props else None,
+        "property_debt": _total(p["debt"] for p in props) if props else None,
+        "property_trades_6m": sum(p["market"]["estimate_basis"] for p in props if p.get("market")),
+        "listed_count": len(listed), "listed_value": _total(p["value"] for p in listed) if listed else None,
+        # Like the holdings section: a partial sum over the holdings whose cost is known, with the counts.
+        "listed_gain": sum(known, Decimal(0)) if known else None,
+        "listed_gain_counted": len(known), "listed_gain_missing": len(gains) - len(known),
+        # What is left after spending and the transfers to the client's own savings and investment accounts.
+        "monthly_left": None if net is None or "cash_flow" in summary.incomplete_areas else net - summary.monthly_transfers,
+    }
 
 
 def decompose(conn: sqlite3.Connection, t0: datetime, t1: datetime, known_at: datetime) -> dict[str, Any]:
@@ -253,7 +287,7 @@ def _timeline(view: LedgerView) -> list[dict[str, Any]]:
             due = date.fromisoformat(f["maturity"])
             if today < due <= horizon:
                 items.append({"date": due, "label": _liability_label(record), "amount": base_amount(view, record),
-                              "kind": "cash_need"})
+                              "kind": "cash_need", "category": f["category"]})
     for goal in view.summary.goals:
         if today < goal["target_date"] <= horizon:
             items.append({"date": goal["target_date"], "label": f"목표: {_goal_label(goal['category'])}",
