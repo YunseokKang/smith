@@ -24,6 +24,7 @@ SOURCES = {
     "home": ("국세청 고가주택 양도차익 계산요령", "https://www.nts.go.kr/nts/cm/cntnts/cntntsView.do?cntntsId=8799&mi=12271"),
     "year_end": ("국세청 연말정산 안내(혼인세액공제 포함)",
                  "https://www.nts.go.kr/nts/cm/cntnts/cntntsView.do?cntntsId=7875&mi=6467"),
+    "earned": ("소득세법 제47조(근로소득공제)·제55조(세율)", "https://www.law.go.kr/법령/소득세법/제55조"),
 }
 MARRIAGE_CREDIT = Decimal(500_000)    # Per person, once, for marriages registered in 2024-2026.
 # Pension accounts (소득세법 제59조의3): credit base 6M for pension savings, 9M with IRP; 13.2% effective
@@ -52,7 +53,51 @@ CGT_BRACKETS = ((14_000_000, "0.06", 0), (50_000_000, "0.15", 1_260_000), (88_00
                 (150_000_000, "0.35", 15_440_000), (300_000_000, "0.38", 19_940_000), (500_000_000, "0.40", 25_940_000),
                 (1_000_000_000, "0.42", 35_940_000), (None, "0.45", 65_940_000))
 CGT_BASIC_DEDUCTION = Decimal(2_500_000)
+# Earned income (소득세법 제47조): the employment-income deduction by band of gross pay (band upper bound,
+# rate), capped at 20M won; the taxable base then meets the same basic rates as above (제55조).
+EARNED_DEDUCTION = ((5_000_000, "0.7"), (15_000_000, "0.4"), (45_000_000, "0.15"), (100_000_000, "0.05"), (None, "0.02"))
+EARNED_DEDUCTION_CAP = Decimal(20_000_000)
+# Without the client's base salary, extra pay is assumed to fall in the 38% bracket (150M-300M won taxable).
+ASSUMED_MARGINAL_RATE = Decimal("0.38")
+# Employee health, long-term care and employment insurance on extra pay (about 5%); the national pension is
+# assumed to be at its monthly ceiling already, so a bonus adds none.
+PAYROLL_INSURANCE_RATE = Decimal("0.05")
 _MONTHS = {"monthly": 1, "quarterly": 3, "annual": 12}
+
+
+def progressive(base: Decimal) -> Decimal:
+    """National income tax at the basic rates (소득세법 제55조) on a taxable base, before local tax."""
+    for upper, rate, quick in CGT_BRACKETS:
+        if upper is None or base <= upper:
+            return max(Decimal(0), base * Decimal(rate) - quick)
+    raise AssertionError("the last bracket has no upper bound")
+
+
+def earned_income_tax(pay: Decimal) -> Decimal:
+    """Income tax plus local tax on a year's gross pay, after only the employment-income deduction.
+
+    Personal and other deductions are left out: they lower the base a little but rarely the bracket that
+    extra pay falls in, which is what `extra_pay_withholding` needs."""
+    deduction, lower = Decimal(0), Decimal(0)
+    for upper, rate in EARNED_DEDUCTION:
+        top = pay if upper is None else min(pay, Decimal(upper))
+        deduction += max(Decimal(0), top - lower) * Decimal(rate)
+        if upper is None or pay <= upper:
+            break
+        lower = Decimal(upper)
+    return progressive(max(Decimal(0), pay - min(deduction, EARNED_DEDUCTION_CAP))) * Decimal("1.1")
+
+
+def extra_pay_withholding(amount: Decimal, *, pay_before: Decimal | None) -> tuple[Decimal, str]:
+    """(tax and insurance, basis) on extra pay (a bonus or shares) of `amount` gross.
+
+    With `pay_before`, the year's gross pay before this payment, the tax is the increase in the year's
+    earned-income tax: a large bonus climbs the brackets. Without it the assumed marginal rate applies.
+    The amount withheld on payday differs; this is the year's final cost after the settlement."""
+    insurance = amount * PAYROLL_INSURANCE_RATE
+    if pay_before is None:
+        return amount * ASSUMED_MARGINAL_RATE * Decimal("1.1") + insurance, "assumed"
+    return earned_income_tax(pay_before + amount) - earned_income_tax(pay_before) + insurance, "estimated"
 
 
 @dataclass(frozen=True)
@@ -175,15 +220,14 @@ def capital_gains(price: Decimal, acquired: Decimal, *, held: int, lived: int, o
         taxable = gain
         rate = min(Decimal("0.02") * held, Decimal("0.3")) if held >= 3 else Decimal(0)
     base = max(Decimal(0), taxable * (1 - rate) - CGT_BASIC_DEDUCTION)
-    tax = Decimal(0)
-    for upper, bracket_rate, quick in CGT_BRACKETS:
-        if upper is None or base <= upper:
-            tax = max(Decimal(0), base * Decimal(bracket_rate) - quick)
-            break
-    return {"gain": gain, "taxable": taxable, "deduction_rate": rate, "base": base, "total": tax * Decimal("1.1")}
+    return {"gain": gain, "taxable": taxable, "deduction_rate": rate, "base": base,
+            "total": progressive(base) * Decimal("1.1")}
 
 
-def retirement(t: dict[str, Any]) -> dict[str, Any] | None:
+def retirement(t: dict[str, Any], extra: list[tuple[date, Decimal | None]] | None = None) -> dict[str, Any] | None:
+    """The pension-account track at each retirement age. `extra` is expected pay set aside for retirement
+    (future_income.retirement_share): each amount grows at the real return from the year it is usable to the
+    retirement year, giving `with_pay` beside the plan without it. `extra` None means that amount is unknown."""
     if not t["birth_year"] or not t["monthly_spend"]:
         return None
     age = t["year"] - int(t["birth_year"])
@@ -197,10 +241,28 @@ def retirement(t: dict[str, Any]) -> dict[str, Any] | None:
             continue
         growth = (1 + REAL_RETURN) ** years
         projected = t["pension_assets"] * growth + yearly * (growth - 1) / REAL_RETURN
-        paths.append({"age": target, "years": years, "projected": projected, "ratio": projected / need})
+        added = _set_aside(extra, int(t["birth_year"]) + target)
+        paths.append({"age": target, "years": years, "projected": projected, "ratio": projected / need,
+                      "with_pay": None if added is None else projected + added,
+                      "ratio_with_pay": None if added is None else (projected + added) / need})
     # With unconverted pension amounts the projection is a lower bound (known amounts only), never a total.
     return {"age": age, "need": need, "spend": spend, "paths": paths, "yearly": yearly, "assets": t["pension_assets"],
-            "unconverted": t.get("pension_unconverted", 0)}
+            "unconverted": t.get("pension_unconverted", 0), "pay_set_aside": _set_aside(extra, None)}
+
+
+def _set_aside(extra: list[tuple[date, Decimal | None]] | None, retire_year: int | None) -> Decimal | None:
+    """Expected pay usable before `retire_year`, grown at the real return until then (today's won); with no
+    year, the plain total. None when any amount is unknown."""
+    if extra is None:
+        return None
+    total = Decimal(0)
+    for usable, amount in extra:
+        if retire_year is not None and usable.year >= retire_year:
+            continue
+        if amount is None:
+            return None
+        total += amount if retire_year is None else amount * (1 + REAL_RETURN) ** (retire_year - usable.year)
+    return total
 
 
 # --- strategy notes and year-end checklist -----------------------------------------------------------------

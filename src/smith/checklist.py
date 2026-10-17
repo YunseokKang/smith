@@ -10,7 +10,7 @@ from datetime import date
 from typing import Any
 
 from smith.payload import LedgerView
-from smith.records import Kind
+from smith.records import COMPENSATION_CATEGORIES, Kind
 
 PRIORITY_ORDER = {"must": 0, "should": 1, "nice": 2}
 _PENSION_ACCOUNTS = ("pension_savings", "irp")
@@ -31,7 +31,8 @@ def requests(view: LedgerView, household: dict[str, Any] | None) -> list[Request
     household = household or {}
     today = view.as_of.date()
     rules = (_cash_flows, _partner, _irregular_flows, _pension_paid, _unclassified, _cost_basis, _toss_cash,
-             _surrender_values, _loan_terms, _acquisition, _retirement, _marriage, _transfer_targets, _commitment)
+             _pay_overdue, _expected_pay, _gross_salary, _surrender_values, _loan_terms, _acquisition, _retirement, _marriage,
+             _transfer_targets, _commitment)
     found = [r for rule in rules if (r := rule(view, household, today)) is not None]
     return sorted(found, key=lambda r: PRIORITY_ORDER[r.priority])
 
@@ -126,6 +127,51 @@ def _toss_cash(view: LedgerView, household: dict[str, Any], today: date) -> Requ
     return Request("toss-cash", "should", "토스증권 계좌의 예수금(현금) 잔액",
                    "토스 API는 예수금을 알려 주지 않아(미수집) 즉시 쓸 수 있는 돈에서 증권 계좌 현금이 빠져 있습니다.",
                    "asset 레코드(category=cash, account_type=brokerage, valuation_method=statement)로 직접 입력")
+
+
+def _unpaid(view: LedgerView) -> list[Any]:
+    """The client's bonuses and share grants not stated as received (scheduled, or overdue)."""
+    return [r for r in _flows(view) if r.owner_id == "self" and r.fields["category"] in COMPENSATION_CATEGORIES
+            and r.fields.get("payment_status") != "received"]
+
+
+def _expected_pay(view: LedgerView, household: dict[str, Any], today: date) -> Request | None:
+    """A salaried client with no unpaid bonus or share grant on record (pay already received does not count):
+    the home and retirement plans may be missing their largest future inflows."""
+    salaried = any(r.owner_id == "self" and r.fields["category"] == "salary" for r in _flows(view))
+    if not salaried or _unpaid(view):
+        return None
+    return Request(
+        "expected-pay", "should", "앞으로 받기로 예정된 성과급·주식 보상(지급 예정 시기, 세전 금액 또는 주식 수, 확실한 정도)",
+        "주택 이전과 노후 계획이 지금 있는 돈과 월급만으로 계산되어, 확정에 가까운 큰 수입이 있다면 계획이 실제보다 보수적입니다. "
+        "받기 전까지는 순자산에 넣지 않고, 확실한 정도에 따라 계획에만 나눠 반영합니다.",
+        "cashflow 레코드(category=bonus 또는 stock_compensation, frequency=once, certainty, amount_basis). "
+        "주식 보상은 symbol·market·quantity도 입력")
+
+
+def _pay_overdue(view: LedgerView, household: dict[str, Any], today: date) -> Request | None:
+    """Pay whose day has passed without a stated receipt is left out of the plans and of the balances alike
+    until the client says what happened."""
+    late = [r for r in _unpaid(view) if r.fields["start_date"] <= today.isoformat()]
+    if not late:
+        return None
+    return Request(
+        "pay-overdue", "must", f"지급 예정일이 지난 성과급·주식 보상 {len(late)}건을 받으셨는지, 받았다면 실제 지급일과 과세 금액",
+        "받았다는 기록이 없어 계획에서 뺐습니다. 이미 받으셨다면 같은 해 뒤에 받는 보상의 세금 구간 계산에도 빠져 있습니다.",
+        "cashflow 레코드의 다음 revision: payment_status=received, received_on, taxable_amount(세전 과세 금액). "
+        "지급이 미뤄졌다면 start_date를, 취소됐다면 status=closed로 갱신. 받은 돈은 현금·주식 자산에 반영")
+
+
+def _gross_salary(view: LedgerView, household: dict[str, Any], today: date) -> Request | None:
+    if household.get("annual_gross_salary") is not None:
+        return None
+    gross = any(r.fields.get("amount_basis") == "gross" and r.fields["start_date"] > today.isoformat()
+                for r in _unpaid(view))
+    if not gross:
+        return None
+    return Request("gross-salary", "should", "세전 기본 연봉(성과급·주식 보상 제외)",
+                   "성과급·주식 보상의 세금을 가정 세율로 계산하고 있어, 큰 성과급이 높은 세율 구간에 걸리는 효과가 빠질 수 있습니다.",
+                   "로컬 설정 [household]의 annual_gross_salary(원)")
 
 
 def _surrender_values(view: LedgerView, household: dict[str, Any], today: date) -> Request | None:

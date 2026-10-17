@@ -35,12 +35,12 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from smith import adviser, editions, headless, holdings, ledger, memory, principles, research
+from smith import adviser, editions, future_income, headless, holdings, ledger, memory, principles, research
 from smith.fmt import short_won
 from smith.payload import build_context, check_outbound, won
 from smith.proposals import Proposal
 
-PROMPT_VERSION = "narrative-v7"  # v7: daily editions (edition_focus, per-day limits and inputs).
+PROMPT_VERSION = "narrative-v8"  # v8: expected pay (household.expected_pay) is not wealth; v7: daily editions.
 MODEL = "fable"
 BUDGET_USD = "5.00"
 TIMEOUT_SECONDS = 600  # Two calls at most (write and repair): 20 minutes, inside the 30-minute lease.
@@ -92,6 +92,11 @@ difficult term in a short parenthesis every time it appears, use concrete exampl
 
 Input JSON:
 - household: the sanitized ledger context (amounts are whole KRW strings computed by code).
+  household.expected_pay: bonuses and share grants not yet paid, with certainty (confirmed, expected,
+  possible), estimated tax and net amount, and the concentration a grant adds to a stock already held. It
+  is not wealth: never add it to net worth or say the client has it. Name its certainty when you use it,
+  and present a goal figure that counts it beside the one that does not (the strategy tracks and
+  household.goals plans keep both).
 - proposals: this week's proposals, computed by code, with their figures and texts. They are the
   backbone of the report. You may reorder them (order) and add context, but not change their figures.
 - strategy: long-range goal tracks computed by code.
@@ -223,7 +228,8 @@ def _full_payload(view: Any, data: dict[str, Any], brief: dict[str, Any] | None,
                   change: dict[str, Any] | None) -> dict[str, Any]:
     return {
         "edition": data["kind"],
-        "household": build_context(view, {}, include_positions=True),
+        "household": build_context(view, {}, include_positions=True, expected_pay=None if "future_income" not in data
+                                   else future_income.context(view, data["future_income"])),
         "change_since_last_report": None if change is None else {
             "total": won(change["total"]),
             "parts": {k: won(v) for k, v in change["parts"].items() if v} if change.get("balanced", True) else {},
@@ -766,7 +772,7 @@ def _figures(text: str) -> set[str]:
 _RATIO_KEYS = frozenset({"share", "share_of_assets", "share_of_securities", "usd_share_of_assets", "return_on_cost",
                          "loan_to_value", "liabilities_to_assets", "premium_to_income", "change_vs_previous_6m",
                          "annual_rate", "rate_rise", "top1_share", "top5_share", "overseas_share",
-                         "concentration_limit", "drawdown"})
+                         "concentration_limit", "drawdown", "share_of_securities_with_grants"})
 _SERIES_VALUES = ("value", "change_3m", "change_12m")
 _PERCENT = re.compile(r"(?<![\w.])([-+−]?)(\d[\d,]*(?:\.\d+)?)\s*%")
 _DECIMAL = re.compile(r"-?\d+(?:\.\d+)?")

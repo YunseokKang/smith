@@ -36,7 +36,7 @@ from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import check_outbound, mask_identifiers
 from smith.report_data import build_report
 
-PROMPT_VERSION = "mail-answer-v6"  # v6: full snapshot vs the replied-to report's own proposals (report_kind).
+PROMPT_VERSION = "mail-answer-v7"  # v7: expected pay is not wealth; v6: full snapshot vs the report's own proposals.
 MODEL = "fable"
 BUDGET_USD = "3.00"
 TIMEOUT_SECONDS = 600
@@ -106,7 +106,11 @@ Hard rules (checked by code; a failing answer is rejected):
 - No certainty about prices, rates, returns, approvals or guarantees. Never state the client's legal
   home count as a fact.
 - Assets managed by Hermes (managed_by "hermes") are never to be sold or changed directly: say to discuss
-  them with Hermes. Assets of household_member_* are not the client's legal property."""
+  them with Hermes. Assets of household_member_* are not the client's legal property.
+- household.expected_pay is pay not yet received (bonuses, share grants): never count it as money the client
+  has, name its certainty when you use it, and give a goal figure with it only beside the one without it.
+  Its after-tax amount is the year's final tax estimate, not the cash on payday; overdue items are
+  unconfirmed."""
 
 
 @dataclass(frozen=True)

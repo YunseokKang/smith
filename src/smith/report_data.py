@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, localcontext
 from typing import Any
 
-from smith import cases, checklist, editions, holdings, ledger, principles, proposals, realestate, tax
+from smith import cases, checklist, editions, future_income, holdings, ledger, principles, proposals, realestate, tax
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import LedgerView, base_amount, load_view, unrealized_gain
 from smith.records import Kind, RecordInput, Status
@@ -24,6 +24,8 @@ CATEGORY_LABELS = {
     "crypto": "가상자산", "unclassified": "구성 미상 증권", "other": "기타",
 }
 LIQUIDITY_LABELS = {"immediate": "즉시", "days": "수일 내", "months": "수개월", "restricted": "인출 제한"}
+PAY_LABELS = {"bonus": "성과급", "stock_compensation": "주식 보상"}
+CERTAINTY_LABELS = {"confirmed": "확정", "expected": "예상", "possible": "가능성"}
 HERMES_LABEL = "Hermes 운용"
 # Real changes only: a correction of a past input restates the start and is shown apart (design §6).
 COMPONENT_LABELS = {
@@ -57,22 +59,25 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
                   baseline: datetime | None, kind: str, household: dict[str, Any] | None) -> dict[str, Any]:
     view = load_view(conn, as_of=as_of, known_at=known_at)
     change = None if baseline is None else decompose(conn, baseline, as_of, known_at)
-    kpis, sectors = _kpis(view, change), _sectors(view)
+    salary = (household or {}).get("annual_gross_salary")
+    pay = future_income.inflows(view, salary=None if salary is None else Decimal(salary))
+    kpis, sectors = _kpis(view, change, pay), _sectors(view)
     # Official transactions matched to each property (local data; only derived figures leave this PC).
     market = realestate.analyze(ledger.load_deals(conn, since=as_of.date() - timedelta(days=400)), today=as_of.date())
     for prop in sectors["real_estate"]["properties"]:
         prop["market"] = market.get(prop["record_id"])
-    advice = proposals.build(view, kpis, sectors, active=ledger.active_proposals(conn), household=household)
+    advice = proposals.build(view, kpis, sectors, active=ledger.active_proposals(conn), household=household, pay=pay)
     # The status badge stays household-wide: urgent proposals of every area, whatever today's theme.
     advice["household_urgent"] = [p.key for p in advice["proposals"] if p.priority == 1]
     # A daily edition carries only its own proposal rules and their pending judgements; each rule belongs
     # to one themed day (the overview carries all of them).
     advice["proposals"] = [p for p in advice["proposals"] if editions.carries(kind, p.key)]
     advice["undetermined"] = [u for u in advice["undetermined"] if editions.carries(kind, u.key)]
+    advice["assumptions"] = advice["assumptions"] + future_income.assumptions(pay)
     plan = tax.facts(view, as_of.date(), household)
     data = {"kind": kind, "as_of": as_of, "baseline": baseline, "kpis": kpis,
-            "change": change, "timeline": _timeline(view), "sectors": sectors, "holdings": holdings.review(view),
-            "advice": advice,
+            "change": change, "timeline": _timeline(view, pay), "sectors": sectors, "holdings": holdings.review(view),
+            "future_income": future_income.review(view, pay), "advice": advice,
             # This year's pension credit room and overseas gains, for the tax day's headline numbers.
             "tax_plan": {**tax.pension_plan(plan), "us_gains": plan["us_gains"], "us_unknown": plan["us_unknown"],
                          "us_positions": plan["us_positions"], "pension_unconverted": plan["pension_unconverted"]},
@@ -242,24 +247,27 @@ def _flows(view: LedgerView) -> tuple[Decimal | None, Decimal | None]:
     return summary.monthly_net, summary.monthly_outflow
 
 
-def _kpis(view: LedgerView, change: dict[str, Any] | None) -> dict[str, Any]:
+def _kpis(view: LedgerView, change: dict[str, Any] | None, pay: list[future_income.Inflow]) -> dict[str, Any]:
     summary = view.summary
     immediate = _liquidity(view)["immediate"]
     monthly_net, outflow = _flows(view)
     months = immediate / outflow if immediate is not None and outflow else None
-    home = _home_progress(view)
+    home = _home_progress(view, pay)
     return {"net_worth": summary.net_worth, "net_worth_change": None if change is None else change["total"],
             "monthly_net": monthly_net, "immediate": immediate, "immediate_months": months,
             "home_progress": home}
 
 
-def _home_progress(view: LedgerView) -> dict[str, Any] | None:
+def _home_progress(view: LedgerView, pay: list[future_income.Inflow]) -> dict[str, Any] | None:
+    """The nearest home goal in the base scenario. `available_self` and the stock glide plan (`from_liquid`)
+    leave expected pay out: money needed at a date is not planned on pay that is not yet certain. The
+    figures with expected pay are shown beside them."""
     goals = [g for g in view.summary.goals if g["category"] == "home" and g["target"] is not None
              and g["target_date"] > view.as_of.date()]
     if not goals:
         return None
     goal = min(goals, key=lambda g: g["target_date"])
-    facts = cases.home_facts(view, target_price=goal["target"], target_date=goal["target_date"])
+    facts = cases.home_facts(view, target_price=goal["target"], target_date=goal["target_date"], pay=pay)
     base = facts["scenarios"][0]
     if base["available_self"] is None:
         return None
@@ -271,16 +279,23 @@ def _home_progress(view: LedgerView) -> dict[str, Any] | None:
     grown = Decimal(facts["liquid_assets_self"]) * (1 + Decimal(base["assumptions"]["investment_return"])) ** (
         Decimal(facts["months"]) / 12)
     from_liquid = required - available + grown + Decimal(facts["projected_savings_from_monthly_net"])
+    with_pay = _dec(base["available_self_with_expected_pay"])
     return {"target_date": goal["target_date"], "required": required, "available_self": available,
             "available_with_partner": with_partner, "ratio_self": available / required,
-            "from_liquid": from_liquid, "scenarios": facts["scenarios"]}
+            "from_liquid": from_liquid, "scenarios": facts["scenarios"],
+            "pay_at_target": _dec(base["expected_pay_at_target"]), "pay_after_target": _dec(base["expected_pay_after_target"]),
+            "available_with_pay": with_pay, "ratio_with_pay": None if with_pay is None else with_pay / required}
 
 
-def _timeline(view: LedgerView) -> list[dict[str, Any]]:
-    """Dated cash needs and goals within the next few years, oldest first."""
+def _timeline(view: LedgerView, pay: list[future_income.Inflow]) -> list[dict[str, Any]]:
+    """Dated cash needs, goals and expected pay (net, kind "inflow") within the next few years, oldest first."""
     today = view.as_of.date()
     horizon = date(today.year + TIMELINE_YEARS, today.month, min(today.day, 28))
-    items = []
+    # Overdue pay is not a coming date: the expected-pay section lists it for the client to confirm.
+    items = [{"date": i.paid_on, "label": f"{PAY_LABELS.get(i.category, '예정 수입')}({CERTAINTY_LABELS[i.certainty]})"
+              + ("" if i.owner_id == "self" else "·배우자"), "amount": i.net, "gross": i.gross, "kind": "inflow",
+              "category": i.category}
+             for i in pay if not i.overdue and i.paid_on <= horizon]
     for record in view.records:
         f = record.fields
         if record.kind is Kind.LIABILITY and f.get("maturity"):

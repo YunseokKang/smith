@@ -20,7 +20,7 @@ from smith import editions, principles
 from smith.holdings import STANCES
 from smith.proposals import Track
 from smith.realestate import MIN_BASIS
-from smith.report_data import CATEGORY_LABELS, COMPONENT_LABELS
+from smith.report_data import CATEGORY_LABELS, CERTAINTY_LABELS, COMPONENT_LABELS, PAY_LABELS
 
 # Design tokens (docs/design-reference.md).
 CANVAS, SOFT, STRONG, DARK, DARK_RAISED = "#ffffff", "#f7f7f7", "#eef0f3", "#0a0b0d", "#16181c"
@@ -79,6 +79,7 @@ def render(data: dict[str, Any]) -> tuple[str, str]:
         bands.append(_band(DARK, _strategy(advice["strategy"], story.get("direction", ""), story.get("direction_memo", ""))))
     sections = [_changes_outside(story), _follow_up(advice), _tax(advice, data, full), _change(data), _timeline(data)]
     if full:
+        sections.append(_future_income(data))
         sectors = data["sectors"]
         sections += [_allocation(data), _cash(sectors["cash"], data), _debt(sectors["debt"]),
                      _policy(data, story, full), _holdings(data, story, full), _real_estate(sectors["real_estate"]),
@@ -120,6 +121,7 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
     renderers = {
         "follow_up": lambda: _follow_up(advice), "change": lambda: _change(data),
         "allocation": lambda: _allocation(data), "timeline": lambda: _timeline(data),
+        "future_income": lambda: _future_income(data),
         "requests": lambda: _requests(data.get("requests") or [], True), "glossary": lambda: _glossary(),
         "holdings": lambda: _holdings(data, story, True), "policy": lambda: _policy(data, story, True),
         "macro": lambda: _macro(sectors["macro"]), "real_estate": lambda: _real_estate(sectors["real_estate"]),
@@ -646,27 +648,101 @@ def _timeline(data: dict[str, Any]) -> str:
     rows = []
     for item in items:
         months = (item["date"].year - today.year) * 12 + item["date"].month - today.month
+        inflow = item["kind"] == "inflow"
+        # Money coming in is told apart from money going out by its sign and a softer marker. The after-tax
+        # figure is the year's final tax estimate, not the cash of that day, so it is named as such.
+        amount = _short(item["amount"])
+        if inflow:
+            amount = ("+" + _short(item["amount"]) + "(세후 입력)" if item.get("gross") is None else
+                      f"+{_short(item['gross'])}(세전) · 최종 세후 약 {_short(item['amount'])}")
         rows.append(f'<tr><td style="width:100px;font-family:{MONO};font-size:12px;font-weight:500;color:{INK};padding:7px 8px 7px 0">'
                     f'{item["date"]:%Y.%m.%d}</td>'
-                    f'<td style="font-size:13px;color:{BODY};padding:7px 0 7px 12px;border-left:3px solid {ACCENT}">'
-                    f'{escape(item["label"])} · {_short(item["amount"])} <span style="color:{MUTED_SOFT}">({months}개월 후)</span></td></tr>')
-    first = items[0]
-    lead = (f"가장 가까운 큰 자금 일정은 <b>{first['date']:%Y년 %m월}</b>의 {escape(first['label'])}"
+                    f'<td style="font-size:13px;color:{BODY};padding:7px 0 7px 12px;border-left:3px '
+                    f'{"dashed " + MUTED_SOFT if inflow else "solid " + ACCENT}">'
+                    f'{escape(item["label"])} · {amount} <span style="color:{MUTED_SOFT}">({months}개월 후)</span></td></tr>')
+    needs = [item for item in items if item["kind"] != "inflow"]
+    first = needs[0] if needs else None
+    lead = ("향후 5년 안에 예정된 큰 지출 일정은 없습니다." if first is None else
+            f"가장 가까운 큰 자금 일정은 <b>{first['date']:%Y년 %m월}</b>의 {escape(first['label'])}"
             f"(<b>{_short(first['amount'])}</b>)입니다. 이 일정들이 현금 준비의 기준이 됩니다.")
+    if len(needs) < len(items):
+        lead += (" 점선 표시는 앞으로 들어올 예정 소득으로, 받기 전까지는 확정된 돈이 아닙니다. 세후 금액은 그해 최종 세금 기준이라 "
+                 "지급일에 실제로 들어오는 돈과 다를 수 있습니다.")
     home = data["kpis"]["home_progress"]
     inner = f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{"".join(rows)}</table>'
     if home:
+        inner += _home_plan(home)
         gap = home["required"] - home["available_self"]
         lead += (f" 주택 목표의 기준 시나리오에서 본인 자원으로 준비 가능한 금액은 필요액의 <b>{_pct(home['ratio_self'], 0)}</b>"
                  f"이며, 부족분은 약 <b>{_short(gap)}</b>입니다(가정: 집값 연 2%·투자 수익 연 4%).")
-        bars = [("필요 자금(비용 포함)", home["required"], False), ("본인 준비 가능액", home["available_self"], True)]
-        if home["available_with_partner"] is not None:
-            bars.append(("배우자 부동산 포함 시", home["available_with_partner"], False))
-        inner += '<div style="height:12px"></div>' + _bars(bars)
-        inner += _table(["시나리오", "필요 자금", "본인 준비 가능액", "부족분(본인)"],
-                        [[SCENARIO_LABELS.get(s["name"], s["name"]), _short(_dec(s["required_with_costs"])),
-                          _short(_dec(s["available_self"])), _short(_dec(s["gap_self"]))] for s in home["scenarios"]])
+        if home.get("pay_at_target"):
+            lead += (f" 목표일 전에 받을 예정 소득(확정·예상분, 세후 추정)은 그때 가치로 약 <b>{_short(home['pay_at_target'])}</b>"
+                     f"이며, 이를 더하면 필요액의 <b>{_pct(home['ratio_with_pay'], 0)}</b>입니다. 다만 받기 전까지는 확정이 "
+                     "아니어서, 준비 상태 판단과 주식 비중 조절 계획은 예정 소득을 뺀 숫자를 기준으로 합니다.")
+        elif home.get("pay_at_target") is None:  # Unknown (no FX rate for some pay), never shown as none.
+            lead += " 예정 소득 가운데 원화로 환산하지 못한 항목이 있어, 예정 소득을 더한 값은 계산하지 않았습니다(미상)."
     return _section("목표와 일정", lead, inner)
+
+
+def _home_plan(home: dict[str, Any]) -> str:
+    """Bars and the scenario table of the home goal, with expected pay as its own column when there is any."""
+    bars = [("필요 자금(비용 포함)", home["required"], False), ("본인 준비 가능액", home["available_self"], True)]
+    if home.get("pay_at_target"):
+        bars.append(("예정 소득 포함 시(기준)", home["available_with_pay"], False))
+    if home["available_with_partner"] is not None:
+        bars.append(("배우자 부동산 포함 시", home["available_with_partner"], False))
+    with_pay = any(s.get("expected_pay_at_target") not in (None, "0") for s in home["scenarios"])
+    headers = ["시나리오", "필요 자금", "본인 준비 가능액", "부족분(본인)"] + (["예정 소득 반영 부족분"] if with_pay else [])
+    rows = [[SCENARIO_LABELS.get(s["name"], s["name"]), _short(_dec(s["required_with_costs"])),
+             _short(_dec(s["available_self"])), _short(_dec(s["gap_self"]))]
+            + ([_short(_dec(s["gap_self_with_expected_pay"]))] if with_pay else []) for s in home["scenarios"]]
+    return '<div style="height:12px"></div>' + _bars(bars) + _table(headers, rows)
+
+
+TAX_BASIS_TEXT = {"net_input": "세후 입력", "estimated": "연봉 기준 추정", "assumed": "가정 세율", "as_entered": "입력값",
+                  "unknown": "환율 미상", "prior_unknown": "앞선 보상 금액 미상"}
+
+
+def _future_income(data: dict[str, Any]) -> str:
+    """Expected pay (bonuses, share grants): what is coming, how sure it is, after an estimated tax, and the
+    concentration a grant adds. Nothing here is in net worth (report design §15)."""
+    found = data.get("future_income") or {}
+    items = found.get("items") or []
+    if not items:
+        return ""
+    sure = found["by_certainty"]
+    lead = (f"앞으로 받을 성과급·주식 보상은 최종 세후 추정으로 확정 <b>{_short(sure['confirmed'])}</b>, 예상 "
+            f"<b>{_short(sure['expected'])}</b>, 가능성 {_short(sure['possible'])}입니다. 아직 받지 않은 돈이라 순자산과 월 현금흐름에는 "
+            "넣지 않았고, 계획에는 확실한 정도에 따라 나눠 반영합니다(불리: 확정분만, 기준: 확정+예상, 유리: 전부). 세후는 그해 "
+            "최종 세금 기준이며, 지급일에 실제로 들어오는 돈은 원천징수 방식에 따라 다르고 연말정산·급여 공제로 나중에 맞춰집니다.")
+    if found.get("overdue"):
+        lead += (f" 지급 예정일이 지났는데 받았다는 기록이 없는 항목 {len(found['overdue'])}건은 계획에서 뺐습니다. 받으셨는지 "
+                 "알려 주시면 실제 지급일과 과세 금액으로 기록하겠습니다.")
+    if found.get("assumed_tax"):
+        lead += " 세전 기본 연봉을 몰라 세금은 가정 세율로 계산한 항목이 있습니다. 연봉을 알려 주시면 더 정확해집니다."
+    if found.get("prior_unknown"):
+        lead += (" 같은 해에 먼저 받는 보상의 세전 금액이나 환율을 몰라, 뒤에 받는 보상의 세율 구간을 정할 수 없어 세후를 "
+                 "계산하지 않은 항목이 있습니다(미상).")
+    rows = []
+    for i in items:
+        what = PAY_LABELS.get(i.category, "예정 수입")
+        if i.shares:
+            what += f" {i.quantity:,f}주" + ("" if i.price is None else f"(주가 {i.price:,f} 기준)")
+        elif i.in_stock:
+            what += "(자사주로 지급)"
+        rows.append([f"{i.paid_on:%Y.%m}", what, "지급 확인 필요" if i.overdue else CERTAINTY_LABELS[i.certainty],
+                     _short(i.gross), _short(i.net),
+                     TAX_BASIS_TEXT[i.withholding_basis] + ("" if i.usable_from == i.paid_on else f", {i.usable_from:%Y.%m}부터 사용")])
+    inner = _table(["받는 달", "내용", "확실성", "세전", "최종 세후(추정)", "비고"], rows)
+    for stock in found.get("same_stock") or []:
+        # A known 0% now (no securities yet) still warns; only unknown shares are skipped.
+        if stock["share_now"] is None or stock["share_with_grants"] is None or not stock["granted"]:
+            continue
+        inner += (f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin-top:10px">회사 주식 집중: 지금 보유한 '
+                  f'{escape(stock["symbol"])}은 본인 증권 자산의 <b>{_pct(stock["share_now"], 0)}</b>이고, 예정된 주식 보상과 자사주로 '
+                  f'받는 성과급(기준, 세후)을 받으면 <b>{_pct(stock["share_with_grants"], 0)}</b>가 됩니다. 월급도 같은 회사에서 나오므로, 받는 대로 일부를 '
+                  "분산하는 원칙을 정해 두시면 회사 실적 하나에 소득과 자산이 함께 흔들리는 위험을 줄일 수 있습니다.</div>")
+    return _section("앞으로 들어올 돈", lead, inner)
 
 
 def _allocation(data: dict[str, Any]) -> str:

@@ -8,14 +8,15 @@ import uuid
 from contextlib import closing
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from smith.config import DEFAULT_TIMEZONE
+from smith.config import DEFAULT_TIMEZONE, load_config
 
 from keyring.errors import KeyringError
 
-from smith import adviser, cases, credentials, ledger, memory
+from smith import adviser, cases, credentials, future_income, ledger, memory
 from smith.payload import PayloadRejected, build_context, check_outbound, load_view, redact
 
 CASES = ("portfolio", "funding", "home")
@@ -43,6 +44,8 @@ def add_parser(sub: Any, default_db: Any) -> None:
                         help=f"Spend cap for the model call (default: {adviser.DEFAULT_BUDGET_USD})")
     advise.add_argument("--model", default=adviser.DEFAULT_MODEL, help=f"Claude model alias or name (default: {adviser.DEFAULT_MODEL})")
     advise.add_argument("--db", type=type(default_db), default=default_db)
+    advise.add_argument("--config", type=Path, default=Path("config/smith.local.toml"),
+                        help="local config; [household] annual_gross_salary sharpens the tax on expected pay")
 
 
 def run(args: argparse.Namespace) -> int:
@@ -64,8 +67,14 @@ def run(args: argparse.Namespace) -> int:
     if args.case == "home" and args.target_date <= today:
         print("Invalid target: --target-date must be in the future.")
         return 2
-    facts = _facts(view, args)
-    context = build_context(view, facts, include_positions=args.case == "portfolio")
+    salary, problem = _salary(args.config)
+    if problem:
+        print(problem)
+        return 2
+    pay = future_income.inflows(view, salary=salary)
+    facts = _facts(view, args, pay)
+    context = build_context(view, facts, include_positions=args.case == "portfolio",
+                            expected_pay=future_income.context(view, future_income.review(view, pay)))
     question = args.question or DEFAULT_QUESTIONS[args.case].format(
         amount=f"{args.amount:,.0f}", price=f"{args.target_price:,.0f}", date=args.target_date.isoformat())
     question = redact(view, question)
@@ -92,12 +101,25 @@ def run(args: argparse.Namespace) -> int:
     return _ask(args, view, question, context, payload, now)
 
 
-def _facts(view: Any, args: argparse.Namespace) -> dict[str, Any]:
+def _facts(view: Any, args: argparse.Namespace, pay: list[future_income.Inflow]) -> dict[str, Any]:
     if args.case == "portfolio":
         return cases.portfolio_facts(view)
     if args.case == "funding":
         return cases.funding_facts(view, amount=args.amount)
-    return cases.home_facts(view, target_price=args.target_price, target_date=args.target_date)
+    return cases.home_facts(view, target_price=args.target_price, target_date=args.target_date, pay=pay)
+
+
+def _salary(path: Path) -> tuple[Decimal | None, str | None]:
+    """(the client's yearly base salary from [household], problem). A missing file means no salary; a
+    broken one is an error, as for report previews."""
+    if not path.exists():
+        return None, None
+    try:
+        config = load_config(path)
+    except (OSError, ValueError, UnicodeDecodeError) as error:
+        return None, f"Local config is invalid ({error}): {path}. Fix it or pass --config to another file."
+    salary = (config.get("household") or {}).get("annual_gross_salary")
+    return (None if salary is None else Decimal(salary)), None
 
 
 def _secrets() -> list[str]:

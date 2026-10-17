@@ -175,8 +175,10 @@ def _add_cashflow(summary: Summary, record: RecordInput, rates: dict[str, Decima
     start = date.fromisoformat(fields["start_date"])
     if fields["frequency"] == "once":
         if today < start <= today + _UPCOMING:
+            # Not part of any total: a future inflow is not wealth until paid (stock grants at their estimate here).
             summary.upcoming_once.append({"record_id": record.record_id, "date": start, "category": fields["category"],
-                                          "direction": fields["direction"], "amount": base})
+                                          "direction": fields["direction"], "amount": base,
+                                          "certainty": fields.get("certainty")})
         return
     if not recurring_active(fields, today):
         return
@@ -298,6 +300,7 @@ def render(summary: Summary) -> list[str]:
               f"net {_money(summary.monthly_net)}  internal transfers {_money(summary.monthly_transfers)}",
               f"  loan interest (estimate) {_money(summary.monthly_loan_interest_estimate)}"]
     lines += [f"  one-time {u['date']} {u['direction']} {u['category']} {_money(u['amount'])}"
+              + (f" ({u['certainty']}, not in totals)" if u.get("certainty") else "")
               for u in summary.upcoming_once]
     if summary.goals:
         lines.append("\nGoals")

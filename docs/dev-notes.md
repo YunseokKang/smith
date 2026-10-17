@@ -235,3 +235,11 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
 - 해결: 여러 줄 편집은 편집 도구로 한다(줄바꿈을 보존). 판별은 PowerShell
   `[regex]::Matches([IO.File]::ReadAllText(path), "`r`n").Count`로 한다. `sed -i`로 한 줄을 바꿀 때 `\r?$`를 쓰면 그 줄의
   CR이 사라져 줄바꿈이 섞이니 피한다. 커밋 시에는 `autocrlf`가 LF로 맞추므로 저장소 내용은 영향이 없다.
+
+### TS-024 PowerShell에서 `python -c "..."` 안의 큰따옴표가 사라져 SyntaxError (2026-10-17)
+
+- 증상: PowerShell 도구에서 `.\.venv\Scripts\python.exe -c "...execute(\"select ...\")..."`를 실행하자
+  `SyntaxError: unterminated string literal`. SQL 문자열의 따옴표가 빠진 채 전달됐다.
+- 원인: Windows PowerShell 5.1은 네이티브 실행 파일에 인자를 넘길 때 인자 안의 큰따옴표를 제대로 이스케이프하지 않는다.
+- 해결: 한 줄 Python은 Bash 도구의 `python - <<'EOF' ... EOF` heredoc으로 실행하고, 길거나 따옴표가 많으면 TS-017처럼
+  scratchpad의 `.py` 파일로 실행한다.

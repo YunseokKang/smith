@@ -277,7 +277,12 @@ v3는 공급자 동기화 시도의 성공·실패를 남기는 `sync_runs` 표�
   못한 연금 자산·납입은 0으로 두지 않고 건수를 세어, 비율을 "확인된 금액만으로 본 하한"이라고 밝힌다.
 - 위험 성향: `[advice] risk_preference`(conservative·balanced·growth·growth_aggressive)를 검증해 서술 단계의
   `household_profile`로 넘긴다. 방향·순서는 성향을 따르되 더 안전한 대안과 날짜가 정해진 자금 수요는 빼지 않는다.
-- 로컬 `[household]`(Git 제외): 출생 연도, 은퇴 생활비, 혼인신고 여부, 동거 여부. 서술 단계에는 나이와 혼인신고 여부만 넘긴다.
+- 로컬 `[household]`(Git 제외): 출생 연도, 은퇴 생활비, 혼인신고 여부, 동거 여부, 세전 기본 연봉(`annual_gross_salary`,
+  성과급·주식 보상 제외). 서술 단계에는 나이와 혼인신고 여부만 넘긴다. 연봉은 넘기지 않고 예정 소득의 세금 추정에만 쓴다.
+- 예정 소득(FR-20, `src/smith/future_income.py`): cashflow `bonus`·`stock_compensation`을 확실성별로 평가(주식은 같은 종목의
+  최신 보유 단가, 세전은 근로소득 증가분 세금·보험 차감)하고, 주택 계산(`cases.home_facts`)은 시나리오별 확실성 규칙으로
+  "예정 소득 포함" 값을 따로 더한다. 순자산·월 현금흐름·준비 상태·주식 단계적 전환·보증금 반환 계산에는 넣지 않는다.
+  `smith advise`는 `--config`의 `[household] annual_gross_salary`를 읽는다. 자세한 규칙은 `docs/report-design.md` §15.
 - 로컬 `[properties."record-id"]`(Git 제외): 공식 실거래가 매칭용 시군구 코드·법정동·단지 키워드. 동·호수는 저장하지 않으며
   모델·웹 조사로 보내지 않는다. 키는 `smith realestate login`(OS 자격 증명 저장소).
 

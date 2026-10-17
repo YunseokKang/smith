@@ -134,8 +134,10 @@ def won(value: Decimal | None) -> str | None:
     return None if value is None else str(value.quantize(Decimal(1), rounding=ROUND_HALF_UP))
 
 
-def build_context(view: LedgerView, case_facts: dict[str, Any], *, include_positions: bool) -> dict[str, Any]:
-    """Assemble the allowlisted context. Only fields named here are ever sent."""
+def build_context(view: LedgerView, case_facts: dict[str, Any], *, include_positions: bool,
+                  expected_pay: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Assemble the allowlisted context. Only fields named here are ever sent. `expected_pay` is
+    future_income.context (built by the caller, which knows the household's salary)."""
     summary = view.summary
     warnings = list(dict.fromkeys(redact(view, warning)
                                   for warning in summary.warnings + list(view.exposures.warnings)))
@@ -160,6 +162,7 @@ def build_context(view: LedgerView, case_facts: dict[str, Any], *, include_posit
                       "monthly_loan_interest_estimate": won(summary.monthly_loan_interest_estimate),
                       "items": [_cashflow(view, r) for r in _sorted(view, Kind.CASHFLOW)]},
         "goals": [_goal(view, goal) for goal in summary.goals],
+        "expected_pay": expected_pay,
         "exposures": [{"ref": f"X{i}", "key": redact(view, e.key), "amount": won(e.amount),
                        "share_of_assets": None if e.share_of_assets is None else f"{e.share_of_assets:.4f}",
                        "evidence": [_evidence_ref(s) for s in e.series], "feeds": list(e.feeds), "note": redact(view, e.note)}

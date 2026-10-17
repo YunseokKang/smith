@@ -20,7 +20,8 @@ KNOWN_KEYS = {
     "privacy": {"remove_personal_identifiers"},
     "reports": {"enabled", "weekdays", "time", "delivery", "editions"},
     "mail": {"recipient", "answer_replies"},
-    "household": {"birth_year", "partner_birth_year", "retirement_monthly_spend", "marriage_registered", "cohabiting"},
+    "household": {"birth_year", "partner_birth_year", "retirement_monthly_spend", "marriage_registered", "cohabiting",
+                  "annual_gross_salary"},
     "backup": {"dir", "keep"},
 }
 PROPERTY_KEYS = {"lawd_cd", "dong", "apt_name", "exclusive_area_m2", "acquired_year", "acquired_price"}
@@ -119,9 +120,10 @@ def _check_household(household: object) -> None:
         value = household.get(field)
         if value is not None and (not isinstance(value, int) or isinstance(value, bool) or not 1900 <= value <= 2100):
             raise ValueError(f"household.{field} must be a year")
-    spend = household.get("retirement_monthly_spend")
-    if spend is not None and (not isinstance(spend, int) or isinstance(spend, bool) or spend <= 0):
-        raise ValueError("household.retirement_monthly_spend must be a positive whole number of won")
+    for field in ("retirement_monthly_spend", "annual_gross_salary"):
+        amount = household.get(field)
+        if amount is not None and (not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0):
+            raise ValueError(f"household.{field} must be a positive whole number of won")
     for field in ("marriage_registered", "cohabiting"):
         if not isinstance(household.get(field, False), bool):
             raise ValueError(f"household.{field} must be a boolean")

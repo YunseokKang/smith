@@ -108,7 +108,7 @@
 - `loan_payment`는 상환할 부채 레코드와 연결한다. 원금·이자 분리는 연결된 부채의 이율·상환 방식으로
   계산 단계에서 추정하며, 추정임을 표시한다.
 - 유입 category: `salary`, `business_income`, `rental_income`, `pension_income`, `investment_income`,
-  `other_income` → `direction=inflow`
+  `other_income`, `bonus`, `stock_compensation` → `direction=inflow`
 - 유출 category: `living_expense`, `housing_cost`, `loan_payment`, `insurance_premium`, `tax`,
   `education`, `other_expense` → `direction=outflow`
 - `internal_transfer`: 본인 계좌 간 이동(적금 납입 등). 수입·지출로 계산하지 않는다.
@@ -118,6 +118,31 @@
 - `end_date`는 `start_date` 이후여야 한다. 없으면 계속 유지되는 흐름이다.
 - `commitment`(선택): `fixed`(계약상 의무) 또는 `discretionary`(추가 원금 상환처럼 언제든 멈출 수 있음).
   긴급 자금 조달처럼 지출 조정 여지를 따질 때 쓴다. 없으면 미확인이다.
+- **예정 소득(FR-20)**: 유입 category `bonus`(성과급·상여)와 `stock_compensation`(주식 보상: PSU·RSU·자사주 성과급 등).
+  - 지급 한 번이 레코드 하나다(`frequency=once` 필수). 매년 받는 성과급도 연도별로 따로 입력한다.
+  - `certainty`(필수): `confirmed`(통지·계약으로 지급과 금액(또는 주식 수)이 확정, 재직 같은 통상 조건만 남음), `expected`(지급은
+    거의 확실하고 금액만 실적·주가에 따라 달라짐), `possible`(지급 자체가 아직 정해지지 않은 조건에 달림: 주총 승인, 주가 기준 미달 시
+    0 등). 다른 유입 category에도 선택으로 쓸 수 있고, 없는 일회성 유입은 `possible`로 본다.
+    사용자 결정(2026-10-17): 합의·계약으로 지급이 정해졌고 남은 조건이 지금 충족돼 있거나 통과 가능성이 높은 보상(예: 노사 합의로
+    지급 일정이 공표되고 주총 승인만 남은 성과급, 현재 주가가 이미 지급 기준을 넘은 주가 연동 보상)은 고객이 `expected`로 둘 수 있다.
+    그 판단과 남은 조건은 레코드 `reason`에 남기고, 불리 시나리오에서는 빠진다.
+  - `amount_basis`(필수): `gross`(세전) 또는 `net`(세후 실수령). 이 두 category에만 쓴다. `net`이면 세전 금액은 미상으로 두며,
+    같은 해 그 뒤에 받는 보상의 세율 구간도 정할 수 없어 세후가 미상이 된다. 세후로 입력한 주식 보상의 `quantity`는 세금 뒤 실제로
+    받을 주식 수다.
+  - `stock_compensation`은 `symbol`, `market`, `quantity`(지급 주식 수)가 필수다. `amount`는 입력 시점의 원화 추정액이며,
+    원장에 같은 시장·심볼·통화의 보유 종목 단가가 있으면 Smith가 가장 최근 단가 × 수량으로 다시 평가한다.
+  - 원화 금액으로 정해져 지급일 주가로 자사주를 받는 성과급은 `bonus`에 `symbol`·`market`(둘 다)을 적는다(`quantity`는 쓰지 않음).
+    같은 종목 집중도에 들어가고, 지급일부터 주가 위험을 진다고 본다. 매도 제한이 단계적이면 금액을 나눠 레코드마다 `available_from`을 둔다.
+  - `available_from`(선택): 의무 보유 등으로 실제로 쓸 수 있게 되는 날(지급일 이후). 없으면 지급일.
+  - 받기 전까지는 순자산·월 현금흐름에 넣지 않는다. 계산 규칙은 `src/smith/future_income.py`.
+  - **지급 수명주기**: 지급 여부는 날짜나 종료 여부로 추정하지 않고 고객이 알려 준 사실로만 정한다.
+    - `payment_status`(선택, 두 category만): `scheduled`(기본) 또는 `received`.
+    - 받았으면 다음 revision으로 `payment_status=received`, `received_on`(실제 지급일), `taxable_amount`(실제 세전 과세 금액,
+      그 레코드 통화)를 함께 적는다. 이 둘은 `received`일 때만 쓰고, 그때는 필수다. 받은 돈은 현금·주식 자산으로 따로 갱신한다.
+    - 받은 레코드는 **종료하지 않는다.** 계획에서는 빠지고, 같은 해 뒤에 받는 보상의 세율 구간 계산에만 실제 과세 금액으로 쓰인다.
+      종료(`closed`)는 지급이 취소되거나 받을 자격을 잃었다는 뜻이다.
+    - 예정일이 지났는데 `received`가 아니면 "지급 확인 필요"(overdue)다. 목록에는 남지만 모든 계획에서 빠지고, "다음에 확인할 것"에
+      꼭 필요 요청(`pay-overdue`)이 뜬다. 미뤄졌으면 `start_date`를 갱신한다.
 
 **goal**: `category`, `currency`, `target_amount`(0 초과), `target_date`, `priority`
 - `category`: `home`, `emergency_fund`, `retirement`, `education`, `major_purchase`, `debt_repayment`, `other`

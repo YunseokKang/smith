@@ -10,10 +10,11 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from smith.records import (
-    ACCOUNT_TYPES, ASSET_CATEGORIES, COMMITMENTS, CURRENCIES, FREQUENCIES, GOAL_CATEGORIES, INFLOW_CATEGORIES,
-    LIABILITY_CATEGORIES, LIQUIDITY_CLASSES, MANAGERS, MARKETS, OCCUPANCY, OUTFLOW_CATEGORIES, PRIORITIES, RATE_TYPES,
-    REPAYMENT_METHODS, TRANSFER_CATEGORIES, VALUATION_METHODS, ChangeType, ImportBatch, ImportRejected,
-    Kind, RecordInput, Status, canonical_decimal,
+    ACCOUNT_TYPES, AMOUNT_BASES, ASSET_CATEGORIES, CERTAINTIES, COMMITMENTS, COMPENSATION_CATEGORIES, CURRENCIES,
+    FREQUENCIES, GOAL_CATEGORIES, INFLOW_CATEGORIES, LIABILITY_CATEGORIES, LIQUIDITY_CLASSES, MANAGERS, MARKETS,
+    OCCUPANCY, OUTFLOW_CATEGORIES, PAYMENT_STATUSES, PRIORITIES, RATE_TYPES, REPAYMENT_METHODS, TRANSFER_CATEGORIES,
+    VALUATION_METHODS,
+    ChangeType, ImportBatch, ImportRejected, Kind, RecordInput, Status, canonical_decimal,
 )
 
 SCHEMA_VERSION = 1
@@ -178,6 +179,19 @@ _KIND_FIELDS: dict[Kind, dict[str, _Field]] = {
         # can be counted per account type for tax limits.
         "target_record_id": _Field(_reference, nullable=True),
         "commitment": _Field(_enum(COMMITMENTS), nullable=True),
+        # Future inflows: how sure they are and whether the amount is before or after withholding.
+        "certainty": _Field(_enum(CERTAINTIES), nullable=True),
+        "amount_basis": _Field(_enum(AMOUNT_BASES), nullable=True),
+        # A share grant: the shares paid, valued at the market price Smith holds for the same stock.
+        "symbol": _Field(_symbol, nullable=True),
+        "market": _Field(_enum(MARKETS), nullable=True),
+        "quantity": _Field(_decimal(positive=True), nullable=True),
+        # When the money can actually be used, if later than the payment (shares held under a lock-up).
+        "available_from": _Field(_date, nullable=True),
+        # Paid or not, stated by the client: the actual payment day and taxable (gross) amount once received.
+        "payment_status": _Field(_enum(PAYMENT_STATUSES), nullable=True),
+        "received_on": _Field(_date, nullable=True),
+        "taxable_amount": _Field(_decimal(), nullable=True),
     },
     Kind.GOAL: {
         "category": _Field(_enum(GOAL_CATEGORIES)),
@@ -339,7 +353,7 @@ def _record(raw: Any, path: str, owner_ids: set[str], problems: _Problems) -> Re
             problems.add(f"{path}.{key}", "unknown field")
         fields = _kind_fields(raw, specs, path, closing=status == Status.CLOSED, problems=problems)
         if kind is Kind.CASHFLOW:
-            _check_cashflow(fields, path, problems)
+            _check_cashflow(fields, path, problems, closing=status == Status.CLOSED)
     if len(problems.items) > before:
         return None
     return RecordInput(record_id, kind, owner_id, effective_at, revision, Status(status),
@@ -381,7 +395,7 @@ def _change_details(raw: dict[str, Any], path: str, change_type: str | None, rev
     return corrects, reason
 
 
-def _check_cashflow(fields: dict[str, str | None], path: str, problems: _Problems) -> None:
+def _check_cashflow(fields: dict[str, str | None], path: str, problems: _Problems, *, closing: bool = False) -> None:
     direction, category = fields.get("direction"), fields.get("category")
     if category in INFLOW_CATEGORIES and direction == "outflow":
         problems.add(f"{path}.direction", f"must be inflow for category {category}")
@@ -400,3 +414,52 @@ def _check_cashflow(fields: dict[str, str | None], path: str, problems: _Problem
         problems.add(f"{path}.end_date", "must be omitted for a one-time cash flow")
     elif start and end and end < start:
         problems.add(f"{path}.end_date", "must not be before start_date")
+    _check_compensation(fields, path, problems, closing=closing)
+
+
+def _check_compensation(fields: dict[str, str | None], path: str, problems: _Problems, *, closing: bool) -> None:
+    """Bonus and share-grant rules (data contract): one record per payment, stated certainty and tax basis,
+    and the shares of a grant. Certainty and basis describe inflows only. A closing revision may omit
+    the required fields, like every kind-specific field."""
+    category = fields.get("category")
+    if category is None:
+        return
+    compensation, shares = category in COMPENSATION_CATEGORIES, category == "stock_compensation"
+    for name, allowed in (("certainty", category in INFLOW_CATEGORIES), ("amount_basis", compensation)):
+        if fields.get(name) is None and compensation and not closing:
+            problems.add(f"{path}.{name}", f"is required for category {category}")
+        elif fields.get(name) is not None and not allowed:
+            problems.add(f"{path}.{name}", "is only allowed for an inflow" if name == "certainty"
+                         else "is only allowed for categories bonus and stock_compensation")
+    # A bonus may name the stock it is paid in (a won amount converted to shares on payday): both or neither.
+    for name in ("symbol", "market", "quantity"):
+        if fields.get(name) is None and shares and not closing:
+            problems.add(f"{path}.{name}", "is required for category stock_compensation")
+        elif fields.get(name) is not None and not (shares or (category == "bonus" and name != "quantity")):
+            problems.add(f"{path}.{name}", "is only allowed for category stock_compensation"
+                         + ("" if name == "quantity" else " or a bonus paid in shares"))
+    if category == "bonus" and (fields.get("symbol") is None) != (fields.get("market") is None):
+        problems.add(f"{path}.market", "a bonus paid in shares needs both symbol and market")
+    if compensation and fields.get("frequency") not in (None, "once"):
+        problems.add(f"{path}.frequency", f"must be once for category {category}: enter each payment as its own record")
+    usable, start = fields.get("available_from"), fields.get("start_date")
+    if usable is not None and not compensation:
+        problems.add(f"{path}.available_from", "is only allowed for categories bonus and stock_compensation")
+    elif usable is not None and start is not None and usable < start:
+        problems.add(f"{path}.available_from", "must not be before start_date")
+    _check_payment(fields, path, problems, compensation=compensation, closing=closing)
+
+
+def _check_payment(fields: dict[str, str | None], path: str, problems: _Problems, *, compensation: bool,
+                   closing: bool) -> None:
+    """A received payment states its actual day and taxable amount; a scheduled one states neither."""
+    status = fields.get("payment_status")
+    if status is not None and not compensation:
+        problems.add(f"{path}.payment_status", "is only allowed for categories bonus and stock_compensation")
+        return
+    received = status == "received"
+    for name in ("received_on", "taxable_amount"):
+        if fields.get(name) is None and received and not closing:
+            problems.add(f"{path}.{name}", "is required when payment_status is received")
+        elif fields.get(name) is not None and not received:
+            problems.add(f"{path}.{name}", "is only allowed when payment_status is received")

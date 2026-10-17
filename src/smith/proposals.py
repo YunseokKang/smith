@@ -10,7 +10,7 @@ from datetime import date
 from decimal import ROUND_CEILING, Decimal
 from typing import Any
 
-from smith import holdings, tax
+from smith import future_income, holdings, tax
 from smith.fmt import percent, short_won
 from smith.payload import LedgerView, base_amount
 from smith.realestate import MIN_BASIS
@@ -80,7 +80,8 @@ RULE_KEYS = ("lease-return", "emergency-reserve", "goal-stocks-glide", "surplus-
 
 
 def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
-          active: dict[str, dict[str, Any]] | None = None, household: dict[str, Any] | None = None) -> dict[str, Any]:
+          active: dict[str, dict[str, Any]] | None = None, household: dict[str, Any] | None = None,
+          pay: list[future_income.Inflow] | None = None) -> dict[str, Any]:
     """Return proposals (most urgent first), the strategy tracks and the follow-up of earlier proposals.
 
     `active` maps proposal identities to their current instance (ledger.active_proposals). Unless the
@@ -89,6 +90,7 @@ def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
     """
     facts = _facts(view, kpis, sectors)
     facts["tax"] = tax.facts(view, facts["today"], household)
+    facts["pay"] = pay or []  # Expected pay (future_income.inflows): shown beside the long-range tracks only.
     facts["glide"] = _glide(facts)
     rules = (_lease_return, _emergency_reserve, _goal_stocks_glide, _surplus_plan, _pension_credit, _overseas_harvest,
              _isa, _prepayment, _variable_rate)
@@ -543,13 +545,15 @@ def _strategy(facts: dict[str, Any]) -> list[Track]:
     if home:
         gap = home["required"] - home["available_self"]
         months = _months_between(facts["today"], home["target_date"])
+        # The status stays on money that exists: expected pay is shown beside it, never relied on for it.
         status = "on_track" if gap <= 0 else "attention"
         tracks.append(Track(
             "주택 이전", status,
-            f"{home['target_date']:%Y년 %m월} 목표, 본인 자원 기준 필요액의 {percent(home['ratio_self'], 0)} 준비 가능",
+            f"{home['target_date']:%Y년 %m월} 목표, 본인 자원 기준 필요액의 {percent(home['ratio_self'], 0)} 준비 가능"
+            + (f"(예정 소득 포함 시 {percent(home['ratio_with_pay'], 0)})" if home.get("pay_at_target") else ""),
             "기준 시나리오(집값 연 2%·투자 수익 연 4%)입니다." + (
                 f" 부족분 {short_won(gap)}을 남은 {months}개월에 나누면 매월 약 {short_won(gap / months)}을 더 모으거나, "
-                "대출·배우자 자산으로 메워야 합니다." if gap > 0 and months > 0 else "")))
+                "대출·배우자 자산으로 메워야 합니다." if gap > 0 and months > 0 else "") + _pay_note(home)))
     for lease in facts["leases"]:
         if lease["amount"] is None:
             continue
@@ -560,7 +564,9 @@ def _strategy(facts: dict[str, Any]) -> list[Track]:
             f"{lease['due']:%Y년 %m월} {short_won(lease['amount'])}, 만기 때 예상 가용 자금 {short_won(accumulated)}",
             "주택 이전 목표와 같은 자금을 나눠 써야 하므로, 두 목표를 합친 자금 계획이 필요합니다." if home else ""))
     pension = facts["pension_total"]
-    plan = tax.retirement(facts["tax"])
+    home_goal = any(g["category"] == "home" and g["target_date"] > facts["today"] for g in facts["summary"].goals)
+    share = future_income.retirement_share(facts["pay"], home=home, home_goal=home_goal)
+    plan = tax.retirement(facts["tax"], extra=share)
     if plan is None or not plan["paths"]:
         tracks.append(Track(
             "노후 준비", "unknown",
@@ -569,15 +575,48 @@ def _strategy(facts: dict[str, Any]) -> list[Track]:
         return tracks
     mid = next((p for p in plan["paths"] if p["age"] == 60), plan["paths"][-1])
     paths = ", ".join(f"{p['age']}세 {percent(p['ratio'], 0)}" for p in plan["paths"])
+    # The status stays on the pension accounts alone; the plan with expected pay is shown beside it.
     tracks.append(Track(
         "노후 준비", "on_track" if mid["ratio"] >= 1 else "attention",
-        f"월 {short_won(plan['spend'])}(현재 가치) 생활에 필요한 자금 약 {short_won(plan['need'])}, 연금 계좌만으로는 {paths}",
+        f"월 {short_won(plan['spend'])}(현재 가치) 생활에 필요한 자금 약 {short_won(plan['need'])}, 연금 계좌만으로는 {paths}"
+        + (f"(예정 소득 포함 시 {mid['age']}세 {percent(mid['ratio_with_pay'], 0)})"
+           if share and mid["ratio_with_pay"] is not None else ""),
         (f"지금 연금 계좌 {short_won(plan['assets'] if pension is None else pension)}에 매년 {short_won(plan['yearly'])}씩 "
          "더하고 실질 연 3%로 불린다고 가정했습니다(국민연금·퇴직금·부동산 제외). "
          + (f"환율이 없어 원화로 바꾸지 못한 연금 자산·납입 {plan['unconverted']}건은 빼고 계산했으므로, 위 비율은 확인된 "
             "금액만으로 본 하한입니다. " if plan["unconverted"] else "")
+         + _retirement_pay_note(share, plan, home_goal)
          + "은퇴 시기를 정하시면 부족분을 무엇으로 채울지(부동산 축소, 추가 적립, 국민연금) 구체적으로 계산해 드리겠습니다.")))
     return tracks
+
+
+def _retirement_pay_note(share: list[Any] | None, plan: dict[str, Any], home_goal: bool) -> str:
+    """How expected pay enters the retirement plan beside it (never in the status)."""
+    if share is None:
+        return "예정 소득을 더한 노후 계산은 주택 목표 계산에 미상 금액이 있어 하지 않았습니다. "
+    if not share:
+        return ""
+    used = ("주택 목표에 필요한 만큼을 먼저 쓰고 남는 몫과 주택 목표일 이후에 받는 몫" if home_goal
+            else "기준 시나리오의 예정 소득")
+    if not plan["pay_set_aside"]:
+        return f"예정 소득은 모두 주택 목표에 필요해, 노후 계산에 더할 몫이 없습니다({used} 기준). "
+    return (f"{used}(확정·예상분, 세후 추정 약 {short_won(plan['pay_set_aside'])})을 노후 자금으로 모아 실질 연 3%로 "
+            "불린다고 보면 괄호 안 비율이 됩니다. 받기 전까지는 확정이 아니어서 상태 판단에는 넣지 않았습니다. ")
+
+
+def _pay_note(home: dict[str, Any]) -> str:
+    """What expected pay (confirmed and expected, after estimated tax) changes in the home plan."""
+    if not home.get("pay_at_target") and not home.get("pay_after_target"):
+        return ""
+    note = ""
+    if home.get("pay_at_target") and home.get("available_with_pay") is not None:
+        rest = home["required"] - home["available_with_pay"]
+        note = (f" 목표일 전에 받을 성과급·주식 보상(확정·예상분, 세후 추정)은 그때 가치로 약 {short_won(home['pay_at_target'])}이며, "
+                + (f"이를 더해도 약 {short_won(rest)}이 모자랍니다." if rest > 0 else
+                   f"이를 더하면 필요액을 넘어 약 {short_won(-rest)}이 남습니다(노후·장기 투자로 돌릴 수 있는 몫)."))
+    if home.get("pay_after_target"):
+        note += f" 목표일 이후에 받을 예정분 약 {short_won(home['pay_after_target'])}은 주택 계산에 넣지 않았습니다."
+    return note + " 예정 소득은 받기 전까지 확정이 아니어서 준비 상태 판단에는 넣지 않았습니다."
 
 
 def _assumptions() -> list[str]:

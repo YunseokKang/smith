@@ -53,20 +53,26 @@ class ChecklistTests(unittest.TestCase):
         self.assertEqual([r.key for r in found if r.priority == "must"], ["partner-finances", "irregular-flows"])
         self.assertEqual({r.key for r in found if r.priority != "must"},
                          {"unclassified", "cost-basis", "surrender-values", "acquisition", "retirement", "marriage",
-                          "commitment"})
+                          "commitment", "expected-pay"})
         self.assertEqual(found[0].priority, "must")
 
     def test_provided_information_closes_its_request(self):
         household = {"birth_year": 1990, "retirement_monthly_spend": 4000000, "marriage_registered": False,
+                     "annual_gross_salary": 120000000,
                      "properties": {ref: {"acquired_year": 2020, "acquired_price": 800000000}
                                     for ref in ("home", "partner-home")}}
+        bonus = rec("bonus", "cashflow", category="bonus", direction="inflow", currency="KRW", amount="30000000",
+                    frequency="once", start_date="2027-01-25", certainty="expected", amount_basis="gross")
         records = RECORDS + [asset("partner-cash", "cash", "partner"), rec("partner-pay", "cashflow", "partner",
                              category="salary", direction="inflow", currency="KRW", amount="100000",
                              frequency="monthly", start_date="2026-01-01"),
-                             flow("tax", "tax", frequency="annual", commitment="fixed")]
+                             flow("tax", "tax", frequency="annual", commitment="fixed"), bonus]
         keys = {r.key for r in self.requests(records, household)}
         self.assertTrue(keys.isdisjoint({"partner-finances", "irregular-flows", "acquisition", "retirement",
-                                         "marriage"}))
+                                         "marriage", "expected-pay", "gross-salary"}))
+        # A gross bonus without the base salary is taxed at an assumed rate until the salary is given.
+        without_salary = {k: v for k, v in household.items() if k != "annual_gross_salary"}
+        self.assertIn("gross-salary", {r.key for r in self.requests(records, without_salary)})
 
 
 if __name__ == "__main__":

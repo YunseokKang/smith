@@ -73,7 +73,19 @@ REPAYMENT_METHODS = frozenset({"bullet", "equal_payment", "equal_principal", "re
 
 INFLOW_CATEGORIES = frozenset({
     "salary", "business_income", "rental_income", "pension_income", "investment_income", "other_income",
+    "bonus", "stock_compensation",
 })
+# Pay from an employer beyond the salary: a bonus in cash or a grant of shares. Each payment is its own
+# one-time record, because the amount and even the payment are uncertain until the day it is paid.
+COMPENSATION_CATEGORIES = frozenset({"bonus", "stock_compensation"})
+# How sure a future inflow is: `confirmed` (announced or contractual, amount fixed), `expected` (the payment
+# is all but certain but the amount depends on results or a share price), `possible` (it may not be paid).
+CERTAINTIES = frozenset({"confirmed", "expected", "possible"})
+AMOUNT_BASES = frozenset({"gross", "net"})  # Before or after the tax and insurance withheld on payment.
+# Whether a bonus or grant has been paid. Payment is never inferred from the date or from closing the record:
+# a `received` revision states the actual payment day and taxable amount, and stays active so that later pay
+# of the same year is taxed on top of it. Closing means the payment was cancelled or forfeited.
+PAYMENT_STATUSES = frozenset({"scheduled", "received"})
 OUTFLOW_CATEGORIES = frozenset({
     "living_expense", "housing_cost", "loan_payment", "insurance_premium", "tax", "education",
     "other_expense",

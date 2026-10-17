@@ -39,7 +39,7 @@ class Edition:
 
 EDITIONS: dict[str, Edition] = {e.key: e for e in (
     Edition("overview", "종합 보고", "한 주의 시작: 우리 집 전체 그림, 이번 주 제안과 할 일입니다. 분야별 자세한 내용은 요일마다 따로 보내 드립니다.",
-            "overview", ("follow_up", "change", "allocation", "timeline", "requests", "glossary"), None,
+            "overview", ("follow_up", "change", "allocation", "timeline", "future_income", "requests", "glossary"), None,
             ("housing_market", "housing_policy", "mortgage", "jeonse", "home_tax", "pension_tax", "rates",
              "us_stocks", "kr_stocks", "household_policy"), False, True, (),
             "the weekly overview across every area: where the household stands now, this week's proposals in "
@@ -68,10 +68,11 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "tax and pensions: this year's pension credit room, overseas capital-gains deduction, ISA, the "
             "year-end settlement checklist, marriage-registration and home-tax timing, and the pension accounts."),
     Edition("life", "생활·목표", "한 달 현금흐름과 비상금, 목표까지의 준비 상황입니다.",
-            "life", ("cash", "timeline", "follow_up", "requests"), ("emergency-reserve", "surplus-plan"),
+            "life", ("cash", "timeline", "future_income", "follow_up", "requests"), ("emergency-reserve", "surplus-plan"),
             (), False, True, ("유동성", "순자산"),
             "the household's own month: income, spending, saving and investing transfers, what is left, the "
-            "emergency reserve, and progress toward the dated goals (lease deposit, home move, retirement). "
+            "emergency reserve, expected bonuses and share grants by how sure they are, and progress toward the "
+            "dated goals (lease deposit, home move, retirement). "
             "No market news is researched for this theme; work from the household's numbers and the client's "
             "statements."),
 )}

@@ -11,7 +11,7 @@ from typing import Any
 from smith import headless
 from smith.headless import HEADLESS_ENV, HeadlessError as AdviserError, find_claude  # noqa: F401 - re-exported
 
-PROMPT_VERSION = "advice-v5"
+PROMPT_VERSION = "advice-v6"  # v6: expected pay (context.expected_pay) is counted by certainty, never as wealth.
 # The household uses a flat-rate subscription and asked for the most capable reasoning model
 # (2026-10-05). Fable runs about 2.5x the notional cost of Opus; the cap only bounds a runaway call.
 DEFAULT_MODEL = "fable"
@@ -76,6 +76,11 @@ Input: a question and a context JSON. All amounts are whole KRW strings computed
 - Assets with managed_by "hermes" are operated by Hermes, a separate fund manager. Do not recommend
   selling or changing them directly; at most suggest discussing a withdrawal with Hermes.
 - Use the case figures (for example funding tiers, scenario gaps) instead of adding numbers yourself.
+- context.expected_pay lists bonuses and share grants not yet paid, with their certainty (confirmed,
+  expected, possible) and estimated net amount. They are not wealth: never count them as available now,
+  name their certainty when you rely on them, and give the plan without them beside the plan with them
+  (case scenarios carry both). A share grant in the employer's stock adds to the risk the salary already
+  carries; weigh that concentration (expected_pay.same_stock).
 Order of thought: recommendation, personal and external basis, alternatives, conditions that would
 change the recommendation, data limitations.
 Output limits: 2-5 alternatives; at most 12 items in personal_basis and in external_basis; at most 10

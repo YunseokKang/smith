@@ -8,6 +8,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
+from smith import future_income
 from smith.payload import LedgerView, base_amount, owner_alias, unrealized_gain, won
 from smith.records import INFLOW_CATEGORIES, OUTFLOW_CATEGORIES, TRANSFER_CATEGORIES, Kind
 from smith.summary import recurring_active
@@ -177,8 +178,13 @@ SCENARIOS = (
 
 
 def home_facts(view: LedgerView, *, target_price: Decimal, target_date: date,
-               buy_cost_rate: Decimal = Decimal("0.035"), sell_cost_rate: Decimal = Decimal("0.005")) -> dict[str, Any]:
-    """UC-03: equity available at the target date under three scenarios versus the target cost."""
+               buy_cost_rate: Decimal = Decimal("0.035"), sell_cost_rate: Decimal = Decimal("0.005"),
+               pay: list[future_income.Inflow] | None = None) -> dict[str, Any]:
+    """UC-03: equity available at the target date under three scenarios versus the target cost.
+
+    `available_self` counts only what exists today plus the recurring surplus. Expected pay (`pay`, from
+    future_income.inflows; computed without a salary when None) is added apart, by the scenario's certainty,
+    so the plan shows both figures and never mixes promised money into the cautious one."""
     _require_positive_finite(target_price, "target_price")
     for name, rate in (("buy_cost_rate", buy_cost_rate), ("sell_cost_rate", sell_cost_rate)):
         if not rate.is_finite() or not Decimal(0) <= rate <= Decimal(1):
@@ -206,6 +212,7 @@ def home_facts(view: LedgerView, *, target_price: Decimal, target_date: date,
     monthly_net = monthly_net_cash_flow(view, owner_id="self")
     savings = monthly_net * months if monthly_net is not None else None
     partner_equity = _partner_property_equity(view)
+    pay = future_income.inflows(view) if pay is None else pay
     scenarios = []
     for s in SCENARIOS:
         required = target_price * _compound(s.target_price_growth, years) * (1 + buy_cost_rate)
@@ -215,14 +222,23 @@ def home_facts(view: LedgerView, *, target_price: Decimal, target_date: date,
             mortgage_left = max(Decimal(0), mortgage_balance - principal_monthly * months)
             available = (home_value * _compound(s.current_home_growth, years) * (1 - sell_cost_rate)
                          - mortgage_left + liquid * _compound(s.investment_return, years) + savings)
+        extra = future_income.at_goal(pay, owner_id="self", scenario=s.name, horizon=target_date, today=today,
+                                      rate=s.investment_return)
+        with_pay = None if available is None or extra["value"] is None else available + extra["value"]
         scenarios.append({"name": s.name, "assumptions": {"target_price_growth": str(s.target_price_growth),
                                                           "current_home_growth": str(s.current_home_growth),
-                                                          "investment_return": str(s.investment_return)},
+                                                          "investment_return": str(s.investment_return),
+                                                          "expected_pay_counted": list(future_income.SCENARIO_CERTAINTIES[s.name])},
                           "required_with_costs": won(required), "available_self": won(available),
                           "gap_self": won(None if available is None else required - available),
                           "gap_including_partner_property_equity": won(
                               None if available is None or partner_equity is None
-                              else required - available - partner_equity)})
+                              else required - available - partner_equity),
+                          "expected_pay_at_target": won(extra["value"]),
+                          "expected_pay_refs": [view.aliases[r] for r in extra["before_refs"]],
+                          "expected_pay_after_target": won(extra["after"]),
+                          "available_self_with_expected_pay": won(with_pay),
+                          "gap_self_with_expected_pay": won(None if with_pay is None else required - with_pay)})
     return {
         "use_case": "UC-03 move to a target home",
         "target_price_today": won(target_price), "target_date": target_date.isoformat(), "months": months,
@@ -240,7 +256,11 @@ def home_facts(view: LedgerView, *, target_price: Decimal, target_date: date,
                         "financing": "loan limits (LTV/DSR) are not modelled; a positive gap must be financed",
                         "partner_property": "current net equity is shown separately without future growth or sale costs",
                         "ownership": "partner-owned property is shown separately; marriage registration may change "
-                                     "household home-count tax treatment"},
+                                     "household home-count tax treatment",
+                        "expected_pay": "bonuses and share grants not yet paid are added only in the *_with_expected_pay "
+                                        "figures: adverse counts confirmed pay, base confirmed and expected, favorable "
+                                        "all; after estimated tax and insurance; cash grows from when it is usable, "
+                                        "shares from today; pay usable after the target date is listed apart"},
         "unknown_amount_refs": _unknown_amount_refs(view),
         "scenarios": scenarios,
     }
