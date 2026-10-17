@@ -168,6 +168,13 @@ def topics(view: LedgerView, kind: str | None = None) -> list[Topic]:
         found.append(("kr_stocks", "국내 주식", "국내 주식시장(코스피·반도체 업종) 최근 흐름과 주요 정책(밸류업, 세제)"))
     found.append(("household_policy", "가계 금융 정책", "가계부채 관리 방안 등 가계 자산·부채에 영향을 주는 최근 정부 금융 정책"))
     wanted = editions.research_categories(kind)
+    # Peer positioning (report design §16.4), only for an edition that asks for it (the overview): the
+    # official survey by age band in general, so the question reveals nothing about this household; the
+    # narrative, which knows the client's age, reads off the band.
+    if wanted is not None and "benchmark" in wanted:
+        found.append(("benchmark", "또래 가구의 자산·소득 분포",
+                      "통계청·한국은행·금융감독원 가계금융복지조사 최신 결과: 가구주 연령대별(30대·40대 등) 가구의 순자산과 "
+                      "경상소득의 평균·중앙값, 분위 경계값(상위 10%·20% 등), 조사 기준 연도와 발표일"))
     chosen = [(title, question) for category, title, question in found if wanted is None or category in wanted]
     held = holding_topics(view) if editions.researches_holdings(kind) else []
     return [Topic(f"T{i}", title, question) for i, (title, question) in enumerate(chosen, 1)] + held

@@ -48,8 +48,8 @@ def portfolio_facts(view: LedgerView) -> dict[str, Any]:
                                    if balance_complete else None),
         "variable_rate_debt": won(variable_debt),
         "monthly_net_cash_flow": won(summary.monthly_net if cash_flow_complete else None),
-        "monthly_insurance_premiums": won(_monthly_outflow(view, lambda f: f["category"] == "insurance_premium")),
-        "monthly_discretionary_outflow": won(_monthly_outflow(view, lambda f: f.get("commitment") == "discretionary")),
+        "monthly_insurance_premiums": won(monthly_outflow(view, lambda f: f["category"] == "insurance_premium")),
+        "monthly_discretionary_outflow": won(monthly_outflow(view, lambda f: f.get("commitment") == "discretionary")),
         "unknown_amount_refs": _unknown_amount_refs(view),
     }
 
@@ -82,7 +82,7 @@ def funding_facts(view: LedgerView, *, amount: Decimal, us_tax_rate: Decimal = D
     us_records = [r for r in view.records if r.kind is Kind.ASSET and r.owner_id == "self"
                   and r.fields.get("market") == "US"]
     us_gain = _sum_unrealized_gains(view, us_records)
-    discretionary = _monthly_outflow(view, lambda f: f.get("commitment") == "discretionary")
+    discretionary = monthly_outflow(view, lambda f: f.get("commitment") == "discretionary")
     cumulative: Decimal | None = Decimal(0)
     reachable = {}
     for liquidity in ("immediate", "days"):
@@ -201,7 +201,7 @@ def home_facts(view: LedgerView, *, target_price: Decimal, target_date: date,
     mortgage = [r for r in view.records if r.kind is Kind.LIABILITY and r.fields.get("collateral_record_id") in home_ids]
     mortgage_balance = _sum_values(view, mortgage)
     mortgage_ids = {r.record_id for r in mortgage}
-    mortgage_payments = _monthly_outflow(
+    mortgage_payments = monthly_outflow(
         view, lambda f: f["category"] == "loan_payment" and f.get("liability_record_id") in mortgage_ids)
     mortgage_interest = _monthly_interest(view, mortgage)
     principal_monthly = (max(Decimal(0), mortgage_payments - mortgage_interest)
@@ -269,7 +269,7 @@ def home_facts(view: LedgerView, *, target_price: Decimal, target_date: date,
 _MONTHS = {"monthly": 1, "quarterly": 3, "annual": 12}
 
 
-def _monthly_outflow(view: LedgerView, accept: Any) -> Decimal | None:
+def monthly_outflow(view: LedgerView, accept: Any) -> Decimal | None:
     """Recurring outflows matching `accept`, as a monthly amount (one-time flows excluded)."""
     records = [r for r in view.records if r.kind is Kind.CASHFLOW and r.fields["direction"] == "outflow"
                and _is_active_recurring(view, r) and accept(r.fields)]

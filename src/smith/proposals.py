@@ -76,7 +76,8 @@ class Undetermined:
 
 # The proposal rules in `build`, in order. A rule's proposals and undetermined judgements carry its key.
 RULE_KEYS = ("lease-return", "emergency-reserve", "goal-stocks-glide", "surplus-plan", "pension-credit",
-             "overseas-harvest", "isa-open", "prepayment", "variable-rate")
+             "overseas-harvest", "isa-open", "prepayment", "variable-rate", "spending-room")
+SPENDING_FILL_MONTHS = 12  # Assumption (§16.3): an emergency-reserve gap is filled within a year.
 
 
 def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
@@ -92,8 +93,9 @@ def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
     facts["tax"] = tax.facts(view, facts["today"], household)
     facts["pay"] = pay or []  # Expected pay (future_income.inflows): shown beside the long-range tracks only.
     facts["glide"] = _glide(facts)
+    facts["spending_room"] = spending_room(facts)
     rules = (_lease_return, _emergency_reserve, _goal_stocks_glide, _surplus_plan, _pension_credit, _overseas_harvest,
-             _isa, _prepayment, _variable_rate)
+             _isa, _prepayment, _variable_rate, _spending_room)
     outcomes = [(i, rule(facts)) for i, rule in enumerate(rules)]
     found = [(i, p) for i, p in outcomes if isinstance(p, Proposal)]
     undetermined = [replace(p, key=RULE_KEYS[i]) for i, p in outcomes if isinstance(p, Undetermined)]
@@ -111,7 +113,8 @@ def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
             proposals.append(replace(proposal, times_shown=current["times_shown"], renewed=False))
     decided = [item for item in active.values() if item["status"] in ("declined", "done")]
     return {"proposals": proposals, "in_progress": in_progress, "decided": decided, "undetermined": undetermined,
-            "strategy": _strategy(facts), "glide": facts["glide"], "assumptions": _assumptions() + tax.assumptions(),
+            "strategy": _strategy(facts), "glide": facts["glide"], "spending_room": facts["spending_room"],
+            "assumptions": _assumptions() + tax.assumptions(),
             "tax_notes": tax.notes(facts["tax"]), "tax_checklist": tax.checklist(facts["tax"])}
 
 
@@ -148,8 +151,8 @@ def _facts(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any]) -> d
         f = record.fields
         if record.kind is Kind.LIABILITY and f["category"] == "lease_deposit_obligation" and f.get("maturity"):
             due = date.fromisoformat(f["maturity"])
-            months = _months_between(today, due)
-            if 0 < months <= LEASE_HORIZON_MONTHS:
+            months = max(1, _months_between(today, due))  # Due later this month: one month away, never dropped.
+            if today < due and months <= LEASE_HORIZON_MONTHS:
                 market = next((p.get("market") for p in sectors["real_estate"]["properties"]
                                if p["record_id"] == f.get("collateral_record_id")), None)
                 leases.append({"due": due, "months": months, "amount": base_amount(view, record), "owner": record.owner_id,
@@ -538,6 +541,112 @@ def _variable_rate(facts: dict[str, Any]) -> Proposal | Undetermined | None:
 
 
 # --- strategy ---------------------------------------------------------------------------------------------
+
+GOAL_LABELS = {"education": "교육", "major_purchase": "큰 지출", "debt_repayment": "부채 상환", "other": "기타"}
+NEAR_COMMITMENT_MONTHS = 12  # A contractual payment due within this long that the surplus cannot reach: act now.
+
+
+def spending_room(facts: dict[str, Any]) -> dict[str, Any] | None:
+    """Guilt-free spending room (report design §16.3), in two figures.
+
+    `room` is the committed basis: the unallocated monthly surplus minus what the emergency reserve
+    (filled within SPENDING_FILL_MONTHS) and contractual payments (the nearest lease deposit, net of a new
+    tenant's deposit at the market level and of liquid money) need every month. `room_with_goals` also
+    keeps the planned dated goals at their current pace: the home goal (what the base scenario's plan
+    already saves every month plus its gap spread over the months left, plus the liquid money the lease
+    consumed first) and every other dated goal (its whole target spread over the months left, since no
+    money is recorded as set aside for it). Each need is floored at zero. None when an input is unknown,
+    a goal could not be converted, or a home goal exists but its plan could not be computed.
+    """
+    surplus, liquid, cash, summary = facts["unallocated"], facts["liquid"], facts["sectors"]["cash"], facts["summary"]
+    if surplus is None or cash["reserve_gap"] is None:
+        return None
+    goals = [g for g in summary.goals if g["target_date"] > facts["today"]]
+    if any(g["target"] is None for g in goals):
+        return None
+    committed = [("비상금 채우기", cash["reserve_gap"] / SPENDING_FILL_MONTHS)]
+    used, near_short = Decimal(0), False
+    if facts["leases"]:
+        lease = min(facts["leases"], key=lambda item: item["due"])
+        if lease["amount"] is None or liquid is None:
+            return None
+        market = lease["jeonse"] if lease["jeonse"] is not None and lease["jeonse_basis"] >= MIN_BASIS else Decimal(0)
+        net = max(Decimal(0), lease["amount"] - market)
+        used = min(liquid, net)
+        need = max(Decimal(0), (net - liquid) / lease["months"])
+        committed.append(("보증금 반환 준비", need))
+        near_short = need > 0 and lease["months"] <= NEAR_COMMITMENT_MONTHS
+    planned = []
+    home = facts["kpis"]["home_progress"]
+    if home is None and any(g["category"] == "home" for g in goals):
+        return None
+    if home:
+        gap = home["required"] - home["available_self"]
+        planned.append(("주택 이전 목표", max(Decimal(0), home["monthly_net_self"] + (gap + used) / max(1, home["months"]))))
+    for goal in goals:
+        # The home goal is above; the emergency fund is the reserve; retirement keeps its current transfers.
+        if goal["category"] in ("home", "emergency_fund", "retirement"):
+            continue
+        label = f"{GOAL_LABELS.get(goal['category'], goal['category'])} 목표({goal['target_date']:%Y.%m})"
+        planned.append((label, goal["target"] / max(1, goal["months_left"])))
+    committed_total = sum((amount for _, amount in committed), Decimal(0))
+    planned_total = sum((amount for _, amount in planned), Decimal(0))
+    return {"surplus": surplus, "committed": committed, "planned": planned, "committed_total": committed_total,
+            "planned_total": planned_total, "room": surplus - committed_total,
+            "room_with_goals": surplus - committed_total - planned_total, "near_commitment_short": near_short}
+
+
+def _spending_room(facts: dict[str, Any]) -> Proposal | Undetermined | None:
+    """What the client may spend every month without touching the reserve or a contractual payment, the
+    smaller figure when the planned goals are kept too, and where a private banker would point it:
+    experiences that keep their value rather than goods that lose it (§16.3)."""
+    room = facts["spending_room"]
+    if room is None:
+        return Undetermined("안심 소비 한도", "월 현금흐름·현금·보증금·목표 금액 가운데 원화로 환산하지 못했거나 계획을 "
+                                       "계산하지 못한 것이 있습니다.")
+
+    def parts(items: list[tuple[str, Decimal]]) -> str:
+        return ", ".join(f"{label} {short_won(amount)}" for label, amount in items if amount)
+    basis = (f"남는 돈 {short_won(room['surplus'])}(수입에서 지출과 본인 계좌로의 이체를 뺀 금액)에서 비상금과 약정(보증금 반환)에 "
+             f"매월 필요한 적립 {short_won(room['committed_total'])}"
+             + (f"({parts(room['committed'])})" if parts(room["committed"]) else "") + f"을 빼면 {short_won(room['room'])}입니다.")
+    with_goals = room["room_with_goals"]
+    goals_note = ""
+    if room["planned"]:
+        goals_note = (f" 계획한 목표({parts(room['planned'])})까지 지금 속도로 지키려면 "
+                      + (f"{short_won(with_goals)}이 남습니다." if with_goals >= 0 else
+                         f"매월 {short_won(-with_goals)}이 모자라, 그 목표의 시점·금액을 조정하지 않는 한 여유가 없습니다."))
+    certainty = (f"계산(기록된 현금흐름) + 가정(비상금은 {SPENDING_FILL_MONTHS}개월 안에 채움, 주택은 기준 시나리오, 다른 목표는 "
+                 "배정된 자금 없이 전액 새로 모음)")
+    figures = {"room": room["room"], "room_with_goals": with_goals, "surplus": room["surplus"],
+               "needs": room["committed_total"] + room["planned_total"]}
+    reconsider = "월 현금흐름, 목표 금액·시점, 전세 시세가 바뀌면 다시 계산합니다."
+    if room["room"] >= 0:
+        tail = ("" if not room["planned"] else
+                f" 계획한 목표까지 지키면 약 {short_won(with_goals)}입니다." if with_goals >= 0 else
+                " 다만 계획한 목표까지 지금 속도로 지키려면 여유가 없습니다.")
+        return Proposal(
+            key="spending-room", priority=3, watch=("room",), tolerance=Decimal("0.25"),
+            title=f"매월 약 {short_won(room['room'])}은 비상금과 약정을 지키고도 쓰실 수 있는 돈입니다.{tail}",
+            why=basis + goals_note + " 약정 기준 한도 안의 소비는 비상금과 보증금 반환을 늦추지 않습니다. 돈을 끝까지 쌓아 두는 "
+                                     "것은 계획의 목적이 아니며, 제때 삶으로 바꾸는 것도 자산 관리의 일부입니다.",
+            effect=(("두 숫자 가운데 작은 쪽은 어떤 계획도 건드리지 않는 돈입니다. " if room["planned"] and with_goals >= 0 else "")
+                    + "값이 떨어지는 물건보다 시간이 지나도 남는 경험(건강, 배움, 여행, 전시·공연, 가족과 보내는 시간)에 먼저 "
+                      "배정하시길 권합니다. 어떤 경험을 좋아하시는지 알려 주시면 그에 맞춰 제안드리겠습니다."),
+            risks=("한도는 기록된 현금흐름과 목표 가정 위의 계산값입니다. 수입이 줄거나 큰 지출이 생기면 줄어들고, 노후 적립을 "
+                   "지금보다 늘리기로 하시면 그만큼 줄어듭니다. 한도를 넘겨 쓰면 가장 가까운 약정부터 늦어집니다."),
+            timing="이번 달부터 매월", reconsider=reconsider, certainty=certainty, figures=figures)
+    return Proposal(
+        key="spending-room", priority=1 if room["near_commitment_short"] else 2, watch=("room",), tolerance=Decimal("0.25"),
+        title=f"지금은 비상금과 약정에 필요한 적립이 남는 돈보다 약 {short_won(-room['room'])} 많아, 마음 편히 쓸 여유가 없습니다.",
+        why=basis + goals_note + (f" {NEAR_COMMITMENT_MONTHS}개월 안에 돌려드려야 할 보증금을 지금 속도로는 마련하지 못하므로 "
+                                  "먼저 손봐야 합니다." if room["near_commitment_short"] else
+                                  " 남는 돈을 모두 넣어도 모자라므로, 소비를 늘리기 전에 약정 쪽을 먼저 손봐야 합니다."),
+        effect=("멈출 수 있는 지출을 찾아 적립으로 돌리거나, 반환 방법(재계약·새 세입자 보증금·매도·대출)을 앞당겨 정하면 "
+                "한도가 생깁니다. 어느 쪽이 나은지는 고객님의 판단이 필요합니다."),
+        risks="그대로 두면 가장 가까운 약정(보증금 반환)부터 늦어지고, 만기 직전에 불리한 선택을 하게 될 수 있습니다.",
+        timing=("이번 달 안에 반환 방법 결정" if room["near_commitment_short"] else "다음 생활·목표 보고 전까지 우선순위 결정"),
+        reconsider=reconsider, certainty=certainty, figures=figures)
 
 def _strategy(facts: dict[str, Any]) -> list[Track]:
     tracks = []

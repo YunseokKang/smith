@@ -39,13 +39,18 @@ class Edition:
 
 EDITIONS: dict[str, Edition] = {e.key: e for e in (
     Edition("overview", "종합 보고", "한 주의 시작: 우리 집 전체 그림, 이번 주 제안과 할 일입니다. 분야별 자세한 내용은 요일마다 따로 보내 드립니다.",
-            "overview", ("follow_up", "change", "allocation", "timeline", "future_income", "requests", "glossary"), None,
+            "overview", ("follow_up", "change", "allocation", "timeline", "stress_summary", "future_income", "requests",
+                         "glossary"),
+            None,
             ("housing_market", "housing_policy", "mortgage", "jeonse", "home_tax", "pension_tax", "rates",
-             "us_stocks", "kr_stocks", "household_policy"), False, True, (),
+             "us_stocks", "kr_stocks", "household_policy", "benchmark"), False, True, (),
             "the weekly overview across every area: where the household stands now, this week's proposals in "
             "the order to act on them, and whether the long-range direction holds. Each area's detail comes in "
             "its own themed report during the week (markets and holdings, property, rates and loans, tax and "
-            "pensions, the household's month and goals), so stay at the level of the whole picture."),
+            "pensions, the household's month and goals), so stay at the level of the whole picture. Say in one "
+            "sentence whether the household survives the composite stress scenario (sector_metrics.stress), and, "
+            "when the brief has a benchmark item (the official survey of net worth and income by age band), where "
+            "this household's net worth sits in its age band, with the survey year: a position, not a goal."),
     Edition("markets", "투자·시장", "주식·펀드와 환율: 보유 종목별 의견과 투자 기준 점검입니다.",
             "markets", ("holdings", "policy", "macro"), ("goal-stocks-glide",),
             ("us_stocks", "kr_stocks", "rates"), True, False, ("미실현 손익", "환율 효과", "%p"),
@@ -68,11 +73,17 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "tax and pensions: this year's pension credit room, overseas capital-gains deduction, ISA, the "
             "year-end settlement checklist, marriage-registration and home-tax timing, and the pension accounts."),
     Edition("life", "생활·목표", "한 달 현금흐름과 비상금, 목표까지의 준비 상황입니다.",
-            "life", ("cash", "timeline", "future_income", "follow_up", "requests"), ("emergency-reserve", "surplus-plan"),
-            (), False, True, ("유동성", "순자산"),
+            "life", ("cash", "spending", "stress", "timeline", "future_income", "follow_up", "requests"),
+            ("emergency-reserve", "surplus-plan", "spending-room"),
+            (), False, True, ("유동성", "순자산", "안심 소비 한도", "스트레스 테스트"),
             "the household's own month: income, spending, saving and investing transfers, what is left, the "
             "emergency reserve, expected bonuses and share grants by how sure they are, and progress toward the "
-            "dated goals (lease deposit, home move, retirement). "
+            "dated goals (lease deposit, home move, retirement). Two private-banker questions belong here: does "
+            "the household survive the composite stress scenario (sector_metrics.stress: how many months, what "
+            "would help), and what may the client spend this month without slowing a goal "
+            "(sector_metrics.spending_room). Where there is room, suggest spending that keeps its value over time "
+            "(health, learning, travel, art and performances, time with family) over goods that lose value, as a "
+            "suggestion shaped by the preferences in client_memory, never an instruction and never invented tastes. "
             "No market news is researched for this theme; work from the household's numbers and the client's "
             "statements."),
 )}

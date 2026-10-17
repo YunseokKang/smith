@@ -132,7 +132,7 @@ class ReportTests(unittest.TestCase):
         proposals = {p.key: p for p in data["advice"]["proposals"]}
         self.assertEqual(set(proposals), {"lease-return", "emergency-reserve", "surplus-plan", "pension-credit",
                                           "prepayment", "variable-rate", "overseas-harvest", "isa-open",
-                                          "goal-stocks-glide"})
+                                          "goal-stocks-glide", "spending-room"})
         # Cash 1.5M plus 3M a month for 20 months cannot return the 3억 deposit, so all the shares
         # (12 x 110 USD x 1,400) rest on that date: move them in 5 quarterly steps until 2027-12.
         glide = proposals["goal-stocks-glide"]

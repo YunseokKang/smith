@@ -60,7 +60,12 @@ TERMS = {
     "환율 효과": "외화 자산의 가치가 환율 변화만으로 원화 기준에서 늘거나 줄어든 부분입니다.",
     "미실현 손익": "아직 팔지 않아 확정되지 않은, 장부상의 이익 또는 손실입니다.",
     "%p": "퍼센트포인트. 3%에서 4%로 오르면 1%p 오른 것입니다.",
+    "스트레스 테스트": "금리 급등, 소득 중단, 집값·주식 하락 같은 나쁜 일이 한꺼번에 온다고 가정하고 우리 집 돈이 버티는지 미리 계산해 보는 것입니다.",
+    "안심 소비 한도": "비상금과 날짜가 정해진 목표에 매월 필요한 적립을 빼고도 남아, 이번 달에 써도 계획이 늦어지지 않는 돈입니다.",
 }
+STRESS_LEASE_FLAG = "lease_deposit_uncovered"  # stress.LEASE_UNCOVERED
+STRESS_VERDICT = {"robust": ("●", "버팁니다", "#05b169"), "watch": ("▲", "빠듯합니다", "#f4b000"),
+                  "fragile": ("■", "취약합니다", "#ff5c66"), "unknown": ("?", "판단 불가", "#7c828a")}
 
 
 def render(data: dict[str, Any]) -> tuple[str, str]:
@@ -81,7 +86,8 @@ def render(data: dict[str, Any]) -> tuple[str, str]:
     if full:
         sections.append(_future_income(data))
         sectors = data["sectors"]
-        sections += [_allocation(data), _cash(sectors["cash"], data), _debt(sectors["debt"]),
+        sections += [_allocation(data), _cash(sectors["cash"], data), _spending(advice.get("spending_room")),
+                     _stress(data["stress"]), _debt(sectors["debt"]),
                      _policy(data, story, full), _holdings(data, story, full), _real_estate(sectors["real_estate"]),
                      _pension(sectors["pension_insurance"]), _macro(sectors["macro"])]
     else:
@@ -127,6 +133,8 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
         "macro": lambda: _macro(sectors["macro"]), "real_estate": lambda: _real_estate(sectors["real_estate"]),
         "debt": lambda: _debt(sectors["debt"]), "tax": lambda: _tax(advice, data, True),
         "pension": lambda: _pension(sectors["pension_insurance"]), "cash": lambda: _cash(sectors["cash"], data),
+        "spending": lambda: _spending(advice.get("spending_room")), "stress": lambda: _stress(data["stress"]),
+        "stress_summary": lambda: _stress_summary(data["stress"]),
     }
     title = "이번 주 눈여겨볼 변화" if overview else f"{edition.label} — 눈여겨볼 변화"
     sections = [_changes_outside(story, title)] + [renderers[name]() for name in edition.sections]
@@ -225,6 +233,13 @@ def _status(data: dict[str, Any], *, requests_shown: bool = True) -> tuple[str, 
     if must:
         reasons.append(f"판단에 꼭 필요한 자료 {len(must)}건이 비어 있습니다"
                        + ("('다음에 확인할 것')." if requests_shown else "(종합·생활 보고의 '다음에 확인할 것')."))
+    stress = data.get("stress") or {}
+    if stress.get("liquidity_verdict") == "fragile":
+        reasons.append(f"나쁜 일이 겹치는 가정에서 현금만으로 {stress['months_cash']:.1f}개월밖에 버티지 못합니다"
+                       "(스트레스 테스트).")
+    if STRESS_LEASE_FLAG in stress.get("flags", ()):
+        reasons.append(f"나쁜 일이 겹치는 가정에서 {stress['lease']['due']:%Y년 %m월} 보증금 반환이 부족합니다"
+                       "(스트레스 테스트).")
     if here or elsewhere:
         return "act", reasons
     if reasons:
@@ -822,6 +837,111 @@ def _debt(debt: dict[str, Any]) -> str:
                     for l in debt["loans"]])
     return _section("부채·금리", lead, bars + table)
 
+
+def _months_text(value: Decimal) -> str:
+    return f"{value:.1f}개월"
+
+
+def _stress_lead(st: dict[str, Any], *, detail: bool) -> str:
+    """The stress scenario in words: assumptions, the monthly shortfall, how far cash and then stock sales
+    carry the household through the scenario's months, an uncovered lease deposit, and the verdict."""
+    a, m = st["assumptions"], st["monthly"]
+    horizon = a["income_stop_months"]
+    icon, label, color = STRESS_VERDICT[st["verdict"]]
+    badge = f'<b style="color:{color}">{icon} {escape(label)}</b>'
+    text = (f"변동금리 대출 금리 +{a['rate_shock'] * 100:.1f}%p, 가장 큰 근로·사업 소득 {horizon}개월 중단, "
+            f"집값 {a['property_drop'] * 100:.0f}% 하락, 주식·펀드 {a['stock_drop'] * 100:.0f}% 하락이 한꺼번에 온다고 "
+            "가정(모두 가정값)했습니다.")
+    if m["burn"] is None:
+        text += " 월 현금흐름이나 대출 가운데 원화로 환산하지 못한 금액이 있어 버티는 기간은 계산하지 않았습니다."
+    elif m["burn"] <= 0:
+        text += f" 그래도 매월 약 <b>{_short(-m['burn'])}</b>이 남아 현금이 줄지 않습니다."
+    else:
+        text += f" 이 경우 매월 약 <b>{_short(m['burn'])}</b>이 모자랍니다."
+        if st["months_cash"] is None:
+            text += " 즉시 쓸 수 있는 돈에 환산하지 못한 금액이 있어 버티는 개월은 미상입니다."
+        elif st["covers_scenario"]:
+            text += (f" 즉시 쓸 수 있는 돈 {_short(st['immediate'])}으로 {horizon}개월을 모두 버티고 약 "
+                     f"<b>{_short(st['cash_after_scenario'])}</b>이 남습니다.")
+        else:
+            text += (f" 즉시 쓸 수 있는 돈 {_short(st['immediate'])}만으로는 {horizon}개월 중 "
+                     f"<b>{_months_text(st['months_cash'])}</b>을 버팁니다.")
+            if st["after_sales"] is not None and st["after_sales"] >= 0:
+                text += f" 주식·펀드를 낮아진 값에 팔면 {horizon}개월을 모두 버티고 약 {_short(st['after_sales'])}이 남습니다."
+            elif st["months_with_sales"] is not None:
+                text += f" 주식·펀드를 낮아진 값에 팔아도 {_months_text(st['months_with_sales'])}까지입니다."
+    lease = st["lease"]
+    if STRESS_LEASE_FLAG in st["flags"]:
+        text += (f" 다만 {lease['due']:%Y년 %m월} 돌려드릴 보증금 {_short(lease['amount'])}은 이 가정에서 약 "
+                 f"{_short(lease['available'])}밖에 마련하지 못합니다.")
+    text += f" 판정: {badge}."
+    if detail:
+        text += (f" 기준: {horizon}개월을 모두 버티면 안정, {a['watch_months']:.0f}개월 이상이면 빠듯, 그 미만이면 취약이며, "
+                 "가까운 보증금 반환이 부족하면 최소 빠듯입니다.")
+        if st["pausable"]:
+            text += f" 멈출 수 있다고 표시하신 지출 {_short(st['pausable'])}을 멈추면 버티는 기간이 늘어납니다."
+    return text
+
+
+def _stress(st: dict[str, Any]) -> str:
+    """The composite stress scenario in full (report design §16.2): the lead, the months bars (capped at the
+    scenario length) and the before/after table. All figures come from stress.test; unknown shows as 미상."""
+    m = st["monthly"]
+    rows = [("현금만으로", st["months_cash"], True), ("주식·펀드 매도 포함", st["months_with_sales"], False)]
+    bars = _bars(rows, value_text=_months_text) if m["burn"] is not None and m["burn"] > 0 else ""
+    usual_net = None if m["inflow"] is None or m["outflow"] is None else m["inflow"] - m["outflow"]
+    table_rows = [["월 수입", _won(m["inflow"]), _won(None if m["inflow"] is None or m["lost_income"] is None
+                                                    else m["inflow"] - m["lost_income"])],
+                  ["월 지출(이자 포함)", _won(m["outflow"]), _won(None if m["outflow"] is None or m["extra_interest"] is None
+                                                            else m["outflow"] + m["extra_interest"])],
+                  ["월 남는 돈", _won(usual_net), _won(None if m["burn"] is None else -m["burn"])],
+                  ["순자산 변화", "-", "미상" if st["net_worth_drop"] is None else
+                   f"-{_short(st['net_worth_drop'])}" + ("" if st["net_worth_drop_ratio"] is None
+                                                       else f" ({_pct(st['net_worth_drop_ratio'], 0)})")]]
+    for prop in st["properties"]:
+        if prop["ltv"] is not None:
+            table_rows.append([f"{prop['label']} LTV(담보대출 기준)", _pct(prop["ltv"], 0), _pct(prop["ltv_stressed"], 0)])
+    lease = st["lease"]
+    if lease is not None:
+        covered = ("미상" if lease["covered"] is None else
+                   f"{'가능' if lease['covered'] else '부족'}(가용 {_short(lease['available'])})")
+        table_rows.append([f"보증금 반환({lease['due']:%Y.%m})", _won(lease["amount"]), covered])
+    return _section("스트레스 테스트: 나쁜 일이 겹치면", _stress_lead(st, detail=True),
+                    bars + _table(["항목", "평소", "위기 가정"], table_rows))
+
+
+def _stress_summary(st: dict[str, Any]) -> str:
+    """The overview's one-paragraph version: verdict and months, no table (the household day has it)."""
+    return _section("스트레스 테스트: 나쁜 일이 겹치면",
+                    _stress_lead(st, detail=False) + " 자세한 표는 생활·목표 보고에 있습니다.", "")
+
+
+def _spending(room: dict[str, Any] | None) -> str:
+    """Guilt-free spending room (report design §16.3): the surplus, what the reserve and contractual payments
+    take every month, the room on that basis, and the smaller room when the planned goals are kept too.
+    Nothing when an input is unknown (the proposals say so)."""
+    if room is None:
+        return ""
+    safe, with_goals = max(room["room"], Decimal(0)), max(room["room_with_goals"], Decimal(0))
+    rows = ([("남는 돈", room["surplus"], False)] + [(label, amount, False) for label, amount in room["committed"]]
+            + [("안심 소비 한도(약정 기준)", safe, True)])
+    if room["planned"]:
+        rows += [(label, amount, False) for label, amount in room["planned"]] + [("계획한 목표까지 지킬 때", with_goals, False)]
+    if room["room"] >= 0:
+        lead = (f"수입에서 지출과 본인 계좌 이체를 뺀 남는 돈 {_short(room['surplus'])} 가운데 비상금과 약정(보증금 반환)이 매월 "
+                f"가져가는 적립은 {_short(room['committed_total'])}입니다. 나머지 <b>{_short(room['room'])}</b>은 이번 달에 쓰셔도 "
+                "비상금과 약정이 늦어지지 않는 <b>안심 소비 한도</b>입니다.")
+        if room["planned"]:
+            lead += (f" 계획한 목표(매월 {_short(room['planned_total'])})까지 지금 속도로 지키려면 약 "
+                     f"<b>{_short(room['room_with_goals'])}</b>입니다." if room["room_with_goals"] >= 0 else
+                     f" 다만 계획한 목표(매월 {_short(room['planned_total'])})까지 지금 속도로 지키려면 매월 "
+                     f"{_short(-room['room_with_goals'])}이 모자라, 목표의 시점·금액을 손보지 않는 한 그 목표는 늦어집니다.")
+        lead += " 쌓아 두는 것이 목적이 아니라면, 시간이 지나도 남는 경험에 먼저 배정하시길 권합니다."
+    else:
+        lead = (f"남는 돈 {_short(room['surplus'])}보다 비상금과 약정에 매월 필요한 적립 {_short(room['committed_total'])}이 "
+                f"<b>{_short(-room['room'])}</b> 더 큽니다. 지금은 마음 편히 쓸 여유가 없고, 약정과 지출을 먼저 손봐야 합니다.")
+    table = _table(["항목", "매월"], [[label, _won(value)] for label, value, _ in rows])
+    return _section("마음 편히 써도 되는 돈", lead, _bars(rows) + table)
 
 STANCE_STYLE = {"add": (UP, "▲"), "hold": (MUTED, "●"), "trim": (BLUE, "▼"), "exit": (BLUE, "■")}
 

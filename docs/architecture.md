@@ -376,6 +376,27 @@ Gmail API, 기본 권한은 `gmail.send` 하나. 질의응답을 켜면 `--read`
   없는 경우). 결과 미상은 자동 재발송하지 않는다. `sent`는 받은편지함 도착 확인이 아니라 Gmail API가 Message를
   반환했다는 뜻이다.
 
+## PB 기준 보강 (report-design §16, `src/smith/stress.py`, `proposals.spending_room`)
+
+- 복합 스트레스 테스트(`stress.test`): 원장 뷰·KPI·분야 지표만으로 결정적으로 계산한다. 가정값(금리 +1.5%p, 가장 큰 근로·사업
+  소득 12개월 중단, 집값 -20%, 주식·펀드 -30%, 판정 기준 12·6개월)은 상수이며 결과에 함께 담긴다. 버티는 개월은 시나리오 길이로
+  상한을 두고, 환산하지 못한 금액이 있으면 해당 수치와 판정은 `None`/`unknown`, 순자산 하락률은 재무상태표가 완전하고 순자산이
+  양수일 때만 낸다. 판정은 유동성 판정(`liquidity_verdict`)과 의무 표지(`flags`, 가까운 보증금 미충족)로 나뉘고 종합 `verdict`는
+  표지가 있으면 최소 `watch`다. `build_report`가 `data["stress"]`로 넣고, 서술 입력 `sector_metrics.stress`(허용 근거), 생활판
+  전체 섹션·종합판 한 문단 요약, 상태 배지(`fragile` 또는 보증금 표지 → 최소 주의)가 쓴다. 멈출 수 있는 지출은
+  `cases.monthly_outflow`(공개 함수로 바꿈)로 센다.
+- 부동산 LTV의 분자는 `report_data.SECURED_LOAN_CATEGORIES`(`mortgage`)만이다. 그 집을 담보로 적은 다른 채무(전세보증금 반환
+  의무 등)는 `debt`(관련 부채 합계)와 `deposits`에 남고 비율에는 들어가지 않는다(1차 리뷰 2026-10-17).
+- 안심 소비 한도(`proposals.spending_room`): 제안 규칙 `spending-room`과 생활판 섹션이 같은 계산을 쓴다. 약정 기준(`room`: 비상금과
+  가장 가까운 보증금)과 계획한 목표까지 지킬 때(`room_with_goals`: 주택 계획이 이미 저축한다고 가정한 월 순현금흐름
+  `home_progress.monthly_net_self`·`months`와 다른 날짜 목표의 전액 적립)의 두 숫자다. 입력 미상, 환산 못 한 목표, 계산 못 한
+  주택 계획이면 미결 판단. 12개월 안 보증금을 지금 속도로 못 모으면 우선순위 1.
+- 또래 벤치마크: `research.topics`의 `benchmark` 범주. 그 범주를 조사 목록에 둔 판(종합판)에만 생기고, 원래의 전체 월요판·목요판과
+  `smith research topics` 목록(전체 집합)에는 들어가지 않는다. 질문은 연령대 일반이라 가구 정보가 검색어에 들어가지 않으며,
+  고객 나이는 서술 단계(`household_profile.age`)에서만 쓴다.
+- 심리 함정 브리핑: 자문(`advice-v7`)·메일 답변(`mail-answer-v8`) 시스템 프롬프트의 지침이다. 출력 스키마는 바뀌지 않았고, 서술
+  프롬프트(`narrative-v9`)는 새 입력 둘의 뜻과 생활판·종합판의 쓰임을 설명한다.
+
 ## 요일별 주제판 (`src/smith/editions.py`, report-design §14)
 
 - 월~토 하루 한 주제: `overview`(월), `markets`(화), `property`(수), `rates`(목), `tax`(금), `life`(토). 요일→판은

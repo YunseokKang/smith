@@ -40,7 +40,7 @@ from smith.fmt import short_won
 from smith.payload import build_context, check_outbound, won
 from smith.proposals import Proposal
 
-PROMPT_VERSION = "narrative-v8"  # v8: expected pay (household.expected_pay) is not wealth; v7: daily editions.
+PROMPT_VERSION = "narrative-v9"  # v9: stress test, spending room, peer benchmark; v8: expected pay is not wealth.
 MODEL = "fable"
 BUDGET_USD = "5.00"
 TIMEOUT_SECONDS = 600  # Two calls at most (write and repair): 20 minutes, inside the 30-minute lease.
@@ -115,6 +115,14 @@ Input JSON:
   gap, what rate rises cost per month, unrealized gains, loan-to-value, locked money and premiums). Listed
   holdings in household.assets carry unrealized_gain and return_on_cost (a decimal ratio in the holding's
   own currency) when their cost basis is known; a holding without them has an unknown gain, not zero.
+  sector_metrics.stress is the composite stress test: one bad year in which several shocks land at once
+  (scenario), with the verdict (robust, watch, fragile, unknown), the monthly shortfall and how many months
+  cash alone, then stock sales at the lower prices, pay the bills. It is the household's survival margin:
+  a fragile verdict outranks return considerations; flags name a dated payment (the lease deposit) the
+  scenario cannot return. sector_metrics.spending_room: room is what the client may spend every month
+  without touching the reserve or a contractual payment, room_with_goals the smaller figure when the
+  planned goals (home move and other dated goals) are kept at their current pace; null when unknown.
+  Spending the room is not a failure: money is meant to become life in time.
 - client_memory: what the client told Smith before (by e-mail or directly), newest first: what a nickname
   of a home means, residence periods, plans, consents, preferences. They are the client's statements, not
   ledger facts, and a newer one wins over an older one. Use them to understand the household and its
@@ -285,7 +293,38 @@ def sector_metrics(view: Any, data: dict[str, Any]) -> dict[str, Any]:
                               "monthly_premiums": won(pension["monthly_premiums"]),
                               "premium_to_income": ratio(pension["premium_to_income"]),
                               "surrender_values_known": pension["surrender_values_known"]},
+        "stress": _stress_metrics(data["stress"]),
+        "spending_room": _spending_metrics(data["advice"].get("spending_room")),
     }
+
+
+def _stress_metrics(st: dict[str, Any]) -> dict[str, Any]:
+    """The composite stress test (report design §16.2) for the narrative: verdict, months and what moves."""
+    def months(value: Decimal | None) -> str | None:
+        return None if value is None else f"{value:.1f}"
+    m, a = st["monthly"], st["assumptions"]
+    return {"scenario": {"rate_rise": str(a["rate_shock"]), "income_stop_months": a["income_stop_months"],
+                         "property_drop": str(a["property_drop"]), "stock_drop": str(a["stock_drop"])},
+            "verdict": st["verdict"], "liquidity_verdict": st["liquidity_verdict"], "flags": list(st["flags"]),
+            "monthly_shortfall": won(m["burn"]), "lost_monthly_income": won(m["lost_income"]),
+            "extra_monthly_interest": won(m["extra_interest"]),
+            # Months are capped at the scenario length; covers_scenario says whether cash alone lasts it.
+            "months_on_cash": months(st["months_cash"]), "months_with_stock_sales": months(st["months_with_sales"]),
+            "covers_scenario": st["covers_scenario"], "cash_left_after_scenario": won(st["cash_after_scenario"]),
+            "left_after_stock_sales": won(st["after_sales"]), "pausable_monthly_outflow": won(st["pausable"]),
+            "net_worth_drop": won(st["net_worth_drop"]),
+            "net_worth_drop_ratio": None if st["net_worth_drop_ratio"] is None else f"{st['net_worth_drop_ratio']:.4f}",
+            "lease_deposit_covered": None if st["lease"] is None else st["lease"]["covered"]}
+
+
+def _spending_metrics(room: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Guilt-free spending room (report design §16.3): None when an input is unknown."""
+    if room is None:
+        return None
+    return {"monthly_surplus": won(room["surplus"]),
+            "committed_needs": [{"item": label, "monthly": won(amount)} for label, amount in room["committed"]],
+            "planned_goal_needs": [{"item": label, "monthly": won(amount)} for label, amount in room["planned"]],
+            "room": won(room["room"]), "room_with_goals": won(room["room_with_goals"])}
 
 
 def holdings_payload(view: Any, data: dict[str, Any]) -> dict[str, Any]:
@@ -772,7 +811,9 @@ def _figures(text: str) -> set[str]:
 _RATIO_KEYS = frozenset({"share", "share_of_assets", "share_of_securities", "usd_share_of_assets", "return_on_cost",
                          "loan_to_value", "liabilities_to_assets", "premium_to_income", "change_vs_previous_6m",
                          "annual_rate", "rate_rise", "top1_share", "top5_share", "overseas_share",
-                         "concentration_limit", "drawdown", "share_of_securities_with_grants"})
+                         "concentration_limit", "drawdown", "share_of_securities_with_grants",
+                         # Stress test (sector_metrics.stress): the scenario's drops and the net-worth fall.
+                         "property_drop", "stock_drop", "net_worth_drop_ratio"})
 _SERIES_VALUES = ("value", "change_3m", "change_12m")
 _PERCENT = re.compile(r"(?<![\w.])([-+−]?)(\d[\d,]*(?:\.\d+)?)\s*%")
 _DECIMAL = re.compile(r"-?\d+(?:\.\d+)?")

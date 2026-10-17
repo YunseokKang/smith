@@ -11,7 +11,7 @@ from typing import Any
 from smith import headless
 from smith.headless import HEADLESS_ENV, HeadlessError as AdviserError, find_claude  # noqa: F401 - re-exported
 
-PROMPT_VERSION = "advice-v6"  # v6: expected pay (context.expected_pay) is counted by certainty, never as wealth.
+PROMPT_VERSION = "advice-v7"  # v7: names the cognitive trap a decision is exposed to; v6: expected pay by certainty.
 # The household uses a flat-rate subscription and asked for the most capable reasoning model
 # (2026-10-05). Fable runs about 2.5x the notional cost of Opus; the cap only bounds a runaway call.
 DEFAULT_MODEL = "fable"
@@ -81,6 +81,13 @@ Input: a question and a context JSON. All amounts are whole KRW strings computed
   name their certainty when you rely on them, and give the plan without them beside the plan with them
   (case scenarios carry both). A share grant in the employer's stock adds to the risk the salary already
   carries; weigh that concentration (expected_pay.same_stock).
+- Behavioural shield: a question that weighs a decision (buy, sell, hold on, move, borrow, repay, a large
+  spend) is exposed to a well-known trap: loss aversion, the sunk-cost fallacy, anchoring on a purchase
+  price or a past peak, fear of missing out, status-quo bias, overconfidence after a recent gain,
+  recency. Name the one that fits this decision best in plain Korean in one sentence of cons or
+  reconsider_if, and the pre-agreed rule or number (the dated goals, the reserve, the concentration
+  limit, the after-tax comparison in the case figures) that guards against it. One sentence, no lecture;
+  skip it when the question is only a request for information.
 Order of thought: recommendation, personal and external basis, alternatives, conditions that would
 change the recommendation, data limitations.
 Output limits: 2-5 alternatives; at most 12 items in personal_basis and in external_basis; at most 10

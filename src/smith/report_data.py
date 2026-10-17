@@ -10,7 +10,8 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, localcontext
 from typing import Any
 
-from smith import cases, checklist, editions, future_income, holdings, ledger, principles, proposals, realestate, tax
+from smith import (cases, checklist, editions, future_income, holdings, ledger, principles, proposals, realestate,
+                   stress, tax)
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import LedgerView, base_amount, load_view, unrealized_gain
 from smith.records import Kind, RecordInput, Status
@@ -36,6 +37,7 @@ _CASH_LIKE = ("cash", "deposit", "installment_savings")
 _MONTHS = {"monthly": 1, "quarterly": 3, "annual": 12}
 EMERGENCY_MONTHS = 6       # Assumption: emergency reserve of six months of outflow.
 RATE_SHOCKS = (Decimal("0.005"), Decimal("0.01"), Decimal("0.02"))
+SECURED_LOAN_CATEGORIES = ("mortgage",)  # Loans that count in a property's loan-to-value ratio.
 TIMELINE_YEARS = 5
 
 
@@ -78,6 +80,8 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     data = {"kind": kind, "as_of": as_of, "baseline": baseline, "kpis": kpis,
             "change": change, "timeline": _timeline(view, pay), "sectors": sectors, "holdings": holdings.review(view),
             "future_income": future_income.review(view, pay), "advice": advice,
+            # One bad year with several shocks at once (report design §16.2), household-wide like the badge.
+            "stress": stress.test(view, kpis, sectors),
             # This year's pension credit room and overseas gains, for the tax day's headline numbers.
             "tax_plan": {**tax.pension_plan(plan), "us_gains": plan["us_gains"], "us_unknown": plan["us_unknown"],
                          "us_positions": plan["us_positions"], "pension_unconverted": plan["pension_unconverted"]},
@@ -283,6 +287,8 @@ def _home_progress(view: LedgerView, pay: list[future_income.Inflow]) -> dict[st
     return {"target_date": goal["target_date"], "required": required, "available_self": available,
             "available_with_partner": with_partner, "ratio_self": available / required,
             "from_liquid": from_liquid, "scenarios": facts["scenarios"],
+            # The plan's own monthly saving and horizon: the spending room (§16.3) must not spend them twice.
+            "monthly_net_self": _dec(facts["monthly_net_cash_flow_self"]), "months": facts["months"],
             "pay_at_target": _dec(base["expected_pay_at_target"]), "pay_after_target": _dec(base["expected_pay_after_target"]),
             "available_with_pay": with_pay, "ratio_with_pay": None if with_pay is None else with_pay / required}
 
@@ -395,10 +401,16 @@ def _real_estate_sector(view: LedgerView) -> dict[str, Any]:
     properties = []
     for record in (r for r in view.records if r.kind is Kind.ASSET and r.fields["category"] == "real_estate"):
         value = base_amount(view, record)
-        debt = _total(base_amount(view, r) for r in view.records if r.kind is Kind.LIABILITY
-                      and r.fields.get("collateral_record_id") == record.record_id)
+        claims = [r for r in view.records if r.kind is Kind.LIABILITY
+                  and r.fields.get("collateral_record_id") == record.record_id]
+        # `debt` is every claim on the property; the loan-to-value ratio counts only loans secured on it.
+        # A lease deposit owed to a tenant is a separate obligation (it is not a loan against the price).
+        debt = _total(base_amount(view, r) for r in claims)
+        loans = _total(base_amount(view, r) for r in claims if r.fields["category"] in SECURED_LOAN_CATEGORIES)
+        deposits = _total(base_amount(view, r) for r in claims if r.fields["category"] == "lease_deposit_obligation")
         properties.append({"record_id": record.record_id, "label": _asset_label(record), "value": value, "debt": debt,
-                           "ltv": debt / value if value and debt is not None else None,
+                           "loans": loans, "deposits": deposits,
+                           "ltv": loans / value if value and loans is not None else None,
                            "valued_on": record.effective_at.date()})
     total = view.summary.total_assets
     share = view.summary.by_category.get("real_estate", Decimal(0)) / total if total else None
