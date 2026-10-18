@@ -267,7 +267,25 @@ def _set_aside(extra: list[tuple[date, Decimal | None]] | None, retire_year: int
 
 # --- strategy notes and year-end checklist -----------------------------------------------------------------
 
-def notes(t: dict[str, Any]) -> list[Note]:
+def financial_income_guard(balance: Decimal | None, rate: Decimal | None, pay: Decimal | None) -> dict[str, Any] | None:
+    """How close deposit interest comes to the financial-income threshold (report design §20): the balance at
+    which interest alone reaches it at `rate` (a yearly fraction, the short market rate as a deposit-rate
+    proxy), the interest on today's interest-bearing `balance`, and on it plus the expected `pay` if that were
+    parked in deposits. Dividends are not in the ledger, so the interest figures are lower bounds. None
+    without a positive rate; an unknown balance or pay leaves its figures unknown."""
+    if rate is None or rate <= 0:
+        return None
+    now = None if balance is None else balance * rate
+    with_pay = None if balance is None or pay is None else (balance + pay) * rate
+    return {"rate": rate, "threshold": FINANCIAL_INCOME_THRESHOLD, "threshold_balance": FINANCIAL_INCOME_THRESHOLD / rate,
+            "balance": balance, "interest_now": now, "pay": pay, "interest_with_pay": with_pay,
+            "share_now": None if now is None else now / FINANCIAL_INCOME_THRESHOLD,
+            "share_with_pay": None if with_pay is None else with_pay / FINANCIAL_INCOME_THRESHOLD}
+
+
+def notes(t: dict[str, Any], guards: list[tuple[str, dict[str, Any]]] = ()) -> list[Note]:
+    """Tax strategy notes for the household; `guards` ((owner id, financial_income_guard) per person, the client
+    first) put numbers on the financial-income note."""
     found = []
     homes = t["homes"]
     own = [h for h in homes if h[0] == "self"]
@@ -335,15 +353,46 @@ def notes(t: dict[str, Any]) -> list[Note]:
                  "이하로 5년 이상 내고 10년 이상 유지해야 이자(보험차익)가 비과세입니다. 중간에 해지하면 세금과 해지 손실이 "
                  f"함께 생기므로, 비상금은 따로 마련해 두시는 것이 안전합니다({start[:4]}년 가입 기준)."),
                 "가입 기간 내내", "세법 기준(현행 법령 확인 필요, 보험 종류 확인 필요)"))
-    found.append(Note(
+    # First: the one note with the household's own numbers on the tax day (user review 2026-10-18).
+    found.insert(0, Note(
         "금융소득종합과세 선제 방어: 이자·배당이 연 2천만 원을 넘기 전에 계좌를 고릅니다",
-        (f"이자와 배당을 합해 연 {short_won(FINANCIAL_INCOME_THRESHOLD)}을 넘으면 다른 소득과 합쳐 높은 세율로 과세됩니다. "
+        (_guard_text(guards)
+         + f"이자와 배당을 합해 연 {short_won(FINANCIAL_INCOME_THRESHOLD)}을 넘으면 다른 소득과 합쳐 높은 세율로 과세됩니다. "
          "성과급과 자사주 보상이 들어올수록 예금 이자와 배당이 그 기준에 가까워지므로, 새 돈을 둘 때마다 세후 수익률로 비교하는 것이 "
          "원칙입니다. 우선순위는 비과세·분리과세 통로입니다: ISA(순이익 일정액 비과세, 초과분 저율 분리과세), 연금저축·IRP(과세 이연과 "
          "세액공제), 저축성 보험의 비과세 한도, 분리과세가 적용되는 채권·인프라펀드, 그리고 배당이 아니라 양도차익으로 과세돼 종합과세와 "
          "분리되는 해외주식입니다. 같은 수익이라도 어느 통로에 두느냐에 따라 세후 결과가 달라집니다."),
-        "자산 배치를 바꾸거나 큰 돈이 들어올 때", "세법 기준(현행 법령 확인 필요)"))
+        "자산 배치를 바꾸거나 큰 돈이 들어올 때",
+        "세법 기준(현행 법령 확인 필요)" + (" + 계산(단기 시장 금리를 예금 금리로 가정, 배당 제외)" if guards else "")))
     return found
+
+
+def _guard_text(guards: list[tuple[str, dict[str, Any]]]) -> str:
+    """Each person's own numbers, the client first and first in the note (the mail shows a note's first sentence):
+    the threshold is per person, so every figure is that person's money and pay."""
+    if not guards:
+        return ""
+    text = "".join(_person_guard(owner, g) for owner, g in guards)
+    rate = guards[0][1]["rate"]
+    return text + f"금리는 단기 시장 금리(연 {percent(rate)})를 예금 금리로 본 값이고, 배당은 원장에 없어 빠진 하한입니다. "
+
+
+def _person_guard(owner: str, g: dict[str, Any]) -> str:
+    who = "본인" if owner == "self" else "배우자"
+    if g["interest_with_pay"] is not None and g["pay"]:
+        text = (f"{who} 명의로는 3년 안에 받을 성과급·주식 보상(확정·예상, 세후) {short_won(g['pay'])}까지 예금에 두면 이자만 연 약 "
+                f"{short_won(g['interest_with_pay'])}(기준의 {percent(g['share_with_pay'], 0)})이므로, 예금에 약 "
+                f"{short_won(g['threshold_balance'])}을 넘게 두지 말고 처음부터 아래 통로에 나눠 두십시오. ")
+    elif owner == "self":
+        text = (f"{who} 명의로는 예금에 약 {short_won(g['threshold_balance'])}을 넘게 두면 이자만으로 기준을 넘습니다. ")
+    else:
+        text = ""
+    if g["interest_now"] is not None:
+        text += (f"{who} 명의 현금·예금 {short_won(g['balance'])}의 이자는 연 약 {short_won(g['interest_now'])}"
+                 f"(기준의 {percent(g['share_now'], 0)})입니다. ")
+    elif g["balance"] is None:
+        text += f"{who} 명의 현금·예금 가운데 원화로 환산하지 못한 금액이 있어 이자는 미상입니다. "
+    return text
 
 
 def checklist(t: dict[str, Any]) -> list[tuple[str, str, str]]:

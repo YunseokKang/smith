@@ -35,14 +35,14 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from smith import adviser, editions, future_income, headless, holdings, ledger, memory, principles, research
+from smith import adviser, editions, future_income, headless, holdings, ledger, memory, principles, research, stress
 from smith.fmt import short_won
 from smith.payload import build_context, check_outbound, won
 from smith.proposals import Proposal
 
 # v10: executive headline, rounded amounts, total-balance-sheet mindset, employer double concentration, no internal
 # vocabulary (user spec 2026-10-17); v9: stress test, spending room, peer benchmark; v8: expected pay is not wealth.
-PROMPT_VERSION = "narrative-v13"  # v13: per-policy reviews, target aliases, no URLs; v12: product review verdicts.
+PROMPT_VERSION = "narrative-v16"  # v16: the headline is the week's decision, stress is an extreme check; v15: concrete words.
 MODEL = "fable"
 BUDGET_USD = "5.00"
 # Two calls at most: the write (the markets day with twenty-odd holdings ran past 10 minutes on 2026-10-17) and a
@@ -66,33 +66,34 @@ NARRATIVE_SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False,
     # `experiences` is optional in the output: only the household theme writes it, and an absent list is empty.
     "required": ["situation", "direction", "portfolio", "order", "proposal_notes", "holdings", "insights", "watch"],
-    # Length limits are about 60% of the v10 ones (user review 2026-10-18: the mails read long); headless.prune
-    # trims at a sentence end, so a block over its limit loses its tail, not the call.
+    # Length limits are about a quarter of the v13 ones (user review 2026-10-18, twice: the mails read long, then
+    # "keep a quarter of this"); headless.prune trims at a sentence end, so a block over its limit loses its
+    # tail, not the call.
     "properties": {
-        "situation": _BLOCK(1000),
-        "direction": _BLOCK(900),
+        "situation": _BLOCK(300),
+        "direction": _BLOCK(220),
         "portfolio": {"type": "object", "additionalProperties": False, "required": ["text", "refs", "principles"],
-                      "properties": {"text": _TEXT(1400), "refs": _REFS, "principles": _PRINCIPLE_IDS}},
+                      "properties": {"text": _TEXT(450), "refs": _REFS, "principles": _PRINCIPLE_IDS}},
         "holdings": {"type": "array", "maxItems": research.MAX_HOLDING_TOPICS, "items": {
             "type": "object", "additionalProperties": False,
             "required": ["symbol", "stance", "reason", "alternative", "reconsider", "refs", "principles"],
-            "properties": {"symbol": _TEXT(20), "stance": _TEXT(8), "reason": _TEXT(500), "alternative": _TEXT(300),
-                           "reconsider": _TEXT(200), "refs": _REFS, "principles": _PRINCIPLE_IDS}}},
+            "properties": {"symbol": _TEXT(20), "stance": _TEXT(8), "reason": _TEXT(160), "alternative": _TEXT(120),
+                           "reconsider": _TEXT(100), "refs": _REFS, "principles": _PRINCIPLE_IDS}}},
         "order": {"type": "array", "maxItems": 12, "items": _TEXT(40)},
-        "proposal_notes": {"type": "array", "maxItems": 12, "items": {
+        "proposal_notes": {"type": "array", "maxItems": 3, "items": {
             "type": "object", "additionalProperties": False, "required": ["key", "context", "refs"],
-            "properties": {"key": _TEXT(40), "context": _TEXT(500), "refs": _REFS}}},
-        "insights": {"type": "array", "maxItems": 4, "items": {
+            "properties": {"key": _TEXT(40), "context": _TEXT(160), "refs": _REFS}}},
+        "insights": {"type": "array", "maxItems": 2, "items": {
             "type": "object", "additionalProperties": False, "required": ["title", "body", "implication", "refs"],
-            "properties": {"title": _TEXT(120), "body": _TEXT(500), "implication": _TEXT(350), "refs": _REFS}}},
-        "watch": {"type": "array", "maxItems": 5, "items": {
+            "properties": {"title": _TEXT(60), "body": _TEXT(160), "implication": _TEXT(120), "refs": _REFS}}},
+        "watch": {"type": "array", "maxItems": 2, "items": {
             "type": "object", "additionalProperties": False, "required": ["item", "why", "refs"],
-            "properties": {"item": _TEXT(200), "why": _TEXT(250), "refs": _REFS}}},
+            "properties": {"item": _TEXT(80), "why": _TEXT(100), "refs": _REFS}}},
         # The experience dividend (report design §18.6): one or two curated things to see, read or do, with
         # their sources; written only for the household theme.
         "experiences": {"type": "array", "maxItems": 2, "items": {
             "type": "object", "additionalProperties": False, "required": ["title", "body", "when", "refs"],
-            "properties": {"title": _TEXT(120), "body": _TEXT(500), "when": _TEXT(120), "refs": _REFS}}},
+            "properties": {"title": _TEXT(60), "body": _TEXT(160), "when": _TEXT(80), "refs": _REFS}}},
     },
 }
 
@@ -110,19 +111,30 @@ The client is not a finance expert: big picture first, say why it matters for th
 difficult term in a short parenthesis the first time it appears in a block, use concrete examples.
 
 Six principles of the writing (the hard rules at the end are checked by code):
-1. Seamless executive flow. The first sentence of `situation` is the executive headline: the single most
-   important conclusion of this report in one fluent sentence (it is shown large at the top of the mail).
-   Then, in order: what changed outside since the last report and what it did to this household's net
-   worth; the household's core strength and its single bottleneck; the one strategy of the period that
-   resolves it. No fragmented warnings, no list of facts, no repeated status banner.
+1. Seamless executive flow. The first sentence of `situation` is the executive headline (shown large at the
+   top of the mail): this week's one decision with its main number and its reason in the household's likely,
+   everyday terms. Never open with a statistic comparison or the stress scenario. Then, in order: what changed
+   since the last report and what it did to this household's net worth; its single bottleneck, said by what it
+   means in a likely event (a few months between jobs, a large unplanned bill), not by an extreme scenario; the
+   one strategy of the period that resolves it. No fragmented warnings, no list of facts, no repeated status
+   banner.
 2. Cognitive ease and brevity. In prose, round every won amount to 억 or 만: "약 27.3억 원", "326만 원",
    "월 약 66만 원". Never write an amount to the won ("27억 2,539만 5,264원", "660,016원", "325만 7,091원");
    the checker accepts rounded figures. At most one parenthesis per sentence, and never a mechanical tag
    such as "(스트레스 테스트)", "(전망)", "(고객님 말씀 기준)", "(가정)": fold the qualifier into the sentence
-   ("나쁜 일이 겹치는 가정에서는", "고객님 말씀대로라면", "전망이지만"). Write about 60% of what you would
-   naturally write: one idea per sentence, no restating of figures the charts already show, no preamble,
+   ("금리 1.5%p 상승과 소득 중단이 함께 오는 가정에서는", "고객님 말씀대로라면", "전망이지만"). Write about a quarter of what you would
+   naturally write, the takeaway only. Hard limits in characters (code cuts anything longer): situation 250
+   with its first sentence, the headline, under 90; direction 200; portfolio 400; a holding's reason 150; a
+   proposal note 150; an insight's title 50, body 150, implication 110; a watch item 70 and its why 90; an
+   experience's body 150. Keep every sentence under 90 characters: one idea per sentence, no restating of figures the charts already show, no preamble,
    no closing summary. The mail is read on a phone in the morning.
-3. Total balance sheet. A cash balance below the reserve target never means the household has nothing to
+3. Concrete words. Name the event and its size, never a category: not 나쁜 일, 악재, 위기, 충격, 겹치다,
+   변동성, 리스크, 불확실성 or 여러 요인 on their own, but 금리 1.5%p 상승, 소득 12개월 중단, 코스피 30% 하락. The
+   client must never be left asking "what, how much, and can that really happen?". For the stress scenario,
+   state its assumptions with their sizes (sector_metrics.stress.scenario) and, when its plausibility matters,
+   that rates, stocks and home prices moved together in 2022 (sector_metrics.stress.precedent), while the
+   income stop stands for a job loss, leave or illness.
+4. Total balance sheet. A cash balance below the reserve target never means the household has nothing to
    spend. When sector_metrics.cash.reserve_swap.one_step is true, the reserve is filled once by selling the
    excess above the single-company limit or holdings with an exit opinion (an asset swap), and the monthly
    surplus stays for investing and living; say so instead of asking the client to save. A lease deposit
@@ -130,7 +142,7 @@ Six principles of the writing (the hard rules at the end are checked by code):
    household's own cash is the gap plus a buffer, and a sale brings cash in. The home goal is the
    household's: lead with sector_metrics.home_plan's baseline (client, partner's property equity and the
    confirmed and expected pay) and give the conservative tiers beside it.
-4. Depth, after tax. For stocks, join macro liquidity (rates), the company's fundamentals (results,
+5. Depth, after tax. For stocks, join macro liquidity (rates), the company's fundamentals (results,
    guidance, valuation, from the research you cite), trend and flows, and its standing in its sector. The
    holding flagged employer_stock stacks the client's human capital and financial assets in one company:
    treat that double concentration as the first investment matter and use the code's trim schedule
@@ -141,14 +153,14 @@ Six principles of the writing (the hard rules at the end are checked by code):
    placement, compare after tax and name the tax-advantaged route first (ISA, pension accounts, the
    savings-insurance exemption, separately taxed bonds and infrastructure funds, overseas shares taxed as
    capital gains apart from the progressive scale).
-5. Behavioural coaching and the experience dividend. Where a decision is at hand, name in one plain
+6. Behavioural coaching and the experience dividend. Where a decision is at hand, name in one plain
    sentence the bias it is exposed to (loss aversion, sunk cost, anchoring, fear of missing out, status
    quo, overconfidence after a gain, recency, mental accounting) and the pre-agreed standard that guards
    against it (dated goals, the reserve, the concentration limit, the investment policy, after-tax
    figures). Once the reserve, the dated goals and the rebalancing are set, encourage spending the surplus
    on experiences that keep their value (art and performances, food, sport, travel with family), shaped
    by client_memory, never invented tastes and never as an instruction.
-6. No internal vocabulary. Never write JSON, owner_id, record_id, payload, schema, refs, field names,
+7. No internal vocabulary. Never write JSON, owner_id, record_id, payload, schema, refs, field names,
    "자동 점검 메모" or any developer term in the client's prose. Ask for missing information in a private
    banker's words ("배우자분의 대략적인 월 소득과 보유 현금 규모를 알려 주시면 가계 전체의 여유를 더 정확히
    볼 수 있습니다").
@@ -182,11 +194,14 @@ Input JSON:
   gap, what rate rises cost per month, unrealized gains, loan-to-value, locked money and premiums). Listed
   holdings in household.assets carry unrealized_gain and return_on_cost (a decimal ratio in the holding's
   own currency) when their cost basis is known; a holding without them has an unknown gain, not zero.
-  sector_metrics.stress is the composite stress test: one bad year in which several shocks land at once
-  (scenario), with the verdict (robust, watch, fragile, unknown), the monthly shortfall and how many months
-  cash alone, then stock sales at the lower prices, pay the bills. It is the household's survival margin:
-  a fragile verdict outranks return considerations; flags name a dated payment (the lease deposit) the
-  scenario cannot return. sector_metrics.spending_room: room is what the client may spend every month
+  sector_metrics.stress is the composite stress test: one year in which its four named assumptions happen
+  together (scenario: the rate rise, the months without the largest income, the fall in home and stock prices), with the verdict (robust, watch, fragile, unknown), the monthly shortfall and how many months
+  cash alone, then stock sales at the lower prices, pay the bills. It is a deliberately extreme check, not a
+  forecast: all four in one year is rare (the market half happened in 2022, a year without the income on top is
+  rarer), and the code writes it in its own section. Keep it out of the headline and the situation; mention it
+  only when flags name a dated payment (the lease deposit) the scenario cannot return, and then with its whole
+  result (months on cash and what stock sales add), never by the verdict word alone. A fragile verdict moves the
+  reserve proposal up; it does not set the tone of the report. sector_metrics.spending_room: room is what the client may spend every month
   without touching the reserve or a contractual payment, room_with_goals the smaller figure when the
   planned goals (home move and other dated goals) are kept at their current pace; null when unknown.
   Spending the room is not a failure: money is meant to become life in time.
@@ -249,28 +264,28 @@ Edition (when `edition_focus` is present): the client gets one short report a da
 with a weekly overview among them; which weekday has which theme is the client's setting, so never name
 weekdays for themes. `edition_focus` is this report's theme. Write only about it; the input already leaves
 out what belongs to the other themes. These limits override the lengths below:
-situation 2-4 sentences; direction 1-3 sentences, or "" when the theme has no long-range angle; insights
-at most 2 (3 on the overview); watch at most 3. If little changed on the theme since last week, say so
+situation 2 sentences; direction 1 sentence, or "" when the theme has no long-range angle; insights
+at most 1 (2 on the overview); watch at most 2. If little changed on the theme since last week, say so
 plainly in the situation and keep the rest minimal rather than repeating last week. portfolio and
 holdings only when `holdings` is not empty; otherwise portfolio.text "" with no refs and holdings [].
 
 Write:
-- situation {text, refs}: 3-6 sentences in the executive flow of principle 1, the first sentence being the
+- situation {text, refs}: 2-3 sentences in the executive flow of principle 1, the first sentence being the
   headline. Where the household stands now and which direction it should take, joining the household's
   numbers with the most important outside changes. The bottom line.
-- direction {text, refs}: one paragraph on the long-range path (home move, lease deposit return,
+- direction {text, refs}: one or two sentences on the long-range path (home move, lease deposit return,
   retirement) and whether a change of course is needed.
 - order: the proposal keys in the order the client should act on them (most important first).
-- proposal_notes: for proposals where the research changes the picture, 1-3 sentences of market or policy
+- proposal_notes: at most 3, for the proposals where the research changes the picture most, one sentence of market or policy
   context with refs. At most one note per proposal key. Skip proposals with nothing to add.
-- insights: up to 4 outside changes that matter for this household: what happened (body), what it means
+- insights: up to 2 outside changes that matter for this household: what happened (body), what it means
   for this household (implication), refs. Label forecasts as forecasts.
-- watch: up to 5 things to watch before the next report and why, with refs.
+- watch: up to 2 things to watch before the next report and why, with refs.
 - experiences: only when edition_focus asks for the experience dividend: one or two things to see, read or
   do this week or month (an exhibition, a book, a place, a table, a court), chosen from the brief's findings
   to fit the preferences in client_memory, written as an invitation with the practical detail (where, until
   when) in `when`, and the refs of the findings. Otherwise an empty list.
-- portfolio {text, refs, principles}: 4-8 sentences, the household's investment strategy for its stocks as a
+- portfolio {text, refs, principles}: 2-3 sentences, the household's investment strategy for its stocks as a
   private banker would set it: the target structure (core and satellite) the principles imply for this
   household, which policy_checks are breached and the concrete steps to fix them in order (which holdings to
   trim or add, where the money goes, over what period), and whether to buy more, rotate or move money to
@@ -278,7 +293,7 @@ Write:
   and the market and company findings. principles: the 2-5 principle ids the strategy rests on.
 - holdings: one opinion for every holding in `holdings` (by its `symbol` value exactly as given). The
   client makes the decision and bears it, so give a clear opinion rather than a hedge. stance is exactly
-  one of add (consider buying more), hold, trim (sell part), exit (sell all). reason: 2-4 sentences joining
+  one of add (consider buying more), hold, trim (sell part), exit (sell all). reason: one or two sentences joining
   the company findings (results, guidance, valuation, analyst views, news; cite their R refs) with this
   household (share, return, tax, goal dates). alternative: for trim or exit, where the money should go
   (another holding, a broad index fund, deposits or short-term bonds for goal money) and the tax order of
@@ -502,7 +517,7 @@ def _move_metrics(view: Any, plan: dict[str, Any] | None) -> dict[str, Any] | No
                          "spread_after_expected_pay_base": won(t["spread_with_pay"]),
                          "spread_after_confirmed_pay_only": won(t["spread_with_pay_adverse"]),
                          "spread_before_tax_now": won(t["spread_before_tax"]), "spread_before_tax_6m_ago": won(t["spread_6m_ago"]),
-                         "trend_before_tax": t["trend"]} for t in plan["targets"]],
+                         "trend_before_tax": t["trend"], "trend_withheld_few_deals": t["trend_hold"]} for t in plan["targets"]],
             "assumptions": plan["assumptions"]}
 
 
@@ -615,7 +630,12 @@ def _stress_metrics(st: dict[str, Any]) -> dict[str, Any]:
             "left_after_stock_sales": won(st["after_sales"]), "pausable_monthly_outflow": won(st["pausable"]),
             "net_worth_drop": won(st["net_worth_drop"]),
             "net_worth_drop_ratio": None if st["net_worth_drop_ratio"] is None else f"{st['net_worth_drop_ratio']:.4f}",
-            "lease_deposit_covered": None if st["lease"] is None else st["lease"]["covered"]}
+            "lease_deposit_covered": None if st["lease"] is None else st["lease"]["covered"],
+            # That the market half has happened, so the client can judge it (user review 2026-10-18).
+            "precedent": {"year": str(stress.PRECEDENT["year"]), "base_rate": " → ".join(stress.PRECEDENT["base_rate"]),
+                          "kospi": stress.PRECEDENT["kospi"], "seoul_apartment_trade_index": stress.PRECEDENT["seoul_apartments"],
+                          "seoul_index_vintage": stress.PRECEDENT["seoul_apartments_vintage"],
+                          "income_stop_stands_for": "a job loss, leave or illness of the largest earner"}}
 
 
 def _spending_metrics(room: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -792,6 +812,7 @@ MEMOS = {"no-source": "출처가 확인되지 않은 외부 사실이 들어 있
          "home-count-asserted": "주택 수 판단은 세대 구성(혼인신고 여부 등)에 따라 달라질 수 있습니다.",
          "unknown-ref": "확인되지 않은 출처 표시가 있어 그 링크는 뺐습니다.",
          "parentheses": "한 문장에 괄호 설명이 여럿 들어가 읽기 어려울 수 있습니다.",
+         "vague-term": "무엇이 얼마나인지 밝히지 않은 표현이 남아 있습니다.",
          "ungrounded-number": "원장이나 출처에서 확인되지 않은 수치가 있습니다"}
 # Blocks dropped for these reasons are never restored: they are unusable for the client.
 UNUSABLE = ("duplicate", "invalid-holding", "add-over-limit", "missing-opinion", "internal-term")
@@ -907,6 +928,11 @@ def merge(first: dict[str, Any], first_dropped: list[str], repaired: dict[str, A
 # Qualifiers the model used to drop into sentences as bare tags; the sentence reads without them.
 _TAGS = re.compile(r"\s*\((?:스트레스 테스트|전망|고객님 말씀 기준|가정|가정값|계산|추정|참고|코드 계산|Smith 계산|시나리오)\)")
 # Developer vocabulary that must never reach the client (checked by code; the block is deleted).
+# Words that name a category where the thing itself is known (user review 2026-10-18: "나쁜 일이 겹치는 한 해"
+# left the client asking what and whether it can happen). A block using one is rewritten once.
+VAGUE_TERMS = ("나쁜 일", "나쁜 한 해", "안 좋은 일", "악재가 겹", "악재가 한꺼번에", "악재가 동시에", "여러 악재", "위기가 겹",
+               "충격이 겹", "충격이 한꺼번에", "나쁜 상황", "최악의 상황")
+_VAGUE = re.compile("|".join(re.escape(term) for term in VAGUE_TERMS))
 INTERNAL_TERMS = ("JSON", "owner_id", "record_id", "target_record_id", "payload", "schema", "스키마", "refs",
                   "자동 점검 메모", "sector_metrics", "client_memory", "household_member", "_id")
 _INTERNAL = re.compile("|".join(re.escape(term) for term in INTERNAL_TERMS))
@@ -959,11 +985,14 @@ _PROSE_FIELDS = ("context", "title", "body", "implication", "item", "why", "reas
 
 
 def style_problem(texts: list[str]) -> str | None:
-    """The style rule a block breaks: internal vocabulary (unusable), or two or more parentheses in one
-    sentence (repaired once, then kept with a footer note)."""
+    """The style rule a block breaks: internal vocabulary (unusable), a vague category word instead of the
+    event and its size, or two or more parentheses in one sentence (both repaired once, then kept with a footer
+    note)."""
     joined = " ".join(texts)
     if _INTERNAL.search(joined):
         return "internal-term"
+    if _VAGUE.search(joined):
+        return "vague-term"
     for sentence in _SENTENCE_END.split(joined):
         if len(_PAREN.findall(sentence)) >= 2:
             return "parentheses"
@@ -995,7 +1024,7 @@ _CONDITIONAL = ("따라", "경우", "수 있", "확인", "판정", "여부")
 SCALAR_BLOCKS = ("situation", "direction", "portfolio")
 TAX_PROPOSALS = ("pension-credit", "overseas-harvest", "isa-open")  # Proposals computed by Smith's tax rules.
 # A daily edition's lists are cut in code too, not only asked for in the prompt (overview, other days).
-EDITION_LIMITS = {"insights": (3, 2), "watch": (3, 3), "experiences": (0, 2)}
+EDITION_LIMITS = {"insights": (2, 1), "watch": (2, 2), "experiences": (0, 2)}  # (overview, themed day)
 _LISTS = {"proposal_notes": "key", "holdings": "symbol", "insights": "title", "watch": "item",
           "experiences": "title"}  # field -> identity
 _REASONS = {"unknown-ref": "cites a ref that is not in the input",
@@ -1013,6 +1042,9 @@ _REASONS = {"unknown-ref": "cites a ref that is not in the input",
             "internal-term": "uses developer vocabulary (JSON, owner_id, record_id, payload, schema, refs, 자동 점검 메모) "
                              "in the client's prose",
             "parentheses": "puts two or more parentheses in one sentence; fold the qualifier into the sentence",
+            "vague-term": "names a category (나쁜 일, 악재가 겹치는, 위기) instead of the event and its size; write what "
+                          "happens and how much (금리 1.5%p 상승, 소득 12개월 중단, 주가 30% 하락), and for the stress "
+                          "scenario that it happened in 2022 (sector_metrics.stress.precedent)",
             "missing-opinion": "gives no opinion on a holding whose must_opine is true (above the single-company "
                                "limit or the employer's stock); write it, by its symbol",
             "ungrounded-number": "uses numbers (or signs) that are not in the input or its cited refs"}

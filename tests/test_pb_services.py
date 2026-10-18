@@ -145,7 +145,12 @@ class StressAndSpendingTests(Household):
         page = render(data)[1]
         self.assertIn("마음 편히 써도 되는 돈", page)
         self.assertIn("안심 소비 한도(약정 기준)", page)
-        self.assertIn("스트레스 테스트: 나쁜 일이 겹치면", page)
+        self.assertIn(report_html.STRESS_TITLE, page)
+        # Concrete: the four assumptions with their sizes and the 2022 precedent with its sources (review 2026-10-18).
+        self.assertIn("변동금리 +1.5%p, 가장 큰 소득 12개월 중단, 집값 20%·주가 30% 하락이 한 해에 모두 오는 드문 극단을 가정해도", page)
+        self.assertIn("2022년 기준금리 1.00%→3.25%, 코스피 -24.9%", page)
+        self.assertIn("bok.or.kr", page)
+        self.assertNotIn("나쁜 일", page)
 
     def test_a_near_deposit_the_surplus_cannot_reach_is_an_act_now_item(self):
         # An earlier, larger deposit due in 8 months takes (250M - 200M liquid) / 8 months every month.
@@ -185,9 +190,9 @@ class StressAndSpendingTests(Household):
         self.assertNotIn("stress", editions.EDITIONS["markets"].sections)
         overview = render(data)[1]
         self.assertIn("자세한 표는 생활·목표 보고에 있습니다", overview)   # One paragraph on the overview ...
-        self.assertNotIn("위기 가정", overview)                            # ... without the table.
-        self.assertIn("위기 가정", render(self.report("life"))[1])
-        self.assertNotIn("스트레스 테스트: 나쁜 일이 겹치면", render(self.report("tax"))[1])
+        self.assertNotIn("가정한 해", overview)                            # ... without the table.
+        self.assertIn("가정한 해", render(self.report("life"))[1])
+        self.assertNotIn(report_html.STRESS_TITLE, render(self.report("tax"))[1])
 
 
 class ReviewCounterexampleTests(Household):
@@ -266,7 +271,7 @@ class BenchmarkAndShieldTests(unittest.TestCase):
         self.assertIn("sector_metrics.stress", narrative.SYSTEM_PROMPT)
         self.assertIn("room_with_goals", narrative.SYSTEM_PROMPT)
         self.assertEqual((adviser.PROMPT_VERSION, qa.PROMPT_VERSION, narrative.PROMPT_VERSION),
-                         ("advice-v8", "mail-answer-v9", "narrative-v13"))
+                         ("advice-v9", "mail-answer-v11", "narrative-v16"))
         self.assertIn("spending-room", proposals.RULE_KEYS)
 
 

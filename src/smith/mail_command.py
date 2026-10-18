@@ -63,7 +63,7 @@ def answer(db: Path, config_path: Path, *, verbose: bool = False) -> int:
     from datetime import datetime, timezone
 
     from smith import qa
-    from smith.report_command import profile
+    from smith.report_command import lineage, profile
 
     try:
         config = load_config(config_path)
@@ -77,9 +77,10 @@ def answer(db: Path, config_path: Path, *, verbose: bool = False) -> int:
         return 2
     household, tz = profile(config), config["app"]["timezone"]
     now = datetime.now(timezone.utc)
+    current = lineage(config_path)
 
     def build(report: dict[str, Any] | None) -> dict[str, Any]:
-        return qa.rebuild(db, report, now=now, tz=tz, household=household)
+        return qa.rebuild(db, report, now=now, tz=tz, household=household, lineage=current)
     try:
         results = qa.poll(db, recipient=to, credentials=stored, now=now, build=build, secrets=credentials.all_secrets(),
                           tz=tz)

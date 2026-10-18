@@ -162,7 +162,7 @@ class CalculatorTests(Upgrade):
                          home["monthly_net_self"] + (home["gap_baseline"] + Decimal(37_800_000)) / home["months"])
         page = render(data)[1]
         self.assertIn("가구 통합", page)
-        self.assertIn("본인 자원만", page)
+        self.assertIn("본인 자원", page)                              # The client-only tier stays a table column.
 
     def test_the_employer_stock_gets_a_trim_schedule_and_never_reads_no_opinion(self):
         data = self.report("markets")
@@ -215,6 +215,8 @@ class CalculatorTests(Upgrade):
         self.assertEqual(pruned, {"refs": ["R1", "R2"], "text": "첫 문장입니다. 둘째 문장입니다."})
         self.assertEqual(headless.validate(pruned, schema, "output"), [])
         self.assertEqual(headless.clip_text("가나다라마바사", 4), "가나다라")        # No boundary: a plain cut.
+        # One long sentence is cut at a clause break with an ellipsis, never inside a word (2026-10-18).
+        self.assertEqual(headless.clip_text("첫째 절이 길게 이어지고, 둘째 절이 이어집니다", 20), "첫째 절이 길게 이어지고…")
 
     def test_insurance_premiums_above_the_limit_or_past_the_home_date_are_a_proposal(self):
         data = self.report("tax")
@@ -276,6 +278,9 @@ class NarrativeRuleTests(Upgrade):
         self.assertEqual(narrative.style_problem(["JSON 입력에서 owner_id를 partner로 한 레코드가 필요합니다."]), "internal-term")
         self.assertEqual(narrative.style_problem(["변동금리(설명) 대출과 LTV(비율)를 함께 봅니다."]), "parentheses")
         self.assertIsNone(narrative.style_problem(["변동금리(설명) 대출을 봅니다. LTV(비율)도 봅니다."]))
+        # A category instead of the event is rewritten (user review 2026-10-18); the named event passes.
+        self.assertEqual(narrative.style_problem(["나쁜 일이 겹치는 한 해를 현금으로 버티지 못합니다."]), "vague-term")
+        self.assertIsNone(narrative.style_problem(["금리 1.5%p 상승과 소득 12개월 중단이 함께 오면 2.7개월을 버팁니다."]))
         data = self.report("overview")
         payload = narrative.build_payload(data["view"], data, None)
         output = {"situation": {"text": "JSON 입력을 더 주십시오.", "refs": []}, "direction": {"text": "", "refs": []},
@@ -316,7 +321,7 @@ class RenderingTests(Upgrade):
     def test_themed_days_do_not_repeat_the_overview_tables(self):
         overview, markets, property_, life, rates = (render(self.report(k))[1]
                                                      for k in ("overview", "markets", "property", "life", "rates"))
-        for text in ("목표와 일정", "앞으로 들어올 돈", "자산 구성"):
+        for text in ("목표와 일정", "앞으로 들어올 돈", "자산의 구성"):  # The composition is the hero bar.
             self.assertIn(text, overview, text)
         self.assertNotIn("목표와 일정", property_)
         self.assertIn("보증금 반환: 실제로 준비할 돈", property_)

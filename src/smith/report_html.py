@@ -2,7 +2,8 @@
 
 Gmail runs no scripts, so every chart is an inline-styled HTML table: stat tiles, emphasis bars
 (one accent, the rest neutral), a zero-centred diverging bar for changes and a timeline. Each chart
-has a plain table twin. State is always icon + label + color.
+has a plain table twin. State is always icon + label + color, except the mail's top line, which carries only the
+action (v3.1, report design §21; the subject names the state).
 
 Visual language follows docs/design-reference.md (style only, no brand marks): white canvas, one
 blue accent used scarcely, display type at weight 400 with negative tracking, tabular monospace
@@ -17,12 +18,13 @@ collapsible <details> card (the hero, the proposals and a theme's opening sectio
 before their tables, opinions and checks are colour pills, and the mail ends with one line: the status
 reasons, data status and sources moved out of the mail into `system_notes` (for the e-mail answers).
 """
+import re
 from decimal import Decimal
 from html import escape
 from typing import Any
 
 from smith.fmt import short_won as _short
-from smith import editions, principles
+from smith import editions, principles, stress
 from smith.holdings import STANCES
 from smith.proposals import Track
 from smith.realestate import MIN_BASIS
@@ -44,6 +46,9 @@ STATUS = {"stable": ("●", "안정", "#05b169"), "watch": ("▲", "주의", "#f
 # or check, red = full exit or breached. (background, ink, weight); the ink reads on its background.
 PILLS = {"good": ("#e6f4ea", "#137333", 700), "neutral": ("#eef0f3", "#3c4043", 600),
          "warn": ("#fef7e0", "#b06000", 700), "bad": ("#fce8e6", "#c5221f", 700)}
+# A collapsible card's summary: a soft, rounded button (user spec 2026-10-18, report design §20).
+SUMMARY = ("display:block;list-style:none;cursor:pointer;outline:none;background:#f8f9fa;padding:16px 20px;"
+           f"border-radius:16px;font-family:{SANS};font-weight:600;color:#0a0b0d;")
 STANCE_PILL = {"add": "good", "hold": "neutral", "trim": "warn", "exit": "bad"}
 CHECK_PILL = {"ok": "good", "plan": "neutral", "watch": "warn", "breach": "bad", "unknown": "neutral"}
 # Stacked-bar segments in a fixed order (hues follow the entity, never cycled; dataviz validator, light
@@ -52,6 +57,7 @@ SEGMENTS = ("#0052ff", "#b86e00", "#0a8f5c", "#7c3aed", "#c43d7a")
 TRACK_STATUS = {"on_track": ("●", "궤도 위", "#05b169"), "attention": ("▲", "보완 필요", "#f4b000"),
                 "unknown": ("○", "판단 불가", ON_DARK_SOFT)}
 PRIORITY_LABELS = {1: "지금 실행", 2: "이번 달·분기", 3: "유지·점검"}
+MAX_TAX_NOTES = 4  # The tax strategy notes in the mail (user review 2026-10-18: a quarter of the text).
 SERIES_LABELS = {
     "722Y001/0101000": "한국은행 기준금리", "817Y002/010200000": "국고채 3년", "817Y002/010210000": "국고채 10년",
     "817Y002/010502000": "CD 91일", "731Y001/0000001": "원/달러 환율", "121Y006/BECBLA0302": "은행 주담대 금리(신규취급 평균)",
@@ -67,26 +73,11 @@ SCENARIO_LABELS = {"base": "기준", "favorable": "유리", "adverse": "불리"}
 RATE_TYPE_LABELS = {"fixed": "고정", "variable": "변동", "mixed": "혼합", "unknown": "미확인"}
 SOURCE_LABELS = {"toss": "토스증권", "ecos": "한국은행 ECOS", "fred": "미국 FRED", "fed-monetary": "Fed 통화정책 발표",
                  "bok-press-conference": "한국은행 총재 기자간담회", "bok-mpb-minutes": "금통위 의사록"}
-TERMS = {
-    "순자산": "가진 것(자산)에서 갚아야 할 것(부채)을 뺀 금액입니다.",
-    "유동성": "필요할 때 얼마나 빨리, 손해 없이 현금으로 바꿀 수 있는지를 뜻합니다.",
-    "변동금리": "몇 달마다 시장 금리에 맞춰 이자율이 다시 정해지는 대출 방식입니다.",
-    "CD 91일물": "은행이 91일 만기로 발행하는 예금증서의 금리로, 단기 시장 금리와 변동금리 대출의 기준으로 자주 쓰입니다.",
-    "LTV": "집값 대비 대출 비율입니다. 50%라면 집값의 절반을 빌렸다는 뜻입니다.",
-    "역전세": "새로 받을 전세보증금이 돌려줘야 할 기존 보증금보다 적어, 차액을 집주인이 마련해야 하는 상황입니다.",
-    "세액공제": "낼 세금에서 일정 금액을 직접 빼 주는 제도입니다. 연말정산 때 그만큼 돌려받습니다.",
-    "환율 효과": "외화 자산의 가치가 환율 변화만으로 원화 기준에서 늘거나 줄어든 부분입니다.",
-    "미실현 손익": "아직 팔지 않아 확정되지 않은, 장부상의 이익 또는 손실입니다.",
-    "%p": "퍼센트포인트. 3%에서 4%로 오르면 1%p 오른 것입니다.",
-    "스트레스 테스트": "금리 급등, 소득 중단, 집값·주식 하락 같은 나쁜 일이 한꺼번에 온다고 가정하고 우리 집 돈이 버티는지 미리 계산해 보는 것입니다.",
-    "안심 소비 한도": "비상금과 날짜가 정해진 목표에 매월 필요한 적립을 빼고도 남아, 이번 달에 써도 계획이 늦어지지 않는 돈입니다.",
-    "이중 집중": "월급을 주는 회사의 주식을 많이 들고 있어, 앞으로 벌 소득과 지금 가진 자산이 같은 회사의 실적에 함께 묶인 상태입니다.",
-    "감액완납": "보험료를 더 내지 않고 보장이나 적립 금액을 줄인 채 계약을 유지하는 방법입니다. 해지보다 손실이 작습니다.",
-    "금융소득종합과세": "한 해 이자와 배당을 합쳐 2천만 원을 넘으면 그 초과분을 다른 소득과 합쳐 높은 세율로 매기는 제도입니다.",
-}
 STRESS_LEASE_FLAG = "lease_deposit_uncovered"  # stress.LEASE_UNCOVERED
-STRESS_VERDICT = {"robust": ("●", "버팁니다", "#05b169"), "watch": ("▲", "빠듯합니다", "#f4b000"),
-                  "fragile": ("■", "취약합니다", "#ff5c66"), "unknown": ("?", "판단 불가", "#7c828a")}
+STRESS_TITLE = "스트레스 테스트: 금리 상승·소득 중단·집값·주가 하락이 함께 오면"
+# Concrete labels (user review 2026-10-18): what the verdict means, not 취약/빠듯.
+STRESS_VERDICT = {"robust": ("●", "현금만으로 버팀", "#05b169"), "watch": ("▲", "현금만으로 6개월 이상", "#f4b000"),
+                  "fragile": ("■", "현금만으로 6개월 미만", "#ff5c66"), "unknown": ("?", "판단 불가", "#7c828a")}
 
 
 def render(data: dict[str, Any]) -> tuple[str, str]:
@@ -99,8 +90,9 @@ def render(data: dict[str, Any]) -> tuple[str, str]:
     full = data["kind"] != "thursday"
     advice = data.get("advice") or {"proposals": [], "strategy": [], "assumptions": []}
     story = data.get("narrative") or {}
-    bands = [_band(DARK, _header(data, status, action=_action(advice, status)) + _judgement(story)
-                   + _composition_bar(data, None) + _overview(data) + _callout(advice)),
+    bands = [_band(DARK, _header(data, action=_action(advice, status), pending=len(advice.get("undetermined") or []))
+                   + _judgement(story)
+                   + _composition_bar(data, None) + _overview(data)),
              _band(CANVAS, _proposals(advice, full), border=True)]
     if full and advice["strategy"]:
         bands.append(_band(DARK, _strategy(advice["strategy"], story.get("direction", ""))))
@@ -117,7 +109,7 @@ def render(data: dict[str, Any]) -> tuple[str, str]:
                      _macro(sectors["macro"]), _experiences(story)]
     else:
         sections += [_policy(data, story, full), _holdings(data, story, full)]
-    sections += [_requests(data.get("requests") or [], full), _glossary()]
+    sections.append(_requests(data.get("requests") or [], full))
     bands.append(_band(CANVAS, "".join(sections), border=True))
     bands.append(_band(SOFT, _footer(_system_warnings(data))))
     return _subject(data, status), _page(bands)
@@ -136,9 +128,9 @@ def system_notes(data: dict[str, Any]) -> list[str]:
 
 def _page(bands: list[str]) -> str:
     spacer = '<tr><td style="height:12px;line-height:12px;font-size:0">&nbsp;</td></tr>'
-    # The [+]/[−] marker of a collapsible card follows its state where <style> is honoured. The "open" marker
-    # is hidden inline, so a client without <style> or <details> (Gmail) shows the card open with one marker
-    # ([+] 자세히 보기), never both; here the stylesheet swaps them with !important over the inline style.
+    # The expand hint of a collapsible card follows its state where <style> is honoured. The "open" hint is
+    # hidden inline, so a client without <style> or <details> (Gmail) shows the card open with one hint
+    # (▼ 펼쳐서 상세 보기), never both; here the stylesheet swaps them with !important over the inline style.
     style = ('<style>details>summary{list-style:none}details>summary::-webkit-details-marker{display:none}'
              'details[open]>summary .mk-open{display:inline!important}'
              'details[open]>summary .mk-closed{display:none!important}</style>')
@@ -158,15 +150,19 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
     advice = data.get("advice") or {"proposals": [], "strategy": [], "assumptions": []}
     story = data.get("narrative") or {}
     overview = edition.key == "overview"
-    hero = (_header(data, status, lead=edition.lead, action=_action(advice, status)) + _judgement(story)
-            + _composition_bar(data, edition) + _tile_grid(_tiles(data, edition)) + _callout(advice, edition))
+    # No "today's one thing" box under the tiles (user review 2026-10-18): the badge names the action and the
+    # first proposal card, open right below, explains it.
+    hero = (_header(data, action=_action(advice, status), pending=len(advice.get("undetermined") or []))
+            + _judgement(story)
+            + _composition_bar(data, edition) + _tile_grid(_tiles(data, edition)))
     bands = [_band(DARK, hero)]
     sectors = data["sectors"]
     renderers = {
         "follow_up": lambda: _follow_up(advice), "change": lambda: _change(data),
         "allocation": lambda: _allocation(data), "timeline": lambda: _timeline(data),
-        "goals": lambda: _goals_brief(data), "future_income": lambda: _future_income(data),
-        "requests": lambda: _requests(data.get("requests") or [], True), "glossary": lambda: _glossary(),
+        "goals": lambda: _goals_brief(data), "future_income": lambda: _future_income(data, overview=True),
+        "requests": lambda: (_requests(data.get("requests") or [], False, "생활·목표 보고") if overview
+                             else _requests(data.get("requests") or [], True)),
         "holdings": lambda: _holdings(data, story, True), "policy": lambda: _policy(data, story, True),
         "macro": lambda: _macro(sectors["macro"]), "macro_brief": lambda: _macro(sectors["macro"], compact=True),
         "real_estate": lambda: _real_estate(sectors["real_estate"], data.get("figures") or {}),
@@ -184,15 +180,13 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
     opening = "".join(_opened(renderers[name]()) for name in edition.opening)
     if opening:
         bands.append(_band(CANVAS, opening, border=True))
-    if advice["proposals"] or overview:
+    if advice["proposals"] or advice.get("undetermined") or overview:
         bands.append(_band(CANVAS, _proposals(advice, not overview, edition=edition), border=True))
     if edition.strategy and advice["strategy"]:
         bands.append(_band(DARK, _strategy(advice["strategy"], story.get("direction", ""))))
     title = "이번 주 눈여겨볼 변화" if overview else f"{edition.label} — 눈여겨볼 변화"
     sections = [_changes_outside(story, title)] + [renderers[name]() for name in edition.sections
                                                     if name not in edition.opening]
-    if edition.terms:
-        sections.append(_glossary(edition.terms))
     if any(sections):
         bands.append(_band(CANVAS, "".join(sections), border=True))
     bands.append(_band(SOFT, _footer(_system_warnings(data))))
@@ -205,14 +199,14 @@ def _opened(section: str) -> str:
 
 
 def _action(advice: dict[str, Any], status: str) -> str:
-    """The one line the status badge carries (report design §18.1): the first proposal's title, or where the
-    urgent proposal of another area is explained. Never the system reasons."""
+    """The short badge beside the status (report design §20): the first proposal's headline (its title only when
+    a rule has none), or which report explains another area's urgent proposal. Never the system reasons."""
     proposals = advice.get("proposals") or []
     if proposals:
-        return proposals[0].title
+        return proposals[0].headline or proposals[0].title
     elsewhere = [editions.home(k) for k in advice.get("household_urgent", [])]
     if status == "act" and any(elsewhere):
-        return "지금 실행할 제안은 " + " · ".join(e.label for e in elsewhere if e) + " 보고에 있습니다."
+        return " · ".join(e.label for e in elsewhere if e) + " 보고의 제안 확인"
     return ""
 
 
@@ -238,6 +232,9 @@ def _tiles(data: dict[str, Any], edition: editions.Edition) -> list[tuple[str, s
         basis = " · ".join(f.get("property_valuation") or []) or "원장 입력가"
         if f.get("property_estimate") is not None and f["property_value"] is not None:
             basis += f" · 실거래 중간값 합계 {amount(f['property_estimate'])}({_signed_short(f['property_estimate'] - f['property_value'])})"
+        elif f.get("property_estimate_reference") is not None and f["property_value"] is not None:
+            reference = f["property_estimate_reference"]
+            basis += f" · 실거래 중간값 합계 {amount(reference)}({_signed_short(reference - f['property_value'])}, 참고)"
         return [("부동산 평가액", amount(f["property_value"]), f"자산의 {_pct(estate['share_of_assets'], 0)} · 기준: {basis}"),
                 ("부동산 관련 부채", amount(f["property_debt"]), "담보대출·보증금 반환"),
                 ("돌려드릴 보증금", "-" if lease is None else amount(lease["amount"]),
@@ -376,17 +373,17 @@ def _eyebrow(text: str, *, color: str = INK, background: str = STRONG) -> str:
             f'font-size:12px;font-weight:600;border-radius:100px;padding:4px 12px">{escape(text)}</span></div>')
 
 
-def _section(title: str, lead: str, inner: str, *, note: str = "") -> str:
-    """A collapsible card (report design §18.1): the heading row is the summary (title, a one-line `note` of
-    HTML such as a pill or a figure), the lead and the body open on tap. A client without <details> shows
-    it open, so nothing is lost."""
-    hint = f'<span style="font-size:13px;font-weight:400;color:{MUTED};margin-left:10px">{note}</span>' if note else ""
-    marker = (f'<span style="font-family:{MONO};font-size:15px;color:{BLUE};margin-right:8px">'
-              f'<span class="mk-closed">[+]</span><span class="mk-open" style="display:none">[−]</span></span>')
-    return (f'<tr><td style="padding:14px 0 6px;border-top:1px solid {HAIRLINE}"><details style="margin:0">'
-            f'<summary style="cursor:pointer;outline:none"><span style="font-family:{SANS};font-weight:400;font-size:20px;'
-            f'line-height:1.35;letter-spacing:-0.4px;color:{INK}">{marker}{escape(title)}</span>{hint}</summary>'
-            f'<div style="font-size:15px;line-height:1.6;color:{BODY};margin:10px 0 12px">{lead}</div>{inner}</details></td></tr>')
+def _section(title: str, lead: str, inner: str, *, note: str = "", brief: int | None = 2) -> str:
+    """A collapsible card, closed by default (report design §18.1, §20): the summary is a soft button with the
+    title, a one-line `note` of HTML (a pill or a figure) under it and "▼ 펼쳐서 상세 보기" on the right; the lead
+    and the body open on tap. A client without <details> (Gmail) shows it open, so nothing is lost. The lead keeps
+    its first `brief` sentences (None: the caller already wrote only what matters)."""
+    hint = f'<div style="font-size:13px;font-weight:400;color:{MUTED};margin-top:6px">{note}</div>' if note else ""
+    lead = lead if brief is None else _brief(lead, brief)
+    return (f'<tr><td style="padding:8px 0"><details style="margin:0">'
+            f'<summary style="{SUMMARY}">{_expand_hint()}<span style="font-size:17px;line-height:1.4;letter-spacing:-0.3px">'
+            f'{escape(title)}</span>{hint}</summary>'
+            f'<div style="font-size:15px;line-height:1.6;color:{BODY};margin:12px 0 12px">{lead}</div>{inner}</details></td></tr>')
 
 
 def _bars(rows: list[tuple[str, Decimal | None, bool]], *, value_text: Any = _short) -> str:
@@ -403,6 +400,29 @@ def _bars(rows: list[tuple[str, Decimal | None, bool]], *, value_text: Any = _sh
                      f'<td style="width:100px;text-align:right;font-family:{MONO};font-size:12px;color:{INK};padding-left:8px;'
                      f'white-space:nowrap">{value_text(value)}</td></tr>')
     return f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{"".join(cells)}</table>'
+
+
+def _paired_bars(rows: list[tuple[str, Decimal | None, Decimal | None]]) -> str:
+    """Before and now on one scale: per row a neutral bar (before) above an accent bar (now), each with its
+    figure; a missing end has no bar and reads "자료 부족". Empty when no row has both ends."""
+    if not any(before is not None and now is not None for _, before, now in rows):
+        return ""
+    peak = max((abs(v) for _, a, b in rows for v in (a, b) if v is not None), default=Decimal(0)) or Decimal(1)
+
+    def bar(value: Decimal | None, color: str) -> str:
+        if value is None:
+            return (f'<tr><td style="font-size:11px;color:{MUTED};padding:1px 0">자료 부족</td>'
+                    f'<td style="width:90px"></td></tr>')
+        width = max(1, int(abs(value) / peak * 100))
+        return (f'<tr><td style="padding:1px 0"><div style="background:{color};height:8px;width:{width}%;'
+                f'border-radius:0 100px 100px 0"></div></td><td style="width:90px;text-align:right;font-family:{MONO};'
+                f'font-size:11px;color:{INK};padding-left:8px;white-space:nowrap">{_short(value)}</td></tr>')
+    cells = "".join(f'<tr><td style="width:150px;font-size:12px;color:{BODY};padding:5px 8px 5px 0;vertical-align:middle">'
+                    f'{escape(label)}</td><td><table role="presentation" width="100%" cellpadding="0" cellspacing="0">'
+                    f'{bar(before, MUTED_BAR)}{bar(now, ACCENT)}</table></td></tr>' for label, before, now in rows)
+    legend = (f'<div style="font-size:12px;color:{INK};margin-top:4px"><span style="color:{MUTED_BAR}">●</span> 6개월 전 '
+              f'<span style="margin:0 12px">|</span><span style="color:{ACCENT}">●</span> 지금</div>')
+    return f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{cells}</table>{legend}'
 
 
 def _diverging(rows: list[tuple[str, Decimal]], *, value_text: Any = None) -> str:
@@ -458,23 +478,24 @@ def _cell(cell: str | tuple[str, str]) -> str:
 
 # --- top bands --------------------------------------------------------------------------------------------
 
-def _header(data: dict[str, Any], status: str, *, lead: str = "", action: str = "") -> str:
-    """Date, the status badge and today's action in one line (report design §18.1). The system reasons behind
-    the badge (data status, stress flags) never appear here; they are `system_notes` for the e-mail answers."""
+def _header(data: dict[str, Any], *, action: str = "", pending: int = 0) -> str:
+    """Date and the short action badge (report design §18.1, §20). The status label is left out (user review
+    2026-10-18: the ⚡ line alone reads better); the status stays in the subject, and its reasons are
+    `system_notes` for the e-mail answers. Without an action, judgements stopped by missing data (`pending`) are
+    named instead of "nothing to do" (review 2026-10-18: a report that could not judge read as reassurance)."""
     edition = editions.title(data["kind"], data["as_of"].date())
-    icon, label, color = STATUS[status]
-    line = (f"오늘의 핵심 액션: {escape(action)}" if action else "오늘 새로 실행하실 일은 없습니다")
+    line = (f'<span style="display:inline-block;background:{DARK_RAISED};color:{ON_DARK};font-weight:600;'
+            f'border-radius:100px;padding:4px 12px;margin-top:4px">⚡ 금주 핵심 액션: {escape(action)}</span>'
+            if action else f"확정한 실행안은 없고, 자료가 부족해 판단을 보류한 것이 {pending}건 있습니다" if pending
+            else "오늘 새로 실행하실 일은 없습니다")
     note = ""
-    if lead:
-        note += f'<div style="font-size:14px;line-height:1.6;color:{ON_DARK_SOFT};margin-top:10px">{escape(lead)}</div>'
     if data.get("delivery_note"):
         note += (f'<div style="font-size:13px;line-height:1.6;color:{ON_DARK};background:{DARK_RAISED};border-radius:16px;'
                 f'padding:12px 14px;margin-top:14px">▲ {escape(data["delivery_note"])}</div>')
     return (f'<tr><td>{_eyebrow(f"SMITH · {edition}", color=ON_DARK, background=DARK_RAISED)}'
             f'<div style="font-family:{SANS};font-weight:400;font-size:30px;line-height:1.15;letter-spacing:-0.8px;'
             f'color:{ON_DARK};margin:4px 0 12px">{data["as_of"]:%Y년 %m월 %d일} 보고</div>'
-            f'<div style="font-size:14px;line-height:1.5;color:{ON_DARK}"><span style="color:{color};font-weight:600">{icon} {label}</span>'
-            f' <span style="color:{ON_DARK}">· {line}</span></div>'
+            f'<div style="font-size:14px;line-height:1.5;color:{ON_DARK}">{line}</div>'
             f'{note}</td></tr>')
 
 
@@ -487,10 +508,13 @@ def _overview_tiles(data: dict[str, Any]) -> list[tuple[str, str, str]]:
     months = "미상" if k["immediate_months"] is None else f'월 지출 {k["immediate_months"]:.1f}개월분'
     home = k["home_progress"]
     # The household basis leads (report design §17.3); the client-only figure is in the goals section.
-    groups = (data.get("change") or {}).get("groups")
+    change = data.get("change") or {}
+    groups = change.get("groups")
+    # The comparison date leads the note (user review 2026-10-18: "MM/DD 대비" is required).
+    since = f"{change['from']:%m/%d} 대비 " if change.get("from") else ""
     change_note = ("기준선" if k["net_worth_change"] is None else
-                   f"시장·평가 {_signed_short(groups['market_and_valuation'])} · 입출금 {_signed_short(groups['net_inflow'])}" if groups
-                   else _signed_short(k["net_worth_change"]))
+                   since + f"시장·평가 {_signed_short(groups['market_and_valuation'])} · 입출금 {_signed_short(groups['net_inflow'])}"
+                   if groups else since + _signed_short(k["net_worth_change"]))
     return [("순자산", _short(k["net_worth"]), change_note),
             ("월 여유 현금흐름", _short(k["monthly_net"]), "수입 − 지출"),
             ("즉시 쓸 수 있는 돈", _short(k["immediate"]), months),
@@ -520,7 +544,7 @@ def _hero_segments(data: dict[str, Any], tiles: str | None) -> tuple[str, list[t
         top, rest = listed[:4], listed[4:]
         segments = [(str(p["name"])[:12], p["value"], "") for p in top]
         if rest:
-            segments.append((f"나머지 {len(rest)}개", sum((p["value"] for p in rest), Decimal(0)), ""))
+            segments.append((f"기타({len(rest)}종)", sum((p["value"] for p in rest), Decimal(0)), ""))
         return "보유 종목 구성(Hermes 운용분 제외)", segments, ""
     if tiles == "property":
         props = data["sectors"]["real_estate"]["properties"]
@@ -554,7 +578,7 @@ def _hero_segments(data: dict[str, Any], tiles: str | None) -> tuple[str, list[t
     segments = []
     for g in groups:
         owners = g["by_owner"]
-        note = " | ".join(f"{'본인' if o == 'self' else '배우자'} {_short(v)}" for o, v in sorted(owners.items(), key=lambda item: (item[0] != "self", item[0]))) if len(owners) > 1 else ""
+        note = " · ".join(f"{'본인' if o == 'self' else '배우자'} {_short(v)}" for o, v in sorted(owners.items(), key=lambda item: (item[0] != "self", item[0]))) if len(owners) > 1 else ""
         segments.append((g["label"], g["value"], note))
     note = "" if composition.get("complete", True) else "환율이 없어 원화로 바꾸지 못한 자산은 빠져 있습니다."
     return f"자산의 구성 · {_short(composition.get('total'))}", segments, note
@@ -576,14 +600,17 @@ def _stacked(segments: list[tuple[str, Decimal | None, str]], *, on_dark: bool =
     bar = (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-radius:100px;'
            f'overflow:hidden"><tr>{cells}</tr></table>')
     ink = ON_DARK if on_dark else INK
+    # The legend sits on its own line under the bar: a coloured dot, the label and the share, 12px apart and
+    # divided by a bar character, so the items never run together even where styles are stripped or the text
+    # is copied (user review 2026-10-18: "삼성전자 39%VOO 24%").
+    divider = f' <span style="color:{ink};margin-right:12px">|</span> '
     items = []
     for i, (label, value, note) in enumerate(rows):
-        swatch = (f'<span style="display:inline-block;width:10px;height:10px;border-radius:3px;'
-                  f'background:{SEGMENTS[i % len(SEGMENTS)]};margin-right:5px;vertical-align:-1px"></span>')
+        dot = f'<span style="color:{SEGMENTS[i % len(SEGMENTS)]}">●</span> '
         extra = f' <span style="font-family:{MONO}">({escape(note)})</span>' if note else ""
-        items.append(f'<span style="display:inline-block;margin:6px 12px 0 0;font-size:12px;color:{ink}">{swatch}'
-                     f'{escape(label)} <span style="font-family:{MONO}">{_pct(value / total, 0)}</span>{extra}</span>')
-    return bar + "<div>" + "".join(items) + "</div>"
+        items.append(f'<span style="display:inline-block;white-space:nowrap;margin:6px 12px 0 0;font-size:12px;color:{ink}">'
+                     f'{dot}{escape(label)} <span style="font-family:{MONO}">{_pct(value / total, 0)}</span>{extra}</span>')
+    return bar + f'<div style="line-height:1.8">{divider.join(items)}</div>'
 
 
 def _gauge(label: str, ratio: Decimal | None, text: str) -> str:
@@ -622,38 +649,6 @@ def _tile_grid(tiles: list[tuple[str, str, str]]) -> str:
             f'cellspacing="0">{grid}</table></td></tr>')
 
 
-def _callout(advice: dict[str, Any], edition: editions.Edition | None = None) -> str:
-    """The single most important message, once per report, closing the dark hero. "Nothing to do" is
-    said only when every rule could judge; a rule stopped by unknown inputs is named instead. A themed day
-    speaks only for its own area."""
-    proposals, undetermined = advice.get("proposals") or [], advice.get("undetermined") or []
-    certainty = ""
-    themed = edition is not None and edition.key != "overview"
-    eyebrow = "오늘의 한 가지" if themed else "이번 주 가장 중요한 한 가지"
-    if proposals:
-        top = proposals[0]
-        title, why, certainty = top.title, _first_sentence(top.why), top.certainty
-    elif undetermined:
-        # Never "nothing to do" while a rule of this report could not judge (its own day lists it).
-        title = (f"오늘 다룬 {edition.label} 분야에 새 제안은 없지만, 자료가 부족해 판단하지 못한 부분이 있습니다." if themed
-                 else "이번 주 새 제안은 없지만, 자료가 부족해 판단하지 못한 부분이 있습니다.")
-        why = "판단하지 못한 것: " + " · ".join(f"{u.topic}({u.missing})" for u in undetermined)
-    elif themed:
-        title = f"오늘 다룬 {edition.label} 분야에서는 새로 실행하실 일이 없습니다."
-        why = "다른 분야의 제안은 그 분야를 다루는 보고와 주간 종합 보고에서 말씀드립니다."
-    else:
-        title = "이번 주에는 새로 실행하실 일이 없습니다. 지금의 전략을 유지하시는 것이 합리적입니다."
-        why = "현금 여유, 대출 부담, 목표 일정 모두 기준 안에 있어 바꿀 이유가 확인되지 않았습니다."
-    label = (f'<div style="font-size:12px;color:{ON_DARK_SOFT};margin-top:8px">근거의 성격: {escape(certainty)}</div>'
-             if certainty else "")
-    return (f'<tr><td style="padding-top:10px"><div style="background:{DARK_RAISED};border-radius:24px;padding:22px 20px">'
-            f'{_eyebrow(eyebrow, color=ON_DARK, background=BLUE)}'
-            f'<div style="font-family:{SANS};font-weight:400;font-size:22px;line-height:1.35;letter-spacing:-0.4px;'
-            f'color:{ON_DARK}">{escape(title)}</div>'
-            f'<div style="font-size:14px;line-height:1.6;color:{ON_DARK_SOFT};margin-top:10px">{escape(why)}</div>'
-            f'{label}</div></td></tr>')
-
-
 def _proposals(advice: dict[str, Any], full: bool, edition: editions.Edition | None = None) -> str:
     """The proposal cards: why now, effect, risks, timing, what would change the judgement, certainty.
     Thursday cards are short but keep the certainty label. Judgements stopped by unknown inputs follow."""
@@ -662,8 +657,11 @@ def _proposals(advice: dict[str, Any], full: bool, edition: editions.Edition | N
     head = f'<tr><td>{_eyebrow("오늘의 제안" if themed else "이번 주 제안")}{_heading("고객님께 드리는 제안", size=28)}</td></tr>'
     pending = _undetermined(advice)  # A daily edition carries only its own rules' pending judgements.
     if not proposals:
-        return head + (f'<tr><td style="font-size:15px;line-height:1.6;color:{BODY}">새 제안이 없습니다. 제안이 없는 것도 '
-                       '판단입니다. 다음 보고에서 변화가 있으면 다시 말씀드리겠습니다.</td></tr>') + pending
+        # Never "no proposal is a judgement too" while a rule could not judge (review 2026-10-18).
+        text = (f"확정한 새 제안은 없습니다. 다만 자료가 부족해 판단을 보류한 것이 {len(advice.get('undetermined') or [])}건 있어, "
+                "무엇이 필요한지 아래에 적었습니다." if advice.get("undetermined") else
+                "새 제안이 없습니다. 제안이 없는 것도 판단입니다. 다음 보고에서 변화가 있으면 다시 말씀드리겠습니다.")
+        return head + f'<tr><td style="font-size:15px;line-height:1.6;color:{BODY}">{text}</td></tr>' + pending
     cards = []
     for number, p in enumerate(proposals[:3], 1):
         badge = (f'<span style="display:inline-block;background:{BLUE};color:#ffffff;font-size:12px;font-weight:600;'
@@ -676,38 +674,47 @@ def _proposals(advice: dict[str, Any], full: bool, edition: editions.Edition | N
         title = (f'<div style="font-size:18px;font-weight:600;line-height:1.4;color:{INK};margin:12px 0 8px">'
                  f'{escape(p.title)}</div>')
         if full:
-            rows = [("왜 지금", escape(p.why))]
+            # One sentence per row (user review 2026-10-18: a quarter of the text); the full reasoning is kept for
+            # the e-mail answers.
+            rows = [("왜 지금", escape(_first_sentence(p.why)))]
             if p.context:  # A verification caveat on the context is a footer system note, not prose.
-                rows.append(("시장·정책 맥락", escape(p.context) + _sources(p.links)))
-            rows += [("예상 효과", escape(p.effect)), ("위험과 대안", escape(p.risks)), ("시점", escape(p.timing)),
-                     ("다시 판단할 조건", escape(p.reconsider)), ("근거의 성격", escape(p.certainty))]
+                rows.append(("시장·정책 맥락", escape(_first_sentence(p.context)) + _sources(p.links)))
+            if number == 1:
+                rows += [("예상 효과", escape(_first_sentence(p.effect))), ("위험과 대안", escape(_first_sentence(p.risks))),
+                         ("시점", escape(p.timing)), ("다시 판단할 조건", escape(_first_sentence(p.reconsider))),
+                         ("근거의 성격", escape(p.certainty))]
+            else:  # The later cards: why and when; the rest is a reply away.
+                rows.append(("시점", escape(p.timing)))
             detail = "".join(f'<tr><td style="width:92px;vertical-align:top;font-size:12px;font-weight:600;color:{MUTED};'
                              f'padding:6px 8px 6px 0">{escape(k)}</td><td style="font-size:14px;line-height:1.6;color:{BODY};'
                              f'padding:6px 0">{v}</td></tr>' for k, v in rows)
             detail = f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{detail}</table>'
         else:
             home = editions.home(p.key) if edition is not None else None
+            # The overview points to the themed day for the certainty and the rest; the original short Thursday
+            # report has no such day, so it keeps the certainty label.
+            pointer = f"자세히: {escape(home.label)} 보고" if home else f"근거의 성격: {escape(p.certainty)}"
             detail = (f'<div style="font-size:14px;line-height:1.6;color:{BODY}">{escape(_first_sentence(p.why))}</div>'
-                      f'<div style="font-size:12px;color:{MUTED};margin-top:6px">근거의 성격: {escape(p.certainty)}'
-                      + (f" · 자세히: {escape(home.label)} 보고" if home else "") + '</div>')
+                      f'<div style="font-size:12px;color:{MUTED};margin-top:6px">{pointer}</div>')
         # One card open at a time (user review 2026-10-18): the first proposal shows its detail, the others
         # show the badges and the title until tapped.
         state = " open" if number == 1 else ""
         cards.append(f'<tr><td style="padding-top:12px"><div style="background:{CANVAS};border:1px solid {HAIRLINE};'
                      f'border-radius:24px;padding:18px 20px"><details{state} style="margin:0">'
-                     f'<summary style="cursor:pointer;outline:none">{badge}{title}{_toggle_hint()}</summary>'
+                     f'<summary style="cursor:pointer;outline:none">{badge}{title}{_expand_hint(block=True)}</summary>'
                      f'<div style="margin-top:8px">{detail}</div></details></div></td></tr>')
     rest = proposals[3:]
     more = ""
     if rest:
-        items = "".join(f'<div style="font-size:13px;line-height:1.6;color:{BODY};margin:4px 0">· {escape(p.title)}</div>' for p in rest)
-        more = (f'<tr><td style="padding-top:16px"><details style="margin:0"><summary style="cursor:pointer;outline:none;'
-                f'font-size:13px;font-weight:600;color:{INK}">{_marker()} 함께 검토한 다른 제안 {len(rest)}건</summary>'
+        # The rest by their short headlines (user review 2026-10-18: nine full sentences read long).
+        items = "".join(f'<div style="font-size:13px;line-height:1.6;color:{BODY};margin:4px 0">· {escape(p.headline or p.title)}</div>'
+                        for p in rest)
+        more = (f'<tr><td style="padding-top:16px"><details style="margin:0"><summary style="{SUMMARY}font-size:14px">'
+                f'{_expand_hint()}함께 검토한 다른 제안 {len(rest)}건</summary>'
                 f'<div style="margin-top:6px">{items}</div></details></td></tr>')
-    if not full:
-        note = ("종합 보고는 요약입니다. 제안마다 근거와 위험은 그 분야를 다루는 요일 보고에서 자세히 말씀드립니다."
-                if edition is not None else "목요 보고는 요약입니다. 근거와 위험은 월요 보고에서 자세히 말씀드립니다.")
-        more += f'<tr><td style="padding-top:12px;font-size:12px;color:{MUTED}">{note}</td></tr>'
+    if not full and edition is None:  # The overview cards point to their themed day themselves.
+        more += (f'<tr><td style="padding-top:12px;font-size:12px;color:{MUTED}">목요 보고는 요약입니다. 근거와 위험은 월요 '
+                 '보고에서 자세히 말씀드립니다.</td></tr>')
     return head + "".join(cards) + more + pending
 
 
@@ -718,23 +725,18 @@ def _undetermined(advice: dict[str, Any]) -> str:
         return ""
     rows = "".join(f'<div style="font-size:13px;line-height:1.6;color:{BODY};margin:4px 0">· <b style="font-weight:600;color:{INK}">'
                    f'{escape(u.topic)}</b> — {escape(u.missing)}</div>' for u in items)
-    return (f'<tr><td style="padding-top:12px"><details style="margin:0"><summary style="cursor:pointer;outline:none;'
-            f'font-size:13px;font-weight:600;color:{INK}">{_marker()} 자료가 부족해 이번에 판단하지 못한 것 {len(items)}건</summary>'
+    return (f'<tr><td style="padding-top:12px"><details style="margin:0"><summary style="{SUMMARY}font-size:14px">'
+            f'{_expand_hint()}자료가 부족해 이번에 판단하지 못한 것 {len(items)}건</summary>'
             f'<div style="margin-top:6px">{rows}</div></details></td></tr>')
 
 
-def _marker(*, on_dark: bool = False) -> str:
-    """The [+]/[−] marker of a collapsible card; it follows the open state where <style> is honoured."""
+def _expand_hint(*, on_dark: bool = False, block: bool = False) -> str:
+    """"▼ 펼쳐서 상세 보기" on a closed card, "▲ 접기" on an open one where <style> is honoured; floated right in a
+    section summary, or its own line (`block`) under a card title."""
     color = ON_DARK if on_dark else BLUE
-    return (f'<span style="font-family:{MONO};font-size:13px;color:{color}"><span class="mk-closed">[+]</span>'
-            f'<span class="mk-open" style="display:none">[−]</span></span>')
-
-
-def _toggle_hint(*, on_dark: bool = False) -> str:
-    """A small "tap for more" line under a card title."""
-    color = ON_DARK if on_dark else MUTED
-    return (f'<div style="font-size:12px;color:{color};margin-top:4px">{_marker(on_dark=on_dark)} '
-            f'<span class="mk-closed">자세히 보기</span><span class="mk-open" style="display:none">접기</span></div>')
+    place = "display:block;margin-top:6px" if block else "float:right;margin-left:10px"
+    return (f'<span style="{place};font-size:12px;font-weight:600;color:{color};white-space:nowrap">'
+            f'<span class="mk-closed">▼ 펼쳐서 상세 보기</span><span class="mk-open" style="display:none">▲ 접기</span></span>')
 
 
 def _judgement(story: dict[str, Any]) -> str:
@@ -791,6 +793,9 @@ def _system_notes(data: dict[str, Any], story: dict[str, Any], reasons: list[str
               for p in (data.get("advice") or {}).get("proposals") or [] if getattr(p, "context_memo", "")]
     notes += [f"자동 점검 메모 · {memo}" for memo in memos]
     notes += [f"입력 안내 · {r.title}: {r.how}" for r in data.get("requests") or []]
+    toss = _toss_cash_note(((data.get("sectors") or {}).get("cash") or {}).get("toss_cash") or {})
+    if toss:  # A standing data caveat, not news: kept for the e-mail answers (user review 2026-10-18).
+        notes.append("데이터 · " + re.sub(r"<[^>]+>", "", toss).strip())
     return notes
 
 
@@ -810,20 +815,18 @@ def _changes_outside(story: dict[str, Any], title: str = "이번 주 눈여겨�
         return ""
     blocks = []
     for item in insights:
-        blocks.append(f'<div style="margin:6px 0 16px"><div style="font-size:16px;font-weight:600;color:{INK};'
+        # The change in its title and what it means here; the full account stays for the e-mail answers (user
+        # review 2026-10-18: a quarter of the text).
+        blocks.append(f'<div style="margin:6px 0 14px"><div style="font-size:16px;font-weight:600;color:{INK};'
                       f'margin-bottom:4px">{escape(item["title"])}</div>'
-                      f'<div style="font-size:14px;line-height:1.6;color:{BODY}">{escape(item["body"])}</div>'
-                      f'<div style="font-size:14px;line-height:1.6;color:{INK};margin-top:6px"><b style="font-weight:600">'
-                      f'우리 집에 주는 의미</b> — {escape(item["implication"])}</div>'
+                      f'<div style="font-size:14px;line-height:1.6;color:{BODY}">{escape(item["implication"])}</div>'
                       f'{_sources(item["links"])}</div>')
     if watch:
         rows = "".join(f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin:4px 0">· <b style="font-weight:600;'
                        f'color:{INK}">{escape(w["item"])}</b> — {escape(w["why"])}'
                        f'{_sources(w["links"])}</div>' for w in watch)
         blocks.append(f'<div style="font-size:12px;font-weight:600;color:{MUTED};margin:8px 0 4px">다음 보고까지 지켜볼 것</div>{rows}')
-    when = "이번 주" if title == "이번 주 눈여겨볼 변화" else "오늘 아침"
-    lead = f"{when} 조사한 정책·시장 변화 가운데 고객님 자산과 직접 연결되는 것만 골랐습니다. 출처를 누르면 원문을 보실 수 있습니다."
-    return _section(title, lead, "".join(blocks))
+    return _section(title, "", "".join(blocks))
 
 
 def _tax(advice: dict[str, Any], data: dict[str, Any], full: bool) -> str:
@@ -836,13 +839,11 @@ def _tax(advice: dict[str, Any], data: dict[str, Any], full: bool) -> str:
     if full:
         inner += "".join(f'<div style="margin:6px 0 14px"><div style="font-size:15px;font-weight:600;color:{INK};'
                          f'margin-bottom:4px">{escape(n.title)}</div><div style="font-size:14px;line-height:1.6;color:{BODY}">'
-                         f'{escape(n.body)}</div><div style="font-size:12px;color:{MUTED};margin-top:4px">시점: '
-                         f'{escape(n.when)} · {escape(n.certainty)}</div></div>' for n in notes)
+                         f'{escape(_first_sentence(n.body))}</div></div>' for n in notes[:MAX_TAX_NOTES])
     if year_end and rows:
         inner += (f'<div style="font-size:12px;font-weight:600;color:{MUTED};margin:8px 0 0">올해 연말정산 점검표</div>'
                   + _table(["항목", "올해 상황", "할 일"], [list(row) for row in rows]))
-    lead = ("같은 돈이라도 어느 계좌에 두고 언제 실현하느냐에 따라 세후 결과가 달라집니다. 고객님 상황에 해당하는 세금 규칙과 "
-            "그 의미를 정리했습니다. 세법은 자주 바뀌므로 실행 전 현행 기준을 확인하셔야 합니다.")
+    lead = "같은 돈도 어느 계좌에 두고 언제 실현하느냐에 따라 세후 결과가 달라집니다."
     from smith import tax as tax_rules
     inner += (f'<div style="font-size:12px;color:{MUTED};margin-top:8px">근거(세법 기준 {tax_rules.RULES_YEAR}년, '
               f'{tax_rules.RULES_CHECKED} 확인): ' + " · ".join(_cell(item) for item in tax_rules.sources()) + "</div>")
@@ -868,15 +869,13 @@ def _strategy(tracks: list[Track], direction: str = "") -> str:
     rows = []
     for track in tracks:
         icon, label, color = TRACK_STATUS[track.status]
-        # The name, the state and the headline stay visible; the reasoning opens on tap (user review 2026-10-18).
+        # The name, the state and the headline only (user review 2026-10-18: a quarter of the text); the reasoning is
+        # a system note away (the e-mail answers).
         rows.append(f'<tr><td style="padding-top:10px"><div style="background:{DARK_RAISED};border-radius:24px;padding:18px 20px">'
-                    f'<details style="margin:0"><summary style="cursor:pointer;outline:none">'
                     f'<div style="font-size:13px;font-weight:600;color:{ON_DARK}">{escape(track.name)} '
                     f'<span style="color:{color}">{icon} {label}</span></div>'
-                    f'<div style="font-size:17px;font-weight:400;line-height:1.4;color:{ON_DARK};margin:6px 0">'
-                    f'{escape(track.headline)}</div>{_toggle_hint(on_dark=True)}</summary>'
-                    f'<div style="font-size:13px;line-height:1.6;color:{ON_DARK_SOFT};margin-top:8px">{escape(track.detail)}</div>'
-                    f'</details></div></td></tr>')
+                    f'<div style="font-size:17px;font-weight:400;line-height:1.4;color:{ON_DARK};margin:6px 0 0">'
+                    f'{escape(track.headline)}</div></div></td></tr>')
     lead = (f'<div style="font-size:15px;line-height:1.65;color:{ON_DARK_SOFT};margin-bottom:6px">{escape(direction)}</div>'
             if direction else "")
     return (f'<tr><td>{_eyebrow("전략 방향", color=ON_DARK, background=DARK_RAISED)}'
@@ -887,6 +886,27 @@ def _strategy(tracks: list[Track], direction: str = "") -> str:
 def _first_sentence(text: str) -> str:
     end = text.find(". ")  # Decimal points (3.61%) are never followed by a space.
     return text if end < 0 else text[:end + 1]
+
+
+_LEAD_TOKENS = re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9]*)[^>]*>|\. ")
+_VOID = frozenset({"br", "img", "hr", "wbr"})
+
+
+def _brief(text: str, sentences: int = 2) -> str:
+    """The first `sentences` sentences of a section lead (user review 2026-10-18: the mail keeps a quarter of the
+    text, so every lead puts its takeaway first). The lead is HTML: a sentence ends only at ". " outside every
+    element, so the markup stays whole (review 2026-10-18: a complex name "가. 나. 다" in <b> lost its </b>).
+    Escaped text cannot contain "<", so every tag found is real markup."""
+    depth, count = 0, 0
+    for token in _LEAD_TOKENS.finditer(text):
+        if token.group(2) is None:
+            if depth == 0:
+                count += 1
+                if count == sentences:
+                    return text[:token.start() + 1]
+        elif token.group(2).lower() not in _VOID and not token.group(0).endswith("/>"):
+            depth = max(0, depth + (-1 if token.group(1) else 1))
+    return text
 
 
 # --- sections ---------------------------------------------------------------------------------------------
@@ -901,7 +921,7 @@ def _change(data: dict[str, Any]) -> str:
     direction = "증가" if change["total"] > 0 else "감소" if change["total"] < 0 else "변동 없음"
     span = (f"<b>{change['from']:%m월 %d일} → {change['to']:%m월 %d일}</b>" if change.get("from") and change.get("to")
             else "지난 보고 이후")
-    lead = (f"{span} <b>순자산</b>(가진 것 − 갚을 것)이 <b>{_short(abs(change['total']))} {direction}</b>했습니다."
+    lead = (f"{span} <b>순자산</b>이 <b>{_short(abs(change['total']))} {direction}</b>했습니다."
             if change["total"] else f"{span} 순자산 변화가 없습니다.")
     groups = change.get("groups")
     if groups:
@@ -915,8 +935,6 @@ def _change(data: dict[str, Any]) -> str:
             lead += f" 시세로는 {_short(market)}이 늘었지만 빠져나간 돈이 합계를 낮췄습니다."
     elif parts:
         lead += f" 가장 큰 요인은 <b>{escape(parts[0][0])}</b>입니다."
-    if parts:
-        lead += " 며칠 사이의 시세 등락은 흔한 일이며, 장기 목표 대비 흐름으로 판단하시기 바랍니다."
     if not balanced:
         lead += " 원인별 분해의 합계가 전체 변화와 맞지 않아 이번에는 분해를 싣지 않았습니다(Smith 계산 점검이 필요합니다)."
     if not change["complete"]:
@@ -925,12 +943,15 @@ def _change(data: dict[str, Any]) -> str:
     if correction:
         lead += (f" 과거 입력을 바로잡아 지난 보고의 출발점이 {_signed_short(correction)} 달라졌습니다. 이는 실제 변동이 "
                  "아니어서 위 변화에 넣지 않았습니다.")
-    rows = [[label, _won(value)] for label, value in parts] + [["합계", _won(change["total"])]]
+    rows = [[label, _signed_short(value)] for label, value in parts] + [["합계", _signed_short(change["total"])]]
     if correction:
         rows.append(["(참고) 과거 입력 정정 · 합계 제외", _won(correction)])
     chart = _diverging([(GROUP_LABELS[k], v) for k, v in groups.items()]) if groups else (_diverging(parts) if parts else "")
-    note = _signed_short(change["total"]) + (f" · 시장·평가 {_signed_short(groups['market_and_valuation'])}" if groups else "")
-    return _section("지난 보고 이후 변화", lead, chart + _table(["요인", "금액"], rows), note=escape(note))
+    since = f"{change['from']:%m/%d} 대비 " if change.get("from") else ""
+    note = since + _signed_short(change["total"]) + (
+        f" · 시장·평가 {_signed_short(groups['market_and_valuation'])} · 입출금 {_signed_short(groups['net_inflow'])}" if groups else "")
+    table = "" if groups else _table(["요인", "금액"], rows)
+    return _section("지난 보고 이후 변화", lead, chart + table, note=escape(note), brief=None)
 
 
 def _timeline(data: dict[str, Any]) -> str:
@@ -960,15 +981,12 @@ def _timeline(data: dict[str, Any]) -> str:
     first = needs[0] if needs else None
     lead = ("향후 5년 안에 예정된 큰 지출 일정은 없습니다." if first is None else
             f"가장 가까운 큰 자금 일정은 <b>{first['date']:%Y년 %m월}</b>의 {escape(first['label'])}"
-            f"(<b>{_short(first['amount'])}</b>)입니다. 이 일정들이 현금 준비의 기준이 됩니다.")
-    if len(needs) < len(items):
-        lead += (" 점선 표시는 앞으로 들어올 예정 소득으로, 받기 전까지는 확정된 돈이 아닙니다. 세후 금액은 그해 최종 세금 기준이라 "
-                 "지급일에 실제로 들어오는 돈과 다를 수 있습니다.")
+            f"(<b>{_short(first['amount'])}</b>)입니다.")
     home = data["kpis"]["home_progress"]
     inner = f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{"".join(rows)}</table>'
     if home:
         inner += _home_plan(home)
-        lead += " " + _home_lead(home)
+        lead += " " + _first_sentence(_home_lead(home))
     note = "" if home is None else f"주택 준비율 {_pct(home['ratio_baseline'], 0)}"
     return _section("목표와 일정", lead, inner, note=escape(note))
 
@@ -1018,7 +1036,7 @@ def _home_plan(home: dict[str, Any]) -> str:
         row.append(_short(_dec(gap)))
         rows.append(row)
     gauge = _gauge(f"주택 목표 준비율({home['baseline_label']})", home["ratio_baseline"], "")
-    return '<div style="height:12px"></div>' + gauge + _bars(bars) + _table(headers, rows)
+    return '<div style="height:12px"></div>' + gauge + _table(headers, rows)
 
 
 def _goals_brief(data: dict[str, Any]) -> str:
@@ -1032,9 +1050,7 @@ def _goals_brief(data: dict[str, Any]) -> str:
     rows = [[f"{item['date']:%Y.%m}", item["label"],
              f"{(item['date'].year - today.year) * 12 + item['date'].month - today.month}개월 후", _short(item["amount"])]
             for item in needs]
-    lead = ("향후 5년 안의 큰 자금 일정과 준비 상황입니다. " if needs else "")
-    if home:
-        lead += _home_lead(home)
+    lead = _home_lead(home) if home else "향후 5년 안의 큰 자금 일정은 아래와 같습니다."
     lead += " 전체 일정표와 시나리오별 표, 앞으로 들어올 성과급·주식 보상은 종합 보고에 있습니다."
     gauge = "" if home is None else _gauge(f"주택 목표 준비율({home['baseline_label']})", home["ratio_baseline"], "")
     return _section("목표까지의 준비", lead, gauge + (_table(["시점", "일정", "남은 기간", "금액"], rows) if rows else ""),
@@ -1076,7 +1092,7 @@ TAX_BASIS_TEXT = {"net_input": "세후 입력", "estimated": "연봉 기준 추�
                   "unknown": "환율 미상", "prior_unknown": "앞선 보상 금액 미상"}
 
 
-def _future_income(data: dict[str, Any]) -> str:
+def _future_income(data: dict[str, Any], *, overview: bool = False) -> str:
     """Expected pay (bonuses, share grants): what is coming, how sure it is, after an estimated tax, and the
     concentration a grant adds. Nothing here is in net worth (report design §15)."""
     found = data.get("future_income") or {}
@@ -1084,10 +1100,9 @@ def _future_income(data: dict[str, Any]) -> str:
     if not items:
         return ""
     sure = found["by_certainty"]
-    lead = (f"앞으로 받을 성과급·주식 보상은 최종 세후 추정으로 확정 <b>{_short(sure['confirmed'])}</b>, 예상 "
-            f"<b>{_short(sure['expected'])}</b>, 가능성 {_short(sure['possible'])}입니다. 아직 받지 않은 돈이라 순자산과 월 현금흐름에는 "
-            "넣지 않았고, 계획에는 확실한 정도에 따라 나눠 반영합니다(불리: 확정분만, 기준: 확정+예상, 유리: 전부). 세후는 그해 "
-            "최종 세금 기준이며, 지급일에 실제로 들어오는 돈은 원천징수 방식에 따라 다르고 연말정산·급여 공제로 나중에 맞춰집니다.")
+    lead = (f"앞으로 받을 성과급·주식 보상은 세후 추정 확정 <b>{_short(sure['confirmed'])}</b>, 예상 "
+            f"<b>{_short(sure['expected'])}</b>, 가능성 {_short(sure['possible'])}이며, 받기 전까지는 순자산에 넣지 않고 계획에만 "
+            "확실성별로 반영합니다.")
     if found.get("overdue"):
         lead += (f" 지급 예정일이 지났는데 받았다는 기록이 없는 항목 {len(found['overdue'])}건은 계획에서 뺐습니다. 받으셨는지 "
                  "알려 주시면 실제 지급일과 과세 금액으로 기록하겠습니다.")
@@ -1106,15 +1121,16 @@ def _future_income(data: dict[str, Any]) -> str:
         rows.append([f"{i.paid_on:%Y.%m}", what, "지급 확인 필요" if i.overdue else CERTAINTY_LABELS[i.certainty],
                      _short(i.gross), _short(i.net),
                      TAX_BASIS_TEXT[i.withholding_basis] + ("" if i.usable_from == i.paid_on else f", {i.usable_from:%Y.%m}부터 사용")])
-    inner = _table(["받는 달", "내용", "확실성", "세전", "최종 세후(추정)", "비고"], rows)
+    # The overview's timeline lists every payment already; the table stays for the original full report only.
+    inner = "" if overview else _table(["받는 달", "내용", "확실성", "세전", "최종 세후(추정)", "비고"], rows)
     for stock in found.get("same_stock") or []:
         # A known 0% now (no securities yet) still warns; only unknown shares are skipped.
         if stock["share_now"] is None or stock["share_with_grants"] is None or not stock["granted"]:
             continue
         inner += (f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin-top:10px">회사 주식 집중: 지금 보유한 '
                   f'{escape(stock["symbol"])}은 본인 증권 자산의 <b>{_pct(stock["share_now"], 0)}</b>이고, 예정된 주식 보상과 자사주로 '
-                  f'받는 성과급(기준, 세후)을 받으면 <b>{_pct(stock["share_with_grants"], 0)}</b>가 됩니다. 월급도 같은 회사에서 나오므로, 받는 대로 일부를 '
-                  "분산하는 원칙을 정해 두시면 회사 실적 하나에 소득과 자산이 함께 흔들리는 위험을 줄일 수 있습니다.</div>")
+                  f'받는 성과급(기준, 세후)을 받으면 <b>{_pct(stock["share_with_grants"], 0)}</b>가 됩니다. 받는 대로 일부를 분산하는 '
+                  "원칙을 정해 두시길 권합니다.</div>")
     return _section("앞으로 들어올 돈", lead, inner)
 
 
@@ -1146,19 +1162,13 @@ def _cash(cash: dict[str, Any], data: dict[str, Any]) -> str:
         lead = ("즉시 활용 가능한 자금이나 월 지출 가운데 환율이 없어 원화로 바꾸지 못한 금액이 있어, "
                 f"비상금 기준(월 지출 {cash['emergency_months_assumption']}개월) 충족 여부는 계산하지 않았습니다.")
     else:
-        lead = (f"즉시 활용 가능한 자금은 <b>{_short(cash['immediate'])}</b>으로, 월 지출의 "
-                f"<b>{'미상' if months is None else f'{months:.1f}개월'}</b>분입니다. "
-                f"비상금 기준(월 지출 {cash['emergency_months_assumption']}개월, 가정)인 {_short(cash['reserve_target'])}"
+        lead = (f"즉시 쓸 수 있는 돈은 <b>{_short(cash['immediate'])}</b>(월 지출 "
+                f"{'미상' if months is None else f'{months:.1f}개월'}분)으로, 비상금 기준 {_short(cash['reserve_target'])}"
                 + (f"까지 <b>{_short(cash['reserve_gap'])}</b>이 부족합니다." if cash["reserve_gap"] else "을 충족합니다."))
         swap = (data.get("advice") or {}).get("reserve_swap")
         if swap and swap["one_step"]:
             lead += (f" 다만 며칠 안에 팔 수 있는 주식·펀드가 {_short(swap['sellable_within_days'])}으로 부족분의 {swap['multiple']:.0f}배가 "
                      "넘으니, 월급을 쪼개 모으기보다 비중이 과한 종목이나 정리할 종목을 한 번 정리해 채우는 것이 자산 전체를 보는 방법입니다.")
-    lead += " <b>유동성</b>(얼마나 빨리 현금으로 바꿀 수 있는지)별 분포는 아래와 같습니다."
-    if cash.get("hermes"):
-        lead += (" Hermes가 운용하는 자산은 Smith가 매각·변경을 권하지 않으므로 쓸 수 있는 돈에 넣지 않고 "
-                 "따로 표시했습니다.")
-    lead += _toss_cash_note(cash.get("toss_cash") or {})
     ladder = cash["ladder"]
     covered = (None if cash["reserve_target"] in (None, 0) or cash["immediate"] is None
                else cash["immediate"] / cash["reserve_target"])
@@ -1197,14 +1207,14 @@ def _debt(debt: dict[str, Any], refinance: dict[str, Any] | None = None) -> str:
         lead = ("<b>변동금리</b>(몇 달마다 시장 금리에 맞춰 이자율이 바뀌는 방식) 대출 가운데 환율이 없어 원화로 바꾸지 못한 "
                 "대출이 있어, 합계와 금리 상승 시 이자 증가액을 계산하지 않았습니다.")
     else:
-        lead = (f"<b>변동금리</b>(몇 달마다 시장 금리에 맞춰 이자율이 바뀌는 방식) 대출은 <b>{_short(debt['variable_total'])}</b>입니다. "
-                + (f"금리가 1%p 오르면 월 이자가 약 <b>{_short(one['monthly_increase'])}</b>"
-                   f"(연 {_short(one['monthly_increase'] * 12)}) 늘어납니다." if one and debt["variable_total"] else ""))
+        lead = (f"<b>변동금리</b> 대출 <b>{_short(debt['variable_total'])}</b>"
+                + (f"은 금리가 1%p 오르면 월 이자가 약 <b>{_short(one['monthly_increase'])}</b> 늘어납니다."
+                   if one and debt["variable_total"] else "이 있습니다."))
     unused = debt.get("unused_credit")
     for line in debt.get("credit_lines", []):
         if line["drawn"] == 0:
-            lead += (f" {line['label']}은 잔액이 0원이라 이자가 전혀 없고, 유사시 바로 쓸 수 있는 "
-                     f"<b>{_short(line['limit'])}</b>의 신용 한도가 확보되어 유동성 방어에 긍정적입니다. 갚을 것이 없으니 상환 제안 대상이 아닙니다.")
+            lead += (f" {line['label']}은 잔액 0원이라 이자가 없고, <b>{_short(line['limit'])}</b> 한도는 유사시 바로 쓸 수 있어 "
+                     "유동성 방어에 긍정적입니다(상환 대상 아님).")
         elif line["drawn"] is not None and line["limit"] is not None:
             lead += f" {line['label']}은 한도 {_short(line['limit'])} 중 {_short(line['drawn'])}을 쓰고 있습니다."
     verdict = ""
@@ -1254,47 +1264,42 @@ def _months_text(value: Decimal) -> str:
 
 
 def _stress_lead(st: dict[str, Any], *, detail: bool) -> str:
-    """The stress scenario in words: assumptions, the monthly shortfall, how far cash and then stock sales
-    carry the household through the scenario's months, an uncovered lease deposit, and the verdict."""
+    """The stress scenario in words: the four assumptions with their sizes, then how far cash and stock sales
+    carry the household, an uncovered lease deposit, and that rates, stocks and home prices did move together in
+    2022 (user review 2026-10-18: "나쁜 일이 겹치는 한 해" left the client asking what and whether it can happen)."""
     a, m = st["assumptions"], st["monthly"]
     horizon = a["income_stop_months"]
-    icon, label, color = STRESS_VERDICT[st["verdict"]]
-    badge = f'<b style="color:{color}">{icon} {escape(label)}</b>'
-    text = (f"변동금리 대출 금리 +{a['rate_shock'] * 100:.1f}%p, 가장 큰 근로·사업 소득 {horizon}개월 중단, "
-            f"집값 {a['property_drop'] * 100:.0f}% 하락, 주식·펀드 {a['stock_drop'] * 100:.0f}% 하락이 한꺼번에 온다고 "
-            "가정했습니다. 모두 가정값입니다.")
+    # An extreme check, said as one (user review 2026-10-18: "비현실적"): the whole result before the cash-only gap.
+    text = (f"변동금리 +{a['rate_shock'] * 100:.1f}%p, 가장 큰 소득 {horizon}개월 중단, 집값 {a['property_drop'] * 100:.0f}%·"
+            f"주가 {a['stock_drop'] * 100:.0f}% 하락이 한 해에 모두 오는 드문 극단을 가정해도 ")
     if m["burn"] is None:
-        text += " 월 현금흐름이나 대출 가운데 원화로 환산하지 못한 금액이 있어 버티는 기간은 계산하지 않았습니다."
+        text += "원화로 환산하지 못한 금액이 있어 버티는 기간은 계산하지 못했습니다."
     elif m["burn"] <= 0:
-        text += f" 그래도 매월 약 <b>{_short(-m['burn'])}</b>이 남아 현금이 줄지 않습니다."
+        text += f"매월 약 <b>{_short(-m['burn'])}</b>이 남아 현금이 줄지 않습니다."
+    elif st["months_cash"] is None:
+        text += f"매월 약 {_short(m['burn'])}이 모자라며, 즉시 쓸 수 있는 돈에 환산하지 못한 금액이 있어 버티는 개월은 미상입니다."
+    elif st["covers_scenario"]:
+        text += (f"즉시 쓸 수 있는 돈 {_short(st['immediate'])}으로 {horizon}개월을 모두 버티고 약 "
+                 f"<b>{_short(st['cash_after_scenario'])}</b>이 남습니다.")
+    elif st["after_sales"] is not None and st["after_sales"] >= 0:
+        text += (f"주식·펀드를 {a['stock_drop'] * 100:.0f}% 내린 값에 팔면 {horizon}개월을 버티고 약 {_short(st['after_sales'])}이 "
+                 f"남습니다. 다만 현금만으로는 <b>{_months_text(st['months_cash'])}</b>이라, 주식을 싼값에 팔지 않으려면 비상금이 "
+                 "먼저입니다.")
     else:
-        text += f" 이 경우 매월 약 <b>{_short(m['burn'])}</b>이 모자랍니다."
-        if st["months_cash"] is None:
-            text += " 즉시 쓸 수 있는 돈에 환산하지 못한 금액이 있어 버티는 개월은 미상입니다."
-        elif st["covers_scenario"]:
-            text += (f" 즉시 쓸 수 있는 돈 {_short(st['immediate'])}으로 {horizon}개월을 모두 버티고 약 "
-                     f"<b>{_short(st['cash_after_scenario'])}</b>이 남습니다.")
-        else:
-            text += (f" 즉시 쓸 수 있는 돈 {_short(st['immediate'])}만으로는 {horizon}개월 중 "
-                     f"<b>{_months_text(st['months_cash'])}</b>을 버팁니다.")
-            if st["after_sales"] is not None and st["after_sales"] >= 0:
-                text += f" 주식·펀드를 낮아진 값에 팔면 {horizon}개월을 모두 버티고 약 {_short(st['after_sales'])}이 남습니다."
-            elif st["months_with_sales"] is not None:
-                text += f" 주식·펀드를 낮아진 값에 팔아도 {_months_text(st['months_with_sales'])}까지입니다."
+        text += (f"버티지 못합니다: 현금만으로는 <b>{_months_text(st['months_cash'])}</b>"
+                 + (f", 주식·펀드를 팔아도 {_months_text(st['months_with_sales'])}" if st["months_with_sales"] is not None else "")
+                 + f"까지만 버팁니다({horizon}개월 중).")
     lease = st["lease"]
     if STRESS_LEASE_FLAG in st["flags"]:
         need = ("보증금 " + _short(lease["amount"]) if lease.get("basis") != "reverse_jeonse" else
                 f"보증금 {_short(lease['amount'])} 가운데 새 세입자 보증금으로 메우지 못하는 차액 {_short(lease['need'])}")
         text += f" 다만 {lease['due']:%Y년 %m월} 돌려드릴 {need}은 이 가정에서 약 {_short(lease['available'])}밖에 마련하지 못합니다."
     elif lease is not None and lease.get("basis") == "reverse_jeonse" and lease.get("covered"):
-        text += (f" {lease['due']:%Y년 %m월} 보증금 반환은 전세 시세가 함께 내려도 차액 {_short(lease['need'])}만 준비하면 되어, "
-                 "이 가정에서도 감당할 수 있습니다.")
-    text += f" 판정: {badge}."
-    if detail:
-        text += (f" 기준: {horizon}개월을 모두 버티면 안정, {a['watch_months']:.0f}개월 이상이면 빠듯, 그 미만이면 취약이며, "
-                 "가까운 보증금 반환이 부족하면 최소 빠듯입니다.")
-        if st["pausable"]:
-            text += f" 멈출 수 있다고 표시하신 지출 {_short(st['pausable'])}을 멈추면 버티는 기간이 늘어납니다."
+        text += f" {lease['due']:%Y년 %m월} 보증금 반환도 차액 {_short(lease['need'])}만 준비하면 되어 감당할 수 있습니다."
+    p = stress.PRECEDENT
+    text += (f" 금리·주가·집값이 함께 움직인 해는 실제로 있었습니다: {p['year']}년 기준금리 {p['base_rate'][0]}→{p['base_rate'][1]}, "
+             f"코스피 {p['kospi']}, 서울 아파트 실거래가지수 {p['seoul_apartments']}({p['seoul_apartments_vintage']}). "
+             "소득 중단은 실직·휴직·질병을 가정한 것입니다.")
     return text
 
 
@@ -1327,15 +1332,16 @@ def _stress(st: dict[str, Any]) -> str:
     gauge = ("" if st["months_cash"] is None else
              _gauge(f"현금만으로 버티는 기간({horizon:.0f}개월 중)", st["months_cash"] / horizon, ""))
     icon, label, _ = STRESS_VERDICT[st["verdict"]]
-    return _section("스트레스 테스트: 나쁜 일이 겹치면", _stress_lead(st, detail=True),
-                    gauge + bars + _table(["항목", "평소", "위기 가정"], table_rows), note=escape(f"{icon} {label}"))
+    return _section(STRESS_TITLE, _stress_lead(st, detail=True) + _sources(stress.PRECEDENT_SOURCES),
+                    gauge + bars + _table(["항목", "평소", "가정한 해"], table_rows), note=escape(f"{icon} {label}"),
+                    brief=None)
 
 
 def _stress_summary(st: dict[str, Any]) -> str:
     """The overview's one-paragraph version: verdict and months, no table (the household day has it)."""
     icon, label, _ = STRESS_VERDICT[st["verdict"]]
-    return _section("스트레스 테스트: 나쁜 일이 겹치면",
-                    _stress_lead(st, detail=False) + " 자세한 표는 생활·목표 보고에 있습니다.", "", note=escape(f"{icon} {label}"))
+    return _section(STRESS_TITLE, _stress_lead(st, detail=False) + " 자세한 표는 생활·목표 보고에 있습니다."
+                    + _sources(stress.PRECEDENT_SOURCES), "", note=escape(f"{icon} {label}"), brief=None)
 
 
 def _spending(room: dict[str, Any] | None, split: dict[str, Any] | None = None) -> str:
@@ -1362,24 +1368,24 @@ def _spending(room: dict[str, Any] | None, split: dict[str, Any] | None = None) 
     if room["planned"]:
         rows += [(label, amount, False) for label, amount in room["planned"]] + [("계획한 목표까지 지킬 때", with_goals, False)]
     if room["room"] >= 0:
-        lead = (f"수입에서 지출과 본인 계좌 이체를 뺀 남는 돈 {_short(room['surplus'])} 가운데 비상금과 약정(보증금 반환)이 매월 "
-                f"가져가는 적립은 {_short(room['committed_total'])}입니다. 나머지 <b>{_short(room['room'])}</b>은 이번 달에 쓰셔도 "
-                "비상금과 약정이 늦어지지 않는 <b>안심 소비 한도</b>입니다.")
-        if room.get("reserve_swap"):
-            lead += (f" 비상금 부족분 {_short(room['reserve_swap'])}은 보유 주식 일부를 정리해 한 번에 채우는 방안을 제안했으므로 "
-                     "매월 적립에서 뺐습니다.")
+        lead = (f"이번 달에 쓰셔도 비상금과 약정이 늦어지지 않는 <b>안심 소비 한도</b>는 <b>{_short(room['room'])}</b>입니다(남는 돈 "
+                f"{_short(room['surplus'])} − 비상금·약정 적립 {_short(room['committed_total'])}).")
         if room["planned"]:
             lead += (f" 계획한 목표(매월 {_short(room['planned_total'])})까지 지금 속도로 지키려면 약 "
                      f"<b>{_short(room['room_with_goals'])}</b>입니다." if room["room_with_goals"] >= 0 else
                      f" 다만 계획한 목표(매월 {_short(room['planned_total'])})까지 지금 속도로 지키려면 매월 "
                      f"{_short(-room['room_with_goals'])}이 모자라, 목표의 시점·금액을 손보지 않는 한 그 목표는 늦어집니다.")
+        if room.get("reserve_swap"):
+            lead += (f" 비상금 부족분 {_short(room['reserve_swap'])}은 보유 주식 일부를 정리해 한 번에 채우는 방안을 제안했으므로 "
+                     "매월 적립에서 뺐습니다.")
         lead += " 쌓아 두는 것이 목적이 아니라면, 시간이 지나도 남는 경험에 먼저 배정하시길 권합니다."
     else:
         lead = (f"남는 돈 {_short(room['surplus'])}보다 비상금과 약정에 매월 필요한 적립 {_short(room['committed_total'])}이 "
                 f"<b>{_short(-room['room'])}</b> 더 큽니다. 지금은 마음 편히 쓸 여유가 없고, 약정과 지출을 먼저 손봐야 합니다.")
     table = _table(["항목", "매월"], [[label, _won(value)] for label, value, _ in rows])
     chart = (balance_chart + '<div style="height:12px"></div>') if balance else ""
-    return _section("마음 편히 써도 되는 돈", balance + lead, chart + _bars(rows) + table,
+    # The room and the goals' pace lead; the month's split follows (the household day's hero bar shows it too).
+    return _section("마음 편히 써도 되는 돈", lead + (" " + balance if balance else ""), chart + _bars(rows) + table,
                     note=escape(f"안심 소비 한도 {_short(safe)}"))
 
 
@@ -1404,7 +1410,7 @@ def _holdings(data: dict[str, Any], story: dict[str, Any], full: bool) -> str:
     listed = [p for p in positions if p["value"] is not None]
     segments = [(str(p["name"])[:12], p["value"], "") for p in listed[:4]]
     if len(listed) > 4:
-        segments.append((f"나머지 {len(listed) - 4}개", sum((p["value"] for p in listed[4:]), Decimal(0)), ""))
+        segments.append((f"기타({len(listed) - 4}종)", sum((p["value"] for p in listed[4:]), Decimal(0)), ""))
     inner = _stacked(segments) + '<div style="height:8px"></div>'
     inner += _table(["종목", "평가액", "비중", "수익률", "Smith 의견"],
                     [[_named(p), _short(p["value"]), _pct(p["share"]), _return(p["return_on_cost"]),
@@ -1442,17 +1448,19 @@ def _holdings_lead(review: dict[str, Any], sec: dict[str, Any], opined: bool) ->
     lead = ""
     if positions:
         top = positions[0]
-        lead = (f"보유 종목 {len(positions)}개, {_short(review['total'])}입니다. 가장 큰 종목({escape(str(top['name']))})이 "
-                f"<b>{_pct(review['top1_share'])}</b>, 상위 5개가 <b>{_pct(review['top5_share'])}</b>를 차지하고, 해외 상장 종목 "
-                f"비중은 {_pct(review['overseas_share'])}입니다.")
-    if review["concentrated"]:
-        names = ", ".join(escape(str(p["name"])) for p in positions if p["concentrated"])
-        lead += (f" 한 종목이 주식의 {_pct(review['concentration_limit'], 0)}를 넘으면 그 회사 한 곳의 소식에 자산이 크게 "
-                 f"흔들리는 <b>집중</b> 상태로 봅니다. 이 기준은 가정이며, 지금 여기에 해당하는 종목은 {names}입니다.")
+        lead = (f"보유 종목 {len(positions)}개 {_short(review['total'])} 가운데 가장 큰 종목({escape(str(top['name']))})이 "
+                f"<b>{_pct(review['top1_share'])}</b>, 상위 5개가 <b>{_pct(review['top5_share'])}</b>이고 해외 상장 비중은 "
+                f"{_pct(review['overseas_share'])}입니다.")
+    if not opined:  # Second, so the two-sentence lead still explains an empty opinion column.
+        lead += " 이번에는 종목별 의견을 만들지 못해 숫자만 보여 드립니다."
     employer = [p for p in positions if p.get("employer")]
     if employer:
         lead += (f" {', '.join(escape(str(p['name'])) for p in employer)}은 월급과 주식 보상이 나오는 회사의 주식이라, 앞으로 벌 소득과 "
                  "지금 가진 자산이 한 회사에 함께 묶인 <b>이중 집중</b> 상태입니다. 가장 먼저 관리할 종목입니다.")
+    if review["concentrated"]:
+        names = ", ".join(escape(str(p["name"])) for p in positions if p["concentrated"])
+        lead += (f" 한 종목이 주식의 {_pct(review['concentration_limit'], 0)}를 넘으면 그 회사 한 곳의 소식에 자산이 크게 "
+                 f"흔들리는 <b>집중</b> 상태로 봅니다. 이 기준은 가정이며, 지금 여기에 해당하는 종목은 {names}입니다.")
     if sec["unrealized_gain"] is not None:
         lead += (f" 종목별 <b>미실현 손익</b>(팔지 않아 확정되지 않은 손익) 합계는 {_signed_short(sec['unrealized_gain'])}"
                  + (f"이며, 매입 원가를 아는 {sec['unrealized_gain_counted']}개 종목만의 부분 합계입니다."
@@ -1462,8 +1470,6 @@ def _holdings_lead(review: dict[str, Any], sec: dict[str, Any], opined: bool) ->
                  "빠졌습니다.")
     if sec.get("hermes"):
         lead += (f" Hermes가 운용하는 자산 {_short(sec['hermes'])}에는 의견을 드리지 않습니다(필요하면 Hermes와 상의하십시오).")
-    if not opined:
-        lead += " 이번에는 종목별 의견을 만들지 못해 숫자만 보여 드립니다."
     return lead
 
 
@@ -1567,9 +1573,14 @@ def _real_estate(estate: dict[str, Any], figures: dict[str, Any] | None = None) 
     lead = (f"부동산이 자산의 <b>{_pct(estate['share_of_assets'], 0)}</b>를 차지합니다. 평가액의 기준은 <b>{escape(basis)}</b>"
             f"(기준일 {', '.join(dates)})입니다.")
     estimate, value = figures.get("property_estimate"), figures.get("property_value")
+    reference = figures.get("property_estimate_reference")
     if estimate is not None and value is not None:
         lead += (f" 같은 단지·면적의 최근 6개월 실거래 중간값 합계는 <b>{_short(estimate)}</b>으로 평가액과 "
                  f"{_signed_short(estimate - value)} 차이입니다.")
+    elif reference is not None and value is not None:
+        lead += (f" 같은 단지·면적의 최근 6개월 실거래 중간값 합계는 <b>{_short(reference)}</b>으로 평가액과 "
+                 f"{_signed_short(reference - value)} 차이입니다. 다만 {escape(', '.join(figures['property_estimate_thin']))}은 "
+                 f"거래가 {MIN_BASIS}건 미만이라 이 합계는 참고용입니다.")
     lead += " <b>LTV</b>(집값 대비 대출 비율)가 낮을수록 시세 하락에 견딜 여유가 큽니다."
     bars = _stacked([(p["label"], p["value"], "") for p in props]) + '<div style="height:8px"></div>'
     table = _table(["부동산", "평가액", "관련 부채", "LTV"],
@@ -1603,7 +1614,7 @@ def _move_targets(data: dict[str, Any]) -> str:
     if not plan:
         return ""
     pr, pay = plan["proceeds"], plan["pay"]
-    lead = (f"<b>{plan['horizon']:%Y년 %m월}</b> 무렵 두 집을 모두 팔면 손에 남는 돈은 약 <b>{_short(pr['general'])}</b>"
+    lead = (f"{plan['horizon']:%Y년 %m월} 무렵 두 집을 모두 팔면 손에 남는 돈은 약 <b>{_short(pr['general'])}</b>"
             + ("입니다(실거래·원장 기준 매도가에서 담보대출·보증금·양도세 일반 과세분을 뺀 값)." if pr["tax_known"]
                else "입니다(매도가에서 담보대출·보증금을 뺀 값, 취득가를 몰라 양도세는 빼지 않음)."))
     if pr["exempt"] is not None and pr["tax_known"]:
@@ -1621,20 +1632,36 @@ def _move_targets(data: dict[str, Any]) -> str:
         # The narrative knows each target by its alias ("후보 1"); the mail pairs the alias with the name.
         named = f"{t['alias']} · {t['label']}"
         bars.append((named, t["cost_with_fees"], False))
-        rows.append([named, f"{_short(t['price'])} · {t['price_basis']}", _delta_pct(t["change_6m"]), _short(t["spread"]),
-                     _short(t["spread_with_pay"]), trends.get(t["trend"], "-")])
+        hold = t["change_hold"]
+        rows.append([named, f"{_short(t['price'])} · {t['price_basis']}",
+                     f"판단 보류(최근 {hold['recent']}·이전 {hold['older']}건)" if hold else _delta_pct(t["change_6m"]),
+                     _short(t["spread"]), _short(t["spread_with_pay"]),
+                     "판단 보류" if t["trend_hold"] else trends.get(t["trend"], "-")])
     nearest = min((t for t in plan["targets"] if t["spread"] is not None), key=lambda t: t["spread"], default=None)
     if nearest is not None:
+        # First (pre-review check 2026-10-18): the gap to the nearest target and what the expected pay closes of it
+        # is the day's answer; the two-sentence lead used to stop before it.
         pays = [f"예정 소득 반영 시 {_short(nearest['spread_with_pay'])}" if nearest["spread_with_pay"] is not None else "",
                 f"확정분만 반영 시 {_short(nearest['spread_with_pay_adverse'])}" if nearest["spread_with_pay_adverse"] is not None else ""]
         pays = ", ".join(p for p in pays if p)
-        lead += (f" 필요 추가 자금이 가장 작은 곳은 <b>{escape(nearest['alias'])} · {escape(nearest['label'])}</b>으로 약 "
-                 f"<b>{_short(nearest['spread'])}</b>" + (f"({pays})" if pays else "")
-                 + (", 세전 기준으로 6개월 전보다 차이가 " + trends[nearest["trend"]] + "입니다." if nearest["trend"] else "입니다."))
+        lead = (f"필요 추가 자금이 가장 작은 곳은 <b>{escape(nearest['alias'])} · {escape(nearest['label'])}</b>으로 약 "
+                f"<b>{_short(nearest['spread'])}</b>" + (f"({pays})" if pays else "")
+                + (", 세전 기준으로 6개월 전보다 차이가 " + trends[nearest["trend"]] + "입니다." if nearest["trend"] else "입니다.")
+                + " " + lead)
     lead += " 핵심 변수는 성과급·자사주 유입과 그 주가, 그리고 매도 순서에 따른 양도세입니다."
     table = _table(["후보 단지", "시세(기준)", "6개월 전 대비", "필요 추가 자금", "예정 소득 반영 후", "추이(세전)"], rows)
+    # The spread trend (user review 2026-10-18): each target's gap six months ago against now, both before tax.
+    trend = _paired_bars([(f"{t['alias']} · {t['label']}", t["spread_6m_ago"], t["spread_before_tax"])
+                          for t in plan["targets"] if not t["trend_hold"]])
+    # A trend needs MIN_BASIS deals in both half-years on both sides; the counts say why it is withheld.
+    homes_hold = "; ".join(f"{h['label']}의 실거래가 최근 6개월 {h['recent']}건·이전 6개월 {h['older']}건" for h in pr["hold"])
+    withheld = (f'<div style="font-size:12px;color:{MUTED};margin-top:4px">6개월 추이는 판단 보류: '
+                + (f"{escape(homes_hold)}으로" if homes_hold else "일부 단지의 실거래가")
+                + f" 비교에 필요한 {MIN_BASIS}건에 못 미칩니다.</div>" if any(t["trend_hold"] for t in plan["targets"]) else "")
+    trend = (f'<div style="font-size:13px;font-weight:600;color:{INK};margin:14px 0 6px">필요 추가 자금 추이(세전, 6개월 전 → 지금)'
+             f'</div>{trend}{withheld}' if trend else withheld)
     note = "" if nearest is None else f"최소 추가 자금 {_short(nearest['spread'])}"
-    return _section("목표 단지 vs 보유 주택 2채 시세 스프레드", lead, _bars(bars) + table, note=escape(note))
+    return _section("목표 단지 vs 보유 주택 2채 시세 스프레드", lead, _bars(bars) + trend + table, note=escape(note))
 
 
 def _delta_pct(ratio: Decimal | None) -> str:
@@ -1655,10 +1682,6 @@ def _pension_stack(data: dict[str, Any]) -> str:
         lead += (f" {', '.join(p['label'] for p in missing)}은 아직 수령액을 몰라 뺀 하한이며, 답장으로 알려 주시면 바로 반영합니다: "
                  + " ".join(f"{p['label']}는 {p['missing']}." for p in missing if p["missing"]))
     lead += f" 연금 계좌는 {stack['payout_age']}세 개시를 가정했고, 세후는 가정 세율이라 현행 법령 확인이 필요합니다."
-    segments = [(p["label"], p["net_monthly"], "") for p in stack["pipelines"] if p["net_monthly"] is not None]
-    gap = target - stack["total_net"]
-    if gap > 0:
-        segments.append(("목표까지 부족", gap, ""))
     rows = []
     for p in stack["pipelines"]:
         # A stated payout starts on a date; with only the birth year its age is approximate (review 2026-10-18).
@@ -1667,10 +1690,10 @@ def _pension_stack(data: dict[str, Any]) -> str:
         gross = _short(p["gross_monthly"])
         if p.get("nominal_monthly") is not None:  # The insurer's own figure is a future amount: show both.
             gross = f"{_short(p['gross_monthly'])}(현재 가치) · {p.get('start_year', '')}년 금액 {_short(p['nominal_monthly'])}"
-        rows.append([p["label"], start, gross, _short(p["net_monthly"]),
-                     p["basis_text"] if p["net_monthly"] is not None else f"입력 필요: {p['missing']}"])
-    inner = (_gauge("목표 월 생활비 대비 준비율", stack["ratio"], "") + _stacked(segments)
-             + _table(["연금", "개시", "월 예상(세전)", "세후", "근거"], rows))
+        basis = (("입력값" if p["basis_text"].startswith("알려 주신") else "추정") if p["net_monthly"] is not None
+                 else f"입력 필요: {p['missing']}")
+        rows.append([p["label"], start, gross, _short(p["net_monthly"]), basis])
+    inner = _gauge("목표 월 생활비 대비 준비율", stack["ratio"], "") + _table(["연금", "개시", "월 예상(세전)", "세후", "근거"], rows)
     return _section("노후 현금흐름 준비율: 4대 연금 스택", lead, inner, note=escape(f"준비율 {_pct(stack['ratio'], 0)}"))
 
 
@@ -1685,8 +1708,9 @@ def _experiences(story: dict[str, Any]) -> str:
                     f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin-top:6px">{escape(e["body"])}</div>'
                     f'<div style="font-size:12px;color:{MUTED};margin-top:6px">{escape(e["when"])}</div>'
                     f'{_sources(e.get("links") or [])}</div>' for e in items)
-    lead = "숫자와 저축 너머, 고객님의 삶과 지평을 넓혀 줄 경험을 이번 주에 한두 가지 골랐습니다. 선택은 고객님의 몫입니다."
-    return _opened(_section("이번 주의 경험 제안", lead, cards, note=escape(f"{len(items)}건")))
+    lead = ("숫자와 저축 너머, 고객님의 삶과 지평을 넓혀 줄 경험(전시, 인문 독서, 여행, 미식, 테니스 같은 웰니스)을 이번 주에 "
+            "한두 가지 골랐습니다. 선택은 고객님의 몫입니다.")
+    return _opened(_section("금주의 라이프스타일 & 경험 소비 큐레이션", lead, cards, note=escape(f"{len(items)}건")))
 
 
 def _annuity_review(data: dict[str, Any]) -> str:
@@ -1704,14 +1728,12 @@ def _annuity_card(r: dict[str, Any], number: int, count: int) -> str:
                  {"strong_keep": "good", "keep_as_floor": "neutral", "surrender_candidate": "warn"}[r["verdict"]])
     be = (f"연 {r['break_even_return'] * 100:.1f}%" if r["break_even_return"] is not None else
           f"연 {SEARCH_HIGH * 100:.0f}% 이상" if r["break_even_bound"] == "above" else f"연 {SEARCH_LOW * 100:.0f}% 미만")
-    lead = (f"연금보험에 앞으로 더 낼 돈은 {r['remaining_months']}회, 약 <b>{_short(r['remaining_premiums'])}</b>이고(총 "
-            f"{_short(r['total_premiums'])} 중 {_short(r['paid_so_far'])} 납입, 지금 해지하면 {_short(r['surrender_now'])}), 받을 돈은 "
-            f"{r['annuity_start']:%Y년 %m월}(약 {r['start_age']}세)부터 평생 매월 <b>{_short(r['annuity_monthly_nominal'])}</b>입니다(그때 금액, "
-            f"세금 없음, 물가 연동 없음). 지금 가치로는 월 {_short(r['annuity_real_now'])}, {r['late_age']}세 무렵에는 "
-            f"{_short(r['annuity_real_late'])} 정도입니다. 남은 보험료와 해지금으로 받는 돈을 계산한 연평균 수익률은 "
-            f"{REFERENCE_AGE_TEXT}까지 받으면 {_pct(r['irr_reference'], 1) if r['irr_reference'] is not None else '미상'}이며, 같은 돈을 "
-            f"지수펀드에 넣어 연금과 같아지려면 <b>{be}</b>의 수익률이 필요합니다. {sentence} {flip} 이미 낸 돈이 아까워 결정하는 "
-            "매몰비용의 함정은 피하셔야 합니다.")
+    # Verdict first, then the two numbers behind it, the flip condition and the sunk-cost trap (user review
+    # 2026-10-18: a quarter of the text; the tables below carry the rest).
+    lead = (f"{sentence} 앞으로 낼 약 <b>{_short(r['remaining_premiums'])}</b>({r['remaining_months']}회)으로 "
+            f"{r['annuity_start']:%Y년 %m월}부터 평생 월 <b>{_short(r['annuity_monthly_nominal'])}</b>(지금 가치 "
+            f"{_short(r['annuity_real_now'])})을 받으며, 지수펀드로 같은 연금을 만들려면 <b>{be}</b>의 수익률이 필요합니다. "
+            f"{flip} 이미 낸 돈(매몰비용)은 판단에서 빼십시오.")
     by_life = _table(["몇 세까지 받나", "연평균 수익률(세후)", "총수령액"],
                      [[f"{b['to_age']}세", _pct(b["irr"], 1) if b["irr"] is not None else "미상", _short(b["received"])]
                       for b in r["by_lifespan"]])
@@ -1719,15 +1741,14 @@ def _annuity_card(r: dict[str, Any], number: int, count: int) -> str:
                  [[_pct(a["rate"], 0), _short(a["monthly"]) + (" (연금보다 적음)" if a["monthly"] < r["annuity_monthly_nominal"] else ""),
                    _short(a["monthly_real"])] for a in r["alternatives"]])
     gauge = _gauge("납입 진행", Decimal(r["paid_months"]) / Decimal(r["total_months"]), "")
-    inner = (f'<div style="margin:4px 0 8px">{pill}</div>' + gauge
+    inner = (gauge
              + f'<div style="font-size:12px;font-weight:600;color:{MUTED};margin-top:10px">수명별 연평균 수익률</div>' + by_life
              + f'<div style="font-size:12px;font-weight:600;color:{MUTED};margin-top:12px">같은 돈을 지수펀드에 넣으면(세금 전)</div>' + alt)
     name = r.get("policy_name") or "연금보험"
     title = "보유 연금보험 평가" + (f" ({number}/{count})" if count > 1 else "")
-    return _section(title, f"<b>{escape(name)}</b> — " + lead, inner, note=pill)
+    return _section(title, f"<b>{escape(name)}</b> — " + lead, inner, note=pill, brief=None)
 
 
-REFERENCE_AGE_TEXT = "85세"
 
 
 def _pension(pi: dict[str, Any], review: dict[str, Any] | None = None) -> str:
@@ -1787,8 +1808,9 @@ def _pp(value: Decimal) -> str:
 REQUEST_LABELS = {"must": "꼭 필요", "should": "있으면 더 정확", "nice": "참고"}
 
 
-def _requests(requests: list[Any], full: bool) -> str:
-    """What the client could provide next (checklist.requests). Thursday lists only the essential ones."""
+def _requests(requests: list[Any], full: bool, rest_where: str = "월요 보고") -> str:
+    """What the client could provide next (checklist.requests). Thursday and the overview list only the essential
+    ones; `rest_where` names the report that lists the rest."""
     shown = requests if full else [r for r in requests if r.priority == "must"]
     if not shown:
         return ""
@@ -1800,21 +1822,11 @@ def _requests(requests: list[Any], full: bool) -> str:
                  f'padding:2px 10px;margin-right:6px">{REQUEST_LABELS[r.priority]}</span>')
         # Where the figure goes (the JSON field or config key) is developer detail: it is listed in the
         # footer's system notes, not beside the request the client reads (report design §17.6).
-        rows.append(f'<div style="margin:6px 0 14px"><div style="font-size:15px;font-weight:600;color:{INK};'
-                    f'line-height:1.5">{badge}{escape(r.title)}</div>'
-                    f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin-top:4px">{escape(r.why)}</div></div>')
+        rows.append(f'<div style="margin:6px 0 10px;font-size:14px;font-weight:600;color:{INK};line-height:1.5">'
+                    f'{badge}{escape(r.title)}</div>')
     rest = len(requests) - len(shown)
-    lead = ("알려 주시면 보고서의 판단이 더 정확해지는 자료입니다. '꼭 필요'는 지금 판단이 비어 있거나 틀릴 수 있는 "
-            "항목입니다. 답장으로 알려 주시면 Smith가 기록합니다.") + (f" 나머지 {rest}건은 월요 보고에서 안내합니다." if rest else "")
+    lead = "답장으로 알려 주시면 판단이 더 정확해지는 자료입니다." + (f" 나머지 {rest}건은 {rest_where}에서 안내합니다." if rest else "")
     return _section("다음에 확인할 것", lead, "".join(rows))
-
-
-def _glossary(terms: tuple[str, ...] | None = None) -> str:
-    """Every term, or only the ones a themed day uses."""
-    chosen = TERMS.items() if terms is None else [(t, TERMS[t]) for t in terms if t in TERMS]
-    inner = "".join(f'<div style="font-size:13px;line-height:1.6;color:{BODY};margin:3px 0"><b style="font-weight:600;'
-                    f'color:{INK}">{escape(term)}</b> — {escape(text)}</div>' for term, text in chosen)
-    return _section("용어 풀이", "", inner)
 
 
 def _footer(warnings: list[str] | tuple[str, ...] = ()) -> str:
@@ -1823,9 +1835,8 @@ def _footer(warnings: list[str] | tuple[str, ...] = ()) -> str:
     warn = ("" if not warnings else
             f'<div style="font-size:13px;line-height:1.6;color:{INK};margin-bottom:8px">▲ 확인 필요: '
             f'{escape(" · ".join(warnings))}. 자세한 사유는 이 메일에 답장으로 물어 주십시오.</div>')
-    return (f'<tr><td>{warn}<div style="font-size:12px;line-height:1.6;color:{MUTED}">Smith는 조회 전용 자문입니다. 매매·이체·대출 '
-            '신청을 실행하지 않으며, 세금과 법령은 실행 전 현행 기준을 확인하셔야 합니다. 판단 근거, 적용한 투자 원칙, 데이터 기준 '
-            '시점은 이 메일에 답장으로 물으시면 설명해 드립니다.</div></td></tr>')
+    return (f'<tr><td>{warn}<div style="font-size:12px;line-height:1.6;color:{MUTED}">Smith는 조회 전용 자문입니다(매매·이체·대출 '
+            '실행 없음). 세금·법령은 실행 전 확인하시고, 판단 근거는 답장으로 물어 주십시오.</div></td></tr>')
 
 
 def _data_lines(data: dict[str, Any], assumptions: list[str], ai: dict[str, Any] | None = None) -> list[str]:

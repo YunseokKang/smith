@@ -140,11 +140,17 @@ def _edition_figures(data: dict[str, Any]) -> dict[str, Any]:
     # recent trades; otherwise the gap to the ledger value cannot be stated (missing is not zero).
     estimates = [(p["market"] or {}).get("estimate") if p.get("market") else None for p in props]
     enough = all(p.get("market") and p["market"]["estimate_basis"] >= realestate.MIN_BASIS for p in props)
+    # Every home traded at least once lately but one too rarely for a median: the sum is still stated, as 참고,
+    # with the thin homes named (user review 2026-10-18 asked for the ledger value against the trade basis).
+    thin = [p["label"] for p in props if p.get("market") and p["market"]["estimate"] is not None
+            and p["market"]["estimate_basis"] < realestate.MIN_BASIS]
     return {
         "property_value": _total(p["value"] for p in props) if props else None,
         "property_debt": _total(p["debt"] for p in props) if props else None,
         "property_trades_6m": sum(p["market"]["estimate_basis"] for p in props if p.get("market")),
         "property_estimate": _total(estimates) if props and enough else None,
+        "property_estimate_reference": _total(estimates) if props and not enough and thin else None,
+        "property_estimate_thin": thin,
         "property_valuation": sorted({VALUATION_LABELS.get(p["valuation_method"], p["valuation_method"]) for p in props}),
         "listed_count": len(listed), "listed_value": _total(p["value"] for p in listed) if listed else None,
         # Like the holdings section: a partial sum over the holdings whose cost is known, with the counts.
@@ -481,8 +487,11 @@ def _timeline(view: LedgerView, pay: list[future_income.Inflow]) -> list[dict[st
         f = record.fields
         if record.kind is Kind.LIABILITY and f.get("maturity"):
             due = date.fromisoformat(f["maturity"])
-            if today < due <= horizon:
-                items.append({"date": due, "label": _liability_label(record), "amount": base_amount(view, record),
+            amount = base_amount(view, record)
+            # A credit line with nothing drawn has a maturity but no money to find (review 2026-10-18: the
+            # nearest "big money date" read 마이너스통장 0원). An unknown amount stays: it is not zero.
+            if today < due <= horizon and amount != 0:
+                items.append({"date": due, "label": _liability_label(record), "amount": amount,
                               "kind": "cash_need", "category": f["category"]})
     for goal in view.summary.goals:
         if today < goal["target_date"] <= horizon:

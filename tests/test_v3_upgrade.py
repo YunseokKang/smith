@@ -5,13 +5,14 @@ against the market average for refinancing, the four pension pipelines stack aga
 the move-target spread is tracked against both homes, the month splits into fixed and discretionary spending,
 and the household day carries curated experiences. Synthetic household; figures checked by hand arithmetic."""
 import json
+import re
 import tempfile
 import unittest
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from smith import evidence, ledger, narrative, pension, proposals, report_html, research, tax
+from smith import editions, evidence, ledger, narrative, pension, proposals, report_html, research, tax
 from smith.config import load_config
 from smith.importer import parse_import
 from smith.records import ImportBatch, ImportRejected, Observation
@@ -63,7 +64,7 @@ RECORDS = [
         annual_rate="0.0352", rate_type="variable", repayment_method="equal_payment", maturity="2061-05-01",
         collateral_record_id="home"),
     rec("credit-line", "liability", category="credit_line", currency="KRW", outstanding_principal="0", annual_rate="0.0549",
-        rate_type="variable", repayment_method="revolving", credit_limit="30000000"),
+        rate_type="variable", repayment_method="revolving", credit_limit="30000000", maturity="2027-10-16"),
     rec("irp", "asset", category="fund", account_type="irp", currency="KRW", value="20000000", valuation_method="statement",
         liquidity="restricted"),
     rec("pension-savings", "asset", category="fund", account_type="pension_savings", currency="KRW", value="30000000",
@@ -126,12 +127,23 @@ class LayoutTests(Upgrade):
         data = self.report("overview")
         page = render(data)[1]
         first = data["advice"]["proposals"][0]
-        self.assertIn("오늘의 핵심 액션: " + report_html.escape(first.title), page)
+        # The banner is a short badge and the first card is the only place the full title appears (user review
+        # 2026-10-18: one sentence repeated three times on the first screen); no "one thing" box under the tiles.
+        self.assertIn("⚡ 금주 핵심 액션: " + report_html.escape(first.headline), page)
+        self.assertEqual(page.count(report_html.escape(first.title)), 1)
+        for box in ("오늘의 한 가지", "가장 중요한 한 가지"):
+            self.assertNotIn(box, page)
+        for p in data["advice"]["proposals"]:
+            with self.subTest(p.key):
+                self.assertTrue(0 < len(p.headline) <= 32 and not p.headline.endswith("."), p.headline)
         self.assertNotIn("판정 사유는 맨 아래", page)
-        # The composition bar under the judgement: the balance sheet by kind, property split by owner.
-        self.assertIn("자산 구성", page)
+        # The composition bar under the judgement: the balance sheet by kind, property split by owner. The
+        # legend items are divided by a bar so they never run together, even as plain text.
+        self.assertIn("자산의 구성", page)
         self.assertIn("부동산", page)
-        self.assertIn("본인 15.0억 원 | 배우자 11.0억 원", page)
+        self.assertIn("본인 15.0억 원 · 배우자 11.0억 원", page)
+        legend = re.sub(r"<[^>]+>", "", page.split("자산의 구성")[1].split("순자산")[0])
+        self.assertRegex(legend, r"● \S+ \d+%.*\s\|\s+●")
         # Body ink is near-black; the grey inks of the design reference are gone.
         self.assertIn("#111111", page)
         for grey in ("#5b616e", "#7c828a", "#a8acb3"):
@@ -146,7 +158,9 @@ class LayoutTests(Upgrade):
     def test_sections_collapse_and_a_theme_opens_its_lead_view_before_the_proposals(self):
         overview = render(self.report("overview"))[1]
         self.assertGreaterEqual(overview.count("<details style"), 3)
-        self.assertIn("[+]", overview)
+        self.assertNotIn("<details open", overview.split("고객님께 드리는 제안")[1].split("함께 검토한")[-1])
+        self.assertIn("background:#f8f9fa;padding:16px 20px;border-radius:16px;", overview)
+        self.assertIn("▼ 펼쳐서 상세 보기", overview)
         rates = render(self.report("rates"))[1]
         self.assertIn("<details open style", rates)
         self.assertLess(rates.index("부채·금리 현황 및 금리 변동 민감도"), rates.index("고객님께 드리는 제안"))
@@ -186,7 +200,7 @@ class CardTests(Upgrade):
         self.assertEqual(page.count("2027.04.10"), 1)
         # Proposal and strategy cards: the first proposal open, the rest closed until tapped.
         self.assertIn("<details open style", page.split("고객님께 드리는 제안")[1])
-        self.assertGreaterEqual(page.count("자세히 보기"), 3)
+        self.assertGreaterEqual(page.count("펼쳐서 상세 보기"), 3)
         self.assertIn("함께 검토한 다른 제안", page)
 
 
@@ -219,7 +233,7 @@ class ChangeTests(unittest.TestCase):
         self.assertIn("시장·평가 변동은 -26만 원", page)
         self.assertIn("입출금·원장 등록은 +500만 원", page)
         self.assertIn("시세로는 <b>26만 원</b>이 줄었습니다", page)          # The loss is not averaged away.
-        self.assertIn("시장·평가 -26만 원 · 입출금 +500만 원", page)          # The net-worth tile says so too.
+        self.assertIn("10/10 대비 시장·평가 -26만 원 · 입출금 +500만 원", page)  # The net-worth tile says so too.
         payload = narrative.build_payload(data["view"], data, None)
         self.assertEqual(payload["change_since_last_report"]["market_and_valuation"], "-260000")
         self.assertEqual(payload["change_since_last_report"]["from"], "2026-10-10")
@@ -235,6 +249,8 @@ class LoanTests(Upgrade):
         self.assertIn("유동성 방어에 긍정적", page)
         self.assertIn("3,000만 원", page)
         self.assertNotIn("마이너스통장(본인) 원금을 미리 갚는", page)
+        # Nor is its maturity a money date on the timeline (review 2026-10-18: "가장 가까운 큰 자금 일정은 … 0원").
+        self.assertNotIn("credit_line", [t.get("category") for t in data["timeline"]])
         metrics = narrative.sector_metrics(data["view"], data)
         self.assertEqual(metrics["debt"]["unused_credit_lines"], [{"limit": "30000000", "drawn": "0"}])
 
@@ -360,6 +376,110 @@ class PensionTests(Upgrade):
             self.apply("v7", [flow("bad2", "salary", "1", "inflow", price_basis="nominal")])
 
 
+class FinancialIncomeTests(unittest.TestCase):
+    def test_the_threshold_balance_and_the_expected_pay_are_weighed_against_the_financial_income_line(self):
+        g = tax.financial_income_guard(Decimal(100_000_000), Decimal("0.04"), Decimal(300_000_000))
+        self.assertEqual((g["threshold_balance"], g["interest_now"], g["interest_with_pay"]),
+                         (Decimal(500_000_000), Decimal(4_000_000), Decimal(16_000_000)))
+        self.assertEqual((g["share_now"], g["share_with_pay"]), (Decimal("0.2"), Decimal("0.8")))
+        text = tax._guard_text([("self", g)])
+        self.assertTrue(text.startswith("본인 명의로는 3년 안에 받을 성과급"))  # The mail shows the first sentence.
+        self.assertIn("예금에 약 5.0억 원을 넘게 두지 말고", text)
+        self.assertIn("연 약 1,600만 원(기준의 80%)", text)
+        # Unknown is never zero: no rate, no figures; an unknown balance leaves the interest unknown.
+        self.assertIsNone(tax.financial_income_guard(Decimal(1), None, None))
+        unknown = tax.financial_income_guard(None, Decimal("0.03"), Decimal(1))
+        self.assertEqual((unknown["interest_now"], unknown["interest_with_pay"]), (None, None))
+
+
+class FinancialIncomePerPersonTests(Upgrade):
+    def test_each_person_is_weighed_on_their_own_money(self):
+        # Review 2026-10-18 (P1): the threshold is per person. The partner's deposit neither raises the client's
+        # figure nor, when it cannot be converted, blanks it.
+        self.apply("v2", [rec("partner-deposit", "asset", "partner", category="deposit", account_type="bank", currency="KRW",
+                               value="900000000", valuation_method="manual", liquidity="days"),
+                          rec("partner-usd", "asset", "partner", category="cash", account_type="bank", currency="JPY",
+                               value="1000", valuation_method="manual", liquidity="immediate")])
+        data = self.report("tax")
+        note = next(n for n in data["advice"]["tax_notes"] if n.title.startswith("금융소득종합과세"))
+        self.assertTrue(note.body.startswith("본인 명의로"))
+        self.assertNotIn("9.3억", note.body)                                   # Never a household total.
+        self.assertIn("배우자 명의 현금·예금 가운데 원화로 환산하지 못한 금액", note.body)
+        self.assertIn("본인 명의 현금·예금 3,000만 원의 이자", note.body)
+
+
+class FirstReviewTests(unittest.TestCase):
+    """The first review of the v3.1 bundle (2026-10-18): each finding reproduced on synthetic input."""
+
+    def test_a_report_that_could_not_judge_never_says_there_is_nothing_to_do(self):
+        pending = proposals.Undetermined("집중 종목 정리", "환산하지 못한 금액이 있습니다.")
+        advice = {"proposals": [], "undetermined": [pending], "strategy": [], "assumptions": []}
+        header = report_html._header({"kind": "markets", "as_of": datetime(2026, 10, 20, 6, tzinfo=timezone.utc)},
+                                     action="", pending=1)
+        cards = report_html._proposals(advice, True, edition=editions.of("markets"))
+        for page in (header, cards):
+            self.assertNotIn("새로 실행하실 일은 없습니다", page)
+            self.assertNotIn("제안이 없는 것도 판단입니다", page)
+        self.assertIn("판단을 보류한 것이 1건", header)
+        self.assertIn("판단을 보류한 것이 1건", cards)
+
+    def test_a_lead_is_cut_only_outside_the_markup(self):
+        lead = "<b>가. 나. 다</b>입니다. 둘째 문장입니다. 셋째 문장입니다."
+        self.assertEqual(report_html._brief(lead), "<b>가. 나. 다</b>입니다. 둘째 문장입니다.")
+        self.assertEqual(report_html._brief('<a href="https://x.y/a">a. b</a>. 끝.', 1), '<a href="https://x.y/a">a. b</a>.')
+
+    def test_a_headline_has_a_bound_whatever_the_holding_is_called(self):
+        long = "가" * 100 + " 초과분 1차 리밸런싱(분기 822만 원)"
+        self.assertLessEqual(len(proposals.fit_headline(long)), proposals.HEADLINE_MAX)
+        self.assertTrue(proposals.fit_headline(long).endswith("…"))
+        self.assertEqual(proposals.fit_headline("짧은 헤드라인"), "짧은 헤드라인")
+
+    def test_identifiers_and_urls_are_never_shortened_into_another_value(self):
+        from smith import headless
+        schema = {"type": "object", "additionalProperties": False, "required": ["symbol", "refs", "text"],
+                  "properties": {"symbol": {"type": "string", "maxLength": 5},
+                                 "refs": {"type": "array", "items": {"type": "string", "maxLength": 4}},
+                                 "text": {"type": "string", "maxLength": 12}}}
+        pruned = headless.prune({"symbol": "TOOLONG", "refs": ["R1", "R1234567"], "text": "첫 문장입니다. 둘째 문장입니다."}, schema)
+        self.assertEqual(pruned["refs"], ["R1"])                            # An over-long ref is dropped, not cut.
+        self.assertEqual(pruned["symbol"], "TOOLONG")                       # Left for validation to reject ...
+        self.assertEqual(headless.validate(pruned, schema, "output"), ["output.symbol"])
+        self.assertEqual(pruned["text"], "첫 문장입니다.")                     # ... while prose is still clipped.
+
+    def test_an_answer_says_when_the_code_or_config_moved_since_the_report(self):
+        from smith import qa
+        from smith.report_command import lineage
+        now = lineage(Path("config/does-not-exist.toml"))
+        self.assertRegex(now["code_version"] or "", r"\+src:[0-9a-f]{12}$")  # A working tree is told apart from HEAD.
+        sent = {"code_version": "e1cc24f", "config_sha256": "abc"}
+        self.assertEqual(qa.drift(sent, {"code_version": "e1cc24f", "config_sha256": "abc"}), [])
+        self.assertEqual(qa.drift(sent, {"code_version": "e1cc24f+src:0123456789ab", "config_sha256": "abc"}), ["code"])
+        self.assertEqual(qa.drift({"code_version": None, "config_sha256": None}, sent), ["code", "config"])
+        at = datetime(2026, 10, 18, tzinfo=timezone.utc)
+        self.assertIn("계산 코드와 설정으로 다시 계산했습니다", qa.drift_memo(["code", "config"], at))
+        self.assertIn("계산 코드로 다시", qa.drift_memo(["code"], at))
+        self.assertIsNone(qa.drift_memo([], at))
+
+    def test_the_precedent_names_its_vintage(self):
+        from smith import stress
+        self.assertEqual(stress.PRECEDENT["seoul_apartments_vintage"], "2023년 2월 공표치")
+
+
+class StressWordingTests(unittest.TestCase):
+    def test_the_extreme_check_leads_with_its_whole_result_not_the_cash_gap(self):
+        # User review 2026-10-18: the cash-only months alone read as unrealistic alarm. Synthetic figures.
+        st = {"assumptions": {"rate_shock": Decimal("0.015"), "income_stop_months": 12, "property_drop": Decimal("0.20"),
+                              "stock_drop": Decimal("0.30")},
+              "monthly": {"burn": Decimal(5_000_000)}, "months_cash": Decimal("2.7"), "covers_scenario": False,
+              "after_sales": Decimal(100_000_000), "months_with_sales": Decimal(12), "immediate": Decimal(13_500_000),
+              "cash_after_scenario": None, "lease": None, "flags": [], "verdict": "fragile"}
+        text = report_html._stress_lead(st, detail=True)
+        self.assertIn("드문 극단을 가정해도", text)
+        self.assertLess(text.index("30% 내린 값에 팔면 12개월을 버티고"), text.index("현금만으로는"))
+        self.assertIn("비상금이 먼저", text)
+        self.assertEqual(report_html.STRESS_VERDICT["fragile"][1], "현금만으로 6개월 미만")   # Not "취약합니다".
+
+
 class MoveTests(Upgrade):
     def test_the_spread_to_each_target_is_tracked_against_both_homes(self):
         data = self.report("property")
@@ -393,6 +513,10 @@ class MoveTests(Upgrade):
         self.assertLess(page.index("목표 단지 vs 보유 주택 2채 시세 스프레드"), page.index("고객님께 드리는 제안"))
         self.assertIn("가 단지", page)
         self.assertIn("입력하신 참고 가격", page)
+        # The trend chart: the target with both ends has two bars; the one without a past reads 자료 부족.
+        trend = page.split("필요 추가 자금 추이(세전, 6개월 전 → 지금)")[1]
+        self.assertIn(report_html._short(earlier), trend)
+        self.assertIn("자료 부족", trend)
         self.assertEqual(data["research_regions"], ["부산광역시 해운대구", "서울특별시 종로구"])
         titles = [t.title for t in research.topics(data["view"], "property", data["research_regions"])]
         self.assertIn("서울특별시 종로구 주요 단지 시세", titles)
@@ -440,7 +564,7 @@ class HouseholdTests(Upgrade):
         narrative.attach(data, {"output": verified, "memos": {}}, brief, {"outcome": "success", "dropped": []})
         self.assertEqual(data["narrative"]["experiences"][0]["links"][0][1], "https://example.org/show")
         page = render(data)[1]
-        self.assertIn("이번 주의 경험 제안", page)
+        self.assertIn(report_html.escape("금주의 라이프스타일 & 경험 소비 큐레이션"), page)
         self.assertIn("기획전", page)
         self.assertIn("https://example.org/show", page)
 
@@ -529,10 +653,20 @@ class ReviewFixTests(Upgrade):
     def test_the_target_trend_is_flat_when_nothing_moved(self):
         from smith import move_plan
         proceeds = {"before_tax": Decimal(1_000), "general": Decimal(800), "exempt": Decimal(900), "six_months_ago": Decimal(1_000),
-                    "tax_known": True}
+                    "tax_known": True, "hold": []}
         row = move_plan._target("t", {"label": "X"}, {"estimate": Decimal(3_000), "estimate_basis": 3, "change_6m": Decimal(0)},
                                 proceeds, None)
-        self.assertEqual(row["trend"], "flat")                               # The tax is not a widening gap.
+        self.assertEqual((row["trend"], row["trend_hold"]), ("flat", False))   # The tax is not a widening gap.
+        # One deal against five is no trend (review 2026-10-18): withheld, with the counts.
+        thin = move_plan._target("t", {"label": "X"}, {"estimate": Decimal(3_000), "estimate_basis": 1, "previous_basis": 5,
+                                                       "change_6m": None}, proceeds, None)
+        self.assertEqual((thin["trend"], thin["trend_hold"], thin["change_hold"]), (None, True, {"recent": 1, "older": 5}))
+        # A thin home withholds every target's trend; a complex priced by reference simply has no past.
+        homes_thin = dict(proceeds, six_months_ago=None, hold=[{"label": "집", "recent": 1, "older": 2}])
+        self.assertTrue(move_plan._target("t", {"label": "X"}, {"estimate": Decimal(3_000), "estimate_basis": 3,
+                                                                 "change_6m": Decimal(0)}, homes_thin, None)["trend_hold"])
+        listed = move_plan._target("t", {"label": "X", "reference_price": 3_000}, None, homes_thin, None)
+        self.assertEqual((listed["trend"], listed["trend_hold"]), (None, False))
 
     def test_targets_alone_are_a_household_setting(self):
         from smith.report_command import profile

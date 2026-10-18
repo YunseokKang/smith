@@ -36,7 +36,7 @@ from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import check_outbound, mask_identifiers
 from smith.report_data import build_report
 
-PROMPT_VERSION = "mail-answer-v9"  # v9: answers "why" from the report's notes and principles; v8: cognitive traps.
+PROMPT_VERSION = "mail-answer-v11"  # v11: narrative principle 1 (headline) changed; v10: concrete words.
 MODEL = "fable"
 BUDGET_USD = "3.00"
 TIMEOUT_SECONDS = 600
@@ -216,10 +216,11 @@ def strip_quote(text: str) -> str:
 # --- answering ----------------------------------------------------------------------------------------------
 
 def rebuild(db: Path, report: dict[str, Any] | None, *, now: datetime, tz: str = DEFAULT_TIMEZONE,
-            household: dict[str, Any] | None = None) -> dict[str, Any]:
+            household: dict[str, Any] | None = None, lineage: dict[str, str | None] | None = None) -> dict[str, Any]:
     """The data of the report a question replies to, rebuilt at that report's ledger time (the bitemporal
     ledger keeps it reproducible). Without a run record (should not happen), current data in the full
-    report form, which carries every area."""
+    report form, which carries every area. The rebuild uses today's code and config: `lineage_drift` names what
+    differs from the report's own lineage (`lineage`: report_command.lineage now), so the answer says so."""
     if report is None:
         at, known, baseline, kind = now, now, None, "monday"
     else:
@@ -230,7 +231,29 @@ def rebuild(db: Path, report: dict[str, Any] | None, *, now: datetime, tz: str =
         # report's ledger time, and still use that report's own brief and narrative.
         kind = "monday" if editions.of(report["kind"]) is not None else report["kind"]
     with closing(ledger.connect_read_only(db)) as conn:
-        return build_report(conn, as_of=at, known_at=known, baseline=baseline, kind=kind, tz=tz, household=household)
+        data = build_report(conn, as_of=at, known_at=known, baseline=baseline, kind=kind, tz=tz, household=household)
+    data["lineage_drift"] = drift(report, lineage)
+    return data
+
+
+def drift(report: dict[str, Any] | None, lineage: dict[str, str | None] | None) -> list[str]:
+    """What a rebuild today differs in from the report as sent: "code" and/or "config" (unknown counts as changed:
+    a report without a recorded lineage, or one recorded before the source digest, cannot be shown to match)."""
+    if report is None or lineage is None:
+        return []
+    return [name for name, key in (("code", "code_version"), ("config", "config_sha256"))
+            if report.get(key) is None or report.get(key) != lineage.get(key)]
+
+
+def drift_memo(changed: list[str], at: datetime) -> str | None:
+    """The fixed caveat for an answer rebuilt with code or config that changed since the report (review
+    2026-10-18: the answer may explain figures the mail never showed)."""
+    if not changed:
+        return None
+    what, by = (("계산 코드와 설정", "으로") if len(changed) == 2 else ("계산 코드", "로") if changed == ["code"]
+                else ("설정", "으로"))
+    return (f"이 답은 {at:%m월 %d일} 보고 시점의 원장을 지금의 {what}{by} 다시 계산했습니다. 보고 뒤 {what}이 바뀌어, "
+            "받으신 메일의 숫자와 다를 수 있습니다.")
 
 
 def answer(db: Path, data: dict[str, Any], question: Question, *, now: datetime, secrets: list[str],
@@ -310,6 +333,9 @@ def answer(db: Path, data: dict[str, Any], question: Question, *, now: datetime,
     if claimed:
         memos.append(f"말씀하신 수치({', '.join(claimed[:3])})는 원장에서 확인되지 않은 값이라, 그 가정을 전제로 "
                      "답했습니다.")
+    stale = drift_memo(data.get("lineage_drift") or [], at)
+    if stale:
+        memos.append(stale)
     if moved:
         memos.append(f"이 답은 {at:%m월 %d일} 보고서 시점의 원장 기준입니다. 그 뒤 원장이 갱신되어, 최신 수치는 다음 "
                      "보고서에 반영됩니다.")

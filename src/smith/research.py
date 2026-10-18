@@ -184,9 +184,10 @@ def topics(view: LedgerView, kind: str | None = None, target_regions: tuple[str,
     # The experience dividend (report design §18.6): timely, quality things to do, read and see. A generic
     # question about the season's offerings, nothing about the household.
     if wanted is not None and "experience" in wanted:
-        found.append(("experience", "이번 주의 경험 큐레이션",
-                      "이번 달 서울·수도권과 해외 주요 미술관·박물관의 미술·역사 기획전과 전시 일정, 주목할 인문·철학·고전과 "
-                      "예술 에세이 신간, 영감을 주는 국내외 조용한 여행지, 파인 다이닝·미식 소식, 테니스 등 웰니스 활동 행사"))
+        found.append(("experience", "금주의 라이프스타일·경험 큐레이션",
+                      "이번 달 서울·수도권과 해외 주요 미술관·박물관의 미술·역사 기획전과 전시 일정, 주목할 역사·인문·철학·고전과 "
+                      "예술 에세이 신간, 프라이빗한 소규모 여행이 가능한 국내외 조용한 여행지, 파인 다이닝·미식 소식, 테니스 등 "
+                      "웰니스 활동 행사"))
     chosen = [(title, question) for category, title, question in found if wanted is None or category in wanted]
     held = holding_topics(view) if editions.researches_holdings(kind) else []
     return [Topic(f"T{i}", title, question) for i, (title, question) in enumerate(chosen, 1)] + held

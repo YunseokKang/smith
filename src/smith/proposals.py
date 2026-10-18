@@ -62,6 +62,9 @@ class Proposal:
     context: str = ""     # Market and policy context added by the narrative stage (verified, sourced).
     context_memo: str = ""  # A verification caveat on `context`, shown in the footer's system notes only.
     links: tuple[tuple[str, str], ...] = ()  # (title, https URL) sources for `context`.
+    # The status-line badge: the action in about 15-25 characters, no sentence (report design §20, user review
+    # 2026-10-18: the full title repeated three times on the first screen). Empty falls back to the title.
+    headline: str = ""
 
 
 @dataclass(frozen=True)
@@ -95,6 +98,8 @@ SWAP_MULTIPLE = Decimal(3)
 INSURANCE_SHARE_LIMIT = Decimal("0.10")
 SAVINGS_PREMIUM_MIN = Decimal(500_000)
 SAVINGS_INSURANCE_YEARS = 10
+GUARD_YEARS = 3  # Assumption: pay arriving within three years is weighed against the financial-income threshold.
+HEADLINE_MAX = 32  # Characters of the status-line badge (proposals.fit_headline).
 
 
 def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
@@ -120,7 +125,8 @@ def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
     outcomes = [(i, rule(facts)) for i, rule in enumerate(rules)]
     found = [(i, p) for i, p in outcomes if isinstance(p, Proposal)]
     undetermined = [replace(p, key=RULE_KEYS[i]) for i, p in outcomes if isinstance(p, Undetermined)]
-    ranked = [p for _, p in sorted(found, key=lambda item: (item[1].priority, item[0]))]
+    ranked = [replace(p, headline=fit_headline(p.headline))
+              for _, p in sorted(found, key=lambda item: (item[1].priority, item[0]))]
     active = active or {}
     proposals, in_progress = [], []
     for proposal in ranked:
@@ -138,7 +144,47 @@ def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
             "reserve_swap": facts["reserve_swap"], "concentration": facts["concentration"],
             "insurance_review": insurance_review(facts), "refinance": refinance_facts(facts),
             "assumptions": _assumptions() + tax.assumptions(),
-            "tax_notes": tax.notes(facts["tax"]), "tax_checklist": tax.checklist(facts["tax"])}
+            "tax_notes": tax.notes(facts["tax"], _income_guard(view, facts)), "tax_checklist": tax.checklist(facts["tax"])}
+
+
+def _income_guard(view: LedgerView, facts: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """The financial-income figures (tax.financial_income_guard) per person, the client first: the threshold is
+    each person's own yearly interest and dividends (review 2026-10-18: a household total let the partner's money
+    raise, or an unconverted amount blank, the client's figure). For each owner with interest-bearing money or
+    expected pay: that owner's cash and deposits (unknown when one is unconverted), the CD rate as the
+    deposit-rate proxy, and that owner's base-scenario pay usable within GUARD_YEARS."""
+    cd = facts["cd"]
+    rate = None if cd is None else cd["value"] / 100
+    today = facts["today"]
+    horizon = date(today.year + GUARD_YEARS, today.month, min(today.day, 28))
+    found = []
+    for owner in sorted({r.owner_id for r in view.records}, key=lambda o: (o != "self", o)):
+        amounts = [base_amount(view, r) for r in view.records if r.owner_id == owner and r.kind is Kind.ASSET
+                   and r.fields.get("category") in ("cash", "deposit", "installment_savings")]
+        pay = future_income.at_goal(facts["pay"], owner_id=owner, scenario="base", horizon=horizon, today=today,
+                                    rate=Decimal(0))["value"]
+        if not amounts and not pay:
+            continue
+        balance = None if any(a is None for a in amounts) else sum(amounts, Decimal(0))
+        guard = tax.financial_income_guard(balance, rate, pay)
+        if guard is not None:
+            found.append((owner, guard))
+    return found
+
+
+def fit_headline(text: str) -> str:
+    """The status-line badge within HEADLINE_MAX characters, cut at a word with an ellipsis (review 2026-10-18: a
+    holding name may be 100 characters, so a rule's headline had no bound)."""
+    if len(text) <= HEADLINE_MAX:
+        return text
+    cut = text[:HEADLINE_MAX - 1]
+    space = cut.rfind(" ")
+    return (cut[:space] if space >= HEADLINE_MAX // 2 else cut).rstrip(" ,(·") + "…"
+
+
+def _short_name(name: Any) -> str:
+    text = str(name)
+    return text if len(text) <= 12 else text[:11] + "…"
 
 
 def materially_changed(proposal: Proposal, anchor: dict[str, str]) -> bool:
@@ -305,6 +351,7 @@ def _lease_return(facts: dict[str, Any]) -> Proposal | Undetermined | None:
             figures["loan_capacity"] = loan["amount"]
     return Proposal(
         key="lease-return", priority=priority, identity=f"lease-return:{lease['due']}",
+        headline=f"전세보증금 반환 방법 결정({deadline:%Y.%m}까지)",
         watch=("need", "accumulated"), tolerance=Decimal("0.15"),
         title=title,
         why=(f"전세보증금은 계약이 끝나면 세입자에게 돌려줘야 하는, 날짜가 정해진 큰 돈입니다(남은 기간 {months}개월). 다만 보증금 "
@@ -371,6 +418,7 @@ def _emergency_reserve(facts: dict[str, Any]) -> Proposal | Undetermined | None:
         return _reserve_by_swap(facts, swap, priority, months_cover)
     return Proposal(
         key="emergency-reserve", priority=priority, watch=("gap", "target"), tolerance=Decimal("0.25"),
+        headline=f"비상금 {short_won(gap)} 보강",
         title=f"바로 꺼내 쓸 수 있는 비상금을 {short_won(cash['reserve_target'])}까지 {short_won(gap)} 더 마련하시길 권합니다.",
         why=(f"비상금은 실직·질병처럼 예상하지 못한 일에 대비해 손해 없이 바로 꺼낼 수 있는 돈입니다. 지금은 월 지출의 "
              f"{'미상' if months_cover is None else f'{months_cover:.1f}개월'}분({short_won(cash['immediate'])})입니다. "
@@ -397,6 +445,7 @@ def _reserve_by_swap(facts: dict[str, Any], swap: dict[str, Any], priority: int,
                if excess > 0 else " 정리 의견이 있는 종목(손실 종목, 역할이 겹치는 종목)부터 정리해 채웁니다."))
     return Proposal(
         key="emergency-reserve", priority=priority, watch=("gap", "target"), tolerance=Decimal("0.25"),
+        headline=f"비상금 {short_won(gap)}, 과비중 주식으로 마련",
         title=(f"비상금 부족분 {short_won(gap)}은 월급에서 떼지 말고, 보유 주식 가운데 비중이 과한 종목이나 정리할 종목을 "
                f"{short_won(gap)}만큼 정리해 한 번에 채우시길 권합니다."),
         why=(f"비상금은 실직·질병처럼 예상하지 못한 일에 대비해 손해 없이 바로 꺼낼 수 있는 돈입니다. 지금은 월 지출의 "
@@ -457,6 +506,7 @@ def _goal_stocks_glide(facts: dict[str, Any]) -> Proposal | Undetermined | None:
     return Proposal(
         key="goal-stocks-glide", priority=2 if first["started"] else 3, identity=f"goal-stocks-glide:{first['due']}",
         watch=("earmarked",), tolerance=Decimal("0.25"),
+        headline=f"{first['label']} 자금 안전자산 이동(분기 {short_won(first['per_quarter'])})",
         title=(f"{first['due']:%Y년 %m월} {first['label']}에 쓸 돈 가운데 약 {short_won(first['from_stocks'])}이 주식에 "
                f"있습니다. {first['start']:%Y년 %m월}{begin} 약 {short_won(first['per_quarter'])}씩 예금·단기채 같은 안전 자산으로 "
                "옮기시길 권합니다."),
@@ -494,11 +544,12 @@ def _concentration_trim(facts: dict[str, Any]) -> Proposal | Undetermined | None
         return Undetermined("집중 종목 정리", "증권 가운데 원화로 환산하지 못한 금액이 있어 종목 비중을 계산하지 못했습니다.")
     first = plan["positions"][0]
     limit, quarters = percent(plan["limit"], 0), plan["quarters"]
+    drop = holdings.STRESS_DRAWDOWN
     employer = first["employer"]
     grants = any(i.in_stock and i.owner_id == "self" and i.symbol == first["symbol"] for i in facts["pay"])
     double = ("" if not employer else
               " 월급" + ("과 예정된 주식 보상" if grants else "") + "도 같은 회사에서 나오므로, 인적 자본(앞으로 벌 소득)과 금융 자산이 "
-              "한 회사에 겹쳐 있습니다(이중 집중). 회사 실적이 꺾이면 소득과 자산이 같은 날 함께 흔들립니다.")
+              "한 회사에 겹쳐 있습니다(이중 집중). 회사 실적이 나빠져 성과급이 줄고 주가가 내리면 소득과 자산이 같은 때에 함께 줄어듭니다.")
     others = "".join(f" {p['name']}도 한도를 {short_won(p['excess'])} 넘어 같은 방식으로 분기마다 약 {short_won(p['per_quarter'])}씩 "
                      "정리합니다." for p in plan["positions"][1:])
     grant_rule = (" 앞으로 받는 자사주 보상은 비중이 한도 안으로 내려올 때까지 받는 즉시 전부 지수펀드로 분산하는 원칙을 권합니다."
@@ -506,13 +557,15 @@ def _concentration_trim(facts: dict[str, Any]) -> Proposal | Undetermined | None
     return Proposal(
         key="concentration-trim", priority=1 if employer else 2, identity=f"concentration-trim:{first['key']}",
         watch=("excess",), tolerance=Decimal("0.25"),
+        headline=f"{_short_name(first['name'])} 초과분 1차 리밸런싱(분기 {short_won(first['per_quarter'])})",
         title=(f"{first['name']} 비중이 주식의 {percent(first['share'], 0)}로 한 종목 한도 {limit}를 넘습니다. 초과분 약 "
                f"{short_won(first['excess'])}을 {quarters}분기에 걸쳐 분기마다 약 {short_won(first['per_quarter'])}씩 정리해 넓은 "
                "지수펀드(코어)로 옮기시길 권합니다."),
-        why=(f"한 종목이 주식의 {limit}를 넘으면 그 회사 한 곳의 소식에 자산 전체가 크게 흔들립니다(집중). 지금 {first['name']}은 "
-             f"{short_won(first['value'])}로 주식의 {percent(first['share'], 0)}입니다." + double + others),
-        effect=(f"한도 안으로 들어오면 이 회사의 악재가 주식 자산에 미치는 영향이 {percent(first['share'], 0)}에서 {limit} 수준으로 "
-                "줄고, 옮긴 돈은 넓은 지수펀드에서 시장 전체의 성장을 따릅니다. 실적 발표 뒤 주가가 좋은 구간에 나눠 팔면 한 시점의 "
+        # In figures, not "자산이 흔들립니다" (user review 2026-10-18): what a fall of that stock takes off the stocks.
+        why=(f"{first['name']} 주가가 {percent(drop, 0)} 빠지면 주식 자산 전체가 {percent(first['share'] * drop, 1)} 줄어듭니다. "
+             f"지금 {first['name']}은 {short_won(first['value'])}로 주식의 {percent(first['share'], 0)}입니다." + double + others),
+        effect=(f"한도 {limit} 안으로 낮추면 같은 {percent(drop, 0)} 하락에도 주식 자산이 줄어드는 폭이 {percent(plan['limit'] * drop, 1)}에 "
+                "그치고, 옮긴 돈은 넓은 지수펀드에서 시장 전체의 성장을 따릅니다. 실적 발표 뒤 주가가 좋은 구간에 나눠 팔면 한 시점의 "
                 "주가에 덜 좌우됩니다." + grant_rule),
         risks=("정리한 뒤 그 종목이 더 오르면 그만큼의 이익을 놓칩니다. 세금은 종목의 시장에 따라 다르니(국내 상장 주식은 대주주가 아니면 "
                "양도세가 없고, 해외 종목은 연 기본공제를 넘는 이익에 양도세) 팔기 전에 확인하십시오(현행 법령 확인 필요). 회사를 깊이 "
@@ -561,11 +614,12 @@ def _insurance_review(facts: dict[str, Any]) -> Proposal | None:
         f" 월 {short_won(s['monthly'])}을 내는 보험이 저축성이라면 비과세 만기(가입 {SAVINGS_INSURANCE_YEARS}년, {s['maturity_year']}년)가 "
         f"주택 이전 시점({review['home_year']}년)보다 늦어, 그 돈은 가장 필요한 때 쓸 수 없습니다(기간 불일치)."
         for s in review["savings_type"] if s["mismatch"])
-    title = (f"{over.rstrip('.')} 저축성 보험의 감액완납·중도인출·추가 납입 중단을 검토해 매월 현금흐름을 되찾으시길 권합니다."
+    title = (f"{over} 저축성 보험의 감액완납·중도인출·추가 납입 중단을 검토해 매월 현금흐름을 되찾으시길 권합니다."
              if review["over_limit"] else
              "저축성 보험의 만기가 주택 이전보다 늦습니다. 감액완납이나 추가 납입 중단으로 그 돈을 필요한 시점에 맞추시길 권합니다.")
     return Proposal(
         key="insurance-review", priority=2, watch=("premiums",), tolerance=Decimal("0.2"),
+        headline="저축성 보험 납입·만기 조정 검토",
         title=title,
         why=(over + mismatch + " 보장성 보험(사고·질병에 대비하는 보험)은 유지하되, 저축성 보험(목돈을 모으는 보험)은 수익이 낮고 "
              "중간에 꺼내기 어려워 현금흐름 개선의 첫 후보입니다."),
@@ -593,6 +647,7 @@ def _surplus_plan(facts: dict[str, Any]) -> Proposal | Undetermined | None:
                else " 그런데 이 돈이")
     return Proposal(
         key="surplus-plan", priority=2, watch=("surplus",),
+        headline=f"월 여유 {short_won(surplus)} 자동이체 배정",
         title=f"매월 남는 약 {short_won(surplus)}의 쓰임새를 정해 자동이체로 묶어 두시길 권합니다.",
         why=(f"수입 {short_won(summary.monthly_inflow)}에서 생활비·대출 상환·보험료 {short_won(summary.monthly_outflow)}을 "
              f"빼면 매월 {short_won(surplus + allocated)}이 남습니다.{already} 어디로 가는지(저축·투자 이체)가 기록되어 있지 않습니다. "
@@ -622,6 +677,7 @@ def _pension_credit(facts: dict[str, Any]) -> Proposal | None:
              "공제를 빠짐없이 받습니다." if plan["monthly"] else "")
     return Proposal(
         key="pension-credit", priority=1 if today.month >= 10 else 2, identity=f"pension-credit:{today.year}",
+        headline=(f"연내 IRP {short_won(plan['irp_room'])} 납입(세액공제)" if plan["irp_room"] else "연금 납입 계좌 나누기"),
         watch=("irp_room", "excess"), tolerance=Decimal("0.2"),
         title=title,
         why=("연금저축과 IRP(개인형 퇴직연금)에 넣은 돈은 합해서 연 900만 원(연금저축만은 600만 원)까지 세금을 돌려받습니다"
@@ -651,6 +707,7 @@ def _overseas_harvest(facts: dict[str, Any]) -> Proposal | Undetermined | None:
     return Proposal(
         key="overseas-harvest", priority=1 if today.month >= 11 else 3, identity=f"overseas-harvest:{today.year}",
         watch=("realize",), tolerance=Decimal("0.3"),
+        headline=f"연내 미국 주식 이익 {short_won(plan['realize'])} 실현 검토",
         title=(f"올해 주식을 팔아 이익을 낸 적이 없다면, 연말 전에 미국 주식 이익 {short_won(plan['realize'])}만큼을 "
                "팔았다가 다시 사서 해외주식 양도세 기본공제를 쓰시는 방안을 검토해 보십시오."),
         why=(f"해외 주식(과세 대상 국내 주식 포함)은 한 해 이익 {short_won(tax.OVERSEAS_DEDUCTION)}까지 세금이 없고, 넘는 부분에 "
@@ -678,6 +735,7 @@ def _isa(facts: dict[str, Any]) -> Proposal | None:
         return None
     return Proposal(
         key="isa-open", priority=3, identity="isa-open",
+        headline="ISA 개설로 절세 계좌 넓히기",
         title="ISA(개인종합자산관리계좌)를 열어 연금 한도를 넘는 투자금을 그곳에서 굴리시길 권합니다.",
         why=("ISA는 3년 이상 유지하면 계좌 안에서 난 이익 중 200만 원까지 세금이 없고, 넘는 부분도 9.9%로 낮게 과세되는 "
              "계좌입니다(일반 계좌 이자·배당은 15.4%). 만기 때 연금계좌로 옮기면 옮긴 금액의 10%, 최대 300만 원까지 "
@@ -719,6 +777,8 @@ def _prepayment(facts: dict[str, Any]) -> Proposal | Undetermined | None:
     return Proposal(
         key="prepayment", priority=2 if verdict == "deposit" else 3, identity=f"prepayment:{verdict}",
         watch=("loan_rate", "deposit_after_tax"), tolerance=Decimal("0.15"),
+        headline={"keep": f"{label} 원금 선상환 유지", "deposit": f"{label} 선상환 대신 예금 점검",
+                  "close": f"{label} 상환·예금 중 유연한 쪽"}[verdict],
         title=titles[verdict],
         why=(f"갚을 수 있는 대출 중 금리가 가장 높은 것은 {label}({percent(rate)})입니다. 대출을 갚으면 그만큼의 이자를 확실히 "
              f"아끼는 '세금 없는 수익'과 같습니다. 같은 1,000만 원을 단기 예금에 두면 연 {short_won(example * deposit)}"
@@ -780,6 +840,7 @@ def _refinance(facts: dict[str, Any]) -> Proposal | Undetermined | None:
     if r["verdict"] == "keep":
         return Proposal(
             key="refinance", priority=3, identity="refinance:keep", watch=("loan_rate", "market_rate"), tolerance=Decimal("0.1"),
+            headline=f"{label} 대환 없이 유지({percent(rate)})",
             title=f"{label} 금리 {percent(rate)}는 시중 평균 이하 수준이므로, 대환 없이 유지하시는 것이 유리합니다.",
             why=(f"{basis}와 견주면 고객님 대출 금리가 {percent(abs(r['gap']))}p {'낮습니다' if r['gap'] < 0 else '높을 뿐입니다'}. "
                  f"차이가 {percent(REFINANCE_MARGIN, 1)}p 안이면 중도상환수수료와 새 대출의 부대비용을 감안할 때 갈아탈 실익이 없습니다."),
@@ -792,6 +853,7 @@ def _refinance(facts: dict[str, Any]) -> Proposal | Undetermined | None:
             figures={"loan_rate": rate, "market_rate": market})
     return Proposal(
         key="refinance", priority=2, identity="refinance:review", watch=("loan_rate", "market_rate"), tolerance=Decimal("0.1"),
+        headline=f"{label} 대환 조건 문의(연 {short_won(r['yearly_saving'])} 절감)",
         title=f"{label} 금리 {percent(rate)}가 시중 평균보다 높으니 대환 조건을 은행에 문의해 보시길 권합니다.",
         why=(f"{basis}보다 고객님 금리가 {percent(r['gap'])}p 높습니다. 잔액 {short_won(r['balance'])} 기준으로 그 차이만큼 "
              f"한 해 약 {short_won(r['yearly_saving'])}의 이자를 더 내는 셈입니다."),
@@ -822,6 +884,7 @@ def _variable_rate(facts: dict[str, Any]) -> Proposal | Undetermined | None:
     direction = "내렸습니다" if change < 0 else "올랐습니다" if change > 0 else "그대로입니다"
     return Proposal(
         key="variable-rate", priority=3, watch=("variable_total", "monthly_change"), tolerance=Decimal("0.3"),
+        headline="변동금리 재산정 영향 미리 확인",
         title="다음 대출 금리 재산정 때 월 이자가 얼마나 바뀔지 미리 확인해 두시길 권합니다.",
         why=(f"변동금리 대출 {short_won(total)}은 몇 달마다 시장 금리에 맞춰 이자율이 다시 정해집니다. 지난 1년 단기 시장 금리"
              f"(CD 91일물)는 {abs(cd['change_12m']):.2f}%p {direction}. 대출 금리가 같은 폭으로 바뀌면 월 이자는 약 "
@@ -930,6 +993,7 @@ def _spending_room(facts: dict[str, Any]) -> Proposal | Undetermined | None:
                 " 다만 계획한 목표까지 지금 속도로 지키려면 여유가 없습니다.")
         return Proposal(
             key="spending-room", priority=3, watch=("room",), tolerance=Decimal("0.25"),
+            headline=f"월 {short_won(room['room'])} 안심 소비 가능",
             title=f"매월 약 {short_won(room['room'])}은 비상금과 약정을 지키고도 쓰실 수 있는 돈입니다.{tail}",
             why=basis + goals_note + " 약정 기준 한도 안의 소비는 비상금과 보증금 반환을 늦추지 않습니다. 돈을 끝까지 쌓아 두는 "
                                      "것은 계획의 목적이 아니며, 제때 삶으로 바꾸는 것도 자산 관리의 일부입니다.",
@@ -941,6 +1005,7 @@ def _spending_room(facts: dict[str, Any]) -> Proposal | Undetermined | None:
             timing="이번 달부터 매월", reconsider=reconsider, certainty=certainty, figures=figures)
     return Proposal(
         key="spending-room", priority=1 if room["near_commitment_short"] else 2, watch=("room",), tolerance=Decimal("0.25"),
+        headline=f"적립 우선, 소비 여유 {short_won(-room['room'])} 부족",
         title=f"지금은 비상금과 약정에 필요한 적립이 남는 돈보다 약 {short_won(-room['room'])} 많아, 마음 편히 쓸 여유가 없습니다.",
         why=basis + goals_note + (f" {NEAR_COMMITMENT_MONTHS}개월 안에 돌려드려야 할 보증금을 지금 속도로는 마련하지 못하므로 "
                                   "먼저 손봐야 합니다." if room["near_commitment_short"] else

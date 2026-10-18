@@ -59,6 +59,7 @@ def _home(view: LedgerView, prop: dict[str, Any], acquisition: dict[str, Any], t
     occupancy = record.fields.get("occupancy") if record else None
     market = prop.get("market") or {}
     estimate, trades = market.get("estimate"), market.get("estimate_basis") or 0
+    change, hold = _change(market)
     if estimate is not None and trades >= MIN_BASIS:
         price, basis = estimate, f"최근 6개월 실거래 {trades}건 중간값"
     else:
@@ -66,10 +67,9 @@ def _home(view: LedgerView, prop: dict[str, Any], acquisition: dict[str, Any], t
     loans, deposits = prop.get("loans"), prop.get("deposits")
     taxes = None if price is None else lease._capital_gains(price, acquisition, owner, occupancy, today)
     before_tax = None if None in (price, loans, deposits) else price - loans - deposits
-    change = market.get("change_6m")
-    earlier = None if price is None or change is None or estimate is None or trades < MIN_BASIS else price / (1 + change)
+    earlier = None if price is None or change is None else price / (1 + change)
     return {"record_id": prop["record_id"], "label": prop["label"], "owner": owner, "occupancy": occupancy,
-            "price": price, "price_basis": basis, "change_6m": change, "loans": loans, "deposits": deposits,
+            "price": price, "price_basis": basis, "change_6m": change, "change_hold": hold, "loans": loans, "deposits": deposits,
             "before_tax": before_tax, "tax": None if taxes is None else {k: v["total"] for k, v in taxes.items()},
             "net_general": None if before_tax is None or taxes is None else before_tax - taxes["general"]["total"],
             "net_exempt": None if before_tax is None or taxes is None else before_tax - taxes["exempt"]["total"],
@@ -86,7 +86,18 @@ def _proceeds(homes: list[dict[str, Any]]) -> dict[str, Any]:
     before = total("before_tax")
     taxed = total("net_general")
     return {"before_tax": before, "general": taxed if taxed is not None else before, "exempt": total("net_exempt"),
-            "tax_known": taxed is not None, "six_months_ago": total("before_tax_6m_ago")}
+            "tax_known": taxed is not None, "six_months_ago": total("before_tax_6m_ago"),
+            "hold": [{"label": h["label"], **h["change_hold"]} for h in homes if h["change_hold"]]}
+
+
+def _change(market: dict[str, Any]) -> tuple[Decimal | None, dict[str, int] | None]:
+    """(six-month change, hold): the change only when both half-years have MIN_BASIS deals; otherwise no change
+    and, when there were deals at all, the counts that withheld it (review 2026-10-18: one deal against one is no
+    trend, and a "참고" label did not say how thin it was)."""
+    if market.get("change_6m") is not None:
+        return market["change_6m"], None
+    recent, older = market.get("estimate_basis") or 0, market.get("previous_basis") or 0
+    return None, ({"recent": recent, "older": older} if recent or older else None)
 
 
 def _target(key: str, spec: dict[str, Any], market: dict[str, Any] | None, proceeds: dict[str, Any],
@@ -105,8 +116,9 @@ def _target(key: str, spec: dict[str, Any], market: dict[str, Any] | None, proce
     cost = None if price is None else price * (1 + BUY_COST_RATE)
     net = proceeds["general"]
     spread = None if cost is None or net is None else cost - net
-    change = m.get("change_6m")
-    earlier_cost = None if price is None or change is None or trades < MIN_BASIS else price / (1 + change) * (1 + BUY_COST_RATE)
+    # A reference price (no recorded trades) has no past; a thin side withholds the trend.
+    change, hold = _change(m) if estimate is not None else (None, None)
+    earlier_cost = None if price is None or change is None else price / (1 + change) * (1 + BUY_COST_RATE)
     # The trend compares like with like: both ends before the capital-gains tax (the tax six months ago is not
     # computed). Comparing an after-tax spread now with a pre-tax one then read the tax as a widening gap
     # (review 2026-10-18).
@@ -120,7 +132,10 @@ def _target(key: str, spec: dict[str, Any], market: dict[str, Any] | None, proce
     return {"key": key, "alias": alias, "label": spec["label"], "region": spec.get("region"), "price": price,
             "price_basis": basis, "spread_before_tax": spread_before_tax,
             "spread_with_pay_adverse": None if spread is None or pay_adverse is None else spread - pay_adverse,
-            "trades_6m": trades, "trades_12m": m.get("trades_12m", 0), "change_6m": change, "cost_with_fees": cost,
+            "trades_6m": trades, "trades_12m": m.get("trades_12m", 0), "change_6m": change, "change_hold": hold,
+            "cost_with_fees": cost,
             "spread": spread, "spread_exempt": None if cost is None or proceeds["exempt"] is None else cost - proceeds["exempt"],
             "spread_with_pay": None if spread is None or pay_base is None else spread - pay_base,
-            "spread_6m_ago": spread_6m, "trend": trend}
+            "spread_6m_ago": spread_6m, "trend": trend,
+            # Withheld for want of deals; a complex priced by reference (no trades at all) simply has no past.
+            "trend_hold": trend is None and estimate is not None and bool(hold or proceeds["hold"])}

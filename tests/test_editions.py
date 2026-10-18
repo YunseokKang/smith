@@ -103,7 +103,7 @@ class EditionTests(unittest.TestCase):
         self.assertTrue(all(not t.ref.startswith("H") for t in research.topics(view, "property")))
         self.assertTrue(all("주택" in t or "부동산" in t or "전세" in t for t in titles("property")))
         # The household day researches only the experience dividend (v3.0): no market or policy topic.
-        self.assertEqual(titles("life"), ["이번 주의 경험 큐레이션"])
+        self.assertEqual(titles("life"), ["금주의 라이프스타일·경험 큐레이션"])
         self.assertFalse(any("주택" in t or "금리" in t for t in titles("life")))
         calls = []
 
@@ -118,11 +118,10 @@ class EditionTests(unittest.TestCase):
     def test_each_day_renders_only_its_sections_and_stays_short(self):
         full_subject, full_html = render(self.data("monday"))
         lengths = {}
-        for key, edition in editions.EDITIONS.items():
+        for key in editions.EDITIONS:
             subject, page = render(self.data(key))
             lengths[key] = len(page)
             self.assertIn(editions.title(key, AT.date()), subject)
-            self.assertIn(edition.lead, page)
         self.assertTrue(all(length < len(full_html) for length in lengths.values()), lengths)
         markets, property_, overview = (render(self.data(k))[1] for k in ("markets", "property", "overview"))
         self.assertIn("보유 종목 점검", markets)
@@ -192,11 +191,11 @@ class EditionTests(unittest.TestCase):
             envelope = {"type": "result", "subtype": "success", "is_error": False, "structured_output": output,
                         "total_cost_usd": 0.1}
             return subprocess.CompletedProcess(args, 0, json.dumps(envelope), "")
-        for kind, insights in (("life", 2), ("overview", 3)):
+        for kind, insights in (("life", 1), ("overview", 2)):
             data = self.data(kind)
             narrative.narrate(self.db, data["view"], data, now=AT, secrets=[], executable=Path("claude.exe"),
                               runner=runner)
-            self.assertEqual((len(data["narrative"]["insights"]), len(data["narrative"]["watch"])), (insights, 3), kind)
+            self.assertEqual((len(data["narrative"]["insights"]), len(data["narrative"]["watch"])), (insights, 2), kind)
 
     def test_the_narrative_sees_only_its_day(self):
         markets, property_ = (narrative.build_payload(self.data(k)["view"], self.data(k), None)

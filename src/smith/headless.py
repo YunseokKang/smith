@@ -157,29 +157,52 @@ def _error_subtype(stdout: str) -> str | None:
     return subtype if isinstance(subtype, str) and subtype.replace("_", "").isalnum() else None
 
 
-def prune(value: Any, schema: dict[str, Any]) -> Any:
+# Identifiers, enumerations, references and URLs are exact values: shortening one makes another value (a
+# different link, an unknown key). An over-long one is dropped from its list, or left for `validate` to reject
+# (review 2026-10-18). Only prose is clipped.
+EXACT_FIELDS = frozenset({"symbol", "stance", "key", "source_url", "published_on", "kind"})
+EXACT_LISTS = frozenset({"refs", "principles", "order"})
+
+
+def prune(value: Any, schema: dict[str, Any], field: str | None = None) -> Any:
     """Normalize runaway output before validation: drop object keys the schema does not define, list items
-    beyond `maxItems`, and text beyond `maxLength` (cut at the last sentence end inside the limit). Only known
+    beyond `maxItems`, and prose beyond `maxLength` (cut at the last sentence end inside the limit). Only known
     fields are ever used or stored. Types and required fields are still checked by `validate`: this accepts no
     wrong shape, it only keeps one over-long block from discarding a whole call (an overview narrative was lost
-    to a schema violation on 2026-10-17)."""
+    to a schema violation on 2026-10-17). `field` is the key the value sits under (EXACT_FIELDS, EXACT_LISTS)."""
     if schema["type"] == "object" and isinstance(value, dict):
-        return {key: prune(item, schema["properties"][key]) for key, item in value.items() if key in schema["properties"]}
+        return {key: prune(item, schema["properties"][key], key) for key, item in value.items() if key in schema["properties"]}
     if schema["type"] == "array" and isinstance(value, list):
         kept = value if "maxItems" not in schema else value[:schema["maxItems"]]
-        return [prune(item, schema["items"]) for item in kept]
+        if field in EXACT_LISTS:
+            limit = schema["items"].get("maxLength", _MAX_TEXT)
+            kept = [item for item in kept if not (isinstance(item, str) and len(item) > limit)]
+        return [prune(item, schema["items"], field) for item in kept]
     if schema["type"] == "string" and isinstance(value, str):
         limit = schema.get("maxLength", _MAX_TEXT)
-        return value if len(value) <= limit else clip_text(value, limit)
+        if len(value) <= limit or field in EXACT_FIELDS or field in EXACT_LISTS:
+            return value
+        return clip_text(value, limit)
     return value
 
 
 def clip_text(text: str, limit: int) -> str:
-    """The longest prefix within `limit` that ends at a sentence boundary (a period followed by a space or a
-    line break), when such a boundary lies in the second half of the limit; else a plain cut."""
+    """The longest prefix within `limit` that ends at a sentence boundary (a period followed by a space, a line
+    break or the end of the text), when such a boundary lies in the second half of the limit; else the prefix up
+    to the last clause break or space there, closed with an ellipsis, so a word is never cut in half (a long
+    one-sentence headline read "...옮기는 자" on 2026-10-18); else a plain cut."""
     cut = text[:limit]
+    if cut.endswith(".") and (len(text) == limit or text[limit] in " \n"):
+        return cut
     end = max(cut.rfind(". "), cut.rfind(".\n"), cut.rfind("\n"))
-    return cut[:end + 1].rstrip() if end >= limit // 2 else cut.rstrip()
+    if end >= limit // 2:
+        return cut[:end + 1].rstrip()
+    head = cut[:limit - 1]  # Room for the ellipsis.
+    for mark in (", ", " "):
+        at = head.rfind(mark)
+        if at >= limit // 2:
+            return head[:at].rstrip(" ,") + "…"
+    return cut.rstrip()
 
 
 def validate(value: Any, schema: dict[str, Any], path: str) -> list[str]:

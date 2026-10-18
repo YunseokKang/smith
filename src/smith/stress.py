@@ -1,7 +1,7 @@
 """Composite household stress test (report design §16.2).
 
-A top private banker asks first how the household survives a bad year in which several things go wrong
-at once, not what a single rate rise costs. This module answers that with deterministic figures: in one
+A top private banker asks first how the household survives one year in which the named assumptions below
+happen together, not what a single rate rise costs. This module answers that with deterministic figures: in one
 scenario (variable-rate loans reprice higher, the household's largest earned income stops for a year,
 property prices fall, stocks fall), how many of the scenario's months the bills can still be paid from
 cash alone and after selling stocks at the lower prices, how far net worth falls, how the mortgages'
@@ -30,6 +30,18 @@ ROBUST_MONTHS = Decimal(INCOME_STOP_MONTHS)  # Verdict (assumptions): cash alone
 WATCH_MONTHS = Decimal(6)              # ... or at least half of it.
 LEASE_HORIZON_MONTHS = 24              # The nearest lease deposit due within this horizon is tested.
 LEASE_UNCOVERED = "lease_deposit_uncovered"
+# The scenario's market half has happened (user review 2026-10-18: "is it even possible for these to come
+# together?"): in 2022 the policy rate, stocks and apartment prices moved against the household in one year. The
+# income stop is household-specific (job loss, leave, illness). Figures checked against the sources on 2026-10-18.
+# The apartment index is the vintage published in February 2023 (December 2021 -> December 2022); the board later
+# revised the series and rebased it in 2026, and recent citations read -21.78% (review 2026-10-18).
+PRECEDENT = {"year": 2022, "base_rate": ("1.00%", "3.25%"), "kospi": "-24.9%", "seoul_apartments": "-22.09%",
+             "seoul_apartments_vintage": "2023년 2월 공표치", "national_apartments": "-16.84%"}
+PRECEDENT_SOURCES = (
+    ("한국은행 기준금리 추이", "https://www.bok.or.kr/portal/singl/baseRate/list.do?dataSeCd=01&menuNo=200643"),
+    ("뉴시스 2022-12-29(코스피 연간 24.9% 하락)", "https://www.newsis.com/view/NISX20221229_0002141083"),
+    ("경향신문 2023-02-16(한국부동산원 실거래가지수)", "https://www.khan.co.kr/article/202302160721001"),
+)
 
 _EARNED = ("salary", "business_income")
 _SECURITIES = ("stock", "fund", "unclassified")

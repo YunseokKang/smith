@@ -108,7 +108,7 @@ class ReportTests(unittest.TestCase):
         _, html = render(data)
         self.assertNotIn("<script>alert", html)
         self.assertIn("&lt;script&gt;", html)
-        for section in ("순자산", "자산 구성", "현금·유동성", "부채·금리", "보유 종목 점검", "거시 환경", "용어 풀이"):
+        for section in ("순자산", "자산 구성", "현금·유동성", "부채·금리", "보유 종목 점검", "거시 환경"):
             self.assertIn(section, html)
         for internal in ("us-1", "loan", "variable_rate_debt", "manual"):
             self.assertNotIn(f">{internal}<", html)
@@ -154,7 +154,7 @@ class ReportTests(unittest.TestCase):
         subject, html = render(data)
         self.assertIn("제안 3건", subject)
         self.assertIn("대응 필요", subject)          # Act-now proposals: the status says so.
-        self.assertIn("이번 주 가장 중요한 한 가지", html)
+        self.assertIn("⚡ 금주 핵심 액션: ", html)
         self.assertIn("목표까지 지금 궤도에 있습니까", html)
 
     def test_glide_plan_moves_only_goal_money_that_cash_cannot_cover(self):
@@ -298,9 +298,10 @@ class ReportTests(unittest.TestCase):
         data["sectors"]["cash"]["toss_cash"] = {"synced": True, "manual_records": 0, "manual_as_of": None,
                                                 "buying_power": [{"currency": "KRW", "value": Decimal(500_000),
                                                                   "observed_at": T1}]}
-        _, html = render(data)
-        self.assertIn("<b>미수집</b>", html)
-        self.assertIn("매수 가능 금액은 500,000원", html)
+        # A standing data caveat: a system note for the e-mail answers, not mail prose (user review 2026-10-18).
+        notes = " ".join(report_html.system_notes(data))
+        self.assertIn("미수집", notes)
+        self.assertIn("매수 가능 금액은 500,000원", notes)
         self.assertTrue(any(n.startswith("토스증권 예수금: API가 제공하지 않아 미수집") for n in report_html.system_notes(data)))
 
     def test_proposals_never_treat_unconverted_amounts_as_known(self):
@@ -323,7 +324,8 @@ class ReportTests(unittest.TestCase):
         tracks = {t.name: t for t in data["advice"]["strategy"]}
         self.assertEqual(tracks["전세보증금 반환"].status, "unknown")
         self.assertEqual(tracks["노후 준비"].headline, "연금 계좌 정보 없음")  # No accounts is not 0 won.
-        self.assertIn("환산하지 못해", render(data)[1])
+        self.assertIn("환산하지 못해", proposals["lease-return"].why)      # Kept for the e-mail answers ...
+        self.assertIn("일부 데이터가 불완전", render(data)[1])                # ... and the mail flags it.
 
     def test_prepayment_compares_the_highest_rate_loan(self):
         later = datetime(2026, 10, 2, tzinfo=timezone.utc)

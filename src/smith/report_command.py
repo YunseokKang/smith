@@ -141,7 +141,25 @@ def lineage(config_path: Path) -> dict[str, str | None]:
         config_sha256 = hashlib.sha256(config_path.read_bytes()).hexdigest()
     except OSError:
         config_sha256 = None
-    return {"config_sha256": config_sha256, "code_version": _git_commit(Path(__file__).resolve().parents[2])}
+    root = Path(__file__).resolve().parents[2]
+    commit, source = _git_commit(root), _source_digest(root)
+    # The commit alone read the same for four reports sent from an uncommitted tree (review 2026-10-18).
+    return {"config_sha256": config_sha256,
+            "code_version": None if commit is None and source is None else f"{commit or 'nogit'}+src:{source or 'unknown'}"}
+
+
+def _source_digest(root: Path) -> str | None:
+    """A short digest of the package source as it runs (paths and bytes of src/smith/**/*.py); None when unreadable."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    try:
+        package = root / "src" / "smith"
+        for path in sorted(package.rglob("*.py")):
+            digest.update(path.relative_to(package).as_posix().encode("utf-8") + b"\0" + path.read_bytes() + b"\0")
+    except OSError:
+        return None
+    return digest.hexdigest()[:12]
 
 
 def _git_commit(root: Path) -> str | None:

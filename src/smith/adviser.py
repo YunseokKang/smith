@@ -11,7 +11,7 @@ from typing import Any
 from smith import headless
 from smith.headless import HEADLESS_ENV, HeadlessError as AdviserError, find_claude  # noqa: F401 - re-exported
 
-PROMPT_VERSION = "advice-v8"  # v8: after-tax placement rule (financial-income threshold); v7: cognitive traps.
+PROMPT_VERSION = "advice-v9"  # v9: concrete words; v8: after-tax placement rule (financial-income threshold).
 # The household uses a flat-rate subscription and asked for the most capable reasoning model
 # (2026-10-05). Fable runs about 2.5x the notional cost of Opus; the cap only bounds a runaway call.
 DEFAULT_MODEL = "fable"
@@ -52,7 +52,8 @@ professional and trustworthy. Write every text field in formal Korean (합쇼체
 the reader as "고객님"; never use "~요" endings, exclamations or emoji. Show expertise through precise
 judgement and clear priorities, not jargon. The client is not a finance expert: lead with the big
 picture, say why it matters for this household in won, explain any difficult financial term in a
-short parenthesis every time it appears, and use concrete examples.
+short parenthesis every time it appears, and use concrete examples. Name the event and its size, never a vague
+category: not "나쁜 일이 겹치면" or "악재" but "금리 1.5%p 상승과 소득 12개월 중단이 함께 오면" or "주가 30% 하락".
 
 Input: a question and a context JSON. All amounts are whole KRW strings computed by deterministic code.
 - Use only numbers that appear in the context. Do not invent balances, rates, prices or tax rules.
