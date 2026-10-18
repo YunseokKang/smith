@@ -130,9 +130,10 @@ class ReportTests(unittest.TestCase):
                               retrieved_at=later)
         data = build_report(self.conn, as_of=later, known_at=later, baseline=None, kind="monday")
         proposals = {p.key: p for p in data["advice"]["proposals"]}
+        # The one stock is all of the stocks: above the single-company limit, so a trim schedule is proposed too.
         self.assertEqual(set(proposals), {"lease-return", "emergency-reserve", "surplus-plan", "pension-credit",
                                           "prepayment", "variable-rate", "overseas-harvest", "isa-open",
-                                          "goal-stocks-glide", "spending-room"})
+                                          "goal-stocks-glide", "spending-room", "concentration-trim"})
         # Cash 1.5M plus 3M a month for 20 months cannot return the 3억 deposit, so all the shares
         # (12 x 110 USD x 1,400) rest on that date: move them in 5 quarterly steps until 2027-12.
         glide = proposals["goal-stocks-glide"]

@@ -106,7 +106,8 @@ class StressAndSpendingTests(Household):
         # Cash lasts the scenario (robust liquidity) but the deposit cannot be returned: overall at most watch.
         self.assertEqual((st["liquidity_verdict"], st["flags"], st["verdict"]), ("robust", ["lease_deposit_uncovered"], "watch"))
         page = render(self.report())[1]
-        self.assertIn("보증금 반환이 부족합니다(스트레스 테스트)", page)        # Named in the status reasons.
+        # Named in the status reasons, which live in the footer's system notes (not an alarm banner on top).
+        self.assertIn("상태 판정: 스트레스 테스트에서는 2027년 10월 보증금 반환에 필요한 돈이 부족합니다.", page)
         self.assertIn("12개월을 모두 버티고", page)
 
     def test_stress_verdicts_and_unknown_inputs(self):
@@ -263,7 +264,7 @@ class BenchmarkAndShieldTests(unittest.TestCase):
         self.assertIn("sector_metrics.stress", narrative.SYSTEM_PROMPT)
         self.assertIn("room_with_goals", narrative.SYSTEM_PROMPT)
         self.assertEqual((adviser.PROMPT_VERSION, qa.PROMPT_VERSION, narrative.PROMPT_VERSION),
-                         ("advice-v7", "mail-answer-v8", "narrative-v9"))
+                         ("advice-v7", "mail-answer-v8", "narrative-v10"))
         self.assertIn("spending-room", proposals.RULE_KEYS)
 
 

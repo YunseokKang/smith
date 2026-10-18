@@ -158,12 +158,28 @@ def _error_subtype(stdout: str) -> str | None:
 
 
 def prune(value: Any, schema: dict[str, Any]) -> Any:
-    """Drop object keys the schema does not define; only known fields are ever used or stored."""
+    """Normalize runaway output before validation: drop object keys the schema does not define, list items
+    beyond `maxItems`, and text beyond `maxLength` (cut at the last sentence end inside the limit). Only known
+    fields are ever used or stored. Types and required fields are still checked by `validate`: this accepts no
+    wrong shape, it only keeps one over-long block from discarding a whole call (an overview narrative was lost
+    to a schema violation on 2026-10-17)."""
     if schema["type"] == "object" and isinstance(value, dict):
         return {key: prune(item, schema["properties"][key]) for key, item in value.items() if key in schema["properties"]}
     if schema["type"] == "array" and isinstance(value, list):
-        return [prune(item, schema["items"]) for item in value]
+        kept = value if "maxItems" not in schema else value[:schema["maxItems"]]
+        return [prune(item, schema["items"]) for item in kept]
+    if schema["type"] == "string" and isinstance(value, str):
+        limit = schema.get("maxLength", _MAX_TEXT)
+        return value if len(value) <= limit else clip_text(value, limit)
     return value
+
+
+def clip_text(text: str, limit: int) -> str:
+    """The longest prefix within `limit` that ends at a sentence boundary (a period followed by a space or a
+    line break), when such a boundary lies in the second half of the limit; else a plain cut."""
+    cut = text[:limit]
+    end = max(cut.rfind(". "), cut.rfind(".\n"), cut.rfind("\n"))
+    return cut[:end + 1].rstrip() if end >= limit // 2 else cut.rstrip()
 
 
 def validate(value: Any, schema: dict[str, Any], path: str) -> list[str]:

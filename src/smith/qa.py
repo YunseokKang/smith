@@ -300,9 +300,10 @@ def answer(db: Path, data: dict[str, Any], question: Question, *, now: datetime,
     if moved:
         memos.append(f"이 답은 {at:%m월 %d일} 보고서 시점의 원장 기준입니다. 그 뒤 원장이 갱신되어, 최신 수치는 다음 "
                      "보고서에 반영됩니다.")
-    return {"text": narrative.readable(output["answer"]["text"]), "refs": output["answer"]["refs"],
-            "follow_up": [narrative.readable(f) for f in output["follow_up"]], "memos": memos, "brief": brief,
-            "remember": memory.new_facts(stored, output["remember"])}
+    # The same prose rules as the report (report design §17.6): rounded amounts, no bare qualifier tags.
+    return {"text": narrative.polish(narrative.readable(output["answer"]["text"])), "refs": output["answer"]["refs"],
+            "follow_up": [narrative.polish(narrative.readable(f)) for f in output["follow_up"]], "memos": memos,
+            "brief": brief, "remember": memory.new_facts(stored, output["remember"])}
 
 
 def _stored_memory(db: Path) -> list[memory.Fact]:
@@ -369,7 +370,8 @@ def render(question: Question, result: dict[str, Any], data: dict[str, Any]) -> 
     follow = "" if not result["follow_up"] else (
         '<div style="font-size:12px;font-weight:600;color:#7c828a;margin:16px 0 4px">이어서 물어보실 만한 것</div>'
         + "".join(f'<div style="font-size:13px;color:#5b616e">· {escape(f)}</div>' for f in result["follow_up"]))
-    memo_html = "".join(f'<div style="font-size:12px;color:#7c828a;margin-top:6px">자동 점검 메모: {escape(m)}</div>'
+    # Caveats read as a note to the client, not as a system label (report design §17.6).
+    memo_html = "".join(f'<div style="font-size:12px;color:#7c828a;margin-top:6px">참고: {escape(m)}</div>'
                         for m in result.get("memos", []))
     remembered = result.get("remember", [])
     follow += "" if not remembered else (
@@ -387,7 +389,7 @@ def render(question: Question, result: dict[str, Any], data: dict[str, Any]) -> 
             f'<div style="font-size:12px;color:#7c828a;margin-top:20px;padding-top:12px;border-top:1px solid #dee1e6">'
             f'Smith는 조회 전용 자문입니다. 매매·이체·대출 신청을 실행하지 않으며, 세금과 법령은 실행 전 현행 기준을 '
             f'확인하셔야 합니다. 이 메일에 다시 답장하시면 이어서 답해 드립니다.</div></div></body></html>')
-    text = result["text"] + "".join(f"\n자동 점검 메모: {m}" for m in result.get("memos", [])) \
+    text = result["text"] + "".join(f"\n참고: {m}" for m in result.get("memos", [])) \
         + ("\n\n출처: " + ", ".join(url for _, url in sources) if sources else "") \
         + ("\n\n기억해 두겠습니다: " + " / ".join(text for _, text in remembered) if remembered else "")
     return html, text

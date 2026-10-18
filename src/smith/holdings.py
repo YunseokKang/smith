@@ -15,6 +15,7 @@ from smith.payload import LedgerView, base_amount, unrealized_gain
 from smith.records import Kind
 
 CONCENTRATION_LIMIT = Decimal("0.25")  # Assumption: one holding above a quarter of the stocks is concentrated.
+TRIM_QUARTERS = 4                      # Assumption: an excess over the limit is sold down in four quarterly steps.
 GLIDE_HORIZON_MONTHS = 36              # Money needed within three years should not depend on stock prices.
 GLIDE_START_MONTHS = 24                # Start moving it to safe assets this long before the date,
 GLIDE_END_MONTHS = 6                   # and finish this long before.
@@ -67,11 +68,15 @@ class Need:
     owner: str = "self"
 
 
-def review(view: LedgerView) -> dict[str, Any]:
+def review(view: LedgerView, employer_symbols: frozenset[str] | set[str] = frozenset()) -> dict[str, Any]:
     """Listed holdings, largest first, and portfolio figures. Lots of one instrument (market, symbol,
     currency) held in several accounts are one position; Hermes-managed lots stay apart. Shares are of all
     the securities Smith may give opinions on, including those without a symbol (`unlisted`); a total that
-    includes an unconverted amount is unknown."""
+    includes an unconverted amount is unknown.
+
+    `employer_symbols` are the stocks the client's pay comes in (future_income): holding them stacks the
+    financial asset on the human capital already tied to that company, so they are flagged `employer` and,
+    like a holding above the limit, must always get an opinion (`must_opine`)."""
     lots: dict[tuple[Any, ...], list[Any]] = {}
     for record in sorted(view.records, key=lambda r: r.record_id):
         f = record.fields
@@ -89,6 +94,8 @@ def review(view: LedgerView) -> dict[str, Any]:
         # A fund spreads over many companies; the single-company limit is for individual companies.
         p["kind"] = kind(p)
         p["concentrated"] = p["kind"] == "stock" and p["share"] is not None and p["share"] > CONCENTRATION_LIMIT
+        p["employer"] = not p["hermes"] and p["symbol"] in employer_symbols
+        p["must_opine"] = not p["hermes"] and (p["concentrated"] or p["employer"])
         # One opinion per position: the symbol, or symbol.market when the symbol is listed on two markets.
         p["key"] = p["symbol"] if symbols.count(p["symbol"]) <= 1 else f"{p['symbol']}.{p['market'] or 'unknown'}"
     positions.sort(key=lambda p: (p["value"] is None, -(p["value"] or 0), p["key"]))
@@ -101,6 +108,29 @@ def review(view: LedgerView) -> dict[str, Any]:
             "overseas_share": overseas / total if total and overseas is not None else None,
             "concentrated": [p["key"] for p in mine if p["concentrated"]],
             "concentration_limit": CONCENTRATION_LIMIT}
+
+
+def concentration_plan(review: dict[str, Any]) -> dict[str, Any] | None:
+    """How to bring every individual stock above the limit back under it (report design §17.4): the excess
+    over the limit per holding, sold in TRIM_QUARTERS equal quarterly steps into the broad-index core, and the
+    rule for pay that arrives in the same stock. None when no holding is above the limit; `unknown` when the
+    securities total could not be converted (an unknown share is not a verdict either way)."""
+    total = review["total"]
+    over = [p for p in review["positions"] if p["concentrated"]]
+    if total is None:
+        return {"positions": [], "excess_total": None, "quarters": TRIM_QUARTERS, "employer_double": False,
+                "unknown": True}
+    if not over:
+        return None
+    items = []
+    for p in over:
+        excess = p["value"] - CONCENTRATION_LIMIT * total
+        items.append({"key": p["key"], "name": p["name"], "symbol": p["symbol"], "market": p["market"],
+                      "share": p["share"], "value": p["value"], "excess": excess, "employer": p["employer"],
+                      "per_quarter": excess / TRIM_QUARTERS})
+    items.sort(key=lambda item: -item["excess"])
+    return {"positions": items, "excess_total": sum((i["excess"] for i in items), Decimal(0)), "quarters": TRIM_QUARTERS,
+            "employer_double": any(i["employer"] for i in items), "unknown": False, "limit": CONCENTRATION_LIMIT}
 
 
 def _position(view: LedgerView, records: list[Any]) -> dict[str, Any]:

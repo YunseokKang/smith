@@ -107,7 +107,8 @@ class QaTests(unittest.TestCase):
         self.poll(bad)
         html = self.sent[0]["html"]
         self.assertIn("반드시 오릅니다", html)                     # Kept: the answer is for the client alone.
-        self.assertIn("자동 점검 메모", html)
+        self.assertIn("참고: ", html)                              # The caveat reads as a note, not a system label.
+        self.assertNotIn("자동 점검 메모", html)
         self.scopes = gmail.SCOPE                                            # Send-only grant: nothing is read.
         with self.assertRaises(gmail.MailError) as caught:
             self.poll()

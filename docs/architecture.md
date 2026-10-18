@@ -397,6 +397,24 @@ Gmail API, 기본 권한은 `gmail.send` 하나. 질의응답을 켜면 `--read`
 - 심리 함정 브리핑: 자문(`advice-v7`)·메일 답변(`mail-answer-v8`) 시스템 프롬프트의 지침이다. 출력 스키마는 바뀌지 않았고, 서술
   프롬프트(`narrative-v9`)는 새 입력 둘의 뜻과 생활판·종합판의 쓰임을 설명한다.
 
+## 보고서 고도화 v2.0 (report-design §17, `src/smith/lease.py`, `proposals`, `narrative`, `report_html`)
+
+- 데이터 흐름: `report_data._build_report`가 예정 소득에서 회사 주식 심볼을 뽑아 `holdings.review(view, employer)`로 `employer`·
+  `must_opine`을 붙이고, `lease.plans`(보증금별 승계·매도·대출 시나리오와 스트레스 역전세 차액)를 만들어 `proposals.build(review=,
+  lease_plans=)`와 `stress.test(..., lease_plans)`에 넘긴다. `_home_progress`는 가구 통합 기준(`baseline`, `baseline_label`,
+  `gap_baseline`, `after_tax`)을 더한다. 결과는 `data["lease_plans"]`, `advice["reserve_swap"]`, `advice["concentration"]`,
+  `advice["insurance_review"]`로 보고서와 서술 입력(`sector_metrics.cash.reserve_swap`, `real_estate.lease_return_plan`,
+  `home_plan`, `pension_insurance.insurance_review`, `portfolio_facts.concentration_plan`, 종목의 `employer_stock`·`must_opine`)에 들어간다.
+- 제안 규칙 2개 추가: `concentration-trim`(투자·시장판), `insurance-review`(세금·연금판). `emergency-reserve`는 매도 가능 자산이 부족분의
+  3배 이상이면 일시 충당 변형, `lease-return`은 순유출 기준. 안심 소비 한도의 비상금 적립은 일시 충당이면 0.
+- 서술 검증: `must_opine` 종목의 의견 누락 거부(`missing-opinion`), 내부 용어 거부·미복원(`internal-term`), 문장당 괄호 2개 이상
+  (`parentheses`), 만 단위 반올림 허용(`_money` 정밀도), `merge`의 정체 기반 병합(`raw` 인자), `restore` 뒤 `polish_output`(금액 반올림·태그
+  제거). 끝까지 의견이 없는 `must_opine` 종목은 `attach`에서 `code_opinion`으로 채운다(`by_code`).
+- 견고성(첫 발송 점검): `headless.prune`은 검증 전에 목록을 `maxItems`에서, 글을 `maxLength` 안의 문장 끝에서 자른다(`clip_text`). 서술 호출 제한은 `TIMEOUT_SECONDS=900`, 수정 `REPAIR_TIMEOUT_SECONDS=420`. 실패 감사 기록은 `{"detail": 필드 경로}`를 든다. 서술이 없어도 `attach`는 `must_opine` 종목에 `code_opinion`을 붙인다.
+- 표시: 히어로는 상태 배지 + 헤드라인(첫 문장) + 나머지 판단. 판정 사유·검증 메모·입력 안내는 `report_html._system_notes`가 모아
+  푸터 "데이터 상태 및 시스템 노트"에 싣는다. `Proposal.context_memo`가 맥락 메모를 따로 든다. 편집: 생활판 `goals`, 부동산판
+  `lease_plan`, 투자판 `macro_brief`.
+
 ## 요일별 주제판 (`src/smith/editions.py`, report-design §14)
 
 - 월~토 하루 한 주제: `overview`(월), `markets`(화), `property`(수), `rates`(목), `tax`(금), `life`(토). 요일→판은

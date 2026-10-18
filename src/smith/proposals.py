@@ -53,6 +53,7 @@ class Proposal:
     times_shown: int = 0  # Delivered reports that already carried this instance.
     renewed: bool = True  # New identity or materially changed figures: a new instance when delivered.
     context: str = ""     # Market and policy context added by the narrative stage (verified, sourced).
+    context_memo: str = ""  # A verification caveat on `context`, shown in the footer's system notes only.
     links: tuple[tuple[str, str], ...] = ()  # (title, https URL) sources for `context`.
 
 
@@ -75,27 +76,40 @@ class Undetermined:
 
 
 # The proposal rules in `build`, in order. A rule's proposals and undetermined judgements carry its key.
-RULE_KEYS = ("lease-return", "emergency-reserve", "goal-stocks-glide", "surplus-plan", "pension-credit",
-             "overseas-harvest", "isa-open", "prepayment", "variable-rate", "spending-room")
+RULE_KEYS = ("lease-return", "emergency-reserve", "goal-stocks-glide", "concentration-trim", "surplus-plan",
+             "pension-credit", "overseas-harvest", "isa-open", "insurance-review", "prepayment", "variable-rate",
+             "spending-room")
 SPENDING_FILL_MONTHS = 12  # Assumption (§16.3): an emergency-reserve gap is filled within a year.
+# Assumption (§17.1): when assets sellable within days are at least this many times the reserve gap, the gap
+# is filled by moving money between assets once, not by diverting the monthly surplus for months.
+SWAP_MULTIPLE = Decimal(3)
+# Assumption (§17.5): premiums above this share of monthly income are a cash-flow target; a premium at or
+# above the savings-type threshold whose tax-free maturity (10 years) falls after the home move is a mismatch.
+INSURANCE_SHARE_LIMIT = Decimal("0.10")
+SAVINGS_PREMIUM_MIN = Decimal(500_000)
+SAVINGS_INSURANCE_YEARS = 10
 
 
 def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
           active: dict[str, dict[str, Any]] | None = None, household: dict[str, Any] | None = None,
-          pay: list[future_income.Inflow] | None = None) -> dict[str, Any]:
+          pay: list[future_income.Inflow] | None = None, review: dict[str, Any] | None = None,
+          lease_plans: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Return proposals (most urgent first), the strategy tracks and the follow-up of earlier proposals.
 
     `active` maps proposal identities to their current instance (ledger.active_proposals). Unless the
     proposal is renewed, a declined or done instance is not raised again, an accepted one moves to
-    `in_progress`, and an open one carries how often it was shown.
+    `in_progress`, and an open one carries how often it was shown. `review` is holdings.review (computed
+    here when absent) and `lease_plans` smith.lease.plans (none when absent: the lease rule then falls back
+    to the whole deposit).
     """
-    facts = _facts(view, kpis, sectors)
+    facts = _facts(view, kpis, sectors, review, lease_plans or [])
     facts["tax"] = tax.facts(view, facts["today"], household)
     facts["pay"] = pay or []  # Expected pay (future_income.inflows): shown beside the long-range tracks only.
     facts["glide"] = _glide(facts)
+    facts["reserve_swap"] = reserve_swap(facts)
     facts["spending_room"] = spending_room(facts)
-    rules = (_lease_return, _emergency_reserve, _goal_stocks_glide, _surplus_plan, _pension_credit, _overseas_harvest,
-             _isa, _prepayment, _variable_rate, _spending_room)
+    rules = (_lease_return, _emergency_reserve, _goal_stocks_glide, _concentration_trim, _surplus_plan, _pension_credit,
+             _overseas_harvest, _isa, _insurance_review, _prepayment, _variable_rate, _spending_room)
     outcomes = [(i, rule(facts)) for i, rule in enumerate(rules)]
     found = [(i, p) for i, p in outcomes if isinstance(p, Proposal)]
     undetermined = [replace(p, key=RULE_KEYS[i]) for i, p in outcomes if isinstance(p, Undetermined)]
@@ -114,6 +128,8 @@ def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
     decided = [item for item in active.values() if item["status"] in ("declined", "done")]
     return {"proposals": proposals, "in_progress": in_progress, "decided": decided, "undetermined": undetermined,
             "strategy": _strategy(facts), "glide": facts["glide"], "spending_room": facts["spending_room"],
+            "reserve_swap": facts["reserve_swap"], "concentration": facts["concentration"],
+            "insurance_review": insurance_review(facts),
             "assumptions": _assumptions() + tax.assumptions(),
             "tax_notes": tax.notes(facts["tax"]), "tax_checklist": tax.checklist(facts["tax"])}
 
@@ -143,9 +159,11 @@ def snapshot(proposal: Proposal) -> dict[str, Any]:
 
 # --- facts ------------------------------------------------------------------------------------------------
 
-def _facts(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any]) -> dict[str, Any]:
+def _facts(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any], review: dict[str, Any] | None,
+           lease_plans: list[dict[str, Any]]) -> dict[str, Any]:
     summary = view.summary
     today = view.as_of.date()
+    plans = {p["record_id"]: p for p in lease_plans}
     leases = []
     for record in view.records:
         f = record.fields
@@ -155,9 +173,15 @@ def _facts(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any]) -> d
             if today < due and months <= LEASE_HORIZON_MONTHS:
                 market = next((p.get("market") for p in sectors["real_estate"]["properties"]
                                if p["record_id"] == f.get("collateral_record_id")), None)
-                leases.append({"due": due, "months": months, "amount": base_amount(view, record), "owner": record.owner_id,
+                amount = base_amount(view, record)
+                plan = plans.get(record.record_id)
+                leases.append({"due": due, "months": months, "amount": amount, "owner": record.owner_id,
                                "jeonse": None if market is None else market["jeonse"],
-                               "jeonse_basis": 0 if market is None else market["jeonse_basis"]})
+                               "jeonse_basis": 0 if market is None else market["jeonse_basis"],
+                               # The household's own cash in the default (re-let) scenario; the whole deposit
+                               # when the market level is unknown or no plan was computed.
+                               "need": amount if plan is None else plan["need"], "plan": plan})
+    review = holdings.review(view) if review is None else review
     # Inputs come from report_data, where a total that includes an unconverted amount is None.
     # Rules skip or say "unknown" rather than turn a partial total into a confident figure.
     liquidity = sectors["cash"]["liquidity"]
@@ -177,7 +201,8 @@ def _facts(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any]) -> d
             "pension_accounts": len(pension),
             "pension_total": pension_total, "cd": _series(view, CD_SERIES),
             "base_rate": _series(view, BASE_RATE_SERIES),
-            "resources": holdings.owner_resources(view)}
+            "resources": holdings.owner_resources(view),
+            "review": review, "concentration": holdings.concentration_plan(review)}
 
 
 def _restricted_transfers(view: LedgerView) -> Decimal:
@@ -220,54 +245,107 @@ def _add_months(day: date, months: int) -> date:
 # --- rules ------------------------------------------------------------------------------------------------
 
 def _lease_return(facts: dict[str, Any]) -> Proposal | Undetermined | None:
+    """The deposit due is returned mostly by the next tenant's deposit (report design §17.2): the proposal
+    sizes the household's own cash in that default scenario, and shows the sale and the loan beside it."""
     if not facts["leases"]:
         return None
     lease = min(facts["leases"], key=lambda item: item["due"])
-    amount, months, surplus = lease["amount"], lease["months"], facts["available"]
-    if amount is None:
+    amount, months, surplus, need = lease["amount"], lease["months"], facts["available"], lease["need"]
+    if amount is None or need is None:
         return Undetermined("전세보증금 반환 계획", "보증금 금액을 원화로 환산하지 못했습니다(환율 없음).")
+    plan = lease["plan"]
+    relet = plan is not None and plan["default"] == "relet"
     accumulated = _accumulated(facts, months)
-    coverage = accumulated / amount if accumulated is not None and amount else None
+    coverage = accumulated / need if accumulated is not None and need else None
     deadline = _add_months(lease["due"], -DECISION_LEAD_MONTHS)
-    priority = 1 if months <= 12 or (coverage is not None and coverage < 1 and months <= 24) else 2
+    short = coverage is not None and coverage < 1
+    priority = 1 if (months <= 12 and short) or (short and months <= 24 and not relet) else 2
     home = facts["kpis"]["home_progress"]
-    overlap = (" 다만 같은 자산과 여유 자금을 주택 이전 목표 계산에도 쓰고 있어, 두 목표가 같은 돈을 나눠 써야 합니다."
+    overlap = (" 같은 자산과 여유 자금을 주택 이전 목표 계산에도 쓰고 있어, 두 목표가 같은 돈을 나눠 써야 합니다."
                if home else "")
     if accumulated is None:
-        readiness = (" 일부 자산이나 현금흐름을 원화로 환산하지 못해(환율 없음) 만기 때 준비할 수 있는 금액은 "
-                     "계산하지 않았습니다.")
+        readiness = (" 일부 자산이나 현금흐름을 원화로 환산하지 못해 만기 때 준비할 수 있는 금액은 계산하지 않았습니다.")
+    elif need == 0:
+        readiness = " 지금 시세라면 직접 마련하실 돈은 없고, 안전 버퍼만 준비하시면 됩니다."
     else:
         readiness = (f" 지금 며칠 안에 현금으로 바꿀 수 있는 자산 {short_won(facts['liquid'])}에 매월 여유 "
-                     f"{short_won(surplus)}이 그대로 쌓인다고 보면, 만기 때 약 {short_won(accumulated)}으로 필요액의 "
+                     f"{short_won(surplus)}이 쌓인다고 보면 만기 때 약 {short_won(accumulated)}이 되어, 준비하실 돈의 "
                      f"{percent(coverage, 0)}입니다.{overlap}")
     jeonse, gap = lease["jeonse"], None
     market = ""
-    if jeonse is not None and lease["jeonse_basis"] >= MIN_BASIS:
-        gap = amount - jeonse
-        market = (f" 같은 단지·같은 면적의 최근 6개월 전세 계약 {lease['jeonse_basis']}건의 중간값은 {short_won(jeonse)}으로, "
-                  + (f"지금 시세로 새 세입자를 받으면 약 {short_won(gap)}을 직접 마련해야 합니다(역전세)." if gap > 0
-                     else "지금 시세라면 새 세입자의 보증금으로 돌려드릴 수 있는 수준입니다."))
+    if relet:
+        gap = plan["relet"]["gap"]
+        market = (f" 같은 단지·같은 면적의 최근 6개월 전세 계약 {lease['jeonse_basis']}건의 중간값은 {short_won(jeonse)}입니다. "
+                  f"새 세입자를 받으면 그 보증금이 기존 보증금을 대신하므로, 고객님이 직접 준비하실 돈은 차액 "
+                  f"{short_won(gap)}에 안전 버퍼 {short_won(plan['relet']['buffer'])}을 더한 약 {short_won(need)}입니다."
+                  + _lease_alternatives(plan))
     elif jeonse is not None:
         # One or two contracts: shown for reference, but too few to put a gap figure on.
-        market = (f" 같은 단지·같은 면적의 최근 6개월 전세 계약은 {lease['jeonse_basis']}건뿐이라(중간값 "
-                  f"{short_won(jeonse)}) 참고용으로만 보시고, 역전세 차액은 계산하지 않았습니다.")
+        market = (f" 같은 단지·같은 면적의 최근 6개월 전세 계약은 {lease['jeonse_basis']}건뿐이라 중간값 {short_won(jeonse)}은 "
+                  "참고용으로만 보시고, 보증금 전액을 보수적으로 잡았습니다." + ("" if plan is None else _lease_alternatives(plan)))
+    title = (f"{lease['due']:%Y년 %m월} 돌려드릴 전세보증금 {short_won(amount)}은 새 세입자 승계가 기본이고, 직접 준비하실 돈은 "
+             f"약 {short_won(need)}입니다. 반환 방법을 {deadline:%Y년 %m월}까지 정해 두시길 권합니다." if relet else
+             f"{lease['due']:%Y년 %m월} 돌려드려야 할 전세보증금 {short_won(amount)}의 반환 방법을 "
+             f"{deadline:%Y년 %m월}까지 정해 두시길 권합니다.")
+    figures = {"amount": amount, "months": Decimal(months), "need": need,
+               **({} if accumulated is None else {"accumulated": accumulated}),
+               **({} if gap is None else {"jeonse_gap": gap})}
+    if plan is not None:
+        sale, loan = plan["sale"], plan["loan"]
+        if sale["cash_out"] is not None:
+            figures["sale_net_inflow"] = -sale["cash_out"]
+        if loan["amount"] is not None:
+            figures["loan_capacity"] = loan["amount"]
     return Proposal(
         key="lease-return", priority=priority, identity=f"lease-return:{lease['due']}",
-        watch=("amount", "accumulated"), tolerance=Decimal("0.15"),
-        title=f"{lease['due']:%Y년 %m월} 돌려드려야 할 전세보증금 {short_won(amount)}의 반환 방법을 "
-              f"{deadline:%Y년 %m월}까지 정해 두시길 권합니다.",
-        why=(f"전세보증금은 계약이 끝나면 세입자에게 돌려줘야 하는, 날짜와 금액이 정해진 큰 지출입니다(남은 기간 {months}개월)."
-             + readiness + market),
-        effect=("반환 방법(재계약, 새 세입자의 보증금, 매도, 보유 자금)을 미리 정해 두면 만기 직전에 주식을 불리한 시세에 "
-                "팔거나 급히 대출을 받는 일을 피할 수 있습니다."),
-        risks=("새 세입자의 보증금이 지금보다 낮으면(이른바 역전세) 그 차액을 직접 마련해야 합니다. 아무것도 정하지 않으면 "
-               "만기 무렵의 시세와 금리에 따라 선택지가 좁아집니다."),
+        watch=("need", "accumulated"), tolerance=Decimal("0.15"),
+        title=title,
+        why=(f"전세보증금은 계약이 끝나면 세입자에게 돌려줘야 하는, 날짜가 정해진 큰 돈입니다(남은 기간 {months}개월). 다만 보증금 "
+             "전액이 고객님 주머니에서 나가는 것은 아닙니다." + market + readiness),
+        effect=("반환 방법(새 세입자 승계, 재계약, 매도, 퇴거자금대출)을 미리 정해 두면 만기 직전에 주식을 불리한 시세에 팔거나 "
+                "급히 대출을 받는 일을 피하고, 월 여유 자금을 보증금에 묶지 않을 수 있습니다."),
+        risks=("새 세입자의 보증금이 지금 시세보다 낮으면 차액이 커지고, 새 세입자가 늦게 들어오면 그 사이 보증금을 먼저 돌려줘야 "
+               "할 수 있습니다. 아무것도 정하지 않으면 만기 무렵의 시세와 금리에 따라 선택지가 좁아집니다."),
         timing=f"{deadline:%Y.%m}까지 방법 결정(만기 {DECISION_LEAD_MONTHS}개월 전)",
         reconsider="주변 전세 시세가 크게 바뀌거나, 재계약·매도 여부가 정해지면 다시 계산합니다.",
-        certainty="계산(현재 잔액과 현금흐름이 유지된다는 가정)" + (", 국토교통부 실거래가" if market else ""),
-        figures={"amount": amount, "months": Decimal(months),
-                 **({} if accumulated is None else {"accumulated": accumulated}),
-                 **({} if gap is None else {"jeonse_gap": gap})})
+        certainty=("계산(현재 잔액과 현금흐름이 유지된다는 가정) + 국토교통부 실거래가 + 가정(안전 버퍼 "
+                   f"{percent(plan['assumptions']['relet_buffer_rate'], 0)})" if relet else
+                   "계산(현재 잔액과 현금흐름이 유지된다는 가정, 보증금 전액 기준)"),
+        figures=figures)
+
+
+def _lease_alternatives(plan: dict[str, Any]) -> str:
+    """The sale and the loan scenarios in one or two sentences, with their figures when known."""
+    sale, loan = plan["sale"], plan["loan"]
+    parts = []
+    if sale["cash_out"] is not None:
+        inflow = -sale["cash_out"]
+        taxed = sale["net_inflow"]
+        parts.append(f" 전세를 끼고 팔거나 만기에 맞춰 파는 경우에는 돈이 나가지 않고, {sale['price_basis']}에서 보증금과 담보대출"
+                     + (f", 양도세를 빼면 약 {short_won(inflow)}이 들어옵니다(1세대 1주택 비과세 요건을 갖추면 약 "
+                        f"{short_won(taxed['exempt'])}, 현행 법령 확인 필요)." if taxed else
+                        f"을 빼면 약 {short_won(inflow)}이 들어옵니다(취득가를 몰라 양도세는 빼지 않았습니다)."))
+    if loan["amount"] is not None:
+        parts.append(f" 퇴거자금대출은 소득 대비 상환 비율 기준으로 약 {short_won(loan['amount'])}까지 가능할 수 있지만, "
+                     "확정 승인이 아니라 가정입니다(현행 규정 확인 필요).")
+    elif loan["basis"].startswith("이 명의"):
+        parts.append(" 퇴거자금대출 한도는 이 명의의 소득 기록이 없어 계산하지 않았습니다.")
+    return "".join(parts)
+
+
+def reserve_swap(facts: dict[str, Any]) -> dict[str, Any] | None:
+    """Whether the emergency-reserve gap is filled in one step by moving money between assets (report design
+    §17.1): assets sellable within days (Hermes-managed ones never count) are at least SWAP_MULTIPLE times the
+    gap. The natural source is the excess of any individual stock above the single-company limit; the rest
+    comes from holdings with an exit or trim opinion. None when there is no gap or an input is unknown."""
+    cash = facts["sectors"]["cash"]
+    gap, days = cash["reserve_gap"], cash["liquidity"].get("days")
+    if gap is None or gap == 0 or days is None:
+        return None
+    plan = facts["concentration"]
+    excess = Decimal(0) if plan is None or plan.get("unknown") else plan["excess_total"]
+    return {"gap": gap, "sellable_within_days": days, "concentration_excess": excess,
+            "multiple": days / gap, "one_step": days >= gap * SWAP_MULTIPLE}
 
 
 def _emergency_reserve(facts: dict[str, Any]) -> Proposal | Undetermined | None:
@@ -281,6 +359,9 @@ def _emergency_reserve(facts: dict[str, Any]) -> Proposal | Undetermined | None:
     fill_months = None if surplus <= 0 else (gap / surplus).to_integral_value(rounding=ROUND_CEILING)
     priority = 1 if months_cover is not None and months_cover < 1 else 2
     days = cash["liquidity"].get("days")  # Hermes-managed assets are not counted (never proposed for sale).
+    swap = facts["reserve_swap"]
+    if swap is not None and swap["one_step"]:
+        return _reserve_by_swap(facts, swap, priority, months_cover)
     return Proposal(
         key="emergency-reserve", priority=priority, watch=("gap", "target"), tolerance=Decimal("0.25"),
         title=f"바로 꺼내 쓸 수 있는 비상금을 {short_won(cash['reserve_target'])}까지 {short_won(gap)} 더 마련하시길 권합니다.",
@@ -295,6 +376,38 @@ def _emergency_reserve(facts: dict[str, Any]) -> Proposal | Undetermined | None:
         reconsider="월 지출이 바뀌거나, 소득이 더 안정적이라 기준 개월 수를 낮추기로 하시면 다시 계산합니다.",
         certainty=f"가정(비상금 기준 월 지출 {cash['emergency_months_assumption']}개월)",
         figures={"gap": gap, "target": cash["reserve_target"]})
+
+
+def _reserve_by_swap(facts: dict[str, Any], swap: dict[str, Any], priority: int, months_cover: Decimal | None) -> Proposal:
+    """The one-step fill: sell the excess above the single-company limit (or holdings with an exit opinion) for
+    the gap, and leave the monthly surplus to its investing and spending. A total-balance-sheet view, not a
+    mental-accounting one (report design §17.1)."""
+    cash, surplus = facts["sectors"]["cash"], facts["available"]
+    gap, excess = swap["gap"], swap["concentration_excess"]
+    source = (f" 한 종목 한도({percent(holdings.CONCENTRATION_LIMIT, 0)})를 넘는 금액이 {short_won(excess)}이라, 그 초과분부터 "
+              "정리하면 비상금 마련과 집중 완화를 한 번에 해결합니다." if excess >= gap else
+              (f" 한 종목 한도를 넘는 초과분 {short_won(excess)}을 먼저 쓰고, 나머지는 정리 의견이 있는 종목에서 채웁니다."
+               if excess > 0 else " 정리 의견이 있는 종목(손실 종목, 역할이 겹치는 종목)부터 정리해 채웁니다."))
+    return Proposal(
+        key="emergency-reserve", priority=priority, watch=("gap", "target"), tolerance=Decimal("0.25"),
+        title=(f"비상금 부족분 {short_won(gap)}은 월급에서 떼지 말고, 보유 주식 가운데 비중이 과한 종목이나 정리할 종목을 "
+               f"{short_won(gap)}만큼 정리해 한 번에 채우시길 권합니다."),
+        why=(f"비상금은 실직·질병처럼 예상하지 못한 일에 대비해 손해 없이 바로 꺼낼 수 있는 돈입니다. 지금은 월 지출의 "
+             f"{'미상' if months_cover is None else f'{months_cover:.1f}개월'}분({short_won(cash['immediate'])})으로 기준 "
+             f"{short_won(cash['reserve_target'])}에 {short_won(gap)}이 모자랍니다. 그런데 며칠 안에 팔 수 있는 주식·펀드가 "
+             f"{short_won(swap['sellable_within_days'])}으로 부족분의 {swap['multiple']:.0f}배가 넘습니다. 통장 하나만 보고 월 여유 자금을 "
+             "몇 달씩 비상금에 묶는 것은 자산 전체를 보지 않는 계산입니다." + source),
+        effect=(f"비상금은 이번 달 안에 채워지고, 매월 여유 {short_won(surplus)}은 비상금에 묶이지 않은 채 정기 투자 적립과 "
+                "안심 소비 한도로 그대로 남습니다."),
+        risks=("주식을 팔 때는 시세와 세금(해외 종목은 양도세와 연 기본공제, 현행 법령 확인 필요), 수수료가 따릅니다. 시세가 낮을 때 "
+               "파는 것이 아깝다면 두세 번에 나눠 옮기셔도 되지만, 비상금은 수익을 내는 돈이 아니라 보험입니다. 비상금은 수시로 "
+               "넣고 빼면서 이자가 붙는 계좌(CMA·파킹통장)에 두십시오."),
+        timing="이번 달 안에 한 번",
+        reconsider="월 지출이 바뀌거나, 팔 수 있는 자산이 크게 줄거나, 기준 개월 수를 바꾸기로 하시면 다시 계산합니다.",
+        certainty=(f"계산(현재 평가액) + 가정(비상금 기준 월 지출 {cash['emergency_months_assumption']}개월, 매도 가능 자산이 부족분의 "
+                   f"{SWAP_MULTIPLE}배 이상이면 일시 충당)"),
+        figures={"gap": gap, "target": cash["reserve_target"], "sellable_within_days": swap["sellable_within_days"],
+                 "concentration_excess": excess})
 
 
 def _glide(facts: dict[str, Any]) -> dict[str, Any] | None:
@@ -360,6 +473,105 @@ def _goal_stocks_glide(facts: dict[str, Any]) -> Proposal | Undetermined | None:
                    "주택은 기준 시나리오)"),
         figures={"earmarked": plan["earmarked"], "from_stocks": first["from_stocks"],
                  "per_quarter": first["per_quarter"], "stress": plan["stress"]})
+
+
+def _concentration_trim(facts: dict[str, Any]) -> Proposal | Undetermined | None:
+    """An individual stock above the single-company limit is sold down to it in quarterly steps into the
+    broad-index core (report design §17.4). When the stock is the employer's, the client's salary and share
+    grants already ride on that company: human capital and financial assets are concentrated twice, so this
+    is the first investment proposal."""
+    plan = facts["concentration"]
+    if plan is None:
+        return None
+    if plan["unknown"]:
+        return Undetermined("집중 종목 정리", "증권 가운데 원화로 환산하지 못한 금액이 있어 종목 비중을 계산하지 못했습니다.")
+    first = plan["positions"][0]
+    limit, quarters = percent(plan["limit"], 0), plan["quarters"]
+    employer = first["employer"]
+    grants = any(i.in_stock and i.owner_id == "self" and i.symbol == first["symbol"] for i in facts["pay"])
+    double = ("" if not employer else
+              " 월급" + ("과 예정된 주식 보상" if grants else "") + "도 같은 회사에서 나오므로, 인적 자본(앞으로 벌 소득)과 금융 자산이 "
+              "한 회사에 겹쳐 있습니다(이중 집중). 회사 실적이 꺾이면 소득과 자산이 같은 날 함께 흔들립니다.")
+    others = "".join(f" {p['name']}도 한도를 {short_won(p['excess'])} 넘어 같은 방식으로 분기마다 약 {short_won(p['per_quarter'])}씩 "
+                     "정리합니다." for p in plan["positions"][1:])
+    grant_rule = (" 앞으로 받는 자사주 보상은 비중이 한도 안으로 내려올 때까지 받는 즉시 전부 지수펀드로 분산하는 원칙을 권합니다."
+                  if employer else "")
+    return Proposal(
+        key="concentration-trim", priority=1 if employer else 2, identity=f"concentration-trim:{first['key']}",
+        watch=("excess",), tolerance=Decimal("0.25"),
+        title=(f"{first['name']} 비중이 주식의 {percent(first['share'], 0)}로 한 종목 한도 {limit}를 넘습니다. 초과분 약 "
+               f"{short_won(first['excess'])}을 {quarters}분기에 걸쳐 분기마다 약 {short_won(first['per_quarter'])}씩 정리해 넓은 "
+               "지수펀드(코어)로 옮기시길 권합니다."),
+        why=(f"한 종목이 주식의 {limit}를 넘으면 그 회사 한 곳의 소식에 자산 전체가 크게 흔들립니다(집중). 지금 {first['name']}은 "
+             f"{short_won(first['value'])}로 주식의 {percent(first['share'], 0)}입니다." + double + others),
+        effect=(f"한도 안으로 들어오면 이 회사의 악재가 주식 자산에 미치는 영향이 {percent(first['share'], 0)}에서 {limit} 수준으로 "
+                "줄고, 옮긴 돈은 넓은 지수펀드에서 시장 전체의 성장을 따릅니다. 실적 발표 뒤 주가가 좋은 구간에 나눠 팔면 한 시점의 "
+                "주가에 덜 좌우됩니다." + grant_rule),
+        risks=("정리한 뒤 그 종목이 더 오르면 그만큼의 이익을 놓칩니다. 세금은 종목의 시장에 따라 다르니(국내 상장 주식은 대주주가 아니면 "
+               "양도세가 없고, 해외 종목은 연 기본공제를 넘는 이익에 양도세) 팔기 전에 확인하십시오(현행 법령 확인 필요). 회사를 깊이 "
+               "이해하셔서 집중을 유지하시겠다면, 그 판단의 근거를 기록해 두시길 권합니다."),
+        timing=f"{facts['today']:%Y.%m}부터 {quarters}분기, 분기마다 한 번(실적 발표 뒤)",
+        reconsider="비중이 한도 아래로 내려오거나, 회사 주식 보상 계획이 바뀌거나, 한 종목 한도를 바꾸기로 하시면 다시 계산합니다.",
+        certainty=f"계산(현재 평가액) + 가정(한 종목 한도 {limit}, {quarters}분기 분할)",
+        figures={"excess": first["excess"], "per_quarter": first["per_quarter"], "share": first["share"],
+                 "value": first["value"]})
+
+
+def insurance_review(facts: dict[str, Any]) -> dict[str, Any] | None:
+    """Premiums against income and the home date (report design §17.5): the share of monthly income, the
+    premiums large enough to be savings-type (SAVINGS_PREMIUM_MIN a month) with their tax-free maturity year,
+    and whether that maturity falls after the home move (a duration mismatch). None without premiums."""
+    pi = facts["sectors"]["pension_insurance"]
+    premiums, share = pi["monthly_premiums"], pi["premium_to_income"]
+    if not premiums:
+        return None
+    home = facts["kpis"]["home_progress"]
+    goal_year = None if home is None else home["target_date"].year
+    savings = []
+    for amount, frequency, start in facts["tax"]["premiums"]:
+        monthly = None if amount is None or frequency not in ("monthly", "quarterly", "annual") else amount / {
+            "monthly": 1, "quarterly": 3, "annual": 12}[frequency]
+        if monthly is not None and monthly >= SAVINGS_PREMIUM_MIN:
+            maturity = int(start[:4]) + SAVINGS_INSURANCE_YEARS
+            savings.append({"monthly": monthly, "maturity_year": maturity,
+                            "mismatch": goal_year is not None and maturity > goal_year})
+    savings_total = sum((s["monthly"] for s in savings), Decimal(0))
+    return {"monthly_premiums": premiums, "share_of_income": share, "limit": INSURANCE_SHARE_LIMIT,
+            "over_limit": share is not None and share > INSURANCE_SHARE_LIMIT,
+            "savings_type": savings, "savings_monthly": savings_total, "home_year": goal_year,
+            "mismatch": any(s["mismatch"] for s in savings)}
+
+
+def _insurance_review(facts: dict[str, Any]) -> Proposal | None:
+    review = insurance_review(facts)
+    if review is None or not (review["over_limit"] or review["mismatch"]):
+        return None
+    share, premiums = review["share_of_income"], review["monthly_premiums"]
+    savings = review["savings_monthly"]
+    over = (f"월 보험료 {short_won(premiums)}이 월 소득의 {percent(share, 0)}로 기준 {percent(INSURANCE_SHARE_LIMIT, 0)}를 넘습니다."
+            if review["over_limit"] else f"월 보험료는 {short_won(premiums)}입니다.")
+    mismatch = "".join(
+        f" 월 {short_won(s['monthly'])}을 내는 보험이 저축성이라면 비과세 만기(가입 {SAVINGS_INSURANCE_YEARS}년, {s['maturity_year']}년)가 "
+        f"주택 이전 시점({review['home_year']}년)보다 늦어, 그 돈은 가장 필요한 때 쓸 수 없습니다(기간 불일치)."
+        for s in review["savings_type"] if s["mismatch"])
+    title = (f"{over.rstrip('.')} 저축성 보험의 감액완납·중도인출·추가 납입 중단을 검토해 매월 현금흐름을 되찾으시길 권합니다."
+             if review["over_limit"] else
+             "저축성 보험의 만기가 주택 이전보다 늦습니다. 감액완납이나 추가 납입 중단으로 그 돈을 필요한 시점에 맞추시길 권합니다.")
+    return Proposal(
+        key="insurance-review", priority=2, watch=("premiums",), tolerance=Decimal("0.2"),
+        title=title,
+        why=(over + mismatch + " 보장성 보험(사고·질병에 대비하는 보험)은 유지하되, 저축성 보험(목돈을 모으는 보험)은 수익이 낮고 "
+             "중간에 꺼내기 어려워 현금흐름 개선의 첫 후보입니다."),
+        effect=(f"저축성으로 보이는 납입 {short_won(savings)}을 멈추면 매월 그만큼 여유가 늘어 1년에 {short_won(savings * 12)}입니다. "
+                if savings else "저축성 납입을 줄이면 그만큼 매월 여유가 늘어납니다. ")
+               + "감액완납(더 내지 않고 보장·적립을 줄여 유지)은 계약을 지키면서 납입을 멈추고, 중도인출은 계약을 유지한 채 일부를 꺼냅니다.",
+        risks=("중도 해지는 환급금 손실과 비과세 혜택 상실이 함께 생기므로 가장 마지막 선택입니다. 보험 종류(보장성·저축성)와 "
+               "해약환급금을 알려 주시면 어느 계약부터 손볼지 정확히 계산해 드립니다. 보장 공백이 생기지 않는지 함께 확인하십시오."),
+        timing="다음 보험료 납입일 전까지 보험사 앱에서 계약 종류와 환급금 확인",
+        reconsider="보험료가 바뀌거나, 보험 종류와 해약환급금이 확인되거나, 주택 이전 시점이 바뀌면 다시 계산합니다.",
+        certainty=(f"계산(기록된 보험료) + 가정(보험료 기준 소득의 {percent(INSURANCE_SHARE_LIMIT, 0)}, 월 "
+                   f"{short_won(SAVINGS_PREMIUM_MIN)} 이상이면 저축성 가능, 비과세 만기 {SAVINGS_INSURANCE_YEARS}년) + 세법 기준(현행 법령 확인 필요)"),
+        figures={"premiums": premiums, **({} if share is None else {"share": share}), "savings_monthly": savings})
 
 
 def _surplus_plan(facts: dict[str, Any]) -> Proposal | Undetermined | None:
@@ -564,14 +776,18 @@ def spending_room(facts: dict[str, Any]) -> dict[str, Any] | None:
     goals = [g for g in summary.goals if g["target_date"] > facts["today"]]
     if any(g["target"] is None for g in goals):
         return None
-    committed = [("비상금 채우기", cash["reserve_gap"] / SPENDING_FILL_MONTHS)]
+    # A gap the sellable assets fill in one step (reserve_swap) takes nothing from the monthly surplus.
+    swap = facts["reserve_swap"]
+    one_step = swap is not None and swap["one_step"]
+    committed = [("비상금 채우기", Decimal(0) if one_step else cash["reserve_gap"] / SPENDING_FILL_MONTHS)]
     used, near_short = Decimal(0), False
     if facts["leases"]:
         lease = min(facts["leases"], key=lambda item: item["due"])
         if lease["amount"] is None or liquid is None:
             return None
-        market = lease["jeonse"] if lease["jeonse"] is not None and lease["jeonse_basis"] >= MIN_BASIS else Decimal(0)
-        net = max(Decimal(0), lease["amount"] - market)
+        # The household's own cash in the default scenario (lease.plans): the re-let gap plus the buffer, or
+        # the whole deposit when the market level is unknown.
+        net = lease["need"]
         used = min(liquid, net)
         need = max(Decimal(0), (net - liquid) / lease["months"])
         committed.append(("보증금 반환 준비", need))
@@ -581,7 +797,9 @@ def spending_room(facts: dict[str, Any]) -> dict[str, Any] | None:
     if home is None and any(g["category"] == "home" for g in goals):
         return None
     if home:
-        gap = home["required"] - home["available_self"]
+        # The home gap on the household baseline (§17.3), not the client alone: the partner's equity and the
+        # expected pay are part of the plan, so the monthly need is the realistic one.
+        gap = home["gap_baseline"]
         planned.append(("주택 이전 목표", max(Decimal(0), home["monthly_net_self"] + (gap + used) / max(1, home["months"]))))
     for goal in goals:
         # The home goal is above; the emergency fund is the reserve; retirement keeps its current transfers.
@@ -593,7 +811,8 @@ def spending_room(facts: dict[str, Any]) -> dict[str, Any] | None:
     planned_total = sum((amount for _, amount in planned), Decimal(0))
     return {"surplus": surplus, "committed": committed, "planned": planned, "committed_total": committed_total,
             "planned_total": planned_total, "room": surplus - committed_total,
-            "room_with_goals": surplus - committed_total - planned_total, "near_commitment_short": near_short}
+            "room_with_goals": surplus - committed_total - planned_total, "near_commitment_short": near_short,
+            "reserve_swap": cash["reserve_gap"] if one_step else None}
 
 
 def _spending_room(facts: dict[str, Any]) -> Proposal | Undetermined | None:
@@ -607,9 +826,11 @@ def _spending_room(facts: dict[str, Any]) -> Proposal | Undetermined | None:
 
     def parts(items: list[tuple[str, Decimal]]) -> str:
         return ", ".join(f"{label} {short_won(amount)}" for label, amount in items if amount)
-    basis = (f"남는 돈 {short_won(room['surplus'])}(수입에서 지출과 본인 계좌로의 이체를 뺀 금액)에서 비상금과 약정(보증금 반환)에 "
+    basis = (f"남는 돈 {short_won(room['surplus'])}은 수입에서 지출과 본인 계좌로의 이체를 뺀 금액입니다. 여기서 비상금과 약정에 "
              f"매월 필요한 적립 {short_won(room['committed_total'])}"
-             + (f"({parts(room['committed'])})" if parts(room["committed"]) else "") + f"을 빼면 {short_won(room['room'])}입니다.")
+             + (f", 곧 {parts(room['committed'])}" if parts(room["committed"]) else "") + f"을 빼면 {short_won(room['room'])}입니다."
+             + (f" 비상금 부족분 {short_won(room['reserve_swap'])}은 주식 일부를 정리해 한 번에 채우는 방안을 따로 제안했으므로 "
+                "매월 적립에서 뺐습니다." if room.get("reserve_swap") else ""))
     with_goals = room["room_with_goals"]
     goals_note = ""
     if room["planned"]:
@@ -652,17 +873,18 @@ def _strategy(facts: dict[str, Any]) -> list[Track]:
     tracks = []
     home = facts["kpis"]["home_progress"]
     if home:
-        gap = home["required"] - home["available_self"]
+        gap = home["gap_baseline"]
         months = _months_between(facts["today"], home["target_date"])
-        # The status stays on money that exists: expected pay is shown beside it, never relied on for it.
+        # The headline is the household baseline (§17.3): the client's and the partner's resources plus the
+        # confirmed and expected pay due before the goal. The conservative tiers are written beside it.
         status = "on_track" if gap <= 0 else "attention"
         tracks.append(Track(
             "주택 이전", status,
-            f"{home['target_date']:%Y년 %m월} 목표, 본인 자원 기준 필요액의 {percent(home['ratio_self'], 0)} 준비 가능"
-            + (f"(예정 소득 포함 시 {percent(home['ratio_with_pay'], 0)})" if home.get("pay_at_target") else ""),
-            "기준 시나리오(집값 연 2%·투자 수익 연 4%)입니다." + (
-                f" 부족분 {short_won(gap)}을 남은 {months}개월에 나누면 매월 약 {short_won(gap / months)}을 더 모으거나, "
-                "대출·배우자 자산으로 메워야 합니다." if gap > 0 and months > 0 else "") + _pay_note(home)))
+            f"{home['target_date']:%Y년 %m월} 목표, 가구 통합 기준 필요액의 {percent(home['ratio_baseline'], 0)} 준비 가능",
+            f"기준 시나리오(집값 연 2%·투자 수익 연 4%)에서 {home['baseline_label']} 기준입니다." + (
+                f" 부족분 {short_won(gap)}을 남은 {months}개월에 나누면 매월 약 {short_won(gap / months)}이며, 대출 한도와 "
+                "주택 매도 순서로 메우는 것이 현실적입니다." if gap > 0 and months > 0 else
+                f" 필요액을 넘어 약 {short_won(-gap)}이 남습니다." if gap < 0 else "") + _home_tiers(home) + _pay_note(home)))
     for lease in facts["leases"]:
         if lease["amount"] is None:
             continue
@@ -713,23 +935,40 @@ def _retirement_pay_note(share: list[Any] | None, plan: dict[str, Any], home_goa
             "불린다고 보면 괄호 안 비율이 됩니다. 받기 전까지는 확정이 아니어서 상태 판단에는 넣지 않았습니다. ")
 
 
+def _home_tiers(home: dict[str, Any]) -> str:
+    """The conservative tiers beside the baseline: the client alone, the household's existing assets, and the
+    baseline after the partner's home-sale tax in both cases (report design §17.3)."""
+    text = f" 보수적으로 지금 있는 자산만 보면 본인 자원 {percent(home['ratio_self'], 0)}"
+    if home.get("ratio_household") is not None:
+        text += f", 배우자 부동산 순자산을 더해 {percent(home['ratio_household'], 0)}"
+    text += "입니다."
+    after = home.get("after_tax")
+    if after:
+        text += (f" 배우자 주택을 팔아 쓰는 경우 양도세는 1세대 1주택 비과세 요건을 갖추면 약 {short_won(after['tax']['exempt'])}, 일반 "
+                 f"과세면 약 {short_won(after['tax']['general'])}이어서, 준비 가능액은 각각 약 {short_won(after['available']['exempt'])}과 "
+                 f"{short_won(after['available']['general'])}입니다(혼인신고 시점과 2년 거주 여부에 따름, 현행 법령 확인 필요).")
+    return text
+
+
 def _pay_note(home: dict[str, Any]) -> str:
-    """What expected pay (confirmed and expected, after estimated tax) changes in the home plan."""
+    """What expected pay (confirmed and expected, after estimated tax) is in the home plan."""
     if not home.get("pay_at_target") and not home.get("pay_after_target"):
         return ""
     note = ""
-    if home.get("pay_at_target") and home.get("available_with_pay") is not None:
-        rest = home["required"] - home["available_with_pay"]
-        note = (f" 목표일 전에 받을 성과급·주식 보상(확정·예상분, 세후 추정)은 그때 가치로 약 {short_won(home['pay_at_target'])}이며, "
-                + (f"이를 더해도 약 {short_won(rest)}이 모자랍니다." if rest > 0 else
-                   f"이를 더하면 필요액을 넘어 약 {short_won(-rest)}이 남습니다(노후·장기 투자로 돌릴 수 있는 몫)."))
+    if home.get("pay_at_target"):
+        note = (f" 기준에 넣은 목표일 전 성과급·주식 보상(확정·예상분, 세후 추정)은 그때 가치로 약 {short_won(home['pay_at_target'])}이며, "
+                "받기 전까지는 확정이 아닙니다.")
     if home.get("pay_after_target"):
         note += f" 목표일 이후에 받을 예정분 약 {short_won(home['pay_after_target'])}은 주택 계산에 넣지 않았습니다."
-    return note + " 예정 소득은 받기 전까지 확정이 아니어서 준비 상태 판단에는 넣지 않았습니다."
+    return note
 
 
 def _assumptions() -> list[str]:
     return [f"이자소득세 {percent(INTEREST_TAX, 1)}",
+            f"비상금 부족분은 며칠 안에 팔 수 있는 자산이 부족분의 {SWAP_MULTIPLE}배 이상이면 자산 간 이동으로 한 번에 채운다고 봄",
+            f"주택 목표 머리 숫자는 가구 통합(본인 + 배우자 부동산 순자산 + 목표일 전 확정·예상 소득의 세후 가치) 기준, 보수 기준을 병기",
+            f"보험료 기준 월 소득의 {percent(INSURANCE_SHARE_LIMIT, 0)}, 월 {short_won(SAVINGS_PREMIUM_MIN)} 이상 보험료는 저축성 가능으로 보고 "
+            f"비과세 만기 {SAVINGS_INSURANCE_YEARS}년과 주택 이전 시점을 비교",
             f"연금계좌 세액공제 한도 연 {short_won(PENSION_CREDIT_LIMIT)}(연금저축 {short_won(PENSION_SAVINGS_LIMIT)}), "
             f"공제율 {percent(PENSION_CREDIT_RATE, 1)}(소득세 12%+지방소득세, 총급여 5,500만 원 초과 가정)",
             "예금 금리는 CD 91일물 유통수익률로 근사(실제 정기예금 금리와 다를 수 있음)"]

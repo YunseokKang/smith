@@ -35,8 +35,9 @@ RECORDS = [
         frequency="monthly", start_date="2026-01-01"),
 ]
 # Every proposal rule (proposals.py). Each belongs to exactly one themed day; the overview carries all.
-PROPOSAL_KEYS = {"lease-return", "emergency-reserve", "goal-stocks-glide", "surplus-plan", "pension-credit",
-                 "overseas-harvest", "isa-open", "prepayment", "variable-rate", "spending-room"}
+PROPOSAL_KEYS = {"lease-return", "emergency-reserve", "goal-stocks-glide", "concentration-trim", "surplus-plan",
+                 "pension-credit", "overseas-harvest", "isa-open", "insurance-review", "prepayment", "variable-rate",
+                 "spending-room"}
 EXTRA = [
     rec("lease", "liability", category="lease_deposit_obligation", currency="KRW", outstanding_principal="300000000",
         annual_rate="0", rate_type="fixed", repayment_method="bullet", maturity="2028-08-07", collateral_record_id="home"),
@@ -165,10 +166,14 @@ class EditionTests(unittest.TestCase):
     def test_review_fixes_tax_source_unknown_sums_and_edition_limits(self):
         from smith import report_data
         claim = (["세법상 공제가 적용됩니다. 현행 법령 확인 필요."], ["tax"])
-        markets = narrative.build_payload(self.data("markets")["view"], self.data("markets"), None)
-        self.assertIsNotNone(narrative.check_block(*claim, markets))      # No tax inputs: "tax" is no source.
-        with_tax = dict(markets, tax={"notes": [{"title": "t", "body": "b", "when": "w"}], "year_end_checklist": []})
+        rates = narrative.build_payload(self.data("rates")["view"], self.data("rates"), None)
+        self.assertIsNotNone(narrative.check_block(*claim, rates))        # No tax inputs: "tax" is no source.
+        with_tax = dict(rates, tax={"notes": [{"title": "t", "body": "b", "when": "w"}], "year_end_checklist": []})
         self.assertIsNone(narrative.check_block(*claim, with_tax))
+        # The markets day carries the holdings, each with Smith's overseas-tax flag, and a trim or exit opinion
+        # must give the tax order of selling: "tax" is a source there (review 2026-10-17).
+        markets = narrative.build_payload(self.data("markets")["view"], self.data("markets"), None)
+        self.assertIsNone(narrative.check_block(*claim, markets))
         data = self.data("property")
         data["sectors"]["real_estate"]["properties"][0]["value"] = None
         self.assertIsNone(report_data._edition_figures(data)["property_value"])  # Unknown is never summed as zero.

@@ -340,7 +340,9 @@ class NarrativeTests(unittest.TestCase):
         for reason, item in cases:
             with self.subTest(reason=reason):
                 _, dropped = narrative.verify(dict(EMPTY, holdings=[item]), payload)
-                self.assertEqual(dropped, [f"holdings[0]:{reason}"])
+                # AAA is above the limit, so an output with no opinion on it at all is also rejected (§17.4).
+                missing = ["holdings[missing]:missing-opinion:AAA"] if item["symbol"] != "AAA" else []
+                self.assertEqual(dropped, [f"holdings[0]:{reason}"] + missing)
         good = dict(base, symbol="AAA", stance="trim", reason="실적은 좋지만 한 회사에 너무 몰려 있습니다.", refs=["R3"])
         self.assertEqual(narrative.verify(dict(EMPTY, holdings=[good]), payload)[1], [])
 

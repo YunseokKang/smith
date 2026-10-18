@@ -225,6 +225,10 @@ def home_facts(view: LedgerView, *, target_price: Decimal, target_date: date,
         extra = future_income.at_goal(pay, owner_id="self", scenario=s.name, horizon=target_date, today=today,
                                       rate=s.investment_return)
         with_pay = None if available is None or extra["value"] is None else available + extra["value"]
+        # The household basis (user decision 2026-10-17): the partner's property equity joins the client's
+        # resources, since the move is the household's goal; expected pay is added on top by certainty.
+        household = None if available is None or partner_equity is None else available + partner_equity
+        household_with_pay = None if household is None or extra["value"] is None else household + extra["value"]
         scenarios.append({"name": s.name, "assumptions": {"target_price_growth": str(s.target_price_growth),
                                                           "current_home_growth": str(s.current_home_growth),
                                                           "investment_return": str(s.investment_return),
@@ -238,7 +242,11 @@ def home_facts(view: LedgerView, *, target_price: Decimal, target_date: date,
                           "expected_pay_refs": [view.aliases[r] for r in extra["before_refs"]],
                           "expected_pay_after_target": won(extra["after"]),
                           "available_self_with_expected_pay": won(with_pay),
-                          "gap_self_with_expected_pay": won(None if with_pay is None else required - with_pay)})
+                          "gap_self_with_expected_pay": won(None if with_pay is None else required - with_pay),
+                          "available_household": won(household),
+                          "available_household_with_expected_pay": won(household_with_pay),
+                          "gap_household_with_expected_pay": won(None if household_with_pay is None
+                                                                 else required - household_with_pay)})
     return {
         "use_case": "UC-03 move to a target home",
         "target_price_today": won(target_price), "target_date": target_date.isoformat(), "months": months,
@@ -254,7 +262,9 @@ def home_facts(view: LedgerView, *, target_price: Decimal, target_date: date,
                         "principal_repayment": "current linked mortgage payments and current interest rates continue",
                         "time_horizon": "whole calendar months from the snapshot date",
                         "financing": "loan limits (LTV/DSR) are not modelled; a positive gap must be financed",
-                        "partner_property": "current net equity is shown separately without future growth or sale costs",
+                        "partner_property": "current net equity, without future growth or sale costs; the "
+                                            "*_household figures add it to the client's resources (the move is the "
+                                            "household's goal), the *_self figures leave it out",
                         "ownership": "partner-owned property is shown separately; marriage registration may change "
                                      "household home-count tax treatment",
                         "expected_pay": "bonuses and share grants not yet paid are added only in the *_with_expected_pay "

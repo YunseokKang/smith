@@ -36,7 +36,8 @@ _SECURITIES = ("stock", "fund", "unclassified")
 _MONTHS = {"monthly": 1, "quarterly": 3, "annual": 12}
 
 
-def test(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any]) -> dict[str, Any]:
+def test(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
+         lease_plans: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """The composite scenario applied to this household. All amounts are KRW Decimals or None.
 
     Keys: monthly (inflow, lost_income, outflow, extra_interest, burn: what the household loses every
@@ -44,8 +45,12 @@ def test(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any]) -> dic
     scenario length), covers_scenario, cash_after_scenario and after_sales (what is left, or the gap, once
     the scenario's months are paid), sellable_stressed, pausable (discretionary outflows that could be
     stopped), net_worth_drop and net_worth_drop_ratio, properties (label, ltv now and stressed, on secured
-    loans only), lease (amount, due, covered under stress), liquidity_verdict, flags, verdict (robust,
+    loans only), lease (amount, need, due, covered under stress), liquidity_verdict, flags, verdict (robust,
     watch, fragile, unknown) and assumptions.
+
+    `lease_plans` (smith.lease.plans) gives each deposit's stress need: the reverse-jeonse gap once the
+    market level has fallen with property prices, or the whole deposit when that level is unknown. Without
+    plans (older callers) the whole deposit is tested.
     """
     summary = view.summary
     today = view.as_of.date()
@@ -65,7 +70,7 @@ def test(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any]) -> dic
     cash_after = None if immediate is None or drained is None else immediate - drained
     after_sales = None if cash_after is None or sellable is None else cash_after + sellable
     drop = _net_worth_drop(view)
-    lease = _lease(view, today, immediate, sellable, burn)
+    lease = _lease(view, today, immediate, sellable, burn, lease_plans)
     liquidity = _verdict(months_cash, burn)
     flags = [LEASE_UNCOVERED] if lease is not None and lease["covered"] is False else []
     return {
@@ -172,10 +177,12 @@ def _drop_ratio(drop: Decimal | None, summary: Summary) -> Decimal | None:
 
 
 def _lease(view: LedgerView, today: date, immediate: Decimal | None, sellable: Decimal | None,
-           burn: Decimal | None) -> dict[str, Any] | None:
+           burn: Decimal | None, plans: list[dict[str, Any]] | None) -> dict[str, Any] | None:
     """The nearest lease deposit due within the horizon (a deposit due later this month counts as one
     month away): can cash plus stressed sales, after the months of stress until the due date (at most the
-    income-stop months), still return it?"""
+    income-stop months), still find what the deposit needs? With a lease plan the need is the reverse-jeonse
+    gap after the price fall (a new tenant's deposit replaces most of the old one); without one, or when the
+    market level is unknown, it is the whole deposit."""
     leases = []
     for record in view.records:
         f = record.fields
@@ -183,15 +190,19 @@ def _lease(view: LedgerView, today: date, immediate: Decimal | None, sellable: D
             due = date.fromisoformat(f["maturity"])
             months = max(1, (due.year - today.year) * 12 + due.month - today.month)
             if today < due and months <= LEASE_HORIZON_MONTHS:
-                leases.append((due, months, base_amount(view, record)))
+                leases.append((due, months, record.record_id, base_amount(view, record)))
     if not leases:
         return None
-    due, months, amount = min(leases)
-    if amount is None or immediate is None or sellable is None or burn is None:
-        return {"due": due, "months": months, "amount": amount, "available": None, "covered": None}
+    due, months, record_id, amount = min(leases)
+    plan = next((p for p in plans or [] if p["record_id"] == record_id), None)
+    need, basis = (amount, "full_deposit") if plan is None else (plan["stress"]["need"], plan["stress"]["basis"])
+    found = {"due": due, "months": months, "amount": amount, "need": need, "basis": basis,
+             "jeonse_dropped": None if plan is None else plan["stress"]["jeonse_dropped"]}
+    if need is None or immediate is None or sellable is None or burn is None:
+        return {**found, "available": None, "covered": None}
     drained = max(burn, Decimal(0)) * min(months, INCOME_STOP_MONTHS)
     available = max(Decimal(0), immediate + sellable - drained)
-    return {"due": due, "months": months, "amount": amount, "available": available, "covered": available >= amount}
+    return {**found, "available": available, "covered": available >= need}
 
 
 def _verdict(months_cash: Decimal | None, burn: Decimal | None) -> str:

@@ -10,8 +10,8 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, localcontext
 from typing import Any
 
-from smith import (cases, checklist, editions, future_income, holdings, ledger, principles, proposals, realestate,
-                   stress, tax)
+from smith import (cases, checklist, editions, future_income, holdings, lease, ledger, principles, proposals,
+                   realestate, stress, tax)
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import LedgerView, base_amount, load_view, unrealized_gain
 from smith.records import Kind, RecordInput, Status
@@ -63,12 +63,22 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     change = None if baseline is None else decompose(conn, baseline, as_of, known_at)
     salary = (household or {}).get("annual_gross_salary")
     pay = future_income.inflows(view, salary=None if salary is None else Decimal(salary))
-    kpis, sectors = _kpis(view, change, pay), _sectors(view)
+    expected = future_income.review(view, pay)
+    # The stocks the client's pay arrives in are the employer's: holding them doubles the concentration
+    # already carried by the salary (report design §17.4), so they always get an opinion.
+    employer = frozenset(s["symbol"] for s in expected["same_stock"] if s["symbol"])
+    review = holdings.review(view, employer)
+    kpis, sectors = _kpis(view, change, pay, household), _sectors(view)
     # Official transactions matched to each property (local data; only derived figures leave this PC).
     market = realestate.analyze(ledger.load_deals(conn, since=as_of.date() - timedelta(days=400)), today=as_of.date())
     for prop in sectors["real_estate"]["properties"]:
         prop["market"] = market.get(prop["record_id"])
-    advice = proposals.build(view, kpis, sectors, active=ledger.active_proposals(conn), household=household, pay=pay)
+    # How each lease deposit due is actually returned (report design §17.2): the plans feed the proposals,
+    # the stress test (reverse-jeonse gap, not the whole deposit) and the property day's section.
+    lease_plans = lease.plans(view, sectors["real_estate"]["properties"], household, today=as_of.date(),
+                              property_drop=stress.PROPERTY_DROP)
+    advice = proposals.build(view, kpis, sectors, active=ledger.active_proposals(conn), household=household, pay=pay,
+                             review=review, lease_plans=lease_plans)
     # The status badge stays household-wide: urgent proposals of every area, whatever today's theme.
     advice["household_urgent"] = [p.key for p in advice["proposals"] if p.priority == 1]
     # A daily edition carries only its own proposal rules and their pending judgements; each rule belongs
@@ -78,10 +88,10 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     advice["assumptions"] = advice["assumptions"] + future_income.assumptions(pay)
     plan = tax.facts(view, as_of.date(), household)
     data = {"kind": kind, "as_of": as_of, "baseline": baseline, "kpis": kpis,
-            "change": change, "timeline": _timeline(view, pay), "sectors": sectors, "holdings": holdings.review(view),
-            "future_income": future_income.review(view, pay), "advice": advice,
+            "change": change, "timeline": _timeline(view, pay), "sectors": sectors, "holdings": review,
+            "future_income": expected, "advice": advice, "lease_plans": lease_plans,
             # One bad year with several shocks at once (report design §16.2), household-wide like the badge.
-            "stress": stress.test(view, kpis, sectors),
+            "stress": stress.test(view, kpis, sectors, lease_plans),
             # This year's pension credit room and overseas gains, for the tax day's headline numbers.
             "tax_plan": {**tax.pension_plan(plan), "us_gains": plan["us_gains"], "us_unknown": plan["us_unknown"],
                          "us_positions": plan["us_positions"], "pension_unconverted": plan["pension_unconverted"]},
@@ -251,21 +261,32 @@ def _flows(view: LedgerView) -> tuple[Decimal | None, Decimal | None]:
     return summary.monthly_net, summary.monthly_outflow
 
 
-def _kpis(view: LedgerView, change: dict[str, Any] | None, pay: list[future_income.Inflow]) -> dict[str, Any]:
+def _kpis(view: LedgerView, change: dict[str, Any] | None, pay: list[future_income.Inflow],
+          household: dict[str, Any] | None = None) -> dict[str, Any]:
     summary = view.summary
     immediate = _liquidity(view)["immediate"]
     monthly_net, outflow = _flows(view)
     months = immediate / outflow if immediate is not None and outflow else None
-    home = _home_progress(view, pay)
+    home = _home_progress(view, pay, household)
     return {"net_worth": summary.net_worth, "net_worth_change": None if change is None else change["total"],
             "monthly_net": monthly_net, "immediate": immediate, "immediate_months": months,
             "home_progress": home}
 
 
-def _home_progress(view: LedgerView, pay: list[future_income.Inflow]) -> dict[str, Any] | None:
-    """The nearest home goal in the base scenario. `available_self` and the stock glide plan (`from_liquid`)
-    leave expected pay out: money needed at a date is not planned on pay that is not yet certain. The
-    figures with expected pay are shown beside them."""
+def _home_progress(view: LedgerView, pay: list[future_income.Inflow],
+                   household: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """The nearest home goal in the base scenario, on three bases (report design §17.3):
+
+    - conservative: what exists today, the client's own resources plus the partner's property equity
+      (`available_household`); the client-only figure (`available_self`) stays beside it;
+    - baseline: the conservative figure plus the confirmed and expected pay due before the goal, after the
+      estimated final tax (`available_household_with_pay`); this is the headline (user decision 2026-10-17);
+    - tax variants: the baseline less the estimated capital-gains tax on the partner's home when it is sold
+      for the move, with and without the one-home exemption (`after_tax`), when its acquisition is known.
+
+    The stock glide plan (`from_liquid`) uses the conservative household basis: a dated need is never planned
+    on pay that is not yet certain, but the partner's equity is the household's money.
+    """
     goals = [g for g in view.summary.goals if g["category"] == "home" and g["target"] is not None
              and g["target_date"] > view.as_of.date()]
     if not goals:
@@ -276,21 +297,65 @@ def _home_progress(view: LedgerView, pay: list[future_income.Inflow]) -> dict[st
     if base["available_self"] is None:
         return None
     required, available = Decimal(base["required_with_costs"]), Decimal(base["available_self"])
-    with_partner = None if base["gap_including_partner_property_equity"] is None else \
-        required - Decimal(base["gap_including_partner_property_equity"])
+    partner_equity = _dec(facts["partner_property_equity"])
+    with_partner = None if partner_equity is None else available + partner_equity
     # What liquid money (grown at the scenario's return) and savings must cover once the home equity is
     # used: the holdings glide plan (§12.4) asks how much of that rests on stocks.
     grown = Decimal(facts["liquid_assets_self"]) * (1 + Decimal(base["assumptions"]["investment_return"])) ** (
         Decimal(facts["months"]) / 12)
-    from_liquid = required - available + grown + Decimal(facts["projected_savings_from_monthly_net"])
+    from_liquid = max(Decimal(0), required - (with_partner if with_partner is not None else available) + grown
+                      + Decimal(facts["projected_savings_from_monthly_net"]))
     with_pay = _dec(base["available_self_with_expected_pay"])
+    household_with_pay = _dec(base["available_household_with_expected_pay"])
+    baseline, label = _home_baseline(available, with_partner, household_with_pay)
+    after_tax = _partner_home_tax(view, household, baseline, view.as_of.date())
     return {"target_date": goal["target_date"], "required": required, "available_self": available,
             "available_with_partner": with_partner, "ratio_self": available / required,
+            "available_household": with_partner, "partner_equity": partner_equity,
+            "ratio_household": None if with_partner is None else with_partner / required,
+            "available_household_with_pay": household_with_pay,
+            "ratio_household_with_pay": None if household_with_pay is None else household_with_pay / required,
+            "baseline": baseline, "baseline_label": label, "ratio_baseline": baseline / required,
+            "gap_baseline": required - baseline, "after_tax": after_tax,
             "from_liquid": from_liquid, "scenarios": facts["scenarios"],
             # The plan's own monthly saving and horizon: the spending room (§16.3) must not spend them twice.
             "monthly_net_self": _dec(facts["monthly_net_cash_flow_self"]), "months": facts["months"],
             "pay_at_target": _dec(base["expected_pay_at_target"]), "pay_after_target": _dec(base["expected_pay_after_target"]),
             "available_with_pay": with_pay, "ratio_with_pay": None if with_pay is None else with_pay / required}
+
+
+def _home_baseline(available_self: Decimal, household: Decimal | None, household_with_pay: Decimal | None) -> tuple[Decimal, str]:
+    """The headline figure and what it counts: the household basis with expected pay when known, else the
+    household basis, else the client alone (an unknown part never silently drops to zero)."""
+    if household_with_pay is not None:
+        return household_with_pay, "가구 통합 + 예정 소득(확정·예상, 세후)"
+    if household is not None:
+        return household, "가구 통합(지금 있는 자산)"
+    return available_self, "본인 자원(배우자 자산 미상)"
+
+
+def _partner_home_tax(view: LedgerView, household: dict[str, Any] | None, baseline: Decimal,
+                      today: date) -> dict[str, Any] | None:
+    """The baseline less the estimated capital-gains tax when the partner's home is sold for the move:
+    the one-home exemption case (two years of residence) and the general case. None without the
+    partner's home or its acquisition data in the local profile."""
+    config = (household or {}).get("properties") or {}
+    homes = [r for r in view.records if r.kind is Kind.ASSET and r.fields["category"] == "real_estate"
+             and r.owner_id != "self"]
+    if not homes:
+        return None
+    totals = {"exempt": Decimal(0), "general": Decimal(0)}
+    for record in homes:
+        spec = config.get(record.record_id) or {}
+        value = base_amount(view, record)
+        if value is None or not spec.get("acquired_year") or not spec.get("acquired_price"):
+            return None
+        held = max(0, today.year - int(spec["acquired_year"]) - 1)
+        acquired = Decimal(spec["acquired_price"])
+        totals["exempt"] += tax.capital_gains(value, acquired, held=held, lived=lease.RESIDENCE_YEARS_FOR_EXEMPTION,
+                                              one_home=True)["total"]
+        totals["general"] += tax.capital_gains(value, acquired, held=held, lived=0, one_home=False)["total"]
+    return {"tax": totals, "available": {key: baseline - total for key, total in totals.items()}}
 
 
 def _timeline(view: LedgerView, pay: list[future_income.Inflow]) -> list[dict[str, Any]]:
