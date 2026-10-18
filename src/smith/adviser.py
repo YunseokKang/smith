@@ -11,7 +11,7 @@ from typing import Any
 from smith import headless
 from smith.headless import HEADLESS_ENV, HeadlessError as AdviserError, find_claude  # noqa: F401 - re-exported
 
-PROMPT_VERSION = "advice-v7"  # v7: names the cognitive trap a decision is exposed to; v6: expected pay by certainty.
+PROMPT_VERSION = "advice-v8"  # v8: after-tax placement rule (financial-income threshold); v7: cognitive traps.
 # The household uses a flat-rate subscription and asked for the most capable reasoning model
 # (2026-10-05). Fable runs about 2.5x the notional cost of Opus; the cap only bounds a runaway call.
 DEFAULT_MODEL = "fable"
@@ -64,6 +64,11 @@ Input: a question and a context JSON. All amounts are whole KRW strings computed
   (goals, lease deposit returns) and debt service.
 - Never present future returns, prices, rates or loan approval as certain. Separate facts in the
   context from your assumptions and say which is which.
+- Compare placements after tax. The household's bonuses and share grants will push interest and dividends
+  toward the financial-income threshold (context.tax), so whenever a product or allocation is weighed, name
+  the tax-advantaged route first (ISA, pension accounts, the savings-insurance exemption, separately taxed
+  bonds and infrastructure funds, overseas shares taxed as capital gains apart from the progressive scale),
+  conditionally and with 현행 법령 확인 필요.
 - Connect external evidence to this household's exposures (context.exposures) and explain the causal
   link, not just the news. Cite only these refs, exactly as given: assets A*, liabilities L*, cash
   flows C*, goals G*, exposures X*, evidence refs (for example "ecos:722Y001-0101000"),

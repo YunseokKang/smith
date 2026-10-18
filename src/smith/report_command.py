@@ -13,6 +13,7 @@ from smith import editions, ledger
 from smith.config import DEFAULT_TIMEZONE
 from smith.narrative import PIPELINES
 from smith.report_data import build_report
+from smith import report_html
 from smith.report_html import render
 
 
@@ -66,7 +67,7 @@ def run(args: argparse.Namespace) -> int:
     try:
         brief_id = None
         if args.research:
-            researched = _research(args.db, now, reuse_fresh=False, kind=kind)
+            researched = _research(args.db, now, reuse_fresh=False, kind=kind, regions=target_regions(config))
             brief_id = researched["brief_id"] if researched["outcome"] == "success" else None
         if args.action == "compare":
             return _compare(args, now=now, kind=kind, tz=tz, config=config, brief_id=brief_id)
@@ -85,6 +86,11 @@ def run(args: argparse.Namespace) -> int:
     out.write_text(html, encoding="utf-8")
     print(f"Preview saved (not sent): {out}")
     print(f"Subject: {subject}")
+    # The mail no longer prints its reasons and data status (report design §18.1); the preview does.
+    notes = report_html.system_notes(data)
+    print(f"System notes ({len(notes)}, not in the mail; the e-mail answers use them):")
+    for line in notes:
+        print(f"  · {line}")
     return 0
 
 
@@ -106,9 +112,11 @@ def profile(config: dict[str, Any]) -> dict[str, Any] | None:
     preference ([advice]), for reports, tax and the narrative."""
     household = config.get("household")
     risk = config.get("advice", {}).get("risk_preference")
-    if household is None and risk is None:
+    # Properties and move targets count on their own: a config with only [targets] still plans the move.
+    if household is None and risk is None and not config.get("properties") and not config.get("targets"):
         return None
-    return {**(household or {}), "properties": config.get("properties") or {}, "risk_preference": risk}
+    return {**(household or {}), "properties": config.get("properties") or {}, "targets": config.get("targets") or {},
+            "risk_preference": risk}
 
 
 def _optional_config(path: Path) -> tuple[dict[str, Any] | None, str | None]:
@@ -205,7 +213,15 @@ FRESH_BRIEF = timedelta(hours=3)
 PREPARE_AHEAD = timedelta(hours=1)
 
 
-def _research(db: Path, now: datetime, *, reuse_fresh: bool = True, kind: str | None = None) -> dict[str, Any]:
+def target_regions(config: dict[str, Any] | None) -> tuple[str, ...]:
+    """The districts of the configured move-target complexes: the only part of a target a research question
+    may carry (never a complex name)."""
+    targets = (config or {}).get("targets") or {}
+    return tuple(sorted({spec["region"] for spec in targets.values() if spec.get("region")}))
+
+
+def _research(db: Path, now: datetime, *, reuse_fresh: bool = True, kind: str | None = None,
+              regions: tuple[str, ...] = ()) -> dict[str, Any]:
     """Research generalized topics on the web (no amounts, accounts or direct identifiers; only the
     approved city/district, asset and debt types, and holdings' public names on the markets day) and store
     the brief. Only the topics of the edition `kind` are researched. Returns the outcome with the brief_id
@@ -216,13 +232,14 @@ def _research(db: Path, now: datetime, *, reuse_fresh: bool = True, kind: str | 
 
     with closing(ledger.connect_read_only(db)) as conn:
         view = load_view(conn, as_of=local_time(now), known_at=now)
-        topics = [{"ref": t.ref, "title": t.title, "question": t.question} for t in research.topics(view, kind)]
+        topics = [{"ref": t.ref, "title": t.title, "question": t.question}
+                  for t in research.topics(view, kind, regions)]
         fresh = ledger.latest_research(conn, since=now - FRESH_BRIEF, topics=topics) if reuse_fresh and topics else None
     if fresh is not None:
         return {"brief_id": fresh["brief_id"], "outcome": "success", "items": len(fresh["brief"]["items"]),
                 "reused": True}
     return research.research_and_store(db, view, now=now, today=local_time(now).date(),
-                                       secrets=credentials.all_secrets(), kind=kind)
+                                       secrets=credentials.all_secrets(), kind=kind, target_regions=regions)
 
 
 def _narrator(db: Path, now: datetime, brief_id: str | None = None, pipeline: str = "single") -> Any:
@@ -231,8 +248,13 @@ def _narrator(db: Path, now: datetime, brief_id: str | None = None, pipeline: st
     from smith import credentials, narrative
 
     secrets = credentials.all_secrets()
-    return lambda data: narrative.narrate(db, data["view"], data, now=now, secrets=secrets, brief_id=brief_id,
-                                          pipeline=pipeline)
+
+    def narrate(data: dict[str, Any]) -> None:
+        narrative.narrate(db, data["view"], data, now=now, secrets=secrets, brief_id=brief_id, pipeline=pipeline)
+        status = data["narrative"]["status"]
+        if status["outcome"] != "success":  # A report without its prose is worth a log line (BUG-2026-003).
+            _say(db, f"Narrative ({data['kind']}) {status['outcome']}: {status.get('error_code') or ''}")
+    return narrate
 
 
 def _log_path(db: Path) -> Path:
@@ -304,7 +326,7 @@ def _publish_once(args: argparse.Namespace) -> int:
             if upcoming:
                 # Prepare: research ahead of the scheduled time so the report itself is not delayed.
                 upcoming_kind = editions.for_day(config, upcoming[0].date())
-                prepared = _research(args.db, now, kind=upcoming_kind)
+                prepared = _research(args.db, now, kind=upcoming_kind, regions=target_regions(config))
                 if not prepared.get("reused") and prepared["outcome"] != "skipped":
                     _say(args.db, f"Prepared research for {upcoming[0]:%m-%d %H:%M} ({upcoming_kind}): "
                                   f"{prepared['outcome']}")
@@ -329,12 +351,12 @@ def _publish_once(args: argparse.Namespace) -> int:
         sync_failures.append("토스증권 보유 내역")
     if cli_main(["evidence", "sync", "--db", str(args.db)]) != 0:
         sync_failures.append("금리·공식 발표")
-    if config.get("properties"):
+    if config.get("properties") or config.get("targets"):
         from smith import realestate_command
         if realestate_command.sync(args.db, args.config) != 0:
             sync_failures.append("아파트 실거래가")
     # Research before claiming the slot (it needs no lease), unless a fresh prepared brief exists.
-    researched = _research(args.db, datetime.now(timezone.utc), kind=kind)
+    researched = _research(args.db, datetime.now(timezone.utc), kind=kind, regions=target_regions(config))
     _say(args.db, f"Research ({kind}) {researched['outcome']}{' (prepared)' if researched.get('reused') else ''}: "
                   f"{researched.get('items', researched.get('error_code'))}")
     brief_id = researched["brief_id"] if researched["outcome"] == "success" else None

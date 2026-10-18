@@ -12,8 +12,9 @@ from typing import Any, NoReturn
 from smith.records import (
     ACCOUNT_TYPES, AMOUNT_BASES, ASSET_CATEGORIES, CERTAINTIES, COMMITMENTS, COMPENSATION_CATEGORIES, CURRENCIES,
     FREQUENCIES, GOAL_CATEGORIES, INFLOW_CATEGORIES, LIABILITY_CATEGORIES, LIQUIDITY_CLASSES, MANAGERS, MARKETS,
-    OCCUPANCY, OUTFLOW_CATEGORIES, PAYMENT_STATUSES, PRIORITIES, RATE_TYPES, REPAYMENT_METHODS, TRANSFER_CATEGORIES,
-    VALUATION_METHODS,
+    OCCUPANCY, OUTFLOW_CATEGORIES, PAYMENT_STATUSES, PENSION_SOURCES, PRICE_BASES, PRIORITIES, RATE_TYPES, REPAYMENT_METHODS,
+    TRANSFER_CATEGORIES,
+    POLICY_CATEGORIES, VALUATION_METHODS,
     ChangeType, ImportBatch, ImportRejected, Kind, RecordInput, Status, canonical_decimal,
 )
 
@@ -192,6 +193,12 @@ _KIND_FIELDS: dict[Kind, dict[str, _Field]] = {
         "payment_status": _Field(_enum(PAYMENT_STATUSES), nullable=True),
         "received_on": _Field(_date, nullable=True),
         "taxable_amount": _Field(_decimal(), nullable=True),
+        # The retirement pipeline an expected pension payout belongs to, and whether its amount is in today's
+        # won or the nominal amount of the first payment year (pension_income only).
+        "pension_source": _Field(_enum(PENSION_SOURCES), nullable=True),
+        "price_basis": _Field(_enum(PRICE_BASES), nullable=True),
+        # The insurance policy (surrender-value asset) a premium pays into or an annuity pays from.
+        "policy_record_id": _Field(_reference, nullable=True),
     },
     Kind.GOAL: {
         "category": _Field(_enum(GOAL_CATEGORIES)),
@@ -409,6 +416,11 @@ def _check_cashflow(fields: dict[str, str | None], path: str, problems: _Problem
         problems.add(f"{path}.liability_record_id", "is only allowed for category loan_payment")
     if fields.get("target_record_id") is not None and category is not None and category not in TRANSFER_CATEGORIES:
         problems.add(f"{path}.target_record_id", "is only allowed for category internal_transfer")
+    if fields.get("policy_record_id") is not None and category is not None and category not in POLICY_CATEGORIES:
+        problems.add(f"{path}.policy_record_id", "is only allowed for categories insurance_premium and pension_income")
+    for name in ("pension_source", "price_basis"):
+        if fields.get(name) is not None and category is not None and category != "pension_income":
+            problems.add(f"{path}.{name}", "is only allowed for category pension_income")
     start, end = fields.get("start_date"), fields.get("end_date")
     if fields.get("frequency") == "once" and end is not None:
         problems.add(f"{path}.end_date", "must be omitted for a one-time cash flow")
@@ -425,12 +437,14 @@ def _check_compensation(fields: dict[str, str | None], path: str, problems: _Pro
     if category is None:
         return
     compensation, shares = category in COMPENSATION_CATEGORIES, category == "stock_compensation"
-    for name, allowed in (("certainty", category in INFLOW_CATEGORIES), ("amount_basis", compensation)):
+    # A stated pension payout may be the after-tax figure of the fund's own statement (amount_basis=net).
+    for name, allowed in (("certainty", category in INFLOW_CATEGORIES),
+                          ("amount_basis", compensation or category == "pension_income")):
         if fields.get(name) is None and compensation and not closing:
             problems.add(f"{path}.{name}", f"is required for category {category}")
         elif fields.get(name) is not None and not allowed:
             problems.add(f"{path}.{name}", "is only allowed for an inflow" if name == "certainty"
-                         else "is only allowed for categories bonus and stock_compensation")
+                         else "is only allowed for categories bonus, stock_compensation and pension_income")
     # A bonus may name the stock it is paid in (a won amount converted to shares on payday): both or neither.
     for name in ("symbol", "market", "quantity"):
         if fields.get(name) is None and shares and not closing:

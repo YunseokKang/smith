@@ -538,3 +538,22 @@ LLM이 작성한 텍스트는 발송 대상·스케줄·금융 API 호출을 변
 연동 전까지 Hermes 운용 계좌는 수동 입력으로 관리하며, 연동 시 그 수동 레코드를 종료하고 API 원천으로 대체한다.
 수집 시점, 스키마 버전, 부분 실패, 인증을 정의한다. 명령/주문 endpoint와 DB 직접 공유는 피한다.
 현재 Hermes API의 경로·구조·인증은 확인하지 않았으며 임의로 고정하지 않는다.
+
+## 보고서 고도화 v3.0 (report-design §18, `src/smith/pension.py`, `src/smith/move_plan.py`, `report_html`)
+
+- 표시: 히어로는 상태 배지 + 오늘의 핵심 액션 + 헤드라인 + 구성 바 + 타일 + 오늘의 한 가지. 요일판의 핵심 뷰(`Edition.opening`)가
+  열린 채 그 아래, 이어서 제안, 접힌 섹션들, 한 줄 꼬리. 판정 사유·검증 메모·데이터 상태는 `report_html.system_notes(data)`로만 남아
+  메일 답변(`qa.answer`의 `report_notes`·`report_principles`)과 `smith report preview`가 쓴다.
+- 데이터: `report_data`가 `composition`(자산 구성·소유자), `spending_split`, `pension_stack`(`pension.stack`), `move_plan`
+  (`move_plan.plan`, 목표 단지 실거래는 `realestate.sync(targets=)`가 `target:<key>` ref로 저장), `research_regions`를 더한다.
+  `decompose`는 `groups`(시장·평가 변동, 입출금·원장 등록)와 `from`·`to`를 돌려준다. 부채 섹터는 `credit_lines`·`unused_credit`.
+- 제안: `refinance`(금리판)가 `proposals.refinance_facts`로 ECOS 주담대 평균(`evidence.SERIES`의 월별·옵션 시리즈)과 비교한다.
+  `_prepayment`는 잔액 0원 대출을 제외한다. 요청 `pension-pipelines`·`move-targets`.
+- 모델: `narrative-v11`(짧은 한도, 두 숫자 변화, `experiences`, 세후 원칙), `advice-v8`, `mail-answer-v9`. 조사 주제 `target_market`
+  (목표 단지 시·구만)과 `experience`(생활판). 설정 `[targets]`, `[household] retirement_age`, 데이터 계약 `pension_source`.
+- 보유 상품 평가(FR-24, `src/smith/product_review.py`): `report_data`가 계약별 `annuity_reviews`를 더하고(연결은
+  `policy_record_id`, 모호하면 보류와 요청 `policy-links`), 세금·연금판 섹션 `_annuity_review`(계약마다 카드)와 서술 입력
+  `sector_metrics.pension_insurance.annuity_reviews`(`연금보험 n`)가 판정·뒤집는 조건을 전달한다.
+- 1차 리뷰(2026-10-18): 정기 보고의 기준선은 같은 주제의 정기 발송만(`ledger.last_sent_report(trigger=)`), 보고서 자체 문제(데이터·서술
+  실패)는 상태 최소 주의와 꼬리 경고 한 줄(`report_html._system_warnings`), 모델 입력에서 URL 제거(`narrative._without_links`),
+  목표 단지는 별칭으로만 모델에 전달.

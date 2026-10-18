@@ -31,6 +31,10 @@ class SeriesSpec:
     unit: str
     source_url: str  # An https URL, optionally followed by a space and a readable series code.
     max_age_days: int  # Older latest observations are reported as stale.
+    period: str = "D"  # ECOS cycle: "D" daily or "M" monthly (observed_on is the first day of the month).
+    # A required series that comes back empty fails the provider (a renamed code must not leave old values
+    # looking fresh). An optional one is simply absent that day: used for a judgement that says "unknown".
+    required: bool = True
 
     @property
     def link(self) -> str:
@@ -46,6 +50,14 @@ SERIES = (
     SeriesSpec("ecos", "817Y002/010502000", "Korea CD 91D", "%", "https://ecos.bok.or.kr/ (817Y002 010502000)", 10),
     SeriesSpec("ecos", "731Y001/0000001", "KRW per USD (BOK reference rate)", "KRW",
                "https://ecos.bok.or.kr/ (731Y001 0000001)", 10),
+    # Deposit banks' weighted average mortgage rate on new loans (monthly, published about a month later):
+    # the market band a household mortgage is compared with for the refinancing verdict (report design §18).
+    # Code checked against two independent integrations and the live API on 2026-10-18. Optional: a wrong or
+    # renamed code leaves the verdict "unknown" instead of failing the provider. A month's figure is published
+    # about eight weeks after the month starts, so the newest one is normally up to ~88 days old; beyond 100
+    # days a release was missed and the figure is stale.
+    SeriesSpec("ecos", "121Y006/BECBLA0302", "Korea bank mortgage rate (new loans, weighted average)", "%",
+               "https://ecos.bok.or.kr/ (121Y006 BECBLA0302)", 100, period="M", required=False),
     SeriesSpec("fred", "DFEDTARU", "Fed funds target upper", "%", "https://fred.stlouisfed.org/series/DFEDTARU", 10),
     SeriesSpec("fred", "DFF", "Fed funds effective", "%", "https://fred.stlouisfed.org/series/DFF", 10),
     SeriesSpec("fred", "DGS2", "US treasury 2Y", "%", "https://fred.stlouisfed.org/series/DGS2", 10),
@@ -94,9 +106,9 @@ def fetch_provider(provider: str, api_key: str, *, start: date, end: date,
             raise EvidenceError(provider, error.code) from None
         except (KeyError, TypeError, ValueError, AttributeError):
             raise EvidenceError(provider, "invalid-response") from None
-        # Every configured series is required. An empty one (a renamed code, a provider change)
-        # must not leave old values looking freshly confirmed.
-        if not series:
+        # Every required series must answer. An empty one (a renamed code, a provider change)
+        # must not leave old values looking freshly confirmed. An optional series may be absent.
+        if not series and spec.required:
             raise EvidenceError(provider, f"missing-series:{spec.series_id}")
         points.extend(series)
     return points
@@ -104,8 +116,10 @@ def fetch_provider(provider: str, api_key: str, *, start: date, end: date,
 
 def _fetch_ecos(spec: SeriesSpec, key: str, start: date, end: date, get: Getter) -> list[Point]:
     stat, item = spec.series_id.split("/")
+    monthly = spec.period == "M"
+    first, last = (f"{start:%Y%m}", f"{end:%Y%m}") if monthly else (f"{start:%Y%m%d}", f"{end:%Y%m%d}")
     status, payload = _json(get(f"https://ecos.bok.or.kr/api/StatisticSearch/{urllib.parse.quote(key)}/json/kr/"
-                                f"1/1000/{stat}/D/{start:%Y%m%d}/{end:%Y%m%d}/{item}"))
+                                f"1/1000/{stat}/{spec.period}/{first}/{last}/{item}"))
     if "RESULT" in payload:  # ECOS reports errors and empty results in-band.
         code = payload["RESULT"]["CODE"]
         if code == "INFO-200":  # No data in the requested range; the caller treats it as missing.
@@ -113,9 +127,13 @@ def _fetch_ecos(spec: SeriesSpec, key: str, start: date, end: date, get: Getter)
         raise EvidenceError("ecos", str(code))
     if status != 200:
         raise EvidenceError("ecos", f"http-{status}")
-    return [("ecos", spec.series_id, datetime.strptime(row["TIME"], "%Y%m%d").date(),
-             canonical_decimal(row["DATA_VALUE"]), None)
+    # TIME is YYYYMMDD for a daily series and YYYYMM for a monthly one (the first day of that month).
+    return [("ecos", spec.series_id, _ecos_time(row["TIME"]), canonical_decimal(row["DATA_VALUE"]), None)
             for row in payload["StatisticSearch"]["row"] if row.get("DATA_VALUE") not in (None, "")]
+
+
+def _ecos_time(text: str) -> date:
+    return datetime.strptime(text, "%Y%m" if len(text) == 6 else "%Y%m%d").date()
 
 
 def _fetch_fred(spec: SeriesSpec, key: str, start: date, end: date, get: Getter) -> list[Point]:

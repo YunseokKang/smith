@@ -243,3 +243,28 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
 - 원인: Windows PowerShell 5.1은 네이티브 실행 파일에 인자를 넘길 때 인자 안의 큰따옴표를 제대로 이스케이프하지 않는다.
 - 해결: 한 줄 Python은 Bash 도구의 `python - <<'EOF' ... EOF` heredoc으로 실행하고, 길거나 따옴표가 많으면 TS-017처럼
   scratchpad의 `.py` 파일로 실행한다.
+
+### TS-025 HTML 보고서 테스트의 실패 출력이 너무 커서 도구 결과가 잘림 (2026-10-18)
+
+- 증상: `assertIn(text, html)`이 실패하면 unittest가 HTML 전체(수만 자)를 메시지에 넣어, 여러 테스트가 함께 실패할 때 도구 출력
+  한도(30KB)를 넘겨 실패 목록조차 읽을 수 없다.
+- 해결: 실패한 테스트 id와 마지막 줄(220자)만 찍는 작은 러너 스크립트로 전체 스위트를 돌린다
+  (`unittest.TextTestRunner(stream=io.StringIO())`로 실행한 뒤 `result.failures`·`errors`를 요약). 시작 디렉터리는
+  `loader.discover("D:/SmithAgent/smith/tests")`처럼 슬래시 경로로 준다(역슬래시 `\t`가 탭으로 바뀐다).
+- 예방: 페이지 전체를 비교하는 단언은 `self.assertIn(text, page, text)`처럼 짧은 메시지를 붙이거나, 조각을 잘라 비교한다.
+
+### TS-026 Chrome 확장은 `file://` 미리보기를 열지 못함 (2026-10-18)
+
+- 증상: Claude in Chrome의 navigate가 `file:///D:/.../reports/preview.html`을 "browser-internal or unparseable URL"로 거부한다.
+- 해결: `reports` 폴더에서 `python -m http.server 8765 --bind 127.0.0.1`을 백그라운드로 띄우고
+  `http://127.0.0.1:8765/<파일>.html`로 연다. 확인이 끝나면 서버를 내린다(로컬 전용 바인딩이라 바깥에서 보이지 않는다).
+
+### TS-027 파일 원장을 쓰는 테스트가 느림: Windows의 SQLite fsync (2026-10-18)
+
+- 증상: 전체 테스트가 12초로 예산(10초)을 넘음. 배송·서술·메일 답변 테스트가 하나에 0.2~0.4초.
+- 원인: 원장은 SQLite 기본 내구성(`synchronous = FULL`)으로 열리고, Windows에서는 커밋마다 디스크 동기화에 10~15ms가 든다. 보고서
+  발행 한 번이 claim·sending·lineage·finish로 여러 번 커밋한다. 계산 시간은 거의 없었다(cProfile: `sqlite3.Connection.execute`가 대부분).
+- 해결: 파일 원장을 쓰는 테스트 모듈이 `setUpModule`에서 `tests/fast_ledger.install()`을 호출해 `synchronous = OFF` 연결을 쓴다.
+  운영 코드는 바꾸지 않는다(결과는 같고 테스트가 쓰지 않는 충돌 안전성만 빠짐). 12초 → 6.4초.
+- 예방: 새 테스트 모듈이 임시 파일 원장을 쓰면 같은 훅을 넣는다. 느린 테스트는 `--durations 10`으로 먼저 보고, 시간이 SQL 실행에
+  몰려 있으면 이 원인을 의심한다.

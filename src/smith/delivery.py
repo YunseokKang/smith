@@ -151,7 +151,11 @@ def publish(db: Path, *, recipient: str, credentials: tuple[str, str, str], now:
         last = ledger.last_sent_report(conn)
         # "Since last report" means last week's report on the same theme (a daily edition compared with
         # yesterday's report on another subject would say little); the first of a series uses the last one.
-        same = ledger.last_sent_report(conn, kinds=editions.same_series(kind)) or last
+        # A scheduled report compares with scheduled reports only: a manual re-send the day before would
+        # otherwise shrink "this week" to a few hours (review 2026-10-18). A manual report keeps any baseline.
+        trigger = None if slot is None else "scheduled"
+        same = (ledger.last_sent_report(conn, kinds=editions.same_series(kind), trigger=trigger)
+                or ledger.last_sent_report(conn, trigger=trigger) or last)
         baseline = None if same is None else datetime.fromisoformat(same["as_of"])
         unresolved = ledger.unresolved_runs(conn, since=None if last is None else datetime.fromisoformat(last["created_at"]))
         claimed = ledger.claim_report(conn, report_id=report_id, slot=slot, kind=kind,

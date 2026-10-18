@@ -42,7 +42,7 @@ from smith.proposals import Proposal
 
 # v10: executive headline, rounded amounts, total-balance-sheet mindset, employer double concentration, no internal
 # vocabulary (user spec 2026-10-17); v9: stress test, spending room, peer benchmark; v8: expected pay is not wealth.
-PROMPT_VERSION = "narrative-v10"
+PROMPT_VERSION = "narrative-v13"  # v13: per-policy reviews, target aliases, no URLs; v12: product review verdicts.
 MODEL = "fable"
 BUDGET_USD = "5.00"
 # Two calls at most: the write (the markets day with twenty-odd holdings ran past 10 minutes on 2026-10-17) and a
@@ -64,27 +64,35 @@ _BLOCK = lambda limit: {"type": "object", "additionalProperties": False, "requir
                         "properties": {"text": _TEXT(limit), "refs": _REFS}}
 NARRATIVE_SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False,
+    # `experiences` is optional in the output: only the household theme writes it, and an absent list is empty.
     "required": ["situation", "direction", "portfolio", "order", "proposal_notes", "holdings", "insights", "watch"],
+    # Length limits are about 60% of the v10 ones (user review 2026-10-18: the mails read long); headless.prune
+    # trims at a sentence end, so a block over its limit loses its tail, not the call.
     "properties": {
-        "situation": _BLOCK(1500),
-        "direction": _BLOCK(1500),
+        "situation": _BLOCK(1000),
+        "direction": _BLOCK(900),
         "portfolio": {"type": "object", "additionalProperties": False, "required": ["text", "refs", "principles"],
-                      "properties": {"text": _TEXT(2000), "refs": _REFS, "principles": _PRINCIPLE_IDS}},
+                      "properties": {"text": _TEXT(1400), "refs": _REFS, "principles": _PRINCIPLE_IDS}},
         "holdings": {"type": "array", "maxItems": research.MAX_HOLDING_TOPICS, "items": {
             "type": "object", "additionalProperties": False,
             "required": ["symbol", "stance", "reason", "alternative", "reconsider", "refs", "principles"],
-            "properties": {"symbol": _TEXT(20), "stance": _TEXT(8), "reason": _TEXT(700), "alternative": _TEXT(400),
-                           "reconsider": _TEXT(300), "refs": _REFS, "principles": _PRINCIPLE_IDS}}},
-        "order": {"type": "array", "maxItems": 10, "items": _TEXT(40)},
-        "proposal_notes": {"type": "array", "maxItems": 10, "items": {
+            "properties": {"symbol": _TEXT(20), "stance": _TEXT(8), "reason": _TEXT(500), "alternative": _TEXT(300),
+                           "reconsider": _TEXT(200), "refs": _REFS, "principles": _PRINCIPLE_IDS}}},
+        "order": {"type": "array", "maxItems": 12, "items": _TEXT(40)},
+        "proposal_notes": {"type": "array", "maxItems": 12, "items": {
             "type": "object", "additionalProperties": False, "required": ["key", "context", "refs"],
-            "properties": {"key": _TEXT(40), "context": _TEXT(800), "refs": _REFS}}},
+            "properties": {"key": _TEXT(40), "context": _TEXT(500), "refs": _REFS}}},
         "insights": {"type": "array", "maxItems": 4, "items": {
             "type": "object", "additionalProperties": False, "required": ["title", "body", "implication", "refs"],
-            "properties": {"title": _TEXT(120), "body": _TEXT(900), "implication": _TEXT(600), "refs": _REFS}}},
+            "properties": {"title": _TEXT(120), "body": _TEXT(500), "implication": _TEXT(350), "refs": _REFS}}},
         "watch": {"type": "array", "maxItems": 5, "items": {
             "type": "object", "additionalProperties": False, "required": ["item", "why", "refs"],
-            "properties": {"item": _TEXT(200), "why": _TEXT(400), "refs": _REFS}}},
+            "properties": {"item": _TEXT(200), "why": _TEXT(250), "refs": _REFS}}},
+        # The experience dividend (report design §18.6): one or two curated things to see, read or do, with
+        # their sources; written only for the household theme.
+        "experiences": {"type": "array", "maxItems": 2, "items": {
+            "type": "object", "additionalProperties": False, "required": ["title", "body", "when", "refs"],
+            "properties": {"title": _TEXT(120), "body": _TEXT(500), "when": _TEXT(120), "refs": _REFS}}},
     },
 }
 
@@ -107,11 +115,13 @@ Six principles of the writing (the hard rules at the end are checked by code):
    Then, in order: what changed outside since the last report and what it did to this household's net
    worth; the household's core strength and its single bottleneck; the one strategy of the period that
    resolves it. No fragmented warnings, no list of facts, no repeated status banner.
-2. Cognitive ease. In prose, round every won amount to 억 or 만: "약 27.3억 원", "326만 원", "월 약 66만
-   원". Never write an amount to the won ("27억 2,539만 5,264원", "660,016원", "325만 7,091원"); the checker
-   accepts rounded figures. At most one parenthesis per sentence, and never a mechanical tag such as
-   "(스트레스 테스트)", "(전망)", "(고객님 말씀 기준)", "(가정)": fold the qualifier into the sentence
-   ("나쁜 일이 겹치는 가정에서는", "고객님 말씀대로라면", "전망이지만").
+2. Cognitive ease and brevity. In prose, round every won amount to 억 or 만: "약 27.3억 원", "326만 원",
+   "월 약 66만 원". Never write an amount to the won ("27억 2,539만 5,264원", "660,016원", "325만 7,091원");
+   the checker accepts rounded figures. At most one parenthesis per sentence, and never a mechanical tag
+   such as "(스트레스 테스트)", "(전망)", "(고객님 말씀 기준)", "(가정)": fold the qualifier into the sentence
+   ("나쁜 일이 겹치는 가정에서는", "고객님 말씀대로라면", "전망이지만"). Write about 60% of what you would
+   naturally write: one idea per sentence, no restating of figures the charts already show, no preamble,
+   no closing summary. The mail is read on a phone in the morning.
 3. Total balance sheet. A cash balance below the reserve target never means the household has nothing to
    spend. When sector_metrics.cash.reserve_swap.one_step is true, the reserve is filled once by selling the
    excess above the single-company limit or holdings with an exit opinion (an asset swap), and the monthly
@@ -120,13 +130,17 @@ Six principles of the writing (the hard rules at the end are checked by code):
    household's own cash is the gap plus a buffer, and a sale brings cash in. The home goal is the
    household's: lead with sector_metrics.home_plan's baseline (client, partner's property equity and the
    confirmed and expected pay) and give the conservative tiers beside it.
-4. Depth. For stocks, join macro liquidity (rates), the company's fundamentals (results, guidance,
-   valuation, from the research you cite), trend and flows, and its standing in its sector. The holding
-   flagged employer_stock stacks the client's human capital and financial assets in one company: treat that
-   double concentration as the first investment matter and use the code's trim schedule
+4. Depth, after tax. For stocks, join macro liquidity (rates), the company's fundamentals (results,
+   guidance, valuation, from the research you cite), trend and flows, and its standing in its sector. The
+   holding flagged employer_stock stacks the client's human capital and financial assets in one company:
+   treat that double concentration as the first investment matter and use the code's trim schedule
    (portfolio_facts.concentration_plan). For property and tax, reason in sequences (marriage registration,
    selling one home, buying the next) and say how taxes and loan limits change at each step, conditionally
-   and with 현행 법령 확인 필요.
+   and with 현행 법령 확인 필요. Standing rule: the household's bonuses and share grants will push interest
+   and dividends toward the financial-income threshold (tax notes), so whenever you weigh a product or a
+   placement, compare after tax and name the tax-advantaged route first (ISA, pension accounts, the
+   savings-insurance exemption, separately taxed bonds and infrastructure funds, overseas shares taxed as
+   capital gains apart from the progressive scale).
 5. Behavioural coaching and the experience dividend. Where a decision is at hand, name in one plain
    sentence the bias it is exposed to (loss aversion, sunk cost, anchoring, fear of missing out, status
    quo, overconfidence after a gain, recency, mental accounting) and the pre-agreed standard that guards
@@ -151,8 +165,12 @@ Input JSON:
 - strategy: long-range goal tracks computed by code.
 - undetermined: judgements code could not make because an input is unknown. Never describe these areas
   as fine or under control; say the judgement is pending the missing information.
-- change_since_last_report.correction_of_past_inputs (when present): a fix of an earlier typo. It is not a
-  real gain or loss and is not in the total; never present it as one.
+- change_since_last_report: the net-worth change from `from` to `to` (dates), split into market_and_valuation
+  (market prices, FX and revaluations, including manual property revaluations, applied to what the household
+  already held) and net_inflow (trades and deposits, cash saved, debt repaid, records newly entered). Brief
+  both figures with the dates, calling the first "시장·평가 변동"; a market loss is never averaged away into a
+  flat total. correction_of_past_inputs (when present): a fix of an earlier
+  typo. It is not a real gain or loss and is not in the total; never present it as one.
 - ownership_notes: what is and is not known about legal ownership and household registration.
 - household_profile: the client's age, whether the marriage is registered, retirement spending goal, and
   risk_preference (the client's stated appetite, e.g. growth_aggressive: lean toward growth in direction
@@ -182,6 +200,26 @@ Input JSON:
   equity, confirmed and expected pay) with the conservative tiers and the partner's home-sale tax variants.
   sector_metrics.pension_insurance.insurance_review: premiums against income, the savings-type premiums
   and whether their tax-free maturity falls after the home move (a duration mismatch).
+  sector_metrics.pension_insurance.pension_stack: every retirement pipeline (national pension, insurer's
+  annuity, pension savings, IRP) with its start age, gross and after-tax monthly payout in today's won, the
+  basis (stated by the client, estimated by code, or unknown with what is missing), the monthly target and
+  the readiness ratio over the known pipelines (a lower bound while any is unknown).
+  sector_metrics.pension_insurance.annuity_reviews: each insurer's annuity (by number) on its own
+  illustration: what is still paid and what comes back for life, the forward internal rate of return by
+  lifespan, the same money in a broad index fund at 4/6/8%, the break-even return (or which side of the
+  search range it lies on), the payout in today's won now and at 85, the code's verdict (strong_keep,
+  keep_as_floor, surrender_candidate) with verdict_text and flip_condition. Give the client that verdict
+  decisively, with its numbers and the flip condition, and name the sunk cost to ignore.
+  sector_metrics.debt.unused_credit_lines: credit lines with nothing drawn; they cost nothing and are
+  liquidity room, never a loan to repay. sector_metrics.debt.refinance: the mortgage against the market
+  average rate on new bank mortgages, with the verdict (keep, review, unknown), the yearly saving, the
+  assumed fee and the months to earn it back.
+  sector_metrics.real_estate.move_plan: the move-target complexes by alias (후보 1, 후보 2: write them so;
+  the mail pairs each alias with its name) with price basis, trades and six-month change, against the net
+  proceeds of selling both homes (price basis per home, loans, deposit, tax cases): the spread now (after
+  tax), the pre-tax spread now and six months ago with its trend, and the spread after the expected pay
+  usable before the horizon (base: confirmed and expected; confirmed only). sector_metrics.cash.spending_split: the month as fixed costs, discretionary spending, transfers
+  and what is left, with their shares of income.
 - client_memory: what the client told Smith before (by e-mail or directly), newest first: what a nickname
   of a home means, residence periods, plans, consents, preferences. They are the client's statements, not
   ledger facts, and a newer one wins over an older one. Use them to understand the household and its
@@ -228,6 +266,10 @@ Write:
 - insights: up to 4 outside changes that matter for this household: what happened (body), what it means
   for this household (implication), refs. Label forecasts as forecasts.
 - watch: up to 5 things to watch before the next report and why, with refs.
+- experiences: only when edition_focus asks for the experience dividend: one or two things to see, read or
+  do this week or month (an exhibition, a book, a place, a table, a court), chosen from the brief's findings
+  to fit the preferences in client_memory, written as an invitation with the practical detail (where, until
+  when) in `when`, and the refs of the findings. Otherwise an empty list.
 - portfolio {text, refs, principles}: 4-8 sentences, the household's investment strategy for its stocks as a
   private banker would set it: the target structure (core and satellite) the principles imply for this
   household, which policy_checks are breached and the concrete steps to fix them in order (which holdings to
@@ -310,10 +352,15 @@ def _full_payload(view: Any, data: dict[str, Any], brief: dict[str, Any] | None,
                   change: dict[str, Any] | None) -> dict[str, Any]:
     return {
         "edition": data["kind"],
-        "household": build_context(view, {}, include_positions=True, expected_pay=None if "future_income" not in data
-                                   else future_income.context(view, data["future_income"])),
+        "household": _without_links(build_context(view, {}, include_positions=True,
+                                                  expected_pay=None if "future_income" not in data
+                                                  else future_income.context(view, data["future_income"]))),
         "change_since_last_report": None if change is None else {
             "total": won(change["total"]),
+            "from": None if change.get("from") is None else change["from"].isoformat(),
+            "to": None if change.get("to") is None else change["to"].isoformat(),
+            # Two headline figures (report design §18.2): the market's effect on what was held, and what moved in or out.
+            **({k: won(v) for k, v in change["groups"].items()} if change.get("groups") else {}),
             "parts": {k: won(v) for k, v in change["parts"].items() if v} if change.get("balanced", True) else {},
             # Restates the starting point; not a real change and not part of the total.
             **({"correction_of_past_inputs": won(change["correction"])} if change.get("correction") else {})},
@@ -333,8 +380,28 @@ def _full_payload(view: Any, data: dict[str, Any], brief: dict[str, Any] | None,
                 "year_end_checklist": [list(row) for row in advice.get("tax_checklist", [])]},
         "brief": None if brief is None else {
             "researched_at": brief["created_at"].date().isoformat(),
-            "items_untrusted": brief["brief"]["items"], "gaps": brief["brief"]["gaps"]},
+            "items_untrusted": _model_items(brief["brief"]["items"]), "gaps": brief["brief"]["gaps"]},
     }
+
+
+def _without_links(household: dict[str, Any]) -> dict[str, Any]:
+    """The ledger context without URLs (official announcement links, statistics pages): the model cites refs,
+    and the report renders the links from the data."""
+    return {**household,
+            "announcements": [{k: v for k, v in a.items() if k != "link"} for a in household.get("announcements", [])],
+            "evidence": [{k: v for k, v in e.items() if k != "source"} for e in household.get("evidence", [])]}
+
+
+# What the model reads of a research item: its content and source, never the stored source-check record
+# (final URL, HTTP status, body SHA-256). A hash's digit run once matched the phone-number rule and the
+# outbound check rejected the whole narrative before any call (BUG-2026-003).
+# The source URL stays out too: a URL cannot be masked without breaking it, and its digits can match an
+# identifier rule just like the hash did (review 2026-10-18). Links are rendered from the stored brief.
+_MODEL_ITEM_FIELDS = ("ref", "topic", "headline", "detail", "published_on", "publisher", "source_title", "kind", "tier")
+
+
+def _model_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{k: item[k] for k in _MODEL_ITEM_FIELDS if k in item} for item in items]
 
 
 def sector_metrics(view: Any, data: dict[str, Any]) -> dict[str, Any]:
@@ -352,29 +419,124 @@ def sector_metrics(view: Any, data: dict[str, Any]) -> dict[str, Any]:
                  "reserve_gap": won(cash["reserve_gap"]),
                  "emergency_months_assumption": str(cash["emergency_months_assumption"]),
                  "hermes_managed": won(cash["hermes"]),
-                 "reserve_swap": _swap_metrics(advice.get("reserve_swap"))},
+                 "reserve_swap": _swap_metrics(advice.get("reserve_swap")),
+                 "spending_split": _split_metrics(data.get("spending_split"))},
         "debt": {"variable_rate_total": won(debt["variable_total"]),
                  "monthly_interest_estimate": won(debt["monthly_interest_estimate"]),
                  "rate_shocks": [{"rate_rise": str(x["shock"]), "monthly_interest_increase": won(x["monthly_increase"])}
-                                 for x in debt["shocks"]]},
+                                 for x in debt["shocks"]],
+                 "unused_credit_lines": [{"limit": won(l["limit"]), "drawn": won(l["drawn"])}
+                                         for l in debt.get("credit_lines", [])],
+                 "unused_credit_total": won(debt.get("unused_credit")),
+                 "refinance": _refinance_metrics(advice.get("refinance"))},
         "securities": {"total": won(securities["total"]), "unclassified": won(securities["unclassified"]),
                        "unrealized_gain": won(securities["unrealized_gain"]),
                        "unrealized_gain_positions": securities["unrealized_gain_counted"],
                        "positions_without_cost_basis": securities["unrealized_gain_missing"],
                        "hermes_managed": won(securities["hermes"])},
         "real_estate": {"share_of_assets": ratio(estate["share_of_assets"]),
-                        "properties": [{"ref": view.aliases.get(p["record_id"]), "loan_to_value": ratio(p["ltv"])}
-                                       for p in estate["properties"]],
-                        "lease_return_plan": _lease_metrics(view, (data.get("lease_plans") or [None])[0])},
+                        "properties": [{"ref": view.aliases.get(p["record_id"]), "loan_to_value": ratio(p["ltv"]),
+                                        "valuation_basis": p.get("valuation_method")} for p in estate["properties"]],
+                        "lease_return_plan": _lease_metrics(view, (data.get("lease_plans") or [None])[0]),
+                        "move_plan": _move_metrics(view, data.get("move_plan"))},
         "home_plan": _home_metrics(data["kpis"]["home_progress"]),
         "pension_insurance": {"restricted_total": won(pension["restricted_total"]),
                               "monthly_premiums": won(pension["monthly_premiums"]),
                               "premium_to_income": ratio(pension["premium_to_income"]),
                               "surrender_values_known": pension["surrender_values_known"],
-                              "insurance_review": _insurance_metrics(advice.get("insurance_review"))},
+                              "insurance_review": _insurance_metrics(advice.get("insurance_review")),
+                              "pension_stack": _stack_metrics(data.get("pension_stack")),
+                              "annuity_reviews": [_annuity_metrics(r, i) for i, r in enumerate(data.get("annuity_reviews") or [], 1)]},
         "stress": _stress_metrics(data["stress"]),
         "spending_room": _spending_metrics(advice.get("spending_room")),
     }
+
+
+def _split_metrics(split: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The month's fixed/discretionary balance (report design §18.6); None when a flow is unknown."""
+    if split is None:
+        return None
+    return {"income": won(split["inflow"]), "fixed_costs": won(split["fixed"]), "discretionary": won(split["discretionary"]),
+            "transfers_to_own_accounts": won(split["transfers"]), "left": won(split["left"]),
+            "fixed_share_of_income": None if split["fixed_share"] is None else f"{split['fixed_share']:.4f}",
+            "discretionary_share_of_income": None if split["discretionary_share"] is None else f"{split['discretionary_share']:.4f}"}
+
+
+def _refinance_metrics(r: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The mortgage against the market average on new bank mortgages (report design §18.4)."""
+    if r is None:
+        return None
+    return {"loan_rate": f"{r['loan_rate']:.4f}", "rate_type": r["rate_type"], "balance": won(r["balance"]),
+            "market_average_rate_new_mortgages": None if r["market_rate"] is None else f"{r['market_rate']:.4f}",
+            "market_rate_month": None if r["observed_on"] is None else r["observed_on"].isoformat()[:7],
+            "gap": None if r["gap"] is None else f"{r['gap']:.4f}", "verdict": r["verdict"],
+            "yearly_saving": won(r["yearly_saving"]), "assumed_fee": won(r["fee"]),
+            "break_even_months": None if r["break_even_months"] is None else f"{r['break_even_months']:.0f}",
+            "source": "한국은행 ECOS 예금은행 대출금리(신규취급액 기준) 주택담보대출"}
+
+
+def _move_metrics(view: Any, plan: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The move-target spread (report design §18.3): targets by label (public complex names the client chose),
+    homes by alias, every amount in whole won; None without configured targets."""
+    if plan is None:
+        return None
+
+    def ratio(value: Decimal | None) -> str | None:
+        return None if value is None else f"{value:.4f}"
+    return {"horizon": plan["horizon"].isoformat(),
+            "homes": [{"ref": view.aliases.get(h["record_id"]), "price": won(h["price"]), "price_basis": h["price_basis"],
+                       "secured_loans": won(h["loans"]), "lease_deposit": won(h["deposits"]),
+                       "net_before_tax": won(h["before_tax"]),
+                       "capital_gains_tax": None if h["tax"] is None else {k: won(v) for k, v in h["tax"].items()},
+                       "net_general_tax": won(h["net_general"]), "net_one_home_exemption": won(h["net_exempt"]),
+                       "exemption_value": won(h["exemption_value"])} for h in plan["homes"]],
+            "household_net_proceeds": {"before_tax": won(plan["proceeds"]["before_tax"]),
+                                       "general_tax": won(plan["proceeds"]["general"]),
+                                       "exemption_each": won(plan["proceeds"]["exempt"]),
+                                       "tax_known": plan["proceeds"]["tax_known"]},
+            "expected_pay_before_horizon": {k: won(v) for k, v in plan["pay"].items()},
+            # Targets by alias only: the complex names stay in the local config and the mail (review 2026-10-18).
+            "targets": [{"target": t["alias"], "region": t["region"], "price": won(t["price"]), "price_basis": t["price_basis"],
+                         "trades_6m": t["trades_6m"], "change_6m": ratio(t["change_6m"]), "cost_with_fees": won(t["cost_with_fees"]),
+                         "spread_now": won(t["spread"]), "spread_with_exemption": won(t["spread_exempt"]),
+                         "spread_after_expected_pay_base": won(t["spread_with_pay"]),
+                         "spread_after_confirmed_pay_only": won(t["spread_with_pay_adverse"]),
+                         "spread_before_tax_now": won(t["spread_before_tax"]), "spread_before_tax_6m_ago": won(t["spread_6m_ago"]),
+                         "trend_before_tax": t["trend"]} for t in plan["targets"]],
+            "assumptions": plan["assumptions"]}
+
+
+def _annuity_metrics(r: dict[str, Any], number: int) -> dict[str, Any]:
+    """One insurer's annuity reviewed on its own illustration (report design §19), named by number only."""
+    from smith.product_review import verdict_text
+    sentence, flip = verdict_text(r)
+    return {"policy": f"연금보험 {number}", "remaining_premiums": won(r["remaining_premiums"]), "remaining_months": r["remaining_months"],
+            "paid_so_far": won(r["paid_so_far"]), "surrender_now": won(r["surrender_now"]),
+            "loss_if_surrendered": won(r["loss_if_surrendered"]), "annuity_monthly_nominal": won(r["annuity_monthly_nominal"]),
+            "annuity_start": r["annuity_start"].isoformat(), "annuity_real_now": won(r["annuity_real_now"]),
+            "annuity_real_at_85": won(r["annuity_real_late"]),
+            "irr_by_lifespan": [{"to_age": b["to_age"], "irr": None if b["irr"] is None else f"{b['irr']:.4f}",
+                                 "received": won(b["received"])} for b in r["by_lifespan"]],
+            "index_fund_alternative": [{"rate": str(a["rate"]), "monthly_at_start": won(a["monthly"]),
+                                        "monthly_real": won(a["monthly_real"])} for a in r["alternatives"]],
+            "break_even_return": None if r["break_even_return"] is None else f"{r['break_even_return']:.4f}",
+            "break_even_outside_range": r["break_even_bound"],
+            "verdict": r["verdict"], "verdict_text": sentence, "flip_condition": flip, "tax_free": r["tax_free"],
+            "assumptions": r["assumptions"]}
+
+
+def _stack_metrics(stack: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The pension stack (report design §18.5) for the narrative; None without a retirement target."""
+    if stack is None:
+        return None
+    return {"monthly_target_today_won": won(stack["target"]), "payout_age_assumed": stack["payout_age"],
+            "pipelines": [{"key": p["key"], "label": p["label"], "start_age": p["start_age"],
+                           "gross_monthly": won(p["gross_monthly"]), "net_monthly": won(p["net_monthly"]),
+                           "nominal_monthly_at_start": won(p.get("nominal_monthly")),
+                           "basis": p["basis"], "basis_text": p["basis_text"], "missing": p["missing"]}
+                          for p in stack["pipelines"]],
+            "total_net_monthly_known": won(stack["total_net"]), "readiness_ratio": f"{stack['ratio']:.4f}",
+            "unknown_pipelines": stack["unknown"], "lower_bound": not stack["complete"]}
 
 
 def _swap_metrics(swap: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -638,7 +800,7 @@ MISSING = "missing"  # The index of a required opinion the model did not write: 
 
 def restore(verified: dict[str, Any], dropped: list[str], raw: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
     """Put failing blocks back from the latest raw output with a memo. Ref codes are stripped from them."""
-    out = {**verified, **{field: list(verified[field]) for field in _LISTS}}
+    out = {**verified, **{field: list(verified.get(field, [])) for field in _LISTS}}
     memos: dict[str, str] = {}
     keys = {n["key"] for n in out["proposal_notes"]}
     symbols = {h["symbol"] for h in out["holdings"]}
@@ -663,7 +825,7 @@ def restore(verified: dict[str, Any], dropped: list[str], raw: dict[str, Any]) -
             continue
         if field == "holdings" and item["symbol"] in symbols:
             continue
-        for name in ("context", "title", "body", "implication", "item", "why", "reason", "alternative", "reconsider"):
+        for name in _PROSE_FIELDS:
             if name in item:
                 item[name] = readable(item[name])
         item["memo"] = memo
@@ -708,7 +870,7 @@ def merge(first: dict[str, Any], first_dropped: list[str], repaired: dict[str, A
     `raw` is the first call's raw output, which the dropped paths index; without it (older callers) the
     identity of a rejected item is unknown and the first new repaired item is taken, which once gave the
     slot of a dropped opinion on the largest holding to another holding's repaired opinion (BUG-2026-002)."""
-    merged = {**first, **{field: list(first[field]) for field in _LISTS}}
+    merged = {**first, **{field: list(first.get(field, [])) for field in _LISTS}}
     remaining = []
     for entry in first_dropped:
         path, reason, *detail = entry.split(":")
@@ -729,7 +891,7 @@ def merge(first: dict[str, Any], first_dropped: list[str], repaired: dict[str, A
             wanted = raw[field][int(index)][identity]
         fresh = [item for item in repaired[field] if item[identity] not in taken]
         candidate = next((item for item in fresh if wanted is None or item[identity] == wanted), None)
-        if candidate is None and wanted is not None and field in ("insights", "watch") and index.isdigit():
+        if candidate is None and wanted is not None and field in ("insights", "watch", "experiences") and index.isdigit():
             # A rewritten insight may carry a new title: the item at the same position, when it is new.
             at = int(index)
             candidate = repaired[field][at] if at < len(repaired[field]) and repaired[field][at][identity] not in taken else None
@@ -793,7 +955,7 @@ def polish_output(output: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-_PROSE_FIELDS = ("context", "title", "body", "implication", "item", "why", "reason", "alternative", "reconsider")
+_PROSE_FIELDS = ("context", "title", "body", "implication", "item", "why", "reason", "alternative", "reconsider", "when")
 
 
 def style_problem(texts: list[str]) -> str | None:
@@ -833,8 +995,9 @@ _CONDITIONAL = ("따라", "경우", "수 있", "확인", "판정", "여부")
 SCALAR_BLOCKS = ("situation", "direction", "portfolio")
 TAX_PROPOSALS = ("pension-credit", "overseas-harvest", "isa-open")  # Proposals computed by Smith's tax rules.
 # A daily edition's lists are cut in code too, not only asked for in the prompt (overview, other days).
-EDITION_LIMITS = {"insights": (3, 2), "watch": (3, 3)}
-_LISTS = {"proposal_notes": "key", "holdings": "symbol", "insights": "title", "watch": "item"}  # field -> identity
+EDITION_LIMITS = {"insights": (3, 2), "watch": (3, 3), "experiences": (0, 2)}
+_LISTS = {"proposal_notes": "key", "holdings": "symbol", "insights": "title", "watch": "item",
+          "experiences": "title"}  # field -> identity
 _REASONS = {"unknown-ref": "cites a ref that is not in the input",
             "invalid-holding": "names a symbol that is not in holdings or a stance other than add, hold, trim, exit",
             "add-over-limit": "advises buying more of a holding above the single-company limit (policy forbids it)",
@@ -927,6 +1090,9 @@ def verify(output: dict[str, Any], payload: dict[str, Any]) -> tuple[dict[str, A
     result["insights"] = [n for i, n in enumerate(output["insights"])
                           if check(f"insights[{i}]", [n["title"], n["body"], n["implication"]], n["refs"], outside=True)]
     result["watch"] = [n for i, n in enumerate(output["watch"]) if check(f"watch[{i}]", [n["item"], n["why"]], n["refs"])]
+    # An experience is an outside fact (an exhibition, a book, a place): it needs its research refs like an insight.
+    result["experiences"] = [n for i, n in enumerate(output.get("experiences") or [])
+                             if check(f"experiences[{i}]", [n["title"], n["body"], n["when"]], n["refs"], outside=True)]
     return result, dropped
 
 
@@ -1018,6 +1184,9 @@ _EVIDENCE_KEYS = ("edition", "change_since_last_report", "proposals", "undetermi
                   "strategy", "assumptions", "ownership_notes", "property_market", "sector_metrics",
                   "household_profile", "holdings", "principles", "policy_checks", "portfolio_facts", "tax",
                   "report_date", "message_date",
+                  # An e-mail answer may quote the report's own status reasons, data status and the principles it
+                  # applied (code output, not the model's earlier prose).
+                  "report_notes", "report_principles",
                   "client_question", "client_memory")
 
 
@@ -1214,7 +1383,7 @@ def attach(data: dict[str, Any], result: dict[str, Any] | None, brief: dict[str,
     # the employer's stock never reads "의견 없음" (report design §17.4).
     narrative: dict[str, Any] = {"status": status, "situation": "", "direction": "", "portfolio": "",
                                  "holdings": _opinions(data, [], links) if "holdings" in data else {},
-                                 "insights": [], "watch": []}
+                                 "insights": [], "watch": [], "experiences": []}
     if result is not None:
         out = result["output"]
         by_key = {p.key: p for p in data["advice"]["proposals"]}
@@ -1241,7 +1410,9 @@ def attach(data: dict[str, Any], result: dict[str, Any] | None, brief: dict[str,
             insights=[{**{k: i[k] for k in ("title", "body", "implication")}, "memo": i.get("memo", ""),
                        "links": [links[r] for r in i["refs"] if r in links]} for i in out["insights"]],
             watch=[{"item": w["item"], "why": w["why"], "memo": w.get("memo", ""),
-                    "links": [links[r] for r in w["refs"] if r in links]} for w in out["watch"]])
+                    "links": [links[r] for r in w["refs"] if r in links]} for w in out["watch"]],
+            experiences=[{**{k: e[k] for k in ("title", "body", "when")}, "memo": e.get("memo", ""),
+                          "links": [links[r] for r in e["refs"] if r in links]} for e in out.get("experiences") or []])
     data["narrative"] = narrative
 
 
@@ -1308,11 +1479,12 @@ def _links(data: dict[str, Any], brief: dict[str, Any] | None) -> dict[str, tupl
 
 
 def pinned_brief(db: Path, view: Any, *, now: datetime, brief_id: str | None,
-                 kind: str | None = None) -> tuple[dict[str, Any] | None, bool]:
+                 kind: str | None = None, target_regions: tuple[str, ...] | list[str] = ()) -> tuple[dict[str, Any] | None, bool]:
     """(brief, reused). The brief researched for this report; without one (research failed or was not
-    run), the newest brief for exactly the same topic set (of the edition `kind`) within BRIEF_REUSE_AGE,
-    marked as reused. An edition with no research topics has no brief."""
-    topics = [{"ref": t.ref, "title": t.title, "question": t.question} for t in research.topics(view, kind)]
+    run), the newest brief for exactly the same topic set (of the edition `kind`, with the move-target
+    districts) within BRIEF_REUSE_AGE, marked as reused. An edition with no research topics has no brief."""
+    topics = [{"ref": t.ref, "title": t.title, "question": t.question}
+              for t in research.topics(view, kind, target_regions)]
     if not topics and brief_id is None:
         return None, False
     with closing(ledger.connect_read_only(db)) as conn:
@@ -1358,7 +1530,8 @@ def narrate(db: Path, view: Any, data: dict[str, Any], *, now: datetime, secrets
         writer, version = team.write, team.PROMPT_VERSION
     else:
         writer, version = write, PROMPT_VERSION
-    brief, reused = pinned_brief(db, view, now=now, brief_id=brief_id, kind=data["kind"])
+    brief, reused = pinned_brief(db, view, now=now, brief_id=brief_id, kind=data["kind"],
+                                 target_regions=data.get("research_regions") or ())
     official = 0 if brief is None else sum(1 for i in brief["brief"]["items"] if i.get("tier") == "official")
     checks = [] if brief is None else [i["check"]["status"] for i in brief["brief"]["items"] if i.get("check")]
     status = {"brief": None if brief is None else {"created_at": brief["created_at"], "items": len(brief["brief"]["items"]),
@@ -1399,8 +1572,18 @@ def narrate(db: Path, view: Any, data: dict[str, Any], *, now: datetime, secrets
     status.update(outcome="success", dropped=result["dropped"], cost_usd=result["cost_usd"])
     if "specialists" in result:
         status["specialists"] = result["specialists"]
-    edition = editions.of(data["kind"])
-    if edition is not None:
-        for field, (overview, other) in EDITION_LIMITS.items():
-            result["output"][field] = result["output"][field][:overview if edition.key == "overview" else other]
+    result["output"] = edition_trim(result["output"], data["kind"])
     attach(data, result, brief, status)
+
+
+def edition_trim(output: dict[str, Any], kind: str) -> dict[str, Any]:
+    """Cut a daily edition's lists to their limits (the overview takes more insights, no experiences); the
+    experience dividend belongs to the household theme alone (report design §18.6). Other kinds are untouched."""
+    edition = editions.of(kind)
+    if edition is None:
+        return output
+    for field, (overview, other) in EDITION_LIMITS.items():
+        output[field] = output.get(field, [])[:overview if edition.key == "overview" else other]
+    if "experiences" not in edition.sections:
+        output["experiences"] = []
+    return output

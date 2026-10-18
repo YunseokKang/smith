@@ -10,6 +10,8 @@ from zoneinfo import ZoneInfo
 from smith import delivery, gmail, ledger
 from smith.importer import parse_import
 
+import fast_ledger
+
 KST = ZoneInfo("Asia/Seoul")
 CONFIG = {"app": {"timezone": "Asia/Seoul"},
           "reports": {"enabled": True, "weekdays": ["monday", "thursday"], "time": "06:00"}}
@@ -173,12 +175,33 @@ class DeliveryTests(unittest.TestCase):
             self.publish(MON + timedelta(minutes=5), MON)
         self.assertIn("지연 발송", self.sent[-1])
 
+    def test_a_scheduled_report_compares_with_the_last_scheduled_one_not_a_manual_resend(self):
+        self.publish(MON, MON)                                                   # Scheduled, a week earlier.
+        manual_at = NEXT_MON - timedelta(hours=16)
+        self.publish(manual_at, None)                                            # A manual re-send the day before.
+        self.publish(NEXT_MON, NEXT_MON)
+        with closing(ledger.connect_read_only(self.db)) as conn:
+            runs = {r["slot"]: r for r in ledger.report_runs(conn, limit=10) if r["slot"]}
+        scheduled = next(r for slot, r in runs.items() if slot.startswith("2026-10-11T21"))
+        self.assertEqual(datetime.fromisoformat(scheduled["baseline"]), MON.astimezone(timezone.utc))
+        manual = delivery.publish(self.db, recipient="me@example.com", credentials=("a", "b", "c"), now=NEXT_MON + timedelta(hours=1),
+                                  slot=None, missed=[], kind="monday", sender=self.sender())
+        self.assertEqual(manual["status"], "sent")                               # A manual report keeps any baseline.
+
     def test_missing_setup_is_recorded_for_unattended_runs(self):
         result = delivery.record_failure(self.db, now=MON, slot=MON, missed=[], kind="monday",
                                          code="setup-no-gmail-grant")
         self.assertEqual(result["status"], "failed")
         with closing(ledger.connect(self.db)) as conn:
             self.assertEqual(ledger.report_runs(conn)[0]["error_code"], "setup-no-gmail-grant")
+
+
+def setUpModule():  # noqa: N802 - unittest hook
+    fast_ledger.install()  # File ledgers without an fsync per commit (test budget); results are unchanged.
+
+
+def tearDownModule():  # noqa: N802 - unittest hook
+    fast_ledger.uninstall()
 
 
 if __name__ == "__main__":

@@ -25,6 +25,13 @@ PENSION_CREDIT_RATE = Decimal("0.132")     # Above 55M won gross salary; 16.5% a
 DECISION_LEAD_MONTHS = 6                    # Decide how to return a lease deposit this long before it is due.
 LEASE_HORIZON_MONTHS = 48
 CD_SERIES, BASE_RATE_SERIES = "817Y002/010502000", "722Y001/0101000"
+# Deposit banks' weighted average mortgage rate on new loans (ECOS, monthly): the market band a household
+# mortgage is judged against for refinancing (report design §18.4).
+MORTGAGE_MARKET_SERIES = "121Y006/BECBLA0302"
+REFINANCE_MARGIN = Decimal("0.003")     # A loan within 0.3%p of the market average is not worth moving.
+# Assumption: the early-repayment fee on a bank mortgage, 1.2% of the balance (often sliding to zero over
+# three years); the loan contract decides the real figure.
+PREPAYMENT_FEE_RATE = Decimal("0.012")
 # Differences smaller than this are within the error of approximating deposit rates by the CD rate.
 DECISION_MARGIN = Decimal("0.005")
 # Loans an extra payment can reduce (a lease deposit is returned, not prepaid).
@@ -78,7 +85,7 @@ class Undetermined:
 # The proposal rules in `build`, in order. A rule's proposals and undetermined judgements carry its key.
 RULE_KEYS = ("lease-return", "emergency-reserve", "goal-stocks-glide", "concentration-trim", "surplus-plan",
              "pension-credit", "overseas-harvest", "isa-open", "insurance-review", "prepayment", "variable-rate",
-             "spending-room")
+             "refinance", "spending-room")
 SPENDING_FILL_MONTHS = 12  # Assumption (§16.3): an emergency-reserve gap is filled within a year.
 # Assumption (§17.1): when assets sellable within days are at least this many times the reserve gap, the gap
 # is filled by moving money between assets once, not by diverting the monthly surplus for months.
@@ -109,7 +116,7 @@ def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
     facts["reserve_swap"] = reserve_swap(facts)
     facts["spending_room"] = spending_room(facts)
     rules = (_lease_return, _emergency_reserve, _goal_stocks_glide, _concentration_trim, _surplus_plan, _pension_credit,
-             _overseas_harvest, _isa, _insurance_review, _prepayment, _variable_rate, _spending_room)
+             _overseas_harvest, _isa, _insurance_review, _prepayment, _variable_rate, _refinance, _spending_room)
     outcomes = [(i, rule(facts)) for i, rule in enumerate(rules)]
     found = [(i, p) for i, p in outcomes if isinstance(p, Proposal)]
     undetermined = [replace(p, key=RULE_KEYS[i]) for i, p in outcomes if isinstance(p, Undetermined)]
@@ -129,7 +136,7 @@ def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
     return {"proposals": proposals, "in_progress": in_progress, "decided": decided, "undetermined": undetermined,
             "strategy": _strategy(facts), "glide": facts["glide"], "spending_room": facts["spending_room"],
             "reserve_swap": facts["reserve_swap"], "concentration": facts["concentration"],
-            "insurance_review": insurance_review(facts),
+            "insurance_review": insurance_review(facts), "refinance": refinance_facts(facts),
             "assumptions": _assumptions() + tax.assumptions(),
             "tax_notes": tax.notes(facts["tax"]), "tax_checklist": tax.checklist(facts["tax"])}
 
@@ -200,7 +207,7 @@ def _facts(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any], revi
             "unallocated": None if kpis["monthly_net"] is None else kpis["monthly_net"] - summary.monthly_transfers,
             "pension_accounts": len(pension),
             "pension_total": pension_total, "cd": _series(view, CD_SERIES),
-            "base_rate": _series(view, BASE_RATE_SERIES),
+            "base_rate": _series(view, BASE_RATE_SERIES), "market_mortgage": _series(view, MORTGAGE_MARKET_SERIES),
             "resources": holdings.owner_resources(view),
             "review": review, "concentration": holdings.concentration_plan(review)}
 
@@ -685,8 +692,11 @@ def _isa(facts: dict[str, Any]) -> Proposal | None:
 
 
 def _prepayment(facts: dict[str, Any]) -> Proposal | Undetermined | None:
-    """The marginal effect of prepaying is set by the highest-rate loan that can be repaid, fixed or not."""
-    loans = [l for l in facts["sectors"]["debt"]["loans"] if l["category"] in REPAYABLE and l["rate"] > 0]
+    """The marginal effect of prepaying is set by the highest-rate loan that can be repaid, fixed or not. A
+    loan with nothing outstanding (an unused credit line) costs no interest and cannot be prepaid: it is left
+    out here and reported as liquidity room instead (user review 2026-10-18)."""
+    loans = [l for l in facts["sectors"]["debt"]["loans"] if l["category"] in REPAYABLE and l["rate"] > 0
+             and (l["amount"] is None or l["amount"] > 0)]
     cd = facts["cd"]
     if not loans:
         return None
@@ -722,6 +732,78 @@ def _prepayment(facts: dict[str, Any]) -> Proposal | Undetermined | None:
                     "보증금 반환 자금이 부족해 보이면 다시 판단합니다."),
         certainty="계산(현재 금리가 유지된다는 가정, 예금 금리는 근사)",
         figures={"loan_rate": rate, "deposit_after_tax": deposit})
+
+
+def refinance_facts(facts: dict[str, Any]) -> dict[str, Any] | None:
+    """The largest mortgage against the market average rate on new bank mortgages (report design §18.4):
+    the gap, the yearly interest it costs, the assumed early-repayment fee and the months to earn it back.
+    None without a mortgage; `verdict` "unknown" without the market series."""
+    mortgages = [l for l in facts["sectors"]["debt"]["loans"] if l["category"] == "mortgage" and l["rate"] > 0
+                 and l["amount"] is not None and l["amount"] > 0]
+    if not mortgages:
+        return None
+    loan = max(mortgages, key=lambda l: l["amount"])
+    series = facts["market_mortgage"]
+    found = {"label": loan["label"], "balance": loan["amount"], "loan_rate": loan["rate"], "rate_type": loan["rate_type"],
+             "maturity": loan["maturity"], "market_rate": None, "observed_on": None, "gap": None, "verdict": "unknown",
+             "yearly_saving": None, "fee": None, "break_even_months": None, "margin": REFINANCE_MARGIN,
+             "fee_rate": PREPAYMENT_FEE_RATE, "stale": False}
+    if series is None:
+        return found
+    if series["stale"]:  # An old monthly figure must not settle a refinancing verdict (review 2026-10-18).
+        found.update(stale=True, observed_on=series["observed_on"])
+        return found
+    market = series["value"] / 100
+    gap = loan["rate"] - market
+    found.update(market_rate=market, observed_on=series["observed_on"], gap=gap,
+                 verdict="keep" if gap <= REFINANCE_MARGIN else "review")
+    if found["verdict"] == "review":
+        yearly = loan["amount"] * gap
+        fee = loan["amount"] * PREPAYMENT_FEE_RATE
+        found.update(yearly_saving=yearly, fee=fee, break_even_months=fee / (yearly / 12))
+    return found
+
+
+def _refinance(facts: dict[str, Any]) -> Proposal | Undetermined | None:
+    """Keep the mortgage when its rate sits at or below the market average on new loans (plus the margin);
+    otherwise size the saving against the early-repayment fee and suggest a refinancing check."""
+    r = refinance_facts(facts)
+    if r is None:
+        return None
+    if r["verdict"] == "unknown":
+        return Undetermined("주택담보대출 대환 실익",
+                            f"시중 주담대 평균 금리(한국은행 신규취급액 기준) 자료가 오래되었습니다(마지막 {r['observed_on']:%Y년 %m월}분, 금리 "
+                            "동기화를 확인하십시오)." if r["stale"] else
+                            "시중 주담대 평균 금리(한국은행 신규취급액 기준) 자료가 없습니다(금리 동기화를 확인하십시오).")
+    label, rate, market = r["label"], r["loan_rate"], r["market_rate"]
+    basis = f"한국은행이 집계한 은행 주담대 신규취급 평균 금리 {percent(market)}({r['observed_on']:%Y년 %m월} 기준)"
+    if r["verdict"] == "keep":
+        return Proposal(
+            key="refinance", priority=3, identity="refinance:keep", watch=("loan_rate", "market_rate"), tolerance=Decimal("0.1"),
+            title=f"{label} 금리 {percent(rate)}는 시중 평균 이하 수준이므로, 대환 없이 유지하시는 것이 유리합니다.",
+            why=(f"{basis}와 견주면 고객님 대출 금리가 {percent(abs(r['gap']))}p {'낮습니다' if r['gap'] < 0 else '높을 뿐입니다'}. "
+                 f"차이가 {percent(REFINANCE_MARGIN, 1)}p 안이면 중도상환수수료와 새 대출의 부대비용을 감안할 때 갈아탈 실익이 없습니다."),
+            effect="지금 조건을 유지하면 추가 비용 없이 시중 최저 수준의 금리를 계속 누립니다.",
+            risks=("변동금리라면 다음 재산정 때 금리가 오를 수 있습니다. 시중 금리가 더 내려 차이가 벌어지면 그때 다시 비교합니다. "
+                   "평균 금리는 신용·담보 조건이 다른 대출의 평균이라 개별 조건과 다를 수 있습니다."),
+            timing="유지(다음 금리 재산정일 전 재확인)",
+            reconsider=f"시중 평균이 고객님 금리보다 {percent(REFINANCE_MARGIN, 1)}p 넘게 낮아지면 대환을 다시 검토합니다.",
+            certainty="계산(한국은행 월간 통계 기준, 개별 대출 조건은 은행 확인 필요)",
+            figures={"loan_rate": rate, "market_rate": market})
+    return Proposal(
+        key="refinance", priority=2, identity="refinance:review", watch=("loan_rate", "market_rate"), tolerance=Decimal("0.1"),
+        title=f"{label} 금리 {percent(rate)}가 시중 평균보다 높으니 대환 조건을 은행에 문의해 보시길 권합니다.",
+        why=(f"{basis}보다 고객님 금리가 {percent(r['gap'])}p 높습니다. 잔액 {short_won(r['balance'])} 기준으로 그 차이만큼 "
+             f"한 해 약 {short_won(r['yearly_saving'])}의 이자를 더 내는 셈입니다."),
+        effect=(f"같은 조건으로 갈아타면 한 해 약 {short_won(r['yearly_saving'])}을 아끼고, 중도상환수수료를 잔액의 "
+                f"{percent(PREPAYMENT_FEE_RATE, 1)}로 보면 약 {short_won(r['fee'])}이어서 {r['break_even_months']:.0f}개월이면 "
+                "수수료를 회수합니다(가정)."),
+        risks=("중도상환수수료율과 잔여 면제 기간은 대출 약정서에 따라 다르고, 새 대출의 한도(LTV·DSR)와 금리는 심사 결과에 달려 "
+               "확정이 아닙니다. 규제지역 여부와 주택 수에 따라 대환 자체가 제한될 수 있습니다(현행 법령 확인 필요)."),
+        timing="이번 달 은행 두 곳 이상 견적 비교",
+        reconsider=f"고객님 금리와 시중 평균의 차이가 {percent(REFINANCE_MARGIN, 1)}p 안으로 좁혀지면 유지로 돌아갑니다.",
+        certainty="계산(한국은행 월간 평균 금리와 수수료 가정 기준, 실제 조건은 은행 확인 필요)",
+        figures={"loan_rate": rate, "market_rate": market, "yearly_saving": r["yearly_saving"]})
 
 
 def _variable_rate(facts: dict[str, Any]) -> Proposal | Undetermined | None:
@@ -971,4 +1053,6 @@ def _assumptions() -> list[str]:
             f"비과세 만기 {SAVINGS_INSURANCE_YEARS}년과 주택 이전 시점을 비교",
             f"연금계좌 세액공제 한도 연 {short_won(PENSION_CREDIT_LIMIT)}(연금저축 {short_won(PENSION_SAVINGS_LIMIT)}), "
             f"공제율 {percent(PENSION_CREDIT_RATE, 1)}(소득세 12%+지방소득세, 총급여 5,500만 원 초과 가정)",
-            "예금 금리는 CD 91일물 유통수익률로 근사(실제 정기예금 금리와 다를 수 있음)"]
+            "예금 금리는 CD 91일물 유통수익률로 근사(실제 정기예금 금리와 다를 수 있음)",
+            f"대환 판정: 은행 주담대 신규취급 평균 금리(한국은행) 대비 {percent(REFINANCE_MARGIN, 1)}p 안이면 유지, "
+            f"중도상환수수료는 잔액의 {percent(PREPAYMENT_FEE_RATE, 1)} 가정(약정서 확인 필요)"]

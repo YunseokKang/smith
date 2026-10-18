@@ -1124,10 +1124,12 @@ def changed_since(conn: sqlite3.Connection, known_at: datetime) -> bool:
     return conn.execute("SELECT 1 FROM imports WHERE recorded_at > ? LIMIT 1", (_db_time(known_at),)).fetchone() is not None
 
 
-def last_sent_report(conn: sqlite3.Connection, *, kinds: tuple[str, ...] | None = None) -> dict[str, Any] | None:
-    """The latest successfully sent report (of one of `kinds`); its snapshot time is the next report's
-    baseline."""
-    sent = [r for r in report_runs(conn, limit=1000) if r["status"] == "sent" and (kinds is None or r["kind"] in kinds)]
+def last_sent_report(conn: sqlite3.Connection, *, kinds: tuple[str, ...] | None = None,
+                     trigger: str | None = None) -> dict[str, Any] | None:
+    """The latest successfully sent report (of one of `kinds`, and of `trigger` "scheduled" or "manual" when
+    given); its snapshot time is the next report's baseline."""
+    sent = [r for r in report_runs(conn, limit=1000) if r["status"] == "sent" and (kinds is None or r["kind"] in kinds)
+            and (trigger is None or r["trigger"] == trigger)]
     return max(sent, key=lambda r: r["as_of"], default=None)
 
 

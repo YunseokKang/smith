@@ -60,21 +60,25 @@ def sync(db: Path, config_path: Path, *, months: int = 13) -> int:
     try:
         config = load_config(config_path)
         properties, tz = config.get("properties") or {}, config["app"]["timezone"]
+        targets = config.get("targets") or {}
     except (OSError, ValueError, UnicodeDecodeError):
-        properties, tz = {}, "Asia/Seoul"
+        properties, targets, tz = {}, {}, "Asia/Seoul"
     key = credentials.load_api_key("datagokr")
-    if not properties or key is None:
-        print("Missing setup: [properties] in the local config and `smith realestate login` are required.")
+    if not (properties or targets) or key is None:
+        print("Missing setup: [properties] or [targets] in the local config and `smith realestate login` are required.")
         _record(db, now, "failure", "no-setup")
         return 2
     try:
-        deals, fetched = realestate.sync(properties, key, today=local_time(now, tz).date(), months=months)
+        deals, fetched = realestate.sync(properties, key, today=local_time(now, tz).date(), months=months,
+                                         targets=targets)
     except realestate.RealEstateError as error:
         print(f"Real-estate sync failed ({error.code}). Nothing stored.")
         _record(db, now, "failure", error.code)
         return 1
+    # Deals of complexes no longer configured (a property sold, a target dropped) are removed with the sync.
+    refs = set(properties) | {realestate.target_ref(key) for key in targets}
     with closing(ledger.connect(db)) as conn:
-        stored = ledger.replace_deals(conn, deals, months=fetched, properties=set(properties),
+        stored = ledger.replace_deals(conn, deals, months=fetched, properties=refs,
                                       fetched_at=datetime.now(timezone.utc))
     _record(db, now, "success")
     print(f"Real-estate sync: {len(deals)} matching deal(s), {stored} row(s) stored")

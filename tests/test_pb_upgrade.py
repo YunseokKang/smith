@@ -8,7 +8,7 @@ import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from smith import ledger, narrative, stress
+from smith import ledger, narrative, report_html, stress
 from smith.importer import parse_import
 from smith.payload import load_view
 from smith.report_data import build_report
@@ -301,17 +301,17 @@ class RenderingTests(Upgrade):
                              "direction": "장기 방향은 그대로입니다.", "direction_memo": "출처가 확인되지 않은 외부 사실이 들어 있습니다.",
                              "situation_memo": "", "portfolio": "", "holdings": {}, "insights": [], "watch": []}
         page = render(data)[1]
-        hero, footer = page.rsplit("데이터 상태 및 시스템 노트", 1)   # The hero names the footer once; the footer is last.
-        self.assertIn("주식의 쏠림을 풀면 비상금과 집중이 함께 해결됩니다.", hero)
-        self.assertLess(hero.index("주식의 쏠림을 풀면"), hero.index("지난주 시장은 조용했습니다"))
-        self.assertNotIn("자동 점검 메모", hero)                                       # Caveats are footer notes ...
-        self.assertIn("자동 점검 메모 · 전략 방향: 출처가 확인되지 않은", footer)
-        self.assertNotIn("입력: ", hero)                                              # ... and so are input hints.
-        self.assertIn("입력 안내 · ", footer)
-        self.assertNotIn("owner_id", hero)
-        self.assertIn("상태 판정: ", footer)                                           # The badge's reasons, once, below.
-        self.assertNotIn(" — 지금 실행을 권하는 제안이", hero)                         # No alarm banner at the top.
-        self.assertIn("판정 사유는 맨 아래", hero)
+        self.assertIn("주식의 쏠림을 풀면 비상금과 집중이 함께 해결됩니다.", page)
+        self.assertLess(page.index("주식의 쏠림을 풀면"), page.index("지난주 시장은 조용했습니다"))
+        # v3.0 (report design §18.1): caveats, input hints and the badge's reasons are not in the mail at all;
+        # they are the report's system notes, kept for the e-mail answers.
+        for text in ("자동 점검 메모", "입력: ", "owner_id", "상태 판정: ", "판정 사유는 맨 아래", "데이터 상태 및 시스템 노트",
+                     " — 지금 실행을 권하는 제안이"):
+            self.assertNotIn(text, page, text)
+        notes = report_html.system_notes(data)
+        self.assertTrue(any(n.startswith("자동 점검 메모 · 전략 방향: 출처가 확인되지 않은") for n in notes))
+        self.assertTrue(any(n.startswith("입력 안내 · ") for n in notes))
+        self.assertTrue(any(n.startswith("상태 판정: ") for n in notes))
 
     def test_themed_days_do_not_repeat_the_overview_tables(self):
         overview, markets, property_, life, rates = (render(self.report(k))[1]

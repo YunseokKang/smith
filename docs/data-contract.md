@@ -96,7 +96,8 @@
 `rate_type`, `maturity`(선택), `repayment_method`, `credit_limit`(선택), `collateral_record_id`(선택)
 - `category`: `mortgage`, `jeonse_loan`, `credit_loan`, `credit_line`(마이너스통장), `card_balance`,
   `policy_loan`(보험계약대출), `lease_deposit_obligation`(임대보증금 반환 의무), `other`
-- `credit_limit`: 마이너스통장 등의 한도. 부채 원금이 아니며 순자산에 들어가지 않는다.
+- `credit_limit`: 마이너스통장 등의 한도. 부채 원금이 아니며 순자산에 들어가지 않는다. 잔액이 0이면 이자가 없는 미사용
+  한도로 보고 상환 제안 대상에서 빼며, 보고서는 유동성 여유로 적는다(report-design §18.4).
 - `collateral_record_id`: 담보 자산 레코드 ID(예: 보험계약대출의 해약환급금, 주택담보대출의 부동산).
 - `annual_rate`: 소수 비율. `0.045`가 4.5%. 1 이상이면 거절한다(퍼센트 입력 실수 방지).
 - `rate_type`: `fixed`, `variable`, `mixed`, `unknown`(미확인)
@@ -118,6 +119,14 @@
 - `end_date`는 `start_date` 이후여야 한다. 없으면 계속 유지되는 흐름이다.
 - `commitment`(선택): `fixed`(계약상 의무) 또는 `discretionary`(추가 원금 상환처럼 언제든 멈출 수 있음).
   긴급 자금 조달처럼 지출 조정 여지를 따질 때 쓴다. 없으면 미확인이다.
+- `pension_source`(선택, `pension_income`만): `national`(국민연금), `occupational`(퇴직연금), `insurance_annuity`(변액·연금보험),
+  `pension_savings`(연금저축), `irp`, `other`. 연금 스택(report-design §18.5)의 파이프라인 구분이다. `amount`는 현재 가치의 월 예상
+  수령액, `start_date`는 수령 개시일(미래 가능)이며, 개시 전 흐름은 월 현금흐름에 들어가지 않는다. `amount_basis`를 `net`으로 두면
+  기관이 알려 준 세후 금액으로 보고 세금을 다시 빼지 않는다(기본 `gross`). `price_basis`(선택): `today`(기본, 현재 가치) 또는
+  `nominal`(보험사 예시표처럼 수령 첫해의 명목 금액). 명목 금액은 연금 스택이 물가 2%로 현재 가치로 환산해 쌓는다.
+- `policy_record_id`(선택, `insurance_premium`·`pension_income`만): 그 보험료가 들어가거나 연금이 나오는 보험 계약(해약환급금 asset
+  레코드 ID). 보험 계약이 여러 건이면 이 연결이 있어야 상품 평가(report-design §19)가 계약별로 나온다. 연결이 없고 연금·보험료·
+  해약환급금이 각각 하나뿐이면 그 셋을 한 계약으로 본다. 그 밖에는 평가를 보류하고 "다음에 확인할 것"이 연결을 요청한다.
 - **예정 소득(FR-20)**: 유입 category `bonus`(성과급·상여)와 `stock_compensation`(주식 보상: PSU·RSU·자사주 성과급 등).
   - 지급 한 번이 레코드 하나다(`frequency=once` 필수). 매년 받는 성과급도 연도별로 따로 입력한다.
   - `certainty`(필수): `confirmed`(통지·계약으로 지급과 금액(또는 주식 수)이 확정, 재직 같은 통상 조건만 남음), `expected`(지급은

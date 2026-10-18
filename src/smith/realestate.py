@@ -116,11 +116,48 @@ def validate_properties(properties: Any) -> dict[str, dict[str, Any]]:
     return checked
 
 
+TARGET_PREFIX = "target:"  # Deals of a move-target complex are stored under this ref (never a record id).
+
+
+def validate_targets(targets: Any) -> dict[str, dict[str, Any]]:
+    """The `[targets]` config (report design §18.3): complexes the household may move to. Matched to official
+    deals like a property; `label` names it in the report, `region` (city/district) is the only part a web
+    research question may carry, and `reference_price` stands in for a complex without recorded trades.
+
+    Raises:
+        RealEstateError: code "bad-config:targets.<key>.<field>".
+    """
+    if not isinstance(targets, dict):
+        raise RealEstateError("bad-config:targets")
+    checked = {}
+    for ref, spec in targets.items():
+        if not isinstance(spec, dict) or not ref or len(ref) > 40 or not all(c.isalnum() or c in "._-" for c in ref):
+            raise RealEstateError(f"bad-config:targets.{ref}")
+        for field, ok in (("label", lambda v: isinstance(v, str) and 0 < len(v) <= 40),
+                          ("lawd_cd", lambda v: isinstance(v, str) and v.isdigit() and len(v) == 5),
+                          ("apt_name", lambda v: isinstance(v, str) and 0 < len(v) <= 60),
+                          ("dong", lambda v: v is None or (isinstance(v, str) and 0 < len(v) <= 20)),
+                          ("exclusive_area_m2", lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v < 1000),
+                          ("region", lambda v: v is None or (isinstance(v, str) and 0 < len(v) <= 40)),
+                          ("reference_price", lambda v: v is None or (isinstance(v, int) and not isinstance(v, bool) and v > 0))):
+            if not ok(spec.get(field)):
+                raise RealEstateError(f"bad-config:targets.{ref}.{field}")
+        checked[ref] = spec
+    return checked
+
+
+def target_ref(key: str) -> str:
+    return f"{TARGET_PREFIX}{key}"
+
+
 def sync(properties: dict[str, dict[str, Any]], api_key: str, *, today: date, months: int = MONTHS,
-         get: Getter = urllib_get) -> tuple[list[dict[str, Any]], set[tuple[str, str, str]]]:
-    """Fetch trades and rents for each configured property and keep same-complex, same-size deals.
-    Returns (matched deals, every (property, kind, YYYYMM) fetched) so the store can replace those months."""
-    properties = validate_properties(properties)
+         get: Getter = urllib_get, targets: dict[str, dict[str, Any]] | None = None
+         ) -> tuple[list[dict[str, Any]], set[tuple[str, str, str]]]:
+    """Fetch trades and rents for each configured property (and move-target complex, stored under
+    `target:<key>`) and keep same-complex, same-size deals. Returns (matched deals, every (ref, kind, YYYYMM)
+    fetched) so the store can replace those months."""
+    properties = dict(validate_properties(properties))
+    properties.update({target_ref(key): spec for key, spec in validate_targets(targets or {}).items()})
     cache: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     matched, fetched = [], set()
     for ref, spec in properties.items():

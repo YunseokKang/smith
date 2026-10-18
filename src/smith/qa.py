@@ -31,12 +31,12 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-from smith import editions, gmail, headless, ledger, memory, narrative
+from smith import editions, gmail, headless, ledger, memory, narrative, principles, report_html
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import check_outbound, mask_identifiers
 from smith.report_data import build_report
 
-PROMPT_VERSION = "mail-answer-v8"  # v8: names the cognitive trap a decision is exposed to; v7: expected pay is not wealth.
+PROMPT_VERSION = "mail-answer-v9"  # v9: answers "why" from the report's notes and principles; v8: cognitive traps.
 MODEL = "fable"
 BUDGET_USD = "3.00"
 TIMEOUT_SECONDS = 600
@@ -84,6 +84,12 @@ the client said earlier is the client's statement, not a ledger fact, just like 
 client_memory: what the client told Smith before, in any thread or directly, newest first (what a nickname
 of a home means, residence periods, plans, consents, preferences). Use it the same way: the client's
 statements, a newer one wins, never a ledger fact.
+
+report_notes and report_principles: what the report mail no longer prints (its status reasons, verification
+memos, data coverage and freshness, assumptions, the AI stages) and the investment principles it applied,
+each with its source. When the client asks why Smith judged, proposed or rated something ("왜 이렇게
+판단했어?"), answer from these and the report's figures: name the reason, the assumption and the data
+limit behind it, in the client's words, and cite the principle by investor and title when one applies.
 
 remember: up to 3 facts the client states in client_question that Smith should keep for later reports and
 answers: what a name or nickname refers to, residence periods, plans and their dates, consents, family
@@ -263,7 +269,14 @@ def answer(db: Path, data: dict[str, Any], question: Question, *, now: datetime,
     payload = narrative.build_payload(view, data, brief, memory.for_model(memory.retrieve(stored, query)))
     verified_report = (recent or {}).get("content", {}).get("verified") or {}
     payload["recent_report"] = {k: verified_report.get(k) for k in ("situation", "direction", "portfolio", "holdings",
-                                                                     "insights", "watch")}
+                                                                     "insights", "watch", "experiences")}
+    # The mail keeps only the client's reading; the reasons behind it (status, data status, assumptions) and the
+    # principles it applied travel here so "why did you judge that" can be answered (report design §18.1).
+    payload["report_notes"] = report_html.system_notes(data)
+    cited = list((verified_report.get("portfolio") or {}).get("principles") or [])
+    cited += [p for h in verified_report.get("holdings") or [] for p in h.get("principles") or []]
+    payload["report_principles"] = [{"id": p.id, "investor": p.investor, "title": p.title, "principle": p.principle,
+                                     "sources": [url for _, url in p.sources]} for p in principles.cited(cited)]
     payload["report_date"] = f"{at:%Y-%m-%d}"
     # The input is the full ledger snapshot at the report's time; a themed report showed only its own area.
     # report_proposals are the proposals that report actually carried (the rest are background).

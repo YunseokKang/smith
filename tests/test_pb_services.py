@@ -7,7 +7,7 @@ import unittest
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-from smith import adviser, editions, ledger, narrative, proposals, qa, research, stress
+from smith import adviser, editions, ledger, narrative, proposals, qa, report_html, research, stress
 from smith.importer import parse_import
 from smith.payload import load_view
 from smith.report_data import build_report
@@ -105,9 +105,11 @@ class StressAndSpendingTests(Household):
         self.assertEqual((st["lease"]["available"], st["lease"]["covered"]), (Decimal(140_000_000), False))
         # Cash lasts the scenario (robust liquidity) but the deposit cannot be returned: overall at most watch.
         self.assertEqual((st["liquidity_verdict"], st["flags"], st["verdict"]), ("robust", ["lease_deposit_uncovered"], "watch"))
-        page = render(self.report())[1]
-        # Named in the status reasons, which live in the footer's system notes (not an alarm banner on top).
-        self.assertIn("상태 판정: 스트레스 테스트에서는 2027년 10월 보증금 반환에 필요한 돈이 부족합니다.", page)
+        data = self.report()
+        page = render(data)[1]
+        # Named in the status reasons, which are system notes (v3.0: not printed in the mail at all).
+        self.assertIn("상태 판정: 스트레스 테스트에서는 2027년 10월 보증금 반환에 필요한 돈이 부족합니다.",
+                      report_html.system_notes(data))
         self.assertIn("12개월을 모두 버티고", page)
 
     def test_stress_verdicts_and_unknown_inputs(self):
@@ -264,7 +266,7 @@ class BenchmarkAndShieldTests(unittest.TestCase):
         self.assertIn("sector_metrics.stress", narrative.SYSTEM_PROMPT)
         self.assertIn("room_with_goals", narrative.SYSTEM_PROMPT)
         self.assertEqual((adviser.PROMPT_VERSION, qa.PROMPT_VERSION, narrative.PROMPT_VERSION),
-                         ("advice-v7", "mail-answer-v8", "narrative-v10"))
+                         ("advice-v8", "mail-answer-v9", "narrative-v13"))
         self.assertIn("spending-room", proposals.RULE_KEYS)
 
 

@@ -131,9 +131,11 @@ class Topic:
     question: str
 
 
-def topics(view: LedgerView, kind: str | None = None) -> list[Topic]:
+def topics(view: LedgerView, kind: str | None = None, target_regions: tuple[str, ...] | list[str] = ()) -> list[Topic]:
     """Generalized research topics derived from the household's situation (T*), then the holdings (H*). No
     amounts, account names or identifiers; regions only at the city/district level the user approved.
+    `target_regions` are the districts of the move-target complexes (local config): the district alone is
+    researched, never a complex name.
 
     With a daily edition `kind`, only that edition's topic categories (and the holdings only on the
     markets day) are researched; the original kinds and None research everything."""
@@ -167,6 +169,10 @@ def topics(view: LedgerView, kind: str | None = None) -> list[Topic]:
     if any(r.fields.get("market") == "KR" for r in assets):
         found.append(("kr_stocks", "국내 주식", "국내 주식시장(코스피·반도체 업종) 최근 흐름과 주요 정책(밸류업, 세제)"))
     found.append(("household_policy", "가계 금융 정책", "가계부채 관리 방안 등 가계 자산·부채에 영향을 주는 최근 정부 금융 정책"))
+    for region in sorted(set(target_regions)):
+        found.append(("target_market", f"{region} 주요 단지 시세",
+                      f"{region} 주요 아파트 단지의 최근 실거래가·호가 흐름, 거래량, 신축·분양·입주 예정 단지와 분양가, "
+                      "재건축·리모델링 추진 현황"))
     wanted = editions.research_categories(kind)
     # Peer positioning (report design §16.4), only for an edition that asks for it (the overview): the
     # official survey by age band in general, so the question reveals nothing about this household; the
@@ -175,6 +181,12 @@ def topics(view: LedgerView, kind: str | None = None) -> list[Topic]:
         found.append(("benchmark", "또래 가구의 자산·소득 분포",
                       "통계청·한국은행·금융감독원 가계금융복지조사 최신 결과: 가구주 연령대별(30대·40대 등) 가구의 순자산과 "
                       "경상소득의 평균·중앙값, 분위 경계값(상위 10%·20% 등), 조사 기준 연도와 발표일"))
+    # The experience dividend (report design §18.6): timely, quality things to do, read and see. A generic
+    # question about the season's offerings, nothing about the household.
+    if wanted is not None and "experience" in wanted:
+        found.append(("experience", "이번 주의 경험 큐레이션",
+                      "이번 달 서울·수도권과 해외 주요 미술관·박물관의 미술·역사 기획전과 전시 일정, 주목할 인문·철학·고전과 "
+                      "예술 에세이 신간, 영감을 주는 국내외 조용한 여행지, 파인 다이닝·미식 소식, 테니스 등 웰니스 활동 행사"))
     chosen = [(title, question) for category, title, question in found if wanted is None or category in wanted]
     held = holding_topics(view) if editions.researches_holdings(kind) else []
     return [Topic(f"T{i}", title, question) for i, (title, question) in enumerate(chosen, 1)] + held
@@ -207,7 +219,7 @@ def _researched(view: LedgerView) -> list[tuple[str, dict[str, Any]]]:
 def run_research(view: LedgerView, *, today: date, secrets: list[str], executable: Path,
                  runner: headless.Runner = subprocess.run, model: str = MODEL,
                  verifier: Callable[..., tuple[list[dict[str, Any]], dict[str, int]]] | None = None,
-                 kind: str | None = None) -> dict[str, Any]:
+                 kind: str | None = None, target_regions: tuple[str, ...] | list[str] = ()) -> dict[str, Any]:
     """Research the topics (of the edition `kind`, see `topics`) and return {"topics", "brief", "cost_usd",
     "dropped"}.
 
@@ -220,7 +232,7 @@ def run_research(view: LedgerView, *, today: date, secrets: list[str], executabl
         headless.HeadlessError: every call failed, or together they produced no usable item.
         PayloadRejected: an outgoing prompt matched an identifier rule (it never should).
     """
-    subjects = topics(view, kind)
+    subjects = topics(view, kind, target_regions)
     market = [t for t in subjects if t.ref.startswith("T")]
     held = [t for t in subjects if t.ref.startswith("H")]
     calls = [(market, SYSTEM_PROMPT, BRIEF_SCHEMA, "시장·정책")] if market else []
@@ -372,17 +384,17 @@ def _plain_https(url: str) -> bool:
 
 def research_and_store(db: Path, view: LedgerView, *, now: datetime, today: date, secrets: list[str],
                        executable: Path | None = None, runner: headless.Runner = subprocess.run,
-                       kind: str | None = None) -> dict[str, Any]:
+                       kind: str | None = None, target_regions: tuple[str, ...] | list[str] = ()) -> dict[str, Any]:
     """Run research and record the outcome (success or failure) in the ledger. Never raises for a
     model failure: a report goes out without a brief rather than not at all. An edition with no topics
     (the Saturday household edition) researches nothing: outcome "skipped", no model call."""
     brief_id = uuid.uuid4().hex
-    subjects = [asdict(t) for t in topics(view, kind)]
+    subjects = [asdict(t) for t in topics(view, kind, target_regions)]
     if not subjects:
         return {"brief_id": None, "outcome": "skipped", "items": 0}
     try:
         result = run_research(view, today=today, secrets=secrets, executable=executable or headless.find_claude(),
-                              runner=runner, kind=kind)
+                              runner=runner, kind=kind, target_regions=target_regions)
     except Exception as error:  # noqa: BLE001 - every failure is recorded and the report continues.
         code = getattr(error, "code", None) or type(error).__name__
         with closing(ledger.connect(db)) as conn:

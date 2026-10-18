@@ -86,6 +86,12 @@ AMOUNT_BASES = frozenset({"gross", "net"})  # Before or after the tax and insura
 # a `received` revision states the actual payment day and taxable amount, and stays active so that later pay
 # of the same year is taxed on top of it. Closing means the payment was cancelled or forfeited.
 PAYMENT_STATUSES = frozenset({"scheduled", "received"})
+# Which retirement pipeline a `pension_income` flow comes from, so the pension stack (report design §18.5)
+# can show the national pension, an insurer's annuity and the pension accounts side by side.
+PENSION_SOURCES = frozenset({"national", "occupational", "insurance_annuity", "pension_savings", "irp", "other"})
+# Whether a stated pension payout is in today's won (the national pension statement) or the nominal amount of
+# its first payment year (an insurer's illustration); the stack deflates a nominal figure to today's won.
+PRICE_BASES = frozenset({"today", "nominal"})
 OUTFLOW_CATEGORIES = frozenset({
     "living_expense", "housing_cost", "loan_payment", "insurance_premium", "tax", "education",
     "other_expense",
@@ -103,7 +109,10 @@ PRIORITIES = frozenset({"high", "medium", "low"})
 
 # Fields that point at another record, with the kind they must point at.
 REFERENCE_FIELDS = {"collateral_record_id": Kind.ASSET, "liability_record_id": Kind.LIABILITY,
-                    "target_record_id": Kind.ASSET}
+                    "target_record_id": Kind.ASSET, "policy_record_id": Kind.ASSET}
+# The insurance policy (its surrender-value asset) a premium is paid into or an annuity is paid from, so a
+# product review never adds unrelated contracts together.
+POLICY_CATEGORIES = frozenset({"insurance_premium", "pension_income"})
 
 
 @dataclass(frozen=True)

@@ -98,7 +98,8 @@ class ReportTests(unittest.TestCase):
         self.assertIn("목요 변화 점검", subject)  # With proposals the subject leads with them.
         self.assertIn("기준선", html)
         self.assertNotIn("자산 구성", html)  # Sector sections are Monday-only.
-        self.assertIn("데이터 상태", html)
+        self.assertNotIn("데이터 상태", html)  # v3.0: the data status is a system note, not part of the mail.
+        self.assertIn("Smith는 조회 전용 자문입니다", html)
 
     def test_monday_html_escapes_external_titles_and_hides_ledger_ids(self):
         data = build_report(self.conn, as_of=T1, known_at=T1, baseline=T0, kind="monday")
@@ -270,9 +271,11 @@ class ReportTests(unittest.TestCase):
                          {"대출 추가 상환과 예금 비교", "변동금리 대출 이자 변화"})
         subject, html = render(data)
         self.assertIn("주의", subject)
-        for text in ("판단에 꼭 필요한 자료 1건", "다음에 확인할 것", "자료가 부족해 이번에 판단하지 못한 것",
+        for text in ("다음에 확인할 것", "자료가 부족해 이번에 판단하지 못한 것",
                      "근거의 성격"):                   # Thursday cards keep the certainty label.
             self.assertIn(text, html)
+        # The badge's reason is a system note (v3.0), kept for the e-mail answers, not printed in the mail.
+        self.assertTrue(any("판단에 꼭 필요한 자료 1건" in note for note in report_html.system_notes(data)))
         self.assertNotIn("데이터가 모두 최신이며 누락이 없습니다", html)
 
     def test_hermes_assets_are_never_spendable_or_proposed_for_sale(self):
@@ -298,7 +301,7 @@ class ReportTests(unittest.TestCase):
         _, html = render(data)
         self.assertIn("<b>미수집</b>", html)
         self.assertIn("매수 가능 금액은 500,000원", html)
-        self.assertIn("토스증권 예수금: API가 제공하지 않아 미수집", html)
+        self.assertTrue(any(n.startswith("토스증권 예수금: API가 제공하지 않아 미수집") for n in report_html.system_notes(data)))
 
     def test_proposals_never_treat_unconverted_amounts_as_known(self):
         later = datetime(2026, 10, 2, tzinfo=timezone.utc)

@@ -10,11 +10,11 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, localcontext
 from typing import Any
 
-from smith import (cases, checklist, editions, future_income, holdings, lease, ledger, principles, proposals,
-                   realestate, stress, tax)
+from smith import (cases, checklist, editions, future_income, holdings, lease, ledger, move_plan, pension, principles,
+                   product_review, proposals, realestate, stress, tax)
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import LedgerView, base_amount, load_view, unrealized_gain
-from smith.records import Kind, RecordInput, Status
+from smith.records import TRANSFER_CATEGORIES, Kind, RecordInput, Status
 from smith.summary import BASE_CURRENCY, DECIMAL_PRECISION, build_summary, recurring_active
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,13 @@ COMPONENT_LABELS = {
     "cash_savings": "현금·예금 증감", "revaluation": "재평가(부동산 등)", "debt": "부채 상환",
 }
 _CASH_LIKE = ("cash", "deposit", "installment_savings")
+_SECURITIES = ("stock", "fund", "bond", "crypto", "unclassified")
+_PENSION_ACCOUNTS = ("pension_savings", "irp", "dc")
+# The hero's composition bar (report design §18.1): what the balance sheet is made of, by owner.
+COMPOSITION_LABELS = {"real_estate": "부동산", "securities": "주식·펀드", "cash": "현금·예금", "pension": "연금·보험",
+                      "other": "기타"}
+# Outflows read as fixed or discretionary when the record does not say (`commitment`), for the spending split.
+_FIXED_CATEGORIES = ("loan_payment", "insurance_premium", "housing_cost", "tax")
 _MONTHS = {"monthly": 1, "quarterly": 3, "annual": 12}
 EMERGENCY_MONTHS = 6       # Assumption: emergency reserve of six months of outflow.
 RATE_SHOCKS = (Decimal("0.005"), Decimal("0.01"), Decimal("0.02"))
@@ -73,6 +80,8 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     market = realestate.analyze(ledger.load_deals(conn, since=as_of.date() - timedelta(days=400)), today=as_of.date())
     for prop in sectors["real_estate"]["properties"]:
         prop["market"] = market.get(prop["record_id"])
+    # Move-target complexes (report design §18.3) share the official-deal store under "target:<key>" refs.
+    targets_market = {ref: found for ref, found in market.items() if ref.startswith(realestate.TARGET_PREFIX)}
     # How each lease deposit due is actually returned (report design §17.2): the plans feed the proposals,
     # the stress test (reverse-jeonse gap, not the whole deposit) and the property day's section.
     lease_plans = lease.plans(view, sectors["real_estate"]["properties"], household, today=as_of.date(),
@@ -87,6 +96,7 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     advice["undetermined"] = [u for u in advice["undetermined"] if editions.carries(kind, u.key)]
     advice["assumptions"] = advice["assumptions"] + future_income.assumptions(pay)
     plan = tax.facts(view, as_of.date(), household)
+    pension_stack = pension.stack(view, household, as_of.date())
     data = {"kind": kind, "as_of": as_of, "baseline": baseline, "kpis": kpis,
             "change": change, "timeline": _timeline(view, pay), "sectors": sectors, "holdings": review,
             "future_income": expected, "advice": advice, "lease_plans": lease_plans,
@@ -95,8 +105,19 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
             # This year's pension credit room and overseas gains, for the tax day's headline numbers.
             "tax_plan": {**tax.pension_plan(plan), "us_gains": plan["us_gains"], "us_unknown": plan["us_unknown"],
                          "us_positions": plan["us_positions"], "pension_unconverted": plan["pension_unconverted"]},
-            "requests": checklist.requests(view, household),
+            "requests": checklist.requests(view, household, pension_stack=pension_stack),
             "household_profile": _profile(household, as_of),
+            # The balance sheet by kind and owner (hero bar), the four pension pipelines against the monthly
+            # target (tax day), the move-target spread (property day) and the month's fixed/discretionary split.
+            "composition": _composition(view),
+            "pension_stack": pension_stack,
+            # What each insurer's annuity is worth on its own illustration (report design §19, FR-24).
+            "annuity_reviews": product_review.annuity_reviews(view, household, as_of.date()),
+            "move_plan": move_plan.plan(view, sectors["real_estate"]["properties"], household, pay, today=as_of.date(),
+                                        horizon=_move_horizon(view, lease_plans), market=targets_market),
+            "spending_split": _spending_split(view),
+            "research_regions": sorted({t["region"] for t in ((household or {}).get("targets") or {}).values()
+                                        if t.get("region")}),
             "completeness": {"complete": view.summary.complete, "areas": view.summary.incomplete_areas,
                              "unconverted": view.summary.unconverted},
             "warnings": view.summary.warnings, "freshness": view.summary.freshness, "sync": view.summary.sync,
@@ -115,10 +136,16 @@ def _edition_figures(data: dict[str, Any]) -> dict[str, Any]:
     known = [g for g in gains if g is not None]
     summary = data["view"].summary
     net = data["kpis"]["monthly_net"]
+    # The official-trade estimate of the whole property line is known only when every property has enough
+    # recent trades; otherwise the gap to the ledger value cannot be stated (missing is not zero).
+    estimates = [(p["market"] or {}).get("estimate") if p.get("market") else None for p in props]
+    enough = all(p.get("market") and p["market"]["estimate_basis"] >= realestate.MIN_BASIS for p in props)
     return {
         "property_value": _total(p["value"] for p in props) if props else None,
         "property_debt": _total(p["debt"] for p in props) if props else None,
         "property_trades_6m": sum(p["market"]["estimate_basis"] for p in props if p.get("market")),
+        "property_estimate": _total(estimates) if props and enough else None,
+        "property_valuation": sorted({VALUATION_LABELS.get(p["valuation_method"], p["valuation_method"]) for p in props}),
         "listed_count": len(listed), "listed_value": _total(p["value"] for p in listed) if listed else None,
         # Like the holdings section: a partial sum over the holdings whose cost is known, with the counts.
         "listed_gain": sum(known, Decimal(0)) if known else None,
@@ -161,8 +188,14 @@ def decompose(conn: sqlite3.Connection, t0: datetime, t1: datetime, known_at: da
         balanced = bool(unconverted) or abs(sum(parts.values()) - total) <= Decimal("0.5")
     if not balanced:
         logger.warning("Net-worth change components do not add up; the breakdown is withheld from the report")
+    # Two headline figures (report design §18.2): what the markets did to what the household already held
+    # (prices, FX, revaluations) and what moved in or out (trades and deposits, cash saved, debt repaid, records
+    # added). Summing them into one total hid a market loss behind new ledger entries (user review 2026-10-18).
+    groups = None if not balanced else {"market_and_valuation": parts["market"] + parts["fx"] + parts["revaluation"],
+                                        "net_inflow": parts["trades"] + parts["cash_savings"] + parts["debt"]}
     return {"start": start, "restated_start": restated_start, "end": end, "total": total,
-            "correction": restated_start - start, "parts": parts, "balanced": balanced,
+            "correction": restated_start - start, "parts": parts, "balanced": balanced, "groups": groups,
+            "from": t0.date(), "to": t1.date(),
             "complete": not unconverted, "unconverted_currencies": sorted(unconverted)}
 
 
@@ -224,6 +257,86 @@ def _record_change(before: RecordInput | None, after: RecordInput | None, rates0
     else:
         key = "cash_savings" if record.fields["category"] in _CASH_LIKE else "revaluation"
     return {key: (n1 - n0) * fx0, "fx": n1 * (fx1 - fx0)}
+
+
+GROUP_LABELS = {"market_and_valuation": "시장·평가 변동", "net_inflow": "입출금·원장 등록"}
+VALUATION_LABELS = {"manual": "원장 수동 입력가", "statement": "기관 명세서 값", "market": "시세×수량",
+                    "appraisal": "외부 평가(KB 시세 등)", "api": "API 조회값"}
+
+
+def _composition(view: LedgerView) -> dict[str, Any]:
+    """Assets by kind (property, securities, cash, pensions and insurance, other) and by owner, for the hero's
+    composition bar. An asset without an FX rate is left out and the result says so (`complete`)."""
+    groups: dict[str, dict[str, Any]] = {key: {"key": key, "label": label, "value": Decimal(0), "by_owner": {}}
+                                         for key, label in COMPOSITION_LABELS.items()}
+    complete = True
+    for record in view.records:
+        if record.kind is not Kind.ASSET:
+            continue
+        value = base_amount(view, record)
+        if value is None:
+            complete = False
+            continue
+        f = record.fields
+        if f.get("account_type") in _PENSION_ACCOUNTS or f["category"] == "insurance_surrender_value":
+            key = "pension"
+        elif f["category"] == "real_estate":
+            key = "real_estate"
+        elif f["category"] in _SECURITIES:
+            key = "securities"
+        elif f["category"] in _CASH_LIKE:
+            key = "cash"
+        else:
+            key = "other"
+        group = groups[key]
+        group["value"] += value
+        group["by_owner"][record.owner_id] = group["by_owner"].get(record.owner_id, Decimal(0)) + value
+    found = sorted((g for g in groups.values() if g["value"]), key=lambda g: -g["value"])
+    total = sum((g["value"] for g in found), Decimal(0))
+    for group in found:
+        group["share"] = group["value"] / total if total else None
+    return {"groups": found, "total": total, "complete": complete}
+
+
+def _spending_split(view: LedgerView) -> dict[str, Any] | None:
+    """The month as fixed costs, discretionary spending, transfers to the client's own accounts and what is
+    left (report design §18.6). A flow says which it is (`commitment`); otherwise loan payments, premiums,
+    housing costs and taxes are fixed and the rest discretionary. None when a flow could not be converted."""
+    summary = view.summary
+    if "cash_flow" in summary.incomplete_areas:
+        return None
+    today = view.as_of.date()
+    fixed = discretionary = Decimal(0)
+    for record in view.records:
+        f = record.fields
+        if record.kind is not Kind.CASHFLOW or f["direction"] != "outflow" or f["category"] in TRANSFER_CATEGORIES \
+                or f["frequency"] not in _MONTHS or not recurring_active(f, today):
+            continue
+        amount = base_amount(view, record)
+        if amount is None:
+            return None
+        monthly = amount / _MONTHS[f["frequency"]]
+        commitment = f.get("commitment") or ("fixed" if f["category"] in _FIXED_CATEGORIES else "discretionary")
+        if commitment == "fixed":
+            fixed += monthly
+        else:
+            discretionary += monthly
+    inflow = summary.monthly_inflow
+    return {"inflow": inflow, "fixed": fixed, "discretionary": discretionary, "transfers": summary.monthly_transfers,
+            "left": inflow - fixed - discretionary - summary.monthly_transfers,
+            "fixed_share": fixed / inflow if inflow else None,
+            "discretionary_share": discretionary / inflow if inflow else None}
+
+
+def _move_horizon(view: LedgerView, lease_plans: list[dict[str, Any]]) -> date:
+    """When the move is planned: the nearest home goal, else the nearest lease deposit due, else two years."""
+    today = view.as_of.date()
+    goals = [g["target_date"] for g in view.summary.goals if g["category"] == "home" and g["target_date"] > today]
+    if goals:
+        return min(goals)
+    if lease_plans:
+        return lease_plans[0]["due"]
+    return date(today.year + 2, today.month, min(today.day, 28))
 
 
 def _profile(household: dict[str, Any] | None, as_of: datetime) -> dict[str, Any] | None:
@@ -363,10 +476,7 @@ def _timeline(view: LedgerView, pay: list[future_income.Inflow]) -> list[dict[st
     today = view.as_of.date()
     horizon = date(today.year + TIMELINE_YEARS, today.month, min(today.day, 28))
     # Overdue pay is not a coming date: the expected-pay section lists it for the client to confirm.
-    items = [{"date": i.paid_on, "label": f"{PAY_LABELS.get(i.category, '예정 수입')}({CERTAINTY_LABELS[i.certainty]})"
-              + ("" if i.owner_id == "self" else "·배우자"), "amount": i.net, "gross": i.gross, "kind": "inflow",
-              "category": i.category}
-             for i in pay if not i.overdue and i.paid_on <= horizon]
+    items = _pay_rows(pay, horizon)
     for record in view.records:
         f = record.fields
         if record.kind is Kind.LIABILITY and f.get("maturity"):
@@ -379,6 +489,27 @@ def _timeline(view: LedgerView, pay: list[future_income.Inflow]) -> list[dict[st
             items.append({"date": goal["target_date"], "label": f"목표: {_goal_label(goal['category'])}",
                           "amount": goal["target"], "kind": "goal"})
     return sorted(items, key=lambda item: item["date"])
+
+
+def _pay_rows(pay: list[future_income.Inflow], horizon: date) -> list[dict[str, Any]]:
+    """Expected pay as timeline rows. The tranches of one payment (same day, category, certainty and owner,
+    entered as separate records because each part becomes usable on its own date, data contract) are one row
+    with the later usable dates: three rows of one day read as a duplicate (user review 2026-10-18). A sum
+    with an unknown part is unknown."""
+    rows: dict[tuple[date, str], dict[str, Any]] = {}
+    for i in pay:
+        if i.overdue or i.paid_on > horizon:
+            continue
+        label = (f"{PAY_LABELS.get(i.category, '예정 수입')}({CERTAINTY_LABELS[i.certainty]})"
+                 + ("" if i.owner_id == "self" else "·배우자"))
+        row = rows.setdefault((i.paid_on, label), {"date": i.paid_on, "label": label, "amount": Decimal(0), "gross": Decimal(0),
+                                                   "kind": "inflow", "category": i.category, "count": 0, "usable": []})
+        row["count"] += 1
+        row["amount"] = None if row["amount"] is None or i.net is None else row["amount"] + i.net
+        row["gross"] = None if row["gross"] is None or i.gross is None else row["gross"] + i.gross
+        if i.usable_from != i.paid_on:
+            row["usable"].append(i.usable_from)
+    return list(rows.values())
 
 
 def _sectors(view: LedgerView) -> dict[str, Any]:
@@ -436,13 +567,20 @@ def _debt_sector(view: LedgerView) -> dict[str, Any]:
     loans = [r for r in view.records if r.kind is Kind.LIABILITY]
     variable = [r for r in loans if r.fields["rate_type"] in ("variable", "mixed")]
     variable_total = _total(base_amount(view, r) for r in variable)
-    return {"loans": [{"label": _liability_label(r), "category": r.fields["category"], "amount": base_amount(view, r),
-                       "rate": Decimal(r.fields["annual_rate"]), "rate_type": r.fields["rate_type"],
-                       "maturity": r.fields.get("maturity")} for r in loans],
-            "variable_total": variable_total,
+    rows = [{"label": _liability_label(r), "category": r.fields["category"], "amount": base_amount(view, r),
+             "rate": Decimal(r.fields["annual_rate"]), "rate_type": r.fields["rate_type"],
+             "maturity": r.fields.get("maturity"), "owner": r.owner_id,
+             "credit_limit": _dec(r.fields.get("credit_limit"))} for r in loans]
+    # A credit line with nothing drawn costs nothing and is a liquidity backstop, not a debt to repay
+    # (user review 2026-10-18): the unused room is reported apart. Unknown when a drawn amount is unknown.
+    lines = [l for l in rows if l["credit_limit"] is not None]
+    unused = _total(None if l["amount"] is None else max(Decimal(0), l["credit_limit"] - l["amount"]) for l in lines)
+    return {"loans": rows, "variable_total": variable_total,
             "shocks": [{"shock": s, "monthly_increase": None if variable_total is None else variable_total * s / 12}
                        for s in RATE_SHOCKS],
-            "monthly_interest_estimate": view.summary.monthly_loan_interest_estimate}
+            "monthly_interest_estimate": view.summary.monthly_loan_interest_estimate,
+            "unused_credit": unused if lines else None,
+            "credit_lines": [{"label": l["label"], "limit": l["credit_limit"], "drawn": l["amount"]} for l in lines]}
 
 
 def _securities_sector(view: LedgerView) -> dict[str, Any]:
@@ -476,7 +614,9 @@ def _real_estate_sector(view: LedgerView) -> dict[str, Any]:
         properties.append({"record_id": record.record_id, "label": _asset_label(record), "value": value, "debt": debt,
                            "loans": loans, "deposits": deposits,
                            "ltv": loans / value if value and loans is not None else None,
-                           "valued_on": record.effective_at.date()})
+                           "valued_on": record.effective_at.date(), "owner": record.owner_id,
+                           "occupancy": record.fields.get("occupancy"),
+                           "valuation_method": record.fields["valuation_method"]})
     total = view.summary.total_assets
     share = view.summary.by_category.get("real_estate", Decimal(0)) / total if total else None
     return {"properties": properties, "share_of_assets": share}

@@ -6,6 +6,8 @@ from pathlib import Path
 
 from smith import backup_command, ledger, memory
 
+import fast_ledger
+
 
 class BackupTests(unittest.TestCase):
     def test_copies_are_verified_readable_and_pruned_to_the_newest(self):
@@ -35,6 +37,14 @@ class BackupTests(unittest.TestCase):
                 backup_command.backup(Path(directory) / "absent.db", out,
                                       now=datetime(2026, 10, 5, tzinfo=timezone.utc), keep=1)
             self.assertEqual(list(out.iterdir()), [])
+
+
+def setUpModule():  # noqa: N802 - unittest hook
+    fast_ledger.install()  # File ledgers without an fsync per commit (test budget); results are unchanged.
+
+
+def tearDownModule():  # noqa: N802 - unittest hook
+    fast_ledger.uninstall()
 
 
 if __name__ == "__main__":

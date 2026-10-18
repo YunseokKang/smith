@@ -106,6 +106,19 @@
             `insurance-review`, `narrative-v10`(헤드라인·반올림·총체적 대차대조표·내부 용어 금지), 반올림 허용 검증·`polish`, 히어로
             경고문 제거·시스템 노트 푸터, 요일판 중복 섹션 제거. 남은 점: 실제 발송 보고서에서 헤드라인·반올림·회사 주식 의견 확인,
             가정값(버퍼 5%, DSR 40%, 보험료 10%) 설정화.
+      - [x] 보고서 고도화 v3.0(2026-10-18, FR-23, report-design §18): 상태줄의 핵심 액션, 시스템 노트의 메일 제거(`report_html.system_notes`,
+            메일 답변 `report_notes`·`report_principles`), 검정 글자·60% 분량(`narrative-v11`), 히어로 구성 바, 누적 바·게이지(팔레트 검증),
+            `<details>` 접기와 요일판 핵심 뷰(`Edition.opening`), 의견·판정 배지, 순자산 변화 두 숫자(`decompose.groups`), 부동산 평가 기준·
+            실거래 괴리, 목표 단지 스프레드(`move_plan.py`, `[targets]`, `target:<key>` 실거래, 조사 `target_market`), 잔액 0 한도대출 제외·
+            미사용 한도, 대환 판정(`refinance`, ECOS `121Y006/BECBLA0302` 월별 옵션 시리즈), 4대 연금 스택(`pension.py`, `pension_source`,
+            요청 `pension-pipelines`), 금융소득 방어 메모·지침, 소비 균형(`spending_split`), 경험 큐레이션(조사 `experience`, 서술 `experiences`).
+            남은 점: Gmail의 `<details>` 동작 확인, ECOS 코드 첫 동기화 확인, 연금 세율·개시 연령 설정화, 호가 수집, 실제 발송 길이 확인.
+      - [x] 보유 금융상품 평가 1차(2026-10-18, FR-24, report-design §19): 연금보험의 수명별 내부수익률·지수펀드 대안·손익분기·판정
+            (`product_review.py`, 세금·연금판 섹션, `narrative-v12`). 연금 입력 `amount_basis=net`·`price_basis=nominal`, 국민연금 조회값과
+            보험사 가입제안서 반영. 남은 점: 보장성 보험·연금계좌·대출로 같은 틀 확장.
+      - [x] v3.0 1차 리뷰 반영(2026-10-18): 손익분기 범위 밖 방향·판정 경계 반전 수정, 계약 연결(`policy_record_id`), 서술 실패 상태·꼬리
+            경고, 정기 기준선은 정기 발송만, 목표 추이 세전 비교·별칭·불리 시나리오, 오래된 주담대 통계 미결, 연금 개시 55세 하한·개시 연월
+            표시, `[targets]` 단독 설정, 모델 입력 URL 제거, `market_and_valuation` 이름, 테스트 6.7초(`tests/fast_ledger.py`), `narrative-v13`.
       - [ ] PB 보강 후보(§16.6): 매각 세금 vs 담보 대출 비교(대출 조건 입력 뒤), 보험 보장 레코드와 저효율 보험 점검, 공동명의 실익,
             20년 순자산 경로·실질 목표액·인적 자본 통합(은퇴 시점 뒤), 투자 기준값 설정화(IPS).
       - [ ] **다음**: 통합 자금 계획(보증금 반환 + 주택 이전 + 예정 소득의 목표별 배분), R-ONE 지수, 은퇴 시점 확정 후 노후 계획.

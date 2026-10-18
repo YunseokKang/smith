@@ -12,6 +12,8 @@ from smith.records import ImportBatch, Observation
 from smith.report_data import build_report
 from smith.report_html import render
 
+import fast_ledger
+
 AT = datetime(2026, 10, 2, tzinfo=timezone.utc)
 
 
@@ -37,7 +39,7 @@ RECORDS = [
 # Every proposal rule (proposals.py). Each belongs to exactly one themed day; the overview carries all.
 PROPOSAL_KEYS = {"lease-return", "emergency-reserve", "goal-stocks-glide", "concentration-trim", "surplus-plan",
                  "pension-credit", "overseas-harvest", "isa-open", "insurance-review", "prepayment", "variable-rate",
-                 "spending-room"}
+                 "refinance", "spending-room"}
 EXTRA = [
     rec("lease", "liability", category="lease_deposit_obligation", currency="KRW", outstanding_principal="300000000",
         annual_rate="0", rate_type="fixed", repayment_method="bullet", maturity="2028-08-07", collateral_record_id="home"),
@@ -100,7 +102,9 @@ class EditionTests(unittest.TestCase):
         self.assertIn("VOO", " ".join(titles("markets")))                    # Holdings only on the markets day.
         self.assertTrue(all(not t.ref.startswith("H") for t in research.topics(view, "property")))
         self.assertTrue(all("주택" in t or "부동산" in t or "전세" in t for t in titles("property")))
-        self.assertEqual(titles("life"), [])
+        # The household day researches only the experience dividend (v3.0): no market or policy topic.
+        self.assertEqual(titles("life"), ["이번 주의 경험 큐레이션"])
+        self.assertFalse(any("주택" in t or "금리" in t for t in titles("life")))
         calls = []
 
         def runner(args, **kwargs):
@@ -108,7 +112,8 @@ class EditionTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 1, "{}", "")
         result = research.research_and_store(self.db, view, now=AT, today=AT.date(), secrets=[], kind="life",
                                              executable=Path("claude.exe"), runner=runner)
-        self.assertEqual((result["outcome"], result["brief_id"], calls), ("skipped", None, []))
+        self.assertEqual(result["outcome"], "failure")                          # Recorded, never raised.
+        self.assertEqual(len(calls), 1)
 
     def test_each_day_renders_only_its_sections_and_stays_short(self):
         full_subject, full_html = render(self.data("monday"))
@@ -149,7 +154,7 @@ class EditionTests(unittest.TestCase):
         self.assertIn("합쳐", delivery._delivery_note(None, [tuesday], tuesday, [], "UTC", [], kind="monday"))
         # No CD rate evidence: the rates rules cannot judge. Their day says so instead of "nothing to do".
         rates = self.data("rates")
-        self.assertEqual({u.key for u in rates["advice"]["undetermined"]} - {"prepayment", "variable-rate"}, set())
+        self.assertEqual({u.key for u in rates["advice"]["undetermined"]} - {"prepayment", "variable-rate", "refinance"}, set())
         self.assertTrue(rates["advice"]["undetermined"])
         page = render(rates)[1]
         self.assertIn("판단하지 못한", page)
@@ -202,6 +207,14 @@ class EditionTests(unittest.TestCase):
         self.assertEqual(markets["property_market"], [])
         self.assertEqual(markets["household"], property_["household"])     # Every amount stays checkable.
         self.assertNotIn("edition_focus", narrative.build_payload(self.data("monday")["view"], self.data("monday"), None))
+
+
+def setUpModule():  # noqa: N802 - unittest hook
+    fast_ledger.install()  # File ledgers without an fsync per commit (test budget); results are unchanged.
+
+
+def tearDownModule():  # noqa: N802 - unittest hook
+    fast_ledger.uninstall()
 
 
 if __name__ == "__main__":

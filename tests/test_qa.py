@@ -10,6 +10,8 @@ from pathlib import Path
 from smith import gmail, ledger, memory, qa
 from smith.importer import parse_import
 
+import fast_ledger
+
 AT = datetime(2026, 10, 5, 3, 0, tzinfo=timezone.utc)
 ME = "me@example.com"
 
@@ -209,6 +211,14 @@ class QaTests(unittest.TestCase):
 
     def test_quotes_are_stripped(self):
         self.assertEqual(qa.strip_quote("질문입니다\n> 인용\nOn Mon, Oct 5, 2026 at 6:00 AM Smith wrote:\n원문"), "질문입니다")
+
+
+def setUpModule():  # noqa: N802 - unittest hook
+    fast_ledger.install()  # File ledgers without an fsync per commit (test budget); results are unchanged.
+
+
+def tearDownModule():  # noqa: N802 - unittest hook
+    fast_ledger.uninstall()
 
 
 if __name__ == "__main__":

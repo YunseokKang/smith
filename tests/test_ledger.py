@@ -10,6 +10,8 @@ from smith import ledger
 from smith.importer import load_import_file, parse_import
 from smith.records import Action, ImportRejected, Kind
 
+import fast_ledger
+
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "portfolio.example.json"
 SEP1, OCT1, NOV1 = "2026-09-01T00:00:00+00:00", "2026-10-01T00:00:00+00:00", "2026-11-01T00:00:00+00:00"
 SEP15, OCT15, NOV15 = (datetime(2026, month, 15, tzinfo=timezone.utc) for month in (9, 10, 11))
@@ -274,6 +276,14 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual((result.outcome, [a for _, _, a in result.actions]), ("dry_run", [Action.CREATED] * 2))
         self.assertEqual(self.history(), 0)
         self.assertEqual(self.apply(asset(), loan, import_id="i1").outcome, "applied")
+
+
+def setUpModule():  # noqa: N802 - unittest hook
+    fast_ledger.install()  # File ledgers without an fsync per commit (test budget); results are unchanged.
+
+
+def tearDownModule():  # noqa: N802 - unittest hook
+    fast_ledger.uninstall()
 
 
 if __name__ == "__main__":

@@ -21,10 +21,14 @@ KNOWN_KEYS = {
     "reports": {"enabled", "weekdays", "time", "delivery", "editions"},
     "mail": {"recipient", "answer_replies"},
     "household": {"birth_year", "partner_birth_year", "retirement_monthly_spend", "marriage_registered", "cohabiting",
-                  "annual_gross_salary"},
+                  "annual_gross_salary", "retirement_age"},
     "backup": {"dir", "keep"},
 }
 PROPERTY_KEYS = {"lawd_cd", "dong", "apt_name", "exclusive_area_m2", "acquired_year", "acquired_price"}
+# `[targets."<key>"]`: the complexes the household may move to (report design §18.3). Same official-data
+# matching as a property, plus a label for the report, a region (city/district) for research questions, and
+# a reference price (an asking or sale-launch price the client enters) for a complex with no recorded trades.
+TARGET_KEYS = {"label", "lawd_cd", "dong", "apt_name", "exclusive_area_m2", "region", "reference_price"}
 
 
 def local_time(moment: datetime, tz_name: str = DEFAULT_TIMEZONE) -> datetime:
@@ -88,10 +92,11 @@ def load_config(path: Path) -> dict:
         raise ValueError("mail.answer_replies must be a boolean")
     _check_household(config.get("household", {}))
     _check_backup(config.get("backup", {}))
-    if "properties" in config:
-        from smith.realestate import RealEstateError, validate_properties
+    if "properties" in config or "targets" in config:
+        from smith.realestate import RealEstateError, validate_properties, validate_targets
         try:
-            validate_properties(config["properties"])
+            validate_properties(config.get("properties") or {})
+            validate_targets(config.get("targets") or {})
         except RealEstateError as error:
             raise ValueError(f"Invalid property setting ({error.code})") from None
     return config
@@ -100,7 +105,7 @@ def load_config(path: Path) -> dict:
 def _check_keys(config: dict) -> None:
     if config.get("config_version", CONFIG_VERSION) != CONFIG_VERSION:
         raise ValueError(f"config_version must be {CONFIG_VERSION}")
-    unknown = sorted(set(config) - set(KNOWN_KEYS) - {"properties", "config_version"})
+    unknown = sorted(set(config) - set(KNOWN_KEYS) - {"properties", "targets", "config_version"})
     for section, keys in KNOWN_KEYS.items():
         if isinstance(config.get(section), dict):
             unknown += [f"{section}.{key}" for key in sorted(set(config[section]) - keys)]
@@ -108,6 +113,10 @@ def _check_keys(config: dict) -> None:
     if isinstance(properties, dict):
         unknown += [f"properties.{ref}.{key}" for ref, spec in sorted(properties.items()) if isinstance(spec, dict)
                     for key in sorted(set(spec) - PROPERTY_KEYS)]
+    targets = config.get("targets")
+    if isinstance(targets, dict):
+        unknown += [f"targets.{ref}.{key}" for ref, spec in sorted(targets.items()) if isinstance(spec, dict)
+                    for key in sorted(set(spec) - TARGET_KEYS)]
     if unknown:
         raise ValueError(f"Unknown setting(s): {', '.join(unknown)}")
 
@@ -127,6 +136,9 @@ def _check_household(household: object) -> None:
     for field in ("marriage_registered", "cohabiting"):
         if not isinstance(household.get(field, False), bool):
             raise ValueError(f"household.{field} must be a boolean")
+    age = household.get("retirement_age")
+    if age is not None and (not isinstance(age, int) or isinstance(age, bool) or not 40 <= age <= 90):
+        raise ValueError("household.retirement_age must be an age from 40 to 90")
 
 
 def _check_backup(backup: object) -> None:

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+from smith import pension, product_review
 from smith.payload import LedgerView
 from smith.records import COMPENSATION_CATEGORIES, Kind
 
@@ -26,15 +27,52 @@ class Request:
     how: str        # Where it goes (JSON field or local config key).
 
 
-def requests(view: LedgerView, household: dict[str, Any] | None) -> list[Request]:
-    """Open data requests, most important first."""
+def requests(view: LedgerView, household: dict[str, Any] | None,
+             pension_stack: dict[str, Any] | None = None) -> list[Request]:
+    """Open data requests, most important first. `pension_stack` (smith.pension.stack) names the pipelines
+    whose payout is still unknown; computed here when not given."""
     household = household or {}
     today = view.as_of.date()
     rules = (_cash_flows, _partner, _irregular_flows, _pension_paid, _unclassified, _cost_basis, _toss_cash,
              _pay_overdue, _expected_pay, _gross_salary, _surrender_values, _loan_terms, _acquisition, _retirement, _marriage,
-             _transfer_targets, _commitment)
+             _move_targets, _policy_links, _transfer_targets, _commitment)
     found = [r for rule in rules if (r := rule(view, household, today)) is not None]
+    stack = pension.stack(view, household, today) if pension_stack is None else pension_stack
+    if stack is not None and stack["unknown"]:
+        found.append(_pension_pipelines(stack))
     return sorted(found, key=lambda r: PRIORITY_ORDER[r.priority])
+
+
+def _pension_pipelines(stack: dict[str, Any]) -> Request:
+    """A pipeline of the pension stack without a payout figure (report design §18.5): the stack is a lower
+    bound until the client states it."""
+    missing = [p for p in stack["pipelines"] if p["net_monthly"] is None]
+    names = ", ".join(p["label"] for p in missing)
+    return Request("pension-pipelines", "should", f"{names}의 예상 월 수령액(현재 가치)과 수령 개시 시점",
+                   "노후 현금흐름 준비율이 이 연금을 빼고 계산되어 실제보다 낮게 나옵니다. "
+                   + " ".join(f"{p['label']}: {p['missing']}." for p in missing if p["missing"]),
+                   "cashflow 레코드(category=pension_income, pension_source=national|insurance_annuity|pension_savings|irp, "
+                   "amount=월 예상 수령액, frequency=monthly, start_date=수령 개시일)")
+
+
+def _policy_links(view: LedgerView, household: dict[str, Any], today: date) -> Request | None:
+    """An annuity payout that cannot be matched to one policy and one premium: its review is held."""
+    count = product_review.unmatched(view, today)
+    if not count:
+        return None
+    return Request("policy-links", "should", f"연금보험 {count}건이 어느 보험 계약의 보험료·해약환급금과 짝인지",
+                   "보험 계약이 여러 건이라 연금 수령액과 보험료·해약환급금을 짝지을 수 없어, 그 연금보험의 평가(수익률·해지 판단)를 미뤘습니다.",
+                   "cashflow 레코드(pension_income, insurance_premium)의 policy_record_id(해약환급금 asset 레코드 ID)")
+
+
+def _move_targets(view: LedgerView, household: dict[str, Any], today: date) -> Request | None:
+    """A home goal without named target complexes: the move-up spread cannot be tracked."""
+    goal = any(r.kind is Kind.GOAL and r.fields["category"] == "home" for r in view.records)
+    if not goal or household.get("targets"):
+        return None
+    return Request("move-targets", "should", "이사를 생각하시는 목표 단지(단지명, 전용면적, 시·구)와 분양가·호가",
+                   "목표 단지와 보유 주택 2채 순자산의 차이(필요 추가 자금)를 추적하지 못하고, 주택 목표는 목표 금액 하나로만 봅니다.",
+                   '로컬 설정 [targets."<별칭>"]의 label, lawd_cd, apt_name, exclusive_area_m2, region, reference_price')
 
 
 def _assets(view: LedgerView) -> list[Any]:

@@ -36,3 +36,18 @@ saturday = "life"        # 생활·목표: 현금흐름, 비상금, 목표 진�
 # [backup]
 # dir = "E:/smith-backups"
 # keep = 14
+
+# Optional, in the local config: the client's retirement facts ([household]) and the complexes the household may
+# move to ([targets], report design §18.3). Target deals are fetched by `smith realestate sync` like a property's;
+# only `region` (city/district) ever goes into a research question, never the complex name.
+# [household]
+# birth_year = 1990
+# retirement_monthly_spend = 5000000   # won, today's prices
+# retirement_age = 60                  # payout age assumed for the pension stack (default 60)
+# [targets.example]
+# label = "예시 단지"
+# lawd_cd = "11110"
+# apt_name = "예시아파트"
+# exclusive_area_m2 = 84.9
+# region = "서울특별시 종로구"
+# reference_price = 2500000000         # asking or sale-launch price when no trades are recorded (won)

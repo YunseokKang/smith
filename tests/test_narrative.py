@@ -9,13 +9,15 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from smith import compare, headless, ledger, memory, narrative, research
+from smith import compare, headless, ledger, memory, narrative, report_html, research
 from smith.importer import parse_import
 from smith.payload import check_outbound
 from smith.proposals import Proposal, materially_changed, snapshot
 from smith.records import ImportBatch, ImportRejected, Observation
 from smith.report_data import build_report
 from smith.report_html import render
+
+import fast_ledger
 
 AT = datetime(2026, 10, 2, tzinfo=timezone.utc)
 TODAY = date(2026, 10, 5)
@@ -263,9 +265,9 @@ class NarrativeTests(unittest.TestCase):
         self.assertEqual(data["narrative"]["status"]["outcome"], "success")
         self.assertEqual(data["advice"]["proposals"][0].links[0][1], "https://www.suwon.go.kr/x")
         _, html = render(data)
-        for text in ("Smith의 판단", "이번 주 눈여겨볼 변화", "시장·정책 맥락", 'href="https://www.suwon.go.kr/x"',
-                     "직접 식별자 없이"):
+        for text in ("Smith의 판단", "이번 주 눈여겨볼 변화", "시장·정책 맥락", 'href="https://www.suwon.go.kr/x"'):
             self.assertIn(text, html)
+        self.assertTrue(any("직접 식별자 없이" in n for n in report_html.system_notes(data)))   # A system note (v3.0).
         with closing(ledger.connect_read_only(self.db)) as conn:
             uses = [row[0] for row in conn.execute("SELECT use_case FROM advice_runs")]
         self.assertEqual(uses, ["report-narrative"])
@@ -306,10 +308,11 @@ class NarrativeTests(unittest.TestCase):
         policy = {c.key: c.status for c in data["policy"]}
         self.assertEqual((policy["core"], policy["single"], policy["reserve"]), ("ok", "ok", "breach"))
         _, html = render(data)
-        for text in ("보유 종목 점검", "Smith의 투자 전략 · 주식 전체", "추가 매수 고려", "전제 조건", "종목 조사: 보유 종목 1개",
+        for text in ("보유 종목 점검", "Smith의 투자 전략 · 주식 전체", "추가 매수 고려", "전제 조건",
                      "투자 원칙과 우리 집 투자 기준", "근거 원칙", "VOO (넓은 지수펀드)",
                      'href="https://www.berkshirehathaway.com/letters/1996.html"'):
             self.assertIn(text, html)
+        self.assertTrue(any("종목 조사: 보유 종목 1개" in n for n in report_html.system_notes(data)))
         data["kind"] = "thursday"
         _, html = render(data)
         self.assertIn("보유 종목 의견", html)
@@ -352,7 +355,7 @@ class NarrativeTests(unittest.TestCase):
         narrative.narrate(self.db, data["view"], data, now=AT, secrets=[], executable=Path("claude.exe"), runner=failing)
         self.assertEqual(data["narrative"]["status"]["outcome"], "failure")
         _, html = render(data)
-        self.assertIn("계산 결과만으로 작성했습니다", html)
+        self.assertTrue(any("계산 결과만으로 작성했습니다" in n for n in report_html.system_notes(data)))
         self.assertNotIn("Smith의 판단", html)
         with closing(ledger.connect_read_only(self.db)) as conn:
             rows = list(conn.execute("SELECT use_case, outcome FROM advice_runs"))
@@ -509,6 +512,14 @@ class NarrativeTests(unittest.TestCase):
         self.assertFalse(moved(months=Decimal(19)))                    # A month passing is not a new proposal.
         self.assertFalse(moved(accumulated=Decimal(270_000_000)))      # +8%: within the 20% default.
         self.assertTrue(moved(accumulated=Decimal(320_000_000)))       # +28%.
+
+def setUpModule():  # noqa: N802 - unittest hook
+    fast_ledger.install()  # File ledgers without an fsync per commit (test budget); results are unchanged.
+
+
+def tearDownModule():  # noqa: N802 - unittest hook
+    fast_ledger.uninstall()
+
 
 if __name__ == "__main__":
     unittest.main()

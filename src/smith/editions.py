@@ -38,6 +38,9 @@ class Edition:
     strategy: bool                     # The dark "on track?" band of long-range goals.
     terms: tuple[str, ...]             # Glossary entries worth repeating on this day.
     focus: str                         # The narrative's theme (English, for the model).
+    # Sections rendered open right under the hero, before the proposals: the day's single most important
+    # view (the loan line-up on the rates day, the pension stack on the tax day, report design §18.1).
+    opening: tuple[str, ...] = ()
 
 
 EDITIONS: dict[str, Edition] = {e.key: e for e in (
@@ -53,7 +56,10 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "pensions, the household's month and goals), so stay at the level of the whole picture. Say in one "
             "sentence whether the household survives the composite stress scenario (sector_metrics.stress), and, "
             "when the brief has a benchmark item (the official survey of net worth and income by age band), where "
-            "this household's net worth sits in its age band, with the survey year: a position, not a goal."),
+            "this household's net worth sits in its age band, with the survey year: a position, not a goal. When "
+            "change_since_last_report is present, brief the week's change in two figures with its dates: market prices, "
+            "FX and revaluations applied to what the household held (market_and_valuation, \"시장·평가 변동\") and what "
+            "moved in or out (net_inflow); never let a market loss hide behind new entries in a single total."),
     Edition("markets", "투자·시장", "주식·펀드와 환율: 보유 종목별 의견과 투자 기준 점검입니다.",
             "markets", ("holdings", "policy", "macro_brief"), ("goal-stocks-glide", "concentration-trim"),
             ("us_stocks", "kr_stocks", "rates"), True, False, ("미실현 손익", "환율 효과", "%p", "이중 집중"),
@@ -63,31 +69,50 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "the trend and flows, and its standing in its sector. The holding flagged employer_stock concentrates "
             "the client's human capital and financial assets in one company (double concentration): manage it "
             "first and most carefully, with the code's trim schedule (portfolio_facts.concentration_plan)."),
-    Edition("property", "부동산", "두 집의 시세와 전세 흐름, 보증금 반환 준비와 주택 정책입니다.",
-            "property", ("real_estate", "lease_plan"), ("lease-return",),
-            ("housing_market", "housing_policy", "jeonse", "home_tax"), False, False, ("LTV", "역전세"),
+    Edition("property", "부동산", "두 집의 시세와 전세 흐름, 목표 단지와의 차이, 보증금 반환 준비와 주택 정책입니다.",
+            "property", ("move_targets", "real_estate", "lease_plan"), ("lease-return",),
+            ("housing_market", "housing_policy", "jeonse", "home_tax", "target_market"), False, False, ("LTV", "역전세"),
             "the household's homes: official trade and jeonse figures for each property, how the lease deposit "
             "due is actually returned (sector_metrics.real_estate.lease_return_plan: a new tenant's deposit "
             "replaces most of it, so the household's own cash is the reverse-jeonse gap plus a buffer; selling "
             "brings cash in; a move-out loan is bounded by the debt-service cap), the regional housing market and "
             "housing policy, and the sequence of marriage registration, selling one home and buying the next as it "
-            "changes taxes and loan limits (conditionally, with 현행 법령 확인 필요)."),
-    Edition("rates", "금리·대출", "기준금리와 대출 금리, 우리 집 이자 부담과 추가 상환 판단입니다.",
-            "rates", ("debt", "macro"), ("prepayment", "variable-rate"),
+            "changes taxes and loan limits (conditionally, with 현행 법령 확인 필요). When "
+            "sector_metrics.real_estate.move_plan is present, it is the day's core: for each target complex the "
+            "spread between its cost and the net proceeds of selling both homes, whether that spread widened or "
+            "narrowed over six months, and how much of it the expected pay (by certainty) and the employer stock's "
+            "price could close; from it, propose the order of selling the two homes (tax cases per home), the loan "
+            "room and the tax moves, conditionally.", opening=("move_targets",)),
+    Edition("rates", "금리·대출", "대출 현황과 금리 민감도, 대환 실익, 기준금리와 시장 금리입니다.",
+            "rates", ("debt", "macro"), ("prepayment", "variable-rate", "refinance"),
             ("mortgage", "rates", "household_policy"), False, False, ("변동금리", "CD 91일물", "%p"),
-            "interest rates and the household's loans: the policy-rate outlook, mortgage rates and rules, what "
-            "the variable-rate loan costs now and if rates move, and whether extra repayment beats saving."),
-    Edition("tax", "세금·연금", "연금 세액공제, 해외주식 공제, ISA와 연말정산 준비, 보험료 효율입니다.",
-            "tax", ("tax", "pension"), ("pension-credit", "overseas-harvest", "isa-open", "insurance-review"),
-            ("pension_tax", "home_tax"), False, False, ("세액공제", "미실현 손익", "감액완납"),
-            "tax and pensions: this year's pension credit room, overseas capital-gains deduction, ISA, the "
-            "year-end settlement checklist, marriage-registration and home-tax timing, the pension accounts, and "
-            "whether the insurance premiums (sector_metrics.pension_insurance.insurance_review) are an efficient "
-            "use of the monthly cash flow."),
-    Edition("life", "생활·목표", "한 달 현금흐름과 비상금, 목표까지의 준비 상황입니다.",
-            "life", ("cash", "spending", "stress", "goals", "follow_up", "requests"),
+            "interest rates and the household's loans: the loan line-up first, what the variable-rate loan costs "
+            "now and if rates move, whether the mortgage rate is competitive against the market average on new "
+            "bank mortgages (sector_metrics.debt.refinance: keep, or review a refinancing with the fee paid back in "
+            "the stated months), whether extra repayment beats saving, and the policy-rate outlook. A credit line "
+            "with nothing drawn (sector_metrics.debt.unused_credit_lines) costs nothing and is liquidity room, never "
+            "a loan to repay.", opening=("debt",)),
+    Edition("tax", "세금·연금", "노후 현금흐름 준비율, 연금 세액공제, 해외주식 공제, 금융소득 방어와 보험료 효율입니다.",
+            "tax", ("tax", "annuity_review", "pension"), ("pension-credit", "overseas-harvest", "isa-open", "insurance-review"),
+            ("pension_tax", "home_tax"), False, False, ("세액공제", "미실현 손익", "감액완납", "금융소득종합과세"),
+            "tax and pensions: the pension stack first (sector_metrics.pension_insurance.pension_stack: every "
+            "pipeline's after-tax monthly payout and start age against the monthly retirement target, the readiness "
+            "ratio, and which pipeline still lacks a figure, asked for in a private banker's words), this year's "
+            "pension credit room, overseas capital-gains deduction, ISA, the year-end settlement checklist, "
+            "marriage-registration and home-tax timing, and whether the insurance premiums "
+            "(sector_metrics.pension_insurance.insurance_review) are an efficient use of the monthly cash flow. For "
+            "each entry of sector_metrics.pension_insurance.annuity_reviews, give the client a decisive opinion of the "
+            "policy in two or three sentences: what they still pay and get, the forward return by lifespan against "
+            "the index-fund alternative, the code's verdict and the one condition that flips it, and the sunk cost "
+            "to ignore. "
+            "Expected pay and share grants will lift interest and dividends toward the financial-income threshold: "
+            "weigh every placement after tax and name the tax-advantaged route (ISA, pension accounts, the "
+            "savings-insurance exemption, separately taxed bonds and infrastructure funds, the overseas capital-gains "
+            "regime) as a standing rule.", opening=("pension_stack",)),
+    Edition("life", "생활·목표", "한 달 현금흐름의 균형, 비상금, 목표까지의 준비, 이번 주의 경험 제안입니다.",
+            "life", ("experiences", "cash", "spending", "stress", "goals", "follow_up", "requests"),
             ("emergency-reserve", "surplus-plan", "spending-room"),
-            (), False, True, ("유동성", "순자산", "안심 소비 한도", "스트레스 테스트"),
+            ("experience",), False, True, ("유동성", "순자산", "안심 소비 한도", "스트레스 테스트"),
             "the household's own month: income, spending, saving and investing transfers, what is left, the "
             "emergency reserve, and progress toward the dated goals (lease deposit, home move, retirement) on the "
             "household basis (sector_metrics.home_plan). Two private-banker questions belong here: does the "
@@ -97,8 +122,13 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "sellable assets allow it, never by cutting the monthly surplus to nothing. Where there is room, suggest "
             "spending that keeps its value over time (health, learning, travel, art and performances, time with "
             "family) over goods that lose value, as a suggestion shaped by the preferences in client_memory, never an "
-            "instruction and never invented tastes. No market news is researched for this theme; work from the "
-            "household's numbers and the client's statements."),
+            "instruction and never invented tastes. Diagnose the month's balance of fixed costs and discretionary "
+            "spending (sector_metrics.cash.spending_split) against the household's income and net worth before any "
+            "figure. Then curate the experience dividend: from the brief's experience findings (exhibitions, books, "
+            "places, dining, sport), write one or two `experiences` the client might enjoy this week, timely and of "
+            "quality, matched to the preferences in client_memory, offered freely as choices, each with its refs. No "
+            "market or policy news is researched for this theme; work from the household's numbers and the client's "
+            "statements."),
 )}
 
 # The weekly plan when [reports.editions] does not say otherwise.
