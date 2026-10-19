@@ -24,7 +24,9 @@ KNOWN_KEYS = {
                   "annual_gross_salary", "retirement_age"},
     "backup": {"dir", "keep"},
 }
-PROPERTY_KEYS = {"lawd_cd", "dong", "apt_name", "exclusive_area_m2", "acquired_year", "acquired_price"}
+# `lease_exit`: how the client plans to return a lease deposit on this home ("relet": a new tenant, the default;
+# "sell": the home is sold when the lease ends, client e-mail 2026-10-19).
+PROPERTY_KEYS = {"lawd_cd", "dong", "apt_name", "exclusive_area_m2", "acquired_year", "acquired_price", "lease_exit"}
 # `[targets."<key>"]`: the complexes the household may move to (report design §18.3). Same official-data
 # matching as a property, plus a label for the report, a region (city/district) for research questions, and
 # a reference price (an asking or sale-launch price the client enters) for a complex with no recorded trades.

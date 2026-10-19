@@ -36,7 +36,7 @@ from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import check_outbound, mask_identifiers
 from smith.report_data import build_report
 
-PROMPT_VERSION = "mail-answer-v11"  # v11: narrative principle 1 (headline) changed; v10: concrete words.
+PROMPT_VERSION = "mail-answer-v12"  # v12: warm service tone, no promises of changes; v11: narrative principle 1.
 MODEL = "fable"
 BUDGET_USD = "3.00"
 TIMEOUT_SECONDS = 600
@@ -63,8 +63,19 @@ e-mail with a question (client_question). This is a conversation, not a report: 
 banker replying to a short message.
 - Length: the bottom line in one or two sentences, then at most three to five short sentences of reasons
   with this household's numbers. Aim for about 400-700 Korean characters; go longer only if the question
-  truly needs it. No greeting, no recap of the whole report, no headings or lists unless asked.
+  truly needs it. No formal greeting line, no recap of the whole report, no headings or lists unless asked.
 - Then stop. Further topics go into follow_up as short questions the client might ask next.
+- Tone of a reply (this overrides the report voice for answers only; reports stay as they are): warm, kind
+  and service-minded, like a private banker who is glad the client asked. Open with one short clause that
+  receives the question or the client's intent ("좋은 점을 짚어 주셨습니다", "노후를 더 챙기시려는 방향은 좋습니다"),
+  correct gently and never curtly ("아닙니다." alone is too blunt: say what is right first), and when it helps
+  close with one line offering the next step ("원하시면 … 계산해 드리겠습니다"). Stay formal (합쇼체), sincere and
+  specific: no flattery, no exclamation marks, no emoji, no "~요" endings.
+- You cannot change Smith. Its calculations, the report's layout and sections, the goals and records in the
+  ledger, its settings, schedule and recipients change only when Smith is updated by its maintainer. When
+  the client asks for such a change, say warmly that you have noted it (put it in remember) and that it takes
+  effect once Smith is updated; never write that it is done, applied, or reflected from the next report
+  ("반영해 두었습니다", "다음 보고서부터 … 계산해 드리겠습니다"). Until then, answer with the figures as they are.
 The input is the full ledger snapshot at the time of the report the client replied to (household,
 proposals, strategy, tax, property_market, sector_metrics, brief; listed holdings carry unrealized_gain and
 return_on_cost when their cost basis is known), so every area can be answered. That report may have been a
@@ -316,7 +327,10 @@ def answer(db: Path, data: dict[str, Any], question: Question, *, now: datetime,
     output, _ = _call(db, text, now, report_kind, executable, runner, "mail-answer")
     problem = _problems(output, payload)
     if problem:
-        repair = dict(payload, previous_output=output, rejected=[{"field": "answer", "reason": problem}])
+        reason = (problem if problem != "promise" else
+                  "promise: says a change to Smith's calculations, layout or settings is done or applies from the next "
+                  "report; Smith cannot change itself: say it is noted and takes effect once Smith is updated")
+        repair = dict(payload, previous_output=output, rejected=[{"field": "answer", "reason": reason}])
         repair_text = json.dumps(repair, ensure_ascii=False)
         check_outbound(repair_text, secrets)
         try:
@@ -327,7 +341,7 @@ def answer(db: Path, data: dict[str, Any], question: Question, *, now: datetime,
     memos = []
     if problem:
         reason, *detail = problem.split(":")
-        memos.append(narrative.MEMOS.get(reason, "확인되지 않은 부분이 있습니다.")
+        memos.append(PROMISE_MEMO if reason == "promise" else narrative.MEMOS.get(reason, "확인되지 않은 부분이 있습니다.")
                      + (f"({detail[0]})." if reason == "ungrounded-number" and detail else ""))
     claimed = _client_figures(question.text, payload, output["answer"]["text"])
     if claimed:
@@ -369,10 +383,24 @@ def _client_figures(question: str, payload: dict[str, Any], answer_text: str) ->
     return list(found)
 
 
+# Promises of a change Smith cannot make by itself (client e-mail 2026-10-19: an answer said the next report
+# would be recalculated and the layout changed, which only an update of Smith can do).
+_PROMISE = re.compile(r"다음 보고서?부터|반영해 ?두었|반영했습니다|반영하도록 (?:하겠|했)|바로 반영|적용해 ?두었")
+PROMISE_MEMO = "보고서의 계산·구성·설정은 Smith를 업데이트해야 바뀝니다. 말씀하신 내용은 기억해 두었습니다."
+
+
 def _problems(output: dict[str, Any], payload: dict[str, Any]) -> str | None:
     # Evidence is narrative's allowlist: Smith's earlier answers and the report's own narrative (recent_report)
     # are model output, so a figure only they contain must still be grounded in the inputs or a cited source.
-    return narrative.check_block([output["answer"]["text"]], output["answer"]["refs"], payload)
+    found = narrative.check_block([output["answer"]["text"]], output["answer"]["refs"], payload)
+    if found is None and promises_change(output["answer"]["text"]):
+        return "promise"
+    return found
+
+
+def promises_change(text: str) -> bool:
+    """Whether an answer says a change to Smith is done or will apply from the next report."""
+    return bool(_PROMISE.search(text))
 
 
 def _call(db: Path, text: str, now: datetime, kind: str, executable: Path, runner: headless.Runner,

@@ -94,9 +94,12 @@ def render(data: dict[str, Any]) -> tuple[str, str]:
                    + _judgement(story)
                    + _composition_bar(data, None) + _overview(data)),
              _band(CANVAS, _proposals(advice, full), border=True)]
+    changes = _changes_outside(story)
+    if changes:
+        bands.append(_band(CANVAS, changes, border=True))
     if full and advice["strategy"]:
         bands.append(_band(DARK, _strategy(advice["strategy"], story.get("direction", ""))))
-    sections = [_changes_outside(story), _follow_up(advice), _tax(advice, data, full), _change(data), _timeline(data)]
+    sections = [_follow_up(advice), _tax(advice, data, full), _change(data), _timeline(data)]
     if full:
         sections.append(_future_income(data))
         sectors = data["sectors"]
@@ -182,11 +185,13 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
         bands.append(_band(CANVAS, opening, border=True))
     if advice["proposals"] or advice.get("undetermined") or overview:
         bands.append(_band(CANVAS, _proposals(advice, not overview, edition=edition), border=True))
+    title = "이번 주 눈여겨볼 변화" if overview else f"{edition.label} — 눈여겨볼 변화"
+    changes = _changes_outside(story, title)
+    if changes:
+        bands.append(_band(CANVAS, changes, border=True))
     if edition.strategy and advice["strategy"]:
         bands.append(_band(DARK, _strategy(advice["strategy"], story.get("direction", ""))))
-    title = "이번 주 눈여겨볼 변화" if overview else f"{edition.label} — 눈여겨볼 변화"
-    sections = [_changes_outside(story, title)] + [renderers[name]() for name in edition.sections
-                                                    if name not in edition.opening]
+    sections = [renderers[name]() for name in edition.sections if name not in edition.opening]
     if any(sections):
         bands.append(_band(CANVAS, "".join(sections), border=True))
     bands.append(_band(SOFT, _footer(_system_warnings(data))))
@@ -809,24 +814,24 @@ def _sources(links: Any) -> str:
 
 
 def _changes_outside(story: dict[str, Any], title: str = "이번 주 눈여겨볼 변화") -> str:
-    """Insights from the research brief that matter for this household, and what to watch next."""
+    """Insights from the research brief that matter for this household, and what to watch next: a band of its
+    own right after the proposals, open and in larger type (client e-mail 2026-10-19: "중요한데 더 가시성 높여줘,
+    크기도 키우고"). The length stays a quarter of the old one: the title and what it means here."""
     insights, watch = story.get("insights") or [], story.get("watch") or []
     if not insights and not watch:
         return ""
-    blocks = []
-    for item in insights:
-        # The change in its title and what it means here; the full account stays for the e-mail answers (user
-        # review 2026-10-18: a quarter of the text).
-        blocks.append(f'<div style="margin:6px 0 14px"><div style="font-size:16px;font-weight:600;color:{INK};'
-                      f'margin-bottom:4px">{escape(item["title"])}</div>'
-                      f'<div style="font-size:14px;line-height:1.6;color:{BODY}">{escape(item["implication"])}</div>'
-                      f'{_sources(item["links"])}</div>')
+    cards = "".join(f'<tr><td style="padding-top:12px"><div style="border-left:4px solid {BLUE};background:{SOFT};'
+                    f'border-radius:16px;padding:16px 18px"><div style="font-size:19px;font-weight:700;line-height:1.4;'
+                    f'color:{INK};margin-bottom:6px">{escape(item["title"])}</div>'
+                    f'<div style="font-size:16px;line-height:1.65;color:{BODY}">{escape(item["implication"])}</div>'
+                    f'{_sources(item["links"])}</div></td></tr>' for item in insights)
     if watch:
-        rows = "".join(f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin:4px 0">· <b style="font-weight:600;'
+        rows = "".join(f'<div style="font-size:15px;line-height:1.65;color:{BODY};margin:6px 0">· <b style="font-weight:700;'
                        f'color:{INK}">{escape(w["item"])}</b> — {escape(w["why"])}'
                        f'{_sources(w["links"])}</div>' for w in watch)
-        blocks.append(f'<div style="font-size:12px;font-weight:600;color:{MUTED};margin:8px 0 4px">다음 보고까지 지켜볼 것</div>{rows}')
-    return _section(title, "", "".join(blocks))
+        cards += (f'<tr><td style="padding-top:14px"><div style="font-size:15px;font-weight:700;color:{INK};margin-bottom:4px">'
+                  f'다음 보고까지 지켜볼 것</div>{rows}</td></tr>')
+    return f'<tr><td>{_eyebrow("놓치지 마실 변화", color="#ffffff", background=BLUE)}{_heading(title, size=26)}</td></tr>' + cards
 
 
 def _tax(advice: dict[str, Any], data: dict[str, Any], full: bool) -> str:
@@ -1066,7 +1071,14 @@ def _lease_plan(data: dict[str, Any]) -> str:
     plan = plans[0]
     relet, sale, loan, st = plan["relet"], plan["sale"], plan["loan"], plan["stress"]
     amount = plan["amount"]
-    if plan["default"] == "relet":
+    if plan["default"] == "sale":
+        # The client's plan: the home is sold when the lease ends (e-mail 2026-10-19).
+        left = -sale["cash_out"]
+        lead = (f"{plan['due']:%Y년 %m월} 돌려드릴 보증금 <b>{_short(amount)}</b>은 계획하신 대로 만기에 맞춰 집을 팔면 매도 대금으로 "
+                + (f"돌려드리고 약 <b>{_short(left)}</b>이 남습니다." if left >= 0 else
+                   f"돌려드리기에 약 <b>{_short(plan['need'])}</b>이 모자랍니다.")
+                + " 팔리지 않을 때를 대비한 예비 방법은 아래 표와 같습니다.")
+    elif plan["default"] == "relet":
         lead = (f"{plan['due']:%Y년 %m월} 돌려드릴 보증금 <b>{_short(amount)}</b>은 전액이 고객님 주머니에서 나가는 돈이 아닙니다. 새 세입자를 "
                 f"받으면 그 보증금이 기존 보증금을 대신하므로, 최근 6개월 같은 단지·면적 전세 중간값 {_short(plan['jeonse'])}을 기준으로 직접 "
                 f"준비하실 돈은 차액 {_short(relet['gap'])}에 안전 버퍼 {_short(relet['buffer'])}을 더한 약 <b>{_short(relet['need'])}</b>입니다.")
@@ -1075,7 +1087,9 @@ def _lease_plan(data: dict[str, Any]) -> str:
                 "보증금 전액을 보수적으로 준비 기준으로 두었습니다. 거래가 쌓이면 새 세입자 승계 기준으로 다시 계산합니다.")
     rows = [[s.label, "미상" if s.cash_out is None else ("들어오는 돈 " + _short(-s.cash_out) if s.cash_out < 0 else _short(s.cash_out)), s.basis]
             for s in plan["scenarios"]]
-    if sale["net_inflow"] is not None:
+    if plan["default"] == "sale":
+        pass
+    elif sale["net_inflow"] is not None:
         lead += (f" 전세를 끼고 팔거나 만기에 맞춰 파는 경우에는 돈이 나가지 않고 약 {_short(-sale['cash_out'])}이 들어옵니다. 1세대 1주택 비과세 "
                  f"요건을 갖추면 약 {_short(sale['net_inflow']['exempt'])}이며, 현행 법령 확인이 필요합니다.")
     elif sale["cash_out"] is not None:
@@ -1296,6 +1310,9 @@ def _stress_lead(st: dict[str, Any], *, detail: bool) -> str:
         text += f" 다만 {lease['due']:%Y년 %m월} 돌려드릴 {need}은 이 가정에서 약 {_short(lease['available'])}밖에 마련하지 못합니다."
     elif lease is not None and lease.get("basis") == "reverse_jeonse" and lease.get("covered"):
         text += f" {lease['due']:%Y년 %m월} 보증금 반환도 차액 {_short(lease['need'])}만 준비하면 되어 감당할 수 있습니다."
+    elif lease is not None and lease.get("basis") == "sale" and lease.get("covered"):
+        text += (f" {lease['due']:%Y년 %m월} 보증금은 계획대로 만기에 팔면 집값이 {a['property_drop'] * 100:.0f}% 내려도 매도 대금으로 "
+                 "돌려드릴 수 있습니다.")
     p = stress.PRECEDENT
     text += (f" 금리·주가·집값이 함께 움직인 해는 실제로 있었습니다: {p['year']}년 기준금리 {p['base_rate'][0]}→{p['base_rate'][1]}, "
              f"코스피 {p['kospi']}, 서울 아파트 실거래가지수 {p['seoul_apartments']}({p['seoul_apartments_vintage']}). "

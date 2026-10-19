@@ -465,6 +465,57 @@ class FirstReviewTests(unittest.TestCase):
         self.assertEqual(stress.PRECEDENT["seoul_apartments_vintage"], "2023년 2월 공표치")
 
 
+class MailRequestTests(Upgrade):
+    """The client's e-mail requests of 2026-10-19."""
+
+    def test_a_planned_sale_returns_the_deposit_and_is_the_default(self):
+        household = {**HOUSEHOLD, "properties": {**HOUSEHOLD["properties"],
+                                                 "rental": {**HOUSEHOLD["properties"]["rental"], "lease_exit": "sell"}}}
+        data = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="property", household=household)
+        plan = data["lease_plans"][0]
+        self.assertEqual((plan["default"], plan["need"]), ("sale", Decimal(0)))       # The sale brings money in.
+        self.assertEqual([s.key for s in plan["scenarios"]], ["sale", "relet", "loan"])
+        self.assertEqual(plan["stress"]["basis"], "sale")
+        proposal = self.proposal(data, "lease-return")
+        self.assertIn("매도 대금으로", proposal.title)
+        self.assertNotIn("새 세입자 승계가 기본", proposal.title)
+        page = render(data)[1]
+        self.assertIn("계획하신 대로 만기에 맞춰 집을 팔면", page)
+        self.assertIn("만기에 맞춰 매도(계획)", page)
+        # The strategy track and the glide plan follow the plan: no own cash is set aside for this deposit.
+        track = next(t for t in data["advice"]["strategy"] if t.name == "전세보증금 반환")
+        self.assertEqual(track.status, "on_track")
+        self.assertLessEqual(len(proposal.headline), proposals.HEADLINE_MAX)
+        self.assertFalse(proposal.headline.endswith("…"))
+        # Without the setting the re-let path stays the default.
+        self.assertEqual(self.report("property")["lease_plans"][0]["default"], "relet")
+
+    def test_the_lease_exit_setting_is_validated(self):
+        from smith.realestate import RealEstateError, validate_properties
+        spec = {"lawd_cd": "11110", "apt_name": "A", "exclusive_area_m2": 59.9}
+        self.assertTrue(validate_properties({"p": dict(spec, lease_exit="sell")}))
+        with self.assertRaises(RealEstateError):
+            validate_properties({"p": dict(spec, lease_exit="keep")})
+
+    def test_the_changes_are_an_open_band_in_large_type(self):
+        story = {"insights": [{"title": "금리 동결", "implication": "변동금리 이자는 그대로입니다.", "links": []}], "watch": []}
+        band = report_html._changes_outside(story)
+        self.assertNotIn("<details", band)
+        self.assertIn("font-size:19px", band)
+        self.assertIn("놓치지 마실 변화", band)
+
+    def test_an_answer_never_promises_a_change_smith_cannot_make(self):
+        from smith import qa
+        for text, promised in (("다음 보고서부터 2028년 8월 기준으로 다시 계산해 드리겠습니다.", True),
+                               ("더 크고 눈에 띄게 배치하도록 반영해 두었습니다.", True),
+                               ("말씀하신 내용은 기억해 두었고, Smith를 업데이트하면 계산에 반영됩니다.", False),
+                               ("원하시면 매도 순서별 세금을 계산해 드리겠습니다.", False)):
+            with self.subTest(text):
+                self.assertEqual(qa.promises_change(text), promised)
+        self.assertIn("warm, kind", qa.SYSTEM_PROMPT)
+        self.assertIn("You cannot change Smith", qa.SYSTEM_PROMPT)
+
+
 class StressWordingTests(unittest.TestCase):
     def test_the_extreme_check_leads_with_its_whole_result_not_the_cash_gap(self):
         # User review 2026-10-18: the cash-only months alone read as unrealistic alarm. Synthetic figures.

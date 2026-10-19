@@ -109,7 +109,8 @@ def validate_properties(properties: Any) -> dict[str, dict[str, Any]]:
                           ("dong", lambda v: v is None or (isinstance(v, str) and 0 < len(v) <= 20)),
                           ("exclusive_area_m2", lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v < 1000),
                           ("acquired_year", lambda v: v is None or (isinstance(v, int) and 1950 <= v <= 2100)),
-                          ("acquired_price", lambda v: v is None or (isinstance(v, int) and v > 0))):
+                          ("acquired_price", lambda v: v is None or (isinstance(v, int) and v > 0)),
+                          ("lease_exit", lambda v: v is None or v in ("relet", "sell"))):
             if not ok(spec.get(field)):
                 raise RealEstateError(f"bad-config:{ref}.{field}")
         checked[ref] = spec

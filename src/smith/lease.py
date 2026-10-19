@@ -82,21 +82,33 @@ def _plan(view: LedgerView, record: Any, prop: dict[str, Any] | None, acquisitio
     relet = _relet(amount, jeonse if jeonse_known else None)
     sale = _sale(amount, prop, acquisition, record.owner_id, today)
     loan = _loan(view, record.owner_id, today)
-    stress = _stress_need(amount, jeonse if jeonse_known else None, drop)
+    # The client's plan (`lease_exit = "sell"` in the local config, e-mail 2026-10-19): the home is sold when the
+    # lease ends, so the sale returns the deposit and only a shortfall of the sale would be the household's own.
+    planned_sale = acquisition.get("lease_exit") == "sell" and sale["cash_out"] is not None
+    stress = (_stress_sale(amount, sale, drop) if planned_sale
+              else _stress_need(amount, jeonse if jeonse_known else None, drop))
     return {"record_id": record.record_id, "owner": record.owner_id, "amount": amount, "due": due, "months": months,
             "jeonse": jeonse, "jeonse_basis": basis, "jeonse_known": jeonse_known,
             "relet": relet, "sale": sale, "loan": loan, "stress": stress,
-            # The figure the plans use: the re-let need when the market level is known, else the whole deposit.
-            "default": "relet" if relet["need"] is not None else "full",
-            "need": relet["need"] if relet["need"] is not None else amount,
-            "scenarios": [Scenario("relet", "새 세입자 승계(기본)", relet["need"],
-                                   "최근 6개월 같은 단지·면적 전세 중간값 + 안전 버퍼" if relet["need"] is not None
-                                   else "전세 실거래 3건 미만: 보증금 전액을 보수적으로 둠", relet["need"] is not None),
-                          Scenario("sale", "전세 끼고 매도 또는 만기 맞춰 매도", sale["cash_out"], sale["basis"],
-                                   sale["cash_out"] is not None),
-                          Scenario("loan", "퇴거자금대출", loan["cash_out"], loan["basis"], loan["amount"] is not None)],
+            # The figure the plans use: the planned sale's shortfall (none when it brings money in), else the re-let
+            # need when the market level is known, else the whole deposit.
+            "default": "sale" if planned_sale else "relet" if relet["need"] is not None else "full",
+            "need": (max(Decimal(0), sale["cash_out"]) if planned_sale else
+                     relet["need"] if relet["need"] is not None else amount),
+            "scenarios": _scenarios(relet, sale, loan, planned_sale),
             "assumptions": {"relet_buffer_rate": RELET_BUFFER_RATE, "dsr_limit": DSR_LIMIT, "loan_rate": LOAN_RATE,
                             "loan_years": LOAN_YEARS, "property_drop": drop}}
+
+
+def _scenarios(relet: dict[str, Any], sale: dict[str, Any], loan: dict[str, Any], planned_sale: bool) -> list[Scenario]:
+    """The ways to return the deposit, the default first."""
+    relet_row = Scenario("relet", "새 세입자 승계" + ("" if planned_sale else "(기본)"), relet["need"],
+                         "최근 6개월 같은 단지·면적 전세 중간값 + 안전 버퍼" if relet["need"] is not None
+                         else "전세 실거래 3건 미만: 보증금 전액을 보수적으로 둠", relet["need"] is not None)
+    sale_row = Scenario("sale", "만기에 맞춰 매도(계획)" if planned_sale else "전세 끼고 매도 또는 만기 맞춰 매도",
+                        sale["cash_out"], sale["basis"], sale["cash_out"] is not None)
+    loan_row = Scenario("loan", "퇴거자금대출", loan["cash_out"], loan["basis"], loan["amount"] is not None)
+    return [sale_row, relet_row, loan_row] if planned_sale else [relet_row, sale_row, loan_row]
 
 
 def _relet(amount: Decimal | None, jeonse: Decimal | None) -> dict[str, Any]:
@@ -190,6 +202,15 @@ def _yearly_payment_per_won(rate: Decimal, years: int) -> Decimal:
     monthly = rate / 12
     months = years * 12
     return monthly / (1 - (1 + monthly) ** -months) * 12
+
+
+def _stress_sale(amount: Decimal | None, sale: dict[str, Any], drop: Decimal) -> dict[str, Any]:
+    """What the stress scenario must still find when the home is sold at the lease's end: the deposit and the
+    secured loans less the price fallen by `drop`, before tax (a lower price only lowers the tax)."""
+    if amount is None or sale["price"] is None or sale["loans"] is None:
+        return {"need": None, "basis": "unknown", "jeonse_dropped": None}
+    shortfall = amount + sale["loans"] - sale["price"] * (1 - drop)
+    return {"need": max(Decimal(0), shortfall), "basis": "sale", "jeonse_dropped": None}
 
 
 def _stress_need(amount: Decimal | None, jeonse: Decimal | None, drop: Decimal) -> dict[str, Any]:
