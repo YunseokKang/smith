@@ -42,7 +42,7 @@ from smith.proposals import Proposal
 
 # v10: executive headline, rounded amounts, total-balance-sheet mindset, employer double concentration, no internal
 # vocabulary (user spec 2026-10-17); v9: stress test, spending room, peer benchmark; v8: expected pay is not wealth.
-PROMPT_VERSION = "narrative-v17"  # v17: product picks as input; v16: the headline is the week's decision.
+PROMPT_VERSION = "narrative-v18"  # v18: principles are consensus, not law; v17: product picks as input.
 MODEL = "fable"
 BUDGET_USD = "5.00"
 # Two calls at most: the write (the markets day with twenty-odd holdings ran past 10 minutes on 2026-10-17) and a
@@ -110,7 +110,7 @@ Voice: formal Korean (합쇼체, "~습니다"), address the reader as "고객님
 The client is not a finance expert: big picture first, say why it matters for this household, explain a
 difficult term in a short parenthesis the first time it appears in a block, use concrete examples.
 
-Six principles of the writing (the hard rules at the end are checked by code):
+Eight principles of the writing (the hard rules at the end are checked by code):
 1. Seamless executive flow. The first sentence of `situation` is the executive headline (shown large at the
    top of the mail): this week's one decision with its main number and its reason in the household's likely,
    everyday terms. Never open with a statistic comparison or the stress scenario. Then, in order: what changed
@@ -160,7 +160,16 @@ Six principles of the writing (the hard rules at the end are checked by code):
    figures). Once the reserve, the dated goals and the rebalancing are set, encourage spending the surplus
    on experiences that keep their value (art and performances, food, sport, travel with family), shaped
    by client_memory, never invented tastes and never as an instruction.
-7. No internal vocabulary. Never write JSON, owner_id, record_id, payload, schema, refs, field names,
+7. Principles are sourced views of experienced investors, not law, and this is one family's money. Never
+   write that the household violates, breaches or goes against a principle, rule or limit (위반, 위배,
+   어긋남, 원칙에 반함). Frame every judgement in two steps: the view and whose it is, and what is reasonable
+   for this household in its present situation and circumstances ("지금 고객님의 상황과 여건에서는 … 하는
+   판단이 합리적이라 봅니다"). Call a view a consensus ("전문가들의 의견이 대체로 일치하는 부분은 …") only when
+   several principles of different investors in `principles` agree on it; otherwise name the investor
+   ("버핏은 …라고 봅니다"). Where the library disagrees with itself (concentration for an investor who knows
+   the company against index funds for the rest; averaging down against periodic buying), say so in one
+   clause. The standards in policy_checks are Smith's assumptions to review, not rules the client broke.
+8. No internal vocabulary. Never write JSON, owner_id, record_id, payload, schema, refs, field names,
    "자동 점검 메모" or any developer term in the client's prose. Ask for missing information in a private
    banker's words ("배우자분의 대략적인 월 소득과 보유 현금 규모를 알려 주시면 가계 전체의 여유를 더 정확히
    볼 수 있습니다").
@@ -249,9 +258,10 @@ Input JSON:
   the brief). portfolio_facts: top-1 and top-5 shares, overseas share, the goal-money glide plan (stocks
   counted for a dated goal within three years), add_condition, and concentration_plan: for each holding
   above the limit, the excess and the quarterly trim schedule into the broad-index core computed by code.
-- principles: Smith's investment principles library: legendary investors' principles (Buffett, Munger,
-  Marks, Vanguard/Bogle, Dalio, Lynch) paraphrased from their primary sources, each with an id and how Smith
-  applies it to a household. policy_checks: the household's investment policy derived from them by code
+- principles: the part of Smith's investment principles library this report needs: well-known investors'
+  principles (Buffett, Munger, Marks, Vanguard/Bogle, Dalio, Templeton, Lynch, Graham, Lefevre) paraphrased
+  from their primary sources, each with an id and how Smith applies it to a household; where two read against
+  each other both are included. policy_checks: the household's investment policy derived from them by code
   (reserve first, no borrowing to hold stocks, goal money out of stocks, single-company limit, core in broad
   index funds) with standard, current state and status (ok, breach, plan, watch, unknown). Each holding
   carries kind: broad_index, narrow_index, fund or stock.
@@ -289,7 +299,7 @@ Write:
   when) in `when`, and the refs of the findings. Otherwise an empty list.
 - portfolio {text, refs, principles}: 2-3 sentences, the household's investment strategy for its stocks as a
   private banker would set it: the target structure (core and satellite) the principles imply for this
-  household, which policy_checks are breached and the concrete steps to fix them in order (which holdings to
+  household, which policy_checks its present situation argues to adjust first and the concrete steps, in order (which holdings to
   trim or add, where the money goes, over what period), and whether to buy more, rotate or move money to
   other assets now. Join concentration, the goal dates (glide plan), the client's risk preference, taxes
   and the market and company findings. principles: the 2-5 principle ids the strategy rests on.
@@ -675,7 +685,7 @@ def holdings_payload(view: Any, data: dict[str, Any]) -> dict[str, Any]:
     plan = data["advice"].get("concentration")
     return {"holdings": positions,
             "principles": [{"id": p.id, "investor": p.investor, "title": p.title, "principle": p.principle,
-                            "apply": p.apply} for p in principles.LIBRARY],
+                            "apply": p.apply} for p in principles.relevant(data)],
             "policy_checks": [{"key": c.key, "title": c.title, "standard": c.standard, "current": c.current,
                                "status": c.status, "principles": list(c.principles)} for c in data.get("policy", [])],
             "portfolio_facts": {
@@ -817,6 +827,8 @@ MEMOS = {"no-source": "출처가 확인되지 않은 외부 사실이 들어 있
          "unknown-ref": "확인되지 않은 출처 표시가 있어 그 링크는 뺐습니다.",
          "parentheses": "한 문장에 괄호 설명이 여럿 들어가 읽기 어려울 수 있습니다.",
          "vague-term": "무엇이 얼마나인지 밝히지 않은 표현이 남아 있습니다.",
+         "law-tone": "투자 원칙은 법이 아니라 출처가 있는 투자자들의 관점이며, 판단은 고객님의 상황과 여건에 따른 것입니다. 원칙을 "
+                     "어겼다고 쓴 문장은 뺐습니다.",
          "ungrounded-number": "원장이나 출처에서 확인되지 않은 수치가 있습니다"}
 # Blocks dropped for these reasons are never restored: they are unusable for the client.
 UNUSABLE = ("duplicate", "invalid-holding", "add-over-limit", "missing-opinion", "internal-term")
@@ -836,9 +848,15 @@ def restore(verified: dict[str, Any], dropped: list[str], raw: dict[str, Any]) -
         memo = MEMOS.get(reason, "")
         if reason == "ungrounded-number" and detail:
             memo += f"({detail[0]})."
+        # A block written in law tone comes back without those sentences (fail closed, review 2026-10-20); an
+        # empty remainder stays dropped.
+        fix = neutralize_law_tone if reason == "law-tone" else (lambda text: text)
         if path in SCALAR_BLOCKS:
             block = raw[path]
-            out[path] = {**block, "text": readable(block["text"]), "refs": list(block["refs"])}  # Unknown refs: no link.
+            text = fix(readable(block["text"]))
+            if not text:
+                continue
+            out[path] = {**block, "text": text, "refs": list(block["refs"])}  # Unknown refs: no link.
             memos[path] = memo
             continue
         field, index = path.split("[")[0], int(path.split("[")[1].rstrip("]"))
@@ -852,7 +870,9 @@ def restore(verified: dict[str, Any], dropped: list[str], raw: dict[str, Any]) -
             continue
         for name in _PROSE_FIELDS:
             if name in item:
-                item[name] = readable(item[name])
+                item[name] = fix(readable(item[name]))
+        if reason == "law-tone" and not any(item.get(name) for name in ("body", "reason", "context", "item", "why")):
+            continue
         item["memo"] = memo
         out[field].append(item)
         if field == "proposal_notes":
@@ -934,6 +954,23 @@ _TAGS = re.compile(r"\s*\((?:스트레스 테스트|전망|고객님 말씀 기�
 # Developer vocabulary that must never reach the client (checked by code; the block is deleted).
 # Words that name a category where the thing itself is known (user review 2026-10-18: "나쁜 일이 겹치는 한 해"
 # left the client asking what and whether it can happen). A block using one is rewritten once.
+# A sentence that treats a principle or a standard as law the client broke (user feedback 2026-10-20: investing has
+# no single right answer; frame as sourced views plus what is reasonable for this household now): it names a
+# principle, standard or limit and says it is violated. "계약 위반" or "계획과 어긋난 지출" are not that (review 2026-10-20).
+LAW_SUBJECTS = ("원칙", "투자 기준", "우리 집 기준", "한도", "규정", "기준에", "기준을", "룰")
+LAW_VERBS = ("위반", "위배", "어긋", "에 반하", "을 깨", "를 깨")
+_LAW_SUBJECT = re.compile("|".join(re.escape(term) for term in LAW_SUBJECTS))
+_LAW_VERB = re.compile("|".join(re.escape(term) for term in LAW_VERBS))
+
+
+def law_tone(sentence: str) -> bool:
+    """Whether one sentence calls a principle, standard or limit violated."""
+    return bool(_LAW_SUBJECT.search(sentence) and _LAW_VERB.search(sentence))
+
+
+def neutralize_law_tone(text: str) -> str:
+    """The text without its law-tone sentences (fail closed: a dropped sentence is better than a verdict)."""
+    return " ".join(s for s in _SENTENCE_END.split(text) if s and not law_tone(s)).strip()
 VAGUE_TERMS = ("나쁜 일", "나쁜 한 해", "안 좋은 일", "악재가 겹", "악재가 한꺼번에", "악재가 동시에", "여러 악재", "위기가 겹",
                "충격이 겹", "충격이 한꺼번에", "나쁜 상황", "최악의 상황")
 _VAGUE = re.compile("|".join(re.escape(term) for term in VAGUE_TERMS))
@@ -998,6 +1035,8 @@ def style_problem(texts: list[str]) -> str | None:
     if _VAGUE.search(joined):
         return "vague-term"
     for sentence in _SENTENCE_END.split(joined):
+        if law_tone(sentence):
+            return "law-tone"
         if len(_PAREN.findall(sentence)) >= 2:
             return "parentheses"
     return None
@@ -1046,6 +1085,8 @@ _REASONS = {"unknown-ref": "cites a ref that is not in the input",
             "internal-term": "uses developer vocabulary (JSON, owner_id, record_id, payload, schema, refs, 자동 점검 메모) "
                              "in the client's prose",
             "parentheses": "puts two or more parentheses in one sentence; fold the qualifier into the sentence",
+            "law-tone": "treats a principle or standard as law the client broke (위반, 위배, 어긋남); write whose view it is "
+                        "(a consensus only when several investors agree) and what is reasonable for this household now",
             "vague-term": "names a category (나쁜 일, 악재가 겹치는, 위기) instead of the event and its size; write what "
                           "happens and how much (금리 1.5%p 상승, 소득 12개월 중단, 주가 30% 하락), and for the stress "
                           "scenario that it happened in 2022 (sector_metrics.stress.precedent)",

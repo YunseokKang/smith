@@ -280,6 +280,25 @@ class NarrativeRuleTests(Upgrade):
         self.assertIsNone(narrative.style_problem(["변동금리(설명) 대출을 봅니다. LTV(비율)도 봅니다."]))
         # A category instead of the event is rewritten (user review 2026-10-18); the named event passes.
         self.assertEqual(narrative.style_problem(["나쁜 일이 겹치는 한 해를 현금으로 버티지 못합니다."]), "vague-term")
+        # A principle is a sourced view, not law (user feedback 2026-10-20): a sentence calling a principle, standard
+        # or limit violated is rewritten once, then removed; "계약 위반" and "계획과 어긋난 지출" are not that (review).
+        self.assertEqual(narrative.style_problem(["삼성전자 비중은 한 종목 한도 원칙을 위반하고 있습니다."]), "law-tone")
+        self.assertEqual(narrative.style_problem(["지금 비중은 우리 집 기준에 어긋나 있습니다."]), "law-tone")
+        self.assertIsNone(narrative.style_problem(["임대인의 계약 위반이 있으면 보증금 반환을 청구할 수 있습니다."]))
+        self.assertIsNone(narrative.style_problem(["계획과 어긋난 지출이 지난달 120만 원이었습니다."]))
+        self.assertIsNone(narrative.style_problem(["버핏은 비전문가에게 지수펀드를 권하며, 지금 고객님의 여건에서는 "
+                                                   "비중을 줄이는 판단이 합리적이라 봅니다."]))
+        self.assertEqual(narrative.neutralize_law_tone("비중은 39%입니다. 이는 한 종목 한도 원칙을 위반합니다. 분기마다 줄이시길 권합니다."),
+                         "비중은 39%입니다. 분기마다 줄이시길 권합니다.")
+        self.assertEqual(narrative.neutralize_law_tone("한도 원칙에 어긋납니다."), "")
+        from smith import adviser
+        advice = {"recommendation": {"summary": "비중을 줄이십시오. 한 종목 한도 원칙을 위반하고 있습니다.", "rationale": "r"},
+                  "alternatives": [{"name": "a", "pros": ["투자 기준에 어긋나는 상태를 고칩니다."], "cons": []}], "data_limitations": []}
+        cleaned = adviser.without_law_tone(advice)
+        self.assertEqual(cleaned["recommendation"]["summary"], "비중을 줄이십시오.")
+        self.assertEqual(cleaned["alternatives"][0]["pros"], [])
+        self.assertIn("원칙을 어겼다고 쓴 문장은 뺐습니다", cleaned["data_limitations"][0])
+        self.assertEqual(adviser.without_law_tone({"data_limitations": [], "x": "그대로"})["data_limitations"], [])
         self.assertIsNone(narrative.style_problem(["금리 1.5%p 상승과 소득 12개월 중단이 함께 오면 2.7개월을 버팁니다."]))
         data = self.report("overview")
         payload = narrative.build_payload(data["view"], data, None)

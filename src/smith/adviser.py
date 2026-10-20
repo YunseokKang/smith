@@ -11,7 +11,7 @@ from typing import Any
 from smith import headless
 from smith.headless import HEADLESS_ENV, HeadlessError as AdviserError, find_claude  # noqa: F401 - re-exported
 
-PROMPT_VERSION = "advice-v9"  # v9: concrete words; v8: after-tax placement rule (financial-income threshold).
+PROMPT_VERSION = "advice-v10"  # v10: principles are consensus, not law; v9: concrete words.
 # The household uses a flat-rate subscription and asked for the most capable reasoning model
 # (2026-10-05). Fable runs about 2.5x the notional cost of Opus; the cap only bounds a runaway call.
 DEFAULT_MODEL = "fable"
@@ -54,6 +54,10 @@ judgement and clear priorities, not jargon. The client is not a finance expert: 
 picture, say why it matters for this household in won, explain any difficult financial term in a
 short parenthesis every time it appears, and use concrete examples. Name the event and its size, never a vague
 category: not "나쁜 일이 겹치면" or "악재" but "금리 1.5%p 상승과 소득 12개월 중단이 함께 오면" or "주가 30% 하락".
+Investment principles are sourced views of experienced investors, not law, and this is one family's money: never
+say the client violates or breaches a principle or limit (위반, 위배, 어긋남); say whose view it is (a consensus only
+where several investors agree) and what is reasonable for this household in its present situation and
+circumstances, naming a differing view where one exists.
 
 Input: a question and a context JSON. All amounts are whole KRW strings computed by deterministic code.
 - Use only numbers that appear in the context. Do not invent balances, rates, prices or tax rules.
@@ -124,7 +128,33 @@ def run_adviser(question: str, context: dict[str, Any], *, executable: Path, bud
     unknown = unknown_refs(advice, context)
     if unknown:
         raise AdviserError("unknown-refs", ", ".join(sorted(set(unknown))[:10]))
+    advice = without_law_tone(advice)
     return {"advice": advice, "cost_usd": cost, "prompt_version": PROMPT_VERSION, "model": model or "default"}
+
+
+def without_law_tone(advice: dict[str, Any]) -> dict[str, Any]:
+    """The advice with every sentence that calls a principle or limit violated removed (fail closed, the same rule
+    as the report's narrative) and, when any was, a data limitation saying so."""
+    from smith import narrative
+
+    changed = False
+
+    def clean(value: Any) -> Any:
+        nonlocal changed
+        if isinstance(value, str):
+            fixed = narrative.neutralize_law_tone(value)
+            changed = changed or fixed != value
+            return fixed
+        if isinstance(value, list):
+            return [c for c in (clean(v) for v in value) if c != ""]   # A sentence removed whole leaves no item.
+        if isinstance(value, dict):
+            return {k: clean(v) for k, v in value.items()}
+        return value
+    out = clean(advice)
+    if changed:
+        out["data_limitations"] = list(out.get("data_limitations", [])) + [
+            "투자 원칙을 어겼다고 쓴 문장은 뺐습니다. 원칙은 법이 아니라 출처가 있는 투자자들의 관점이며, 판단은 고객님의 상황과 여건에 따릅니다."]
+    return out
 
 
 _validated_cost = headless.validated_cost

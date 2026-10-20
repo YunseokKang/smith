@@ -230,7 +230,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(checks["core"].current, "0.0%")
         _, html = render(data)
         self.assertIn("투자 원칙과 우리 집 투자 기준", html)
-        self.assertIn("어긋남", html)
+        self.assertIn("조정 권장", html)
 
     def test_holdings_review_edges_from_the_review(self):
         """Securities without a symbol are part of the stocks; one instrument per (market, symbol, currency,

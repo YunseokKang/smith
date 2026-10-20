@@ -385,30 +385,36 @@ ISA)뿐이며, 조사는 시장 수준("미국 대형 기술주")에 그쳐 개�
   그 금액이 한도를 넘을 때, 지수 비중은 그 금액을 모두 지수로 쳐야 기준을 넘을 때.
 - 원칙마다 출처가 여러 개일 수 있다(문서·위치·URL 쌍). "깊이 이해한다는 근거가 없으면 지수 쪽"은 버핏의 단일 원칙이 아니라
   Smith의 정책 해석으로 표시한다.
-- 모델은 주식 전체 전략(코어·위성 구조, 어긋난 기준을 고치는 순서와 기간, 지금 더 살지·갈아탈지·다른 자산으로 옮길지)과
+- 모델은 주식 전체 전략(코어·위성 구조, 조정을 검토할 기준의 순서와 기간, 지금 더 살지·갈아탈지·다른 자산으로 옮길지)과
   종목 의견마다 원칙 id를 인용한다. 한도를 넘은 종목의 추가 매수와 가격 전망만을 근거로 한 의견은 프롬프트로 막는다.
 
 ### 13.4 표시
 월요판: "투자 원칙과 우리 집 투자 기준"(기준표 → Smith의 투자 전략과 근거 원칙 → 이번 보고에 쓴 원칙과 출처) 다음에
-"보유 종목 점검"(종목 표에 펀드 구분, 의견 카드에 근거 원칙 링크). 목요판: 어긋난 기준만 한 줄씩.
+"보유 종목 점검"(종목 표에 펀드 구분, 의견 카드에 근거 원칙 링크). 목요판: 조정을 검토할 기준만 한 줄씩.
 
 ### 13.5 한계
 기준의 숫자(25%, 50%, 6개월)는 가정이다. 버핏의 "아는 투자자의 집중"과 "비전문가는 지수펀드"처럼 원칙끼리 긴장이 있으며,
 Smith는 고객이 회사를 깊이 이해한다는 근거가 없으면 지수 쪽을 기본으로 둔다. 원칙의 요약은 사람이 원문과 대조해 검토해야 한다.
 
-## 9. 출처
+### 13.6 원칙은 법이 아니다 (사용자 요구, 2026-10-20)
 
-- SEC, [A Plain English Handbook](https://www.sec.gov/pdf/handbook.pdf); [SEC plain English rule (1998)](https://www.sec.gov/newsroom/press-releases/98-10-sec-adopts-rule-requiring-plain-english-prospectuses)
-- [BLUF (communication)](https://en.wikipedia.org/wiki/BLUF_(communication)), [Minto Pyramid Principle](https://www.betterup.com/blog/minto-pyramid)
-- CFP Board, [Practice Standards Reference Guide](https://www.cfp.net/-/media/files/cfp-board/standards-and-ethics/compliance-resources/practice-standards-reference-guide.pdf); [Kitces 해설](https://www.kitces.com/blog/definition-financial-planning-practice-standards-conduct-required-cfp-board/)
-- 금융위원회, [금융소비자보호법](https://www.fsc.go.kr/po0201101/76243)
-- Gigerenzer, [What are natural frequencies?](http://library.mpib-berlin.mpg.de/ft/gg/gg_what_2011.pdf)
-- NBER, [Myopic Loss Aversion and Investment Decisions](https://www.nber.org/system/files/working_papers/w28730/w28730.pdf)
-- [FinCon (NeurIPS 2024)](https://proceedings.neurips.cc/paper_files/paper/2024/file/f7ae4fe91d96f50abc2211f09b6a7e49-Paper-Conference.pdf), [TradingAgents](https://arxiv.org/abs/2412.20138)
-- [On the Self-Verification Limitations of LLMs (ICLR 2025)](https://proceedings.iclr.cc/paper_files/paper/2025/file/f3c5e56274140e0420baa3916c529210-Paper-Conference.pdf), [VeriFin](https://arxiv.org/html/2608.10213)
-- [AI Financial Advice: Supply, Demand, and Life Cycle Implications](https://arxiv.org/pdf/2608.01607), [Using LLMs for Financial Advice](https://www.researchgate.net/publication/388904444_Using_Large_Language_Models_for_Financial_Advice)
-- 시각화: dataviz 지침(형태 선택, 강조형, 단일 축, 표 동반, 색 검증), [Gmail CSS 지원](https://developers.google.com/workspace/gmail/design/css)
-- CFA Institute, [Performance Attribution literature review](https://rpc.cfainstitute.org/sites/default/files/-/media/documents/book/rf-lit-review/2019/rflr-performance-attribution.pdf)
+독서 목록을 반영하면서 사용자가 못 박은 것: 책을 쓴 이들도 유능한 투자자·학자이지만 투자와 재테크에 정답은 없고, 이것은 개인 재정이다.
+"이 조항을 위반한다, 이 원칙에 위배된다"로 쓰지 말고 **"전문가들의 의견이 일치하는 부분은 …이고, 지금의 상태와 개인적 상황·여건에서는
+… 판단이 합리적이라 본다"**로 쓸 것.
+
+- 지침: 서술 원칙 7(`narrative-v18`, 머리글 "Eight principles of the writing"), 자문(`advice-v10`), 메일 답변(`mail-answer-v13`). 두 단계
+  틀(누구의 관점인지 → 이 가구에서 합리적인 판단), 견해가 갈리는 곳은 한 절로 밝힘, `policy_checks`의 기준은 검토할 가정이지 고객이 어긴
+  규칙이 아님. 리뷰(2026-10-20)로 바로잡은 표현: 원칙은 "전문가들의 합의"가 아니라 **출처가 있는 한 투자자의 관점**이며, "전문가들의 의견이
+  대체로 일치한다"는 서로 다른 투자자의 원칙 여럿이 같은 말을 할 때만 쓰고 아니면 투자자 이름으로 쓴다("버핏은 …라고 봅니다").
+- 검사(`narrative.law_tone`): 한 문장 안에 원칙·투자 기준·우리 집 기준·한도·규정 같은 **주어**와 위반·위배·어긋·에 반하·깨 같은 **서술**이
+  함께 있을 때만 `law-tone`이다("계약 위반", "계획과 어긋난 지출"은 아님, 리뷰 오탐 지적). 한 번 다시 쓰게 하고, 남으면 그 문장을 지운다
+  (`neutralize_law_tone`, fail-closed: 블록이 비면 싣지 않고, 메모는 "원칙을 어겼다고 쓴 문장은 뺐습니다"). 자문 출력도 같은 처리
+  (`adviser.without_law_tone`, 지운 문장이 있으면 data_limitations에 한 줄).
+- 입력(`principles.relevant`): 서술·답변 입력에 라이브러리 전체(33개)를 보내지 않고, 조정 권장 점검의 근거 원칙 → 모든 점검의 근거 →
+  기본 순서로 12개(`RELEVANT_DEFAULT`)까지 고른 뒤, 포함된 원칙의 반대 관점(`OPPOSING`: 아는 투자자의 집중↔지수펀드, 물타기 금지↔지수 적립,
+  공황에 팔지 않기↔떨어졌다고 더 사지 않기 …)을 더해 최대 16개(`RELEVANT_MAX`). 고용주 주식이 있으면 집중 관련 원칙을 앞세운다.
+- 코드 문구: 기준표 판정 "어긋남" → **"조정 권장"**, 머리말 "경험 많은 투자자들이 공개한 투자 원칙을 우리 집 기준으로 옮겼습니다. 법이 아니라
+  출처가 있는 관점이자 판단의 출발점이며 …", 요약 "검토 n개". 목요판 "지금 상황에서 조정을 검토할 항목만". 상태 코드(`breach` 등)는 그대로다.
 
 ### 13.7 고객의 독서 목록 반영 (사용자 요구, 2026-10-20)
 

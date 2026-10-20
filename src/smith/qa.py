@@ -36,7 +36,7 @@ from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import check_outbound, mask_identifiers
 from smith.report_data import build_report
 
-PROMPT_VERSION = "mail-answer-v12"  # v12: warm service tone, no promises of changes; v11: narrative principle 1.
+PROMPT_VERSION = "mail-answer-v13"  # v13: principles are consensus, not law; v12: warm service tone.
 MODEL = "fable"
 BUDGET_USD = "3.00"
 TIMEOUT_SECONDS = 600
@@ -100,7 +100,9 @@ report_notes and report_principles: what the report mail no longer prints (its s
 memos, data coverage and freshness, assumptions, the AI stages) and the investment principles it applied,
 each with its source. When the client asks why Smith judged, proposed or rated something ("왜 이렇게
 판단했어?"), answer from these and the report's figures: name the reason, the assumption and the data
-limit behind it, in the client's words, and cite the principle by investor and title when one applies.
+limit behind it, in the client's words, and cite the principle by investor and title when one applies, as that
+investor's view (a consensus only where several agree) that Smith judged reasonable for this household's situation,
+never as a rule the client broke (writing principle 7).
 
 remember: up to 3 facts the client states in client_question that Smith should keep for later reports and
 answers: what a name or nickname refers to, residence periods, plans and their dates, consents, family

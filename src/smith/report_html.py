@@ -1477,9 +1477,13 @@ def _holdings_lead(review: dict[str, Any], sec: dict[str, Any], opined: bool) ->
     lead = ""
     if positions:
         top = positions[0]
+        stocks, tiny = principles.stock_count(positions)
+        # How many individual companies, shown not judged (review 2026-10-20 replaced the "follow" check); in the
+        # first sentence, so the two-sentence brief keeps the opinion note below.
+        count = (f", 개별 종목은 {stocks}개" + (f"(1% 미만 {tiny}개)" if tiny else "")) if stocks else ""
         lead = (f"보유 종목 {len(positions)}개 {_short(review['total'])} 가운데 가장 큰 종목({escape(str(top['name']))})이 "
                 f"<b>{_pct(review['top1_share'])}</b>, 상위 5개가 <b>{_pct(review['top5_share'])}</b>이고 해외 상장 비중은 "
-                f"{_pct(review['overseas_share'])}입니다.")
+                f"{_pct(review['overseas_share'])}{count}입니다.")
     if not opined:  # Second, so the two-sentence lead still explains an empty opinion column.
         lead += " 이번에는 종목별 의견을 만들지 못해 숫자만 보여 드립니다."
     employer = [p for p in positions if p.get("employer")]
@@ -1507,7 +1511,8 @@ def _named(position: dict[str, Any]) -> str:
     return str(position["name"]) + ("" if kind == "stock" else f" ({principles.KIND_LABELS[kind]})")
 
 
-CHECK_STATUS = {"ok": ("●", "충족", "#05b169"), "breach": ("■", "어긋남", "#cf202f"), "plan": ("▲", "계획 있음", "#b27b00"),
+# A standard is an assumption to review, not a rule the client broke (user feedback 2026-10-20): "조정 권장", not 어긋남.
+CHECK_STATUS = {"ok": ("●", "충족", "#05b169"), "breach": ("■", "조정 권장", "#cf202f"), "plan": ("▲", "계획 있음", "#b27b00"),
                 "watch": ("▲", "확인 필요", "#b27b00"), "unknown": ("○", "판단 불가", MUTED)}
 
 
@@ -1523,7 +1528,7 @@ def _policy(data: dict[str, Any], story: dict[str, Any], full: bool) -> str:
             return ""
         rows = "".join(f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin:4px 0">· {_check_status(c.status)} '
                        f'<b style="font-weight:600;color:{INK}">{escape(c.title)}</b> — {escape(c.current)}</div>' for c in off)
-        return _section("투자 기준 점검", "우리 집 투자 기준에서 벗어난 항목만 보여 드립니다. 원칙과 근거는 월요 보고에 있습니다.", rows)
+        return _section("투자 기준 점검", "지금 상황에서 조정을 검토할 항목만 보여 드립니다. 원칙과 근거는 월요 보고에 있습니다.", rows)
     table = _table(["기준", "우리 집 기준", "지금", "판정"],
                    [[c.title, c.standard, c.current, Raw(_check_status(c.status))] for c in checks])
     view = ""
@@ -1535,11 +1540,11 @@ def _policy(data: dict[str, Any], story: dict[str, Any], full: bool) -> str:
                 f'{_sources(story.get("portfolio_links") or [])}</div>')
     # The principles' quotations and sources no longer print in the mail (report design §18.1): they stay in
     # the report's data for the e-mail answers ("왜 이렇게 판단했어?"), and the opinion cards keep short links.
-    lead = ("전설적인 투자자들의 공개된 원칙을 우리 집 투자 기준으로 바꿨습니다. 기준의 숫자는 Smith의 가정이며 고객님 성향에 맞게 "
-            "조정할 수 있습니다. 어긋난 항목부터 고치는 것이 순서입니다.")
+    lead = ("경험 많은 투자자들이 공개한 투자 원칙을 우리 집 기준으로 옮겼습니다. 법이 아니라 출처가 있는 관점이자 판단의 출발점이며, "
+            "기준의 숫자는 Smith의 가정이라 고객님 사정에 맞게 조정할 수 있습니다. 조정 권장 항목부터 보시는 것이 순서입니다.")
     off = sum(1 for c in checks if c.status in ("breach", "plan", "watch"))
     return _section("투자 원칙과 우리 집 투자 기준", lead, table + view,
-                    note=escape(f"{len(checks)}개 기준 · 어긋남·확인 {off}개" if off else f"{len(checks)}개 기준 모두 충족"))
+                    note=escape(f"{len(checks)}개 기준 · 검토 {off}개" if off else f"{len(checks)}개 기준 모두 충족"))
 
 
 def _check_status(status: str) -> str:
