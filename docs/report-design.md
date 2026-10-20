@@ -360,11 +360,12 @@ ISA)뿐이며, 조사는 시장 수준("미국 대형 기술주")에 그쳐 개�
 (1) 우리 집 투자 기준(투자 정책)으로 바꾸고, (2) 종목 의견과 주식 전체 전략이 그 원칙에 근거하게 한다.
 
 ### 13.2 자료 원칙
-- 저자·발행처가 무료 공개한 1차 자료만 쓴다: Berkshire Hathaway 주주서한(1987·1993·1996·2013·2017), Stripe Press의
+- 저자·발행처가 무료 공개한 1차 자료만 쓴다: Berkshire Hathaway 주주서한(1987·1992·1993·1996·2013·2017), Stripe Press의
   『Poor Charlie's Almanack』 무료 온라인판, Oaktree의 Howard Marks 메모(2001·2003), Vanguard 투자 원칙, Bridgewater
-  'The All Weather Story'(2012), PBS FRONTLINE Peter Lynch 인터뷰. 무단 복제 PDF(예: 인터넷 아카이브의 책 PDF)는 쓰지 않는다.
+  'The All Weather Story'(2012), PBS FRONTLINE Peter Lynch 인터뷰, Franklin Templeton의 '16 Rules' 브로슈어, Project
+  Gutenberg의 『Reminiscences of a Stock Operator』(1923, 저작권 만료). 무단 복제 PDF(예: 인터넷 아카이브의 책 PDF)는 쓰지 않는다.
 - 책 본문을 저장하지 않는다. 원칙은 Smith의 한국어 요약이며 문서·위치(쪽, 장)·URL을 붙인다. 원칙 라이브러리는 코드 변경
-  (사람 검토)으로만 바뀌고 모델 출력으로 바뀌지 않는다(`src/smith/principles.py`, 21개).
+  (사람 검토)으로만 바뀌고 모델 출력으로 바뀌지 않는다(`src/smith/principles.py`, 33개).
 
 ### 13.3 파이프라인
 ```
@@ -374,7 +375,9 @@ ISA)뿐이며, 조사는 시장 수준("미국 대형 기술주")에 그쳐 개�
 ```
 - 투자 기준 점검(코드, 고치는 순서): ① 비상금이 먼저(월 지출 6개월, 가정) ② 빚으로 주식을 들고 있지 않기(신용성 대출이 있으면
   "확인 필요") ③ 3년 안 목표 자금은 주식 밖에(§12.4 전환 계획) ④ 한 회사가 주식의 25% 이하(가정) ⑤ 핵심은 넓은 저비용
-  지수펀드, 주식의 50% 이상(가정). 판정: 충족·어긋남·계획 있음·확인 필요·판단 불가.
+  지수펀드, 주식의 50% 이상(가정). 판정: 충족·조정 권장·계획 있음·확인 필요·판단 불가. 보유 개별 종목 수(1% 미만 병기,
+  `principles.stock_count`)는 기준이 아니라 보유 종목 점검 머리말에 표시만 한다(리뷰 2026-10-20: 몇 개를 따라갈 수 있는지는 고객의
+  판단이지 Smith의 기준이 아니라서, 점검 ⑥ "개별 종목 수"는 뺐다).
 - 종목 구분(`holdings.kind`): 넓은 지수펀드(VOO, SPY, IVV, SPYM(구 SPLG), VTI, VT, KODEX 200 등 명시 목록), 좁은
   지수펀드(QQQ 등), 기타 펀드·ETF(SCHD, JEPQ, 국내 ETF 브랜드 이름), 개별 종목. 목록은 검토 가능한 명시 목록이며 보유가
   바뀌거나 공급자가 심볼을 바꾸면 늘린다.
@@ -392,6 +395,41 @@ ISA)뿐이며, 조사는 시장 수준("미국 대형 기술주")에 그쳐 개�
 ### 13.5 한계
 기준의 숫자(25%, 50%, 6개월)는 가정이다. 버핏의 "아는 투자자의 집중"과 "비전문가는 지수펀드"처럼 원칙끼리 긴장이 있으며,
 Smith는 고객이 회사를 깊이 이해한다는 근거가 없으면 지수 쪽을 기본으로 둔다. 원칙의 요약은 사람이 원문과 대조해 검토해야 한다.
+
+## 9. 출처
+
+- SEC, [A Plain English Handbook](https://www.sec.gov/pdf/handbook.pdf); [SEC plain English rule (1998)](https://www.sec.gov/newsroom/press-releases/98-10-sec-adopts-rule-requiring-plain-english-prospectuses)
+- [BLUF (communication)](https://en.wikipedia.org/wiki/BLUF_(communication)), [Minto Pyramid Principle](https://www.betterup.com/blog/minto-pyramid)
+- CFP Board, [Practice Standards Reference Guide](https://www.cfp.net/-/media/files/cfp-board/standards-and-ethics/compliance-resources/practice-standards-reference-guide.pdf); [Kitces 해설](https://www.kitces.com/blog/definition-financial-planning-practice-standards-conduct-required-cfp-board/)
+- 금융위원회, [금융소비자보호법](https://www.fsc.go.kr/po0201101/76243)
+- Gigerenzer, [What are natural frequencies?](http://library.mpib-berlin.mpg.de/ft/gg/gg_what_2011.pdf)
+- NBER, [Myopic Loss Aversion and Investment Decisions](https://www.nber.org/system/files/working_papers/w28730/w28730.pdf)
+- [FinCon (NeurIPS 2024)](https://proceedings.neurips.cc/paper_files/paper/2024/file/f7ae4fe91d96f50abc2211f09b6a7e49-Paper-Conference.pdf), [TradingAgents](https://arxiv.org/abs/2412.20138)
+- [On the Self-Verification Limitations of LLMs (ICLR 2025)](https://proceedings.iclr.cc/paper_files/paper/2025/file/f3c5e56274140e0420baa3916c529210-Paper-Conference.pdf), [VeriFin](https://arxiv.org/html/2608.10213)
+- [AI Financial Advice: Supply, Demand, and Life Cycle Implications](https://arxiv.org/pdf/2608.01607), [Using LLMs for Financial Advice](https://www.researchgate.net/publication/388904444_Using_Large_Language_Models_for_Financial_Advice)
+- 시각화: dataviz 지침(형태 선택, 강조형, 단일 축, 표 동반, 색 검증), [Gmail CSS 지원](https://developers.google.com/workspace/gmail/design/css)
+- CFA Institute, [Performance Attribution literature review](https://rpc.cfainstitute.org/sites/default/files/-/media/documents/book/rf-lit-review/2019/rflr-performance-attribution.pdf)
+
+### 13.7 고객의 독서 목록 반영 (사용자 요구, 2026-10-20)
+
+고객이 "골드만삭스 필독서"로 알려진 목록(16권이라 했으나 11권을 전달)을 주며 Smith도 공부해 재무 결정에 고려하라고 했다. 13.2의
+자료 원칙(무료 1차 자료만, 책 본문 저장 금지)을 지키며 **같은 저자의 무료 1차 자료로 뒷받침되는 원칙만** 라이브러리에 더했다
+(12개, 21→33). 이 목록이 골드만삭스가 공식 발표한 것인지는 확인하지 못했다(인터넷에 널리 도는 목록). 원칙의 쓰임은 13.6을 따른다.
+
+| 책 | 처리 | 근거 자료 |
+|---|---|---|
+| 『현명한 투자자』(그레이엄) | `GRA-MOS` 안전마진 | 버핏 1992 주주서한이 그레이엄의 원칙을 인용(원서 무료판 없음) |
+| 『워런 버핏의 주주 서한』 | 이미 라이브러리의 주 출처(BUF-*) | Berkshire 주주서한 |
+| 『투자의 대가들』(트레인) | 템플턴 4개(`TEMP-VALUE`·`TEMP-INVEST`·`TEMP-NO-PANIC`·`TEMP-DIVERSIFY`) | Franklin Templeton 브로슈어(16원칙, World Monitor 1993; 이미지 PDF라 제목과 널리 전재된 설명문으로 요약). 리뷰(2026-10-20)로 10·13번 문구를 원문에 맞춤: "팔 때는 폭락 전이며, 폭락 뒤에는 더 매력적인 종목이 없으면 보유"(더 사라는 말이 아님), "시장을 이기는 것은 어려운 일"(대개 실패한다는 말이 아님). 필립 피셔·T. 로 프라이스는 무료 1차 자료가 없어 보류 |
+| 『월가의 영웅』(린치) | `LYNCH-FEW-WINNERS`·`LYNCH-NO-TIPS`·`LYNCH-FLOWERS` + 보유 종목 점검 머리말의 개별 종목 수(점검 ⑥은 리뷰에서 뺌, §13.3) | PBS 인터뷰(1996). 책 본문은 쓰지 않음 |
+| 『어느 주식투자자의 회상』(르페브르) | `LIV-SIT`·`LIV-NO-AVERAGE-DOWN`·`LIV-TIPS`·`LIV-EMOTIONS` | Project Gutenberg #60979(저작권 만료), 장 번호 인용. 적용 문구에 "투기자의 규율을 장기 투자 가구에 맞게 옮긴 Smith의 해석"을 명시 |
+| 『비주얼 인베스터』(머피, 기술적 분석) | **채택하지 않음** | 차트·추세로 사고파는 접근은 BUF-NO-MACRO·BUF-MR-MARKET·TEMP-VALUE와 충돌. 리버모어의 "너무 높아서 못 살 주식은 없다"(10장)도 같은 이유로 제외 |
+| 『연방준비제도의 비밀』(그라이더) | 원칙 없음(배경) | 금리 경로는 이미 ECOS·FRED 증거와 조사 단계가 다룸(BUF-NO-MACRO: 전망이 아니라 우리 집 숫자에 닿는 경로로만) |
+| 『월스트리트의 이해』『글로벌 은행가들』『모건 가문의 역사』『월스트리트의 탐욕과 영광』 | 원칙 없음(역사·입문서) | 가구 결정에 바로 쓰는 원칙이 없음 |
+
+긴장 관계는 적용 문구로 가른다: `LIV-NO-AVERAGE-DOWN`(개별 종목 물타기 금지)과 `BUF-DCA`(지수 적립)는 대상이 다르고, `TEMP-NO-PANIC`·
+`BUF-MR-MARKET`(급락 때 팔지 않기)과 `LIV-NO-AVERAGE-DOWN`(떨어졌다고 더 사지 않기)은 "팔지도 더 사지도 않고 계획대로"로 읽는다.
+이 쌍들은 `principles.OPPOSING`에 적혀 서술 입력에 함께 간다(§13.6). 나머지 5권을 주면 같은 기준으로 검토한다.
 
 ## 9. 출처
 
