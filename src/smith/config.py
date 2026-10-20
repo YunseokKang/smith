@@ -25,8 +25,11 @@ KNOWN_KEYS = {
     "backup": {"dir", "keep"},
 }
 # `lease_exit`: how the client plans to return a lease deposit on this home ("relet": a new tenant, the default;
-# "sell": the home is sold when the lease ends, client e-mail 2026-10-19).
-PROPERTY_KEYS = {"lawd_cd", "dong", "apt_name", "exclusive_area_m2", "acquired_year", "acquired_price", "lease_exit"}
+# "sell": the home is sold when the lease ends, client e-mail 2026-10-19). `residence_years`: whole years the
+# owner's household has lived in the home (client e-mail 2026-10-21): with two or more, and two years held, the
+# one-home exemption is the figure the reports lead with.
+PROPERTY_KEYS = {"lawd_cd", "dong", "apt_name", "exclusive_area_m2", "acquired_year", "acquired_price", "lease_exit",
+                 "residence_years"}
 # `[targets."<key>"]`: the complexes the household may move to (report design §18.3). Same official-data
 # matching as a property, plus a label for the report, a region (city/district) for research questions, and
 # a reference price (an asking or sale-launch price the client enters) for a complex with no recorded trades.

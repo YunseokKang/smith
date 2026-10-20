@@ -159,7 +159,7 @@ def facts(view: LedgerView, today: date, household: dict[str, Any] | None) -> di
         "home_records": [{"record_id": r.record_id, "owner": r.owner_id, "value": base_amount(view, r),
                           "occupancy": r.fields.get("occupancy"),
                           **{k: (household.get("properties") or {}).get(r.record_id, {}).get(k)
-                             for k in ("acquired_year", "acquired_price")}}
+                             for k in ("acquired_year", "acquired_price", "residence_years")}}
                          for r in view.records if r.kind is Kind.ASSET and r.fields["category"] == "real_estate"],
         "premiums": [(base_amount(view, r), r.fields["frequency"], r.fields["start_date"]) for r in view.records
                      if r.kind is Kind.CASHFLOW and r.fields["category"] == "insurance_premium"],
@@ -318,6 +318,19 @@ def notes(t: dict[str, Any], guards: list[tuple[str, dict[str, Any]]] = ()) -> l
                  f"{short_won(general['total'])}(지방소득세 포함)입니다. 세대의 주택 수, 정확한 취득일과 실제 거주 기간에 따라 "
                  "이 범위 안에서 달라지며, 보유·거주가 1년 늘 때마다 1주택 공제가 8%p씩 커집니다."),
                 "매도 시점을 정할 때", "계산(취득가·평가액 기준, 범위 추정) + 세법 기준(현행 법령 확인 필요)"))
+        elif home["owner"] != "self" and (home.get("residence_years") or 0) >= 2:
+            # The client confirmed the residence (e-mail 2026-10-21): the exemption is the figure, the general
+            # case the fallback, and the sale order under a marriage is what remains to plan.
+            lived = capital_gains(price, acquired, held=held, lived=int(home["residence_years"]), one_home=True)
+            not_lived = capital_gains(price, acquired, held=held, lived=0, one_home=False)
+            found.append(Note(
+                "배우자분 주택은 2년 거주가 확인되어 비과세 기준으로 봅니다",
+                (f"평가액 {short_won(price)}에 팔면 차익은 약 {short_won(lived['gain'])}입니다. {home['acquired_year']}년 취득 뒤 "
+                 f"{home['residence_years']}년 이상 거주하셨다고 확인해 주셔서 1세대 1주택 비과세 기준(양도가액 {short_won(HIGH_VALUE_HOME)} "
+                 f"초과분만 과세)으로 약 {short_won(lived['total'])}을 예상하고, 요건을 못 갖추면 약 {short_won(not_lived['total'])}"
+                 f"(지방소득세 포함)입니다. 혼인신고를 하시면 혼인일부터 {MARRIAGE_MERGE_YEARS}년 안에 이 집을 먼저 파는 순서가 안전하고, "
+                 "혼인신고 전에는 각자 1주택으로 봅니다. 거주 요건은 소유자인 배우자분 세대의 거주로 따집니다."),
+                "주택 이전 순서를 정하기 전", "계산(취득가·평가액 기준, 거주 기간은 고객님 확인) + 세법 기준(현행 법령 확인 필요)"))
         elif home["owner"] != "self":
             lived = capital_gains(price, acquired, held=held, lived=2, one_home=True)  # The partner's own tax.
             not_lived = capital_gains(price, acquired, held=held, lived=0, one_home=False)

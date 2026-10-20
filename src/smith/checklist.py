@@ -34,8 +34,8 @@ def requests(view: LedgerView, household: dict[str, Any] | None,
     household = household or {}
     today = view.as_of.date()
     rules = (_cash_flows, _partner, _irregular_flows, _pension_paid, _unclassified, _cost_basis, _toss_cash,
-             _pay_overdue, _expected_pay, _gross_salary, _surrender_values, _loan_terms, _acquisition, _retirement, _marriage,
-             _move_targets, _policy_links, _transfer_targets, _commitment)
+             _pay_overdue, _expected_pay, _gross_salary, _surrender_values, _loan_terms, _acquisition, _residence, _retirement,
+             _marriage, _move_targets, _policy_links, _transfer_targets, _commitment)
     found = [r for rule in rules if (r := rule(view, household, today)) is not None]
     stack = pension.stack(view, household, today) if pension_stack is None else pension_stack
     if stack is not None and stack["unknown"]:
@@ -241,6 +241,21 @@ def _acquisition(view: LedgerView, household: dict[str, Any], today: date) -> Re
     return Request("acquisition", "should", f"주택 {len(homes)}채의 취득 연도와 취득가",
                    "팔 때의 양도소득세를 추정하지 못해, 주택 이전 순서와 시기의 세금 비교가 비어 있습니다.",
                    '로컬 설정 [properties."<레코드 ID>"]의 acquired_year, acquired_price')
+
+
+def _residence(view: LedgerView, household: dict[str, Any], today: date) -> Request | None:
+    """A home the client does not own and live in needs its residence years for the one-home exemption to lead
+    the figures (client e-mail 2026-10-21)."""
+    properties = household.get("properties") or {}
+    homes = [r for r in _assets(view) if r.fields["category"] == "real_estate"
+             and not (r.owner_id == "self" and r.fields.get("occupancy") == "owner_occupied")
+             and (properties.get(r.record_id) or {}).get("acquired_year")
+             and (properties.get(r.record_id) or {}).get("residence_years") is None]
+    if not homes:
+        return None
+    return Request("residence", "should", f"주택 {len(homes)}채에 거주한 기간(년)",
+                   "2년 거주가 확인되어야 1세대 1주택 비과세를 기준 숫자로 쓸 수 있어, 지금은 일반 과세로 보수적으로 계산합니다.",
+                   '로컬 설정 [properties."<레코드 ID>"]의 residence_years')
 
 
 def _retirement(view: LedgerView, household: dict[str, Any], today: date) -> Request | None:

@@ -242,7 +242,10 @@ Input JSON:
   the mail pairs each alias with its name) with price basis, trades and six-month change, against the net
   proceeds of selling both homes (price basis per home, loans, deposit, tax cases): the spread now (after
   tax), the pre-tax spread now and six months ago with its trend, and the spread after the expected pay
-  usable before the horizon (base: confirmed and expected; confirmed only). sector_metrics.cash.spending_split: the month as fixed costs, discretionary spending, transfers
+  usable before the horizon (base: confirmed and expected; confirmed only). tax_case_led says which tax
+  case the figures lead with: "exempt" where the two years held and lived in are confirmed (the client's
+  own home; the partner's home per the client's word), "general" where they are not. Lead with the same
+  case; give the other as the fallback, never as the base. sector_metrics.cash.spending_split: the month as fixed costs, discretionary spending, transfers
   and what is left, with their shares of income.
 - client_memory: what the client told Smith before (by e-mail or directly), newest first: what a nickname
   of a home means, residence periods, plans, consents, preferences. They are the client's statements, not
@@ -516,10 +519,11 @@ def _move_metrics(view: Any, plan: dict[str, Any] | None) -> dict[str, Any] | No
                        "net_before_tax": won(h["before_tax"]),
                        "capital_gains_tax": None if h["tax"] is None else {k: won(v) for k, v in h["tax"].items()},
                        "net_general_tax": won(h["net_general"]), "net_one_home_exemption": won(h["net_exempt"]),
-                       "exemption_value": won(h["exemption_value"])} for h in plan["homes"]],
+                       "exemption_value": won(h["exemption_value"]), "tax_case_led": h["tax_case"]} for h in plan["homes"]],
             "household_net_proceeds": {"before_tax": won(plan["proceeds"]["before_tax"]),
                                        "general_tax": won(plan["proceeds"]["general"]),
                                        "exemption_each": won(plan["proceeds"]["exempt"]),
+                                       "headline": won(plan["proceeds"]["headline"]), "tax_case_led": plan["proceeds"]["case"],
                                        "tax_known": plan["proceeds"]["tax_known"]},
             "expected_pay_before_horizon": {k: won(v) for k, v in plan["pay"].items()},
             # Targets by alias only: the complex names stay in the local config and the mail (review 2026-10-18).
@@ -586,7 +590,8 @@ def _lease_metrics(view: Any, plan: dict[str, Any] | None) -> dict[str, Any] | N
             "sale": {"price": won(sale["price"]), "price_basis": sale["price_basis"], "secured_loans": won(sale["loans"]),
                      "net_cash_in_general_tax": None if sale["net_inflow"] is None else won(sale["net_inflow"]["general"]),
                      "net_cash_in_one_home_exemption": None if sale["net_inflow"] is None else won(sale["net_inflow"]["exempt"]),
-                     "net_cash_in_before_tax": won(sale.get("before_tax")), "capital_gains_tax_known": sale["tax"] is not None},
+                     "net_cash_in_before_tax": won(sale.get("before_tax")), "capital_gains_tax_known": sale["tax"] is not None,
+                     "tax_case_led": sale.get("tax_case")},
             "loan": {"dsr_capped_amount": won(loan["amount"]), "basis": loan["basis"]},
             "stress_need": won(st["need"]), "stress_need_basis": st["basis"],
             "assumptions": {k: str(v) for k, v in plan["assumptions"].items()}}
@@ -610,6 +615,7 @@ def _home_metrics(home: dict[str, Any] | None) -> dict[str, Any] | None:
             "ratio_household_with_pay": ratio(home.get("ratio_household_with_pay")),
             "partner_home_sale_tax": None if not after else {k: won(v) for k, v in after["tax"].items()},
             "baseline_after_partner_home_tax": None if not after else {k: won(v) for k, v in after["available"].items()},
+            "partner_home_tax_case_led": None if not after else after.get("case"),
             "expected_pay_before_target": won(home.get("pay_at_target")), "months_left": home["months"]}
 
 

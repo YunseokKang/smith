@@ -68,24 +68,35 @@ def _home(view: LedgerView, prop: dict[str, Any], acquisition: dict[str, Any], t
     taxes = None if price is None else lease._capital_gains(price, acquisition, owner, occupancy, today)
     before_tax = None if None in (price, loans, deposits) else price - loans - deposits
     earlier = None if price is None or change is None else price / (1 + change)
+    case = None if taxes is None else taxes["headline"]
+    nets = {k: None if before_tax is None or taxes is None else before_tax - taxes[k]["total"] for k in lease.TAX_CASES}
     return {"record_id": prop["record_id"], "label": prop["label"], "owner": owner, "occupancy": occupancy,
             "price": price, "price_basis": basis, "change_6m": change, "change_hold": hold, "loans": loans, "deposits": deposits,
-            "before_tax": before_tax, "tax": None if taxes is None else {k: v["total"] for k, v in taxes.items()},
-            "net_general": None if before_tax is None or taxes is None else before_tax - taxes["general"]["total"],
-            "net_exempt": None if before_tax is None or taxes is None else before_tax - taxes["exempt"]["total"],
+            "before_tax": before_tax, "tax": None if taxes is None else {k: taxes[k]["total"] for k in lease.TAX_CASES},
+            "tax_case": case, "net_general": nets["general"], "net_exempt": nets["exempt"],
+            # The figure the report leads with: the exemption where its requirements are known (client e-mail
+            # 2026-10-21), the general case otherwise.
+            "net": nets[case] if case else None,
             "exemption_value": None if taxes is None else taxes["general"]["total"] - taxes["exempt"]["total"],
             "before_tax_6m_ago": None if earlier is None or loans is None or deposits is None else earlier - loans - deposits}
 
 
 def _proceeds(homes: list[dict[str, Any]]) -> dict[str, Any]:
-    """The household's cash after selling every home: before tax, general taxation, and with the one-home
-    exemption on each (an upper bound; the law allows it for one home at a time). Unknown when any part is."""
+    """The household's cash after selling every home: before tax, general taxation, with the one-home exemption
+    on each, and the headline (each home's own case: the exemption where the two years held and lived are known,
+    sold in the order the law allows, the general case otherwise). Unknown when any part is."""
     def total(key: str) -> Decimal | None:
         values = [h[key] for h in homes]
         return None if not values or any(v is None for v in values) else sum(values, Decimal(0))
     before = total("before_tax")
     taxed = total("net_general")
+    headline = total("net")
+    cases = {h["tax_case"] for h in homes}
     return {"before_tax": before, "general": taxed if taxed is not None else before, "exempt": total("net_exempt"),
+            "headline": headline if headline is not None else before,
+            # exempt: every home leads with the exemption; general: none does; mixed: some do (named in the lead).
+            "case": ("exempt" if cases == {"exempt"} else "general" if cases == {"general"} else
+                     "mixed" if cases and None not in cases else None),
             "tax_known": taxed is not None, "six_months_ago": total("before_tax_6m_ago"),
             "hold": [{"label": h["label"], **h["change_hold"]} for h in homes if h["change_hold"]]}
 
@@ -114,7 +125,7 @@ def _target(key: str, spec: dict[str, Any], market: dict[str, Any] | None, proce
     else:
         price, basis = None, "실거래가 없고 참고 가격도 입력되지 않음"
     cost = None if price is None else price * (1 + BUY_COST_RATE)
-    net = proceeds["general"]
+    net = proceeds["headline"]
     spread = None if cost is None or net is None else cost - net
     # A reference price (no recorded trades) has no past; a thin side withholds the trend.
     change, hold = _change(m) if estimate is not None else (None, None)

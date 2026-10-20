@@ -514,12 +514,47 @@ class MailRequestTests(Upgrade):
         self.assertEqual(proposals._lease_sale(unpriced, short).priority, 1)                 # 10 months, 5천만 원 short.
         self.assertEqual(proposals._lease_sale({**unpriced, "months": 20}, short).priority, 2)
 
+    def test_a_confirmed_residence_makes_the_exemption_the_headline(self):
+        """Client e-mail 2026-10-21: the partner's home was bought in 2020 and lived in for two years or more, so
+        the one-home exemption (the 12억 excess taxed) is the figure the reports lead with and the general case
+        the fallback; without the residence on record the general case still leads."""
+        from smith import lease, move_plan
+        rental = {**HOUSEHOLD["properties"]["rental"], "lease_exit": "sell", "residence_years": 2}
+        household = {**HOUSEHOLD, "properties": {**HOUSEHOLD["properties"], "rental": rental}}
+        data = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="property", household=household)
+        sale = data["lease_plans"][0]["sale"]
+        self.assertEqual((sale["tax_case"], -sale["cash_out"]), ("exempt", sale["net_inflow"]["exempt"]))
+        self.assertIn("비과세 기준", sale["basis"])
+        proceeds = data["move_plan"]["proceeds"]
+        self.assertEqual((proceeds["case"], proceeds["headline"]), ("exempt", proceeds["exempt"]))   # Both homes known.
+        self.assertEqual({h["tax_case"] for h in data["move_plan"]["homes"]}, {"exempt"})
+        self.assertEqual(data["kpis"]["home_progress"]["after_tax"]["case"], "exempt")
+        proposal = self.proposal(data, "lease-return")
+        self.assertIn("비과세 기준", proposal.why)
+        self.assertIn("비과세 추정", proposal.certainty)
+        page = render(data)[1]
+        self.assertIn("1세대 1주택 비과세 기준의 양도세를 뺀 값, 요건을 못 갖추면 일반 과세로 약", page)
+        self.assertFalse(any(r.key == "residence" for r in data["requests"]))
+        # Without the residence on record: the general case leads, the client is asked for the years.
+        before = self.report("property")
+        self.assertEqual(before["lease_plans"][0]["sale"]["tax_case"], "general")
+        self.assertEqual(before["move_plan"]["proceeds"]["case"], "mixed")     # The client's own home alone: mixed.
+        self.assertIn("거주 기간이 확인되지 않아 일반 과세", render(before)[1])
+        self.assertTrue(any(r.key == "residence" for r in before["requests"]))
+        taxes = lease._capital_gains(Decimal(1_100_000_000), {"acquired_year": 2025, "acquired_price": 1_000_000_000,
+                                                            "residence_years": 2}, "partner", "leased_out", AT.date())
+        self.assertEqual(taxes["headline"], "general")                        # Held under two years: not yet.
+        self.assertEqual(move_plan._proceeds([])["case"], None)
+
     def test_the_lease_exit_setting_is_validated(self):
         from smith.realestate import RealEstateError, validate_properties
         spec = {"lawd_cd": "11110", "apt_name": "A", "exclusive_area_m2": 59.9}
         self.assertTrue(validate_properties({"p": dict(spec, lease_exit="sell")}))
+        self.assertTrue(validate_properties({"p": dict(spec, residence_years=2)}))
         with self.assertRaises(RealEstateError):
             validate_properties({"p": dict(spec, lease_exit="keep")})
+        with self.assertRaises(RealEstateError):
+            validate_properties({"p": dict(spec, residence_years="2")})
 
     def test_the_changes_are_an_open_band_in_large_type(self):
         story = {"insights": [{"title": "금리 동결", "implication": "변동금리 이자는 그대로입니다.", "links": []}], "watch": []}
@@ -572,11 +607,16 @@ class MoveTests(Upgrade):
         general = sum((h["before_tax"] - h["tax"]["general"] for h in plan["homes"]), Decimal(0))
         self.assertEqual(plan["proceeds"]["general"], general)
         self.assertTrue(plan["proceeds"]["tax_known"] and plan["proceeds"]["exempt"] > general)
+        # The client's own home leads with the exemption (held and lived in), the partner's with the general case
+        # until its residence is recorded (client e-mail 2026-10-21): a mixed household headline.
+        headline = home["before_tax"] - home["tax"]["exempt"] + rental["before_tax"] - rental["tax"]["general"]
+        self.assertEqual((home["tax_case"], rental["tax_case"]), ("exempt", "general"))
+        self.assertEqual((plan["proceeds"]["case"], plan["proceeds"]["headline"]), ("mixed", headline))
         alpha, beta = plan["targets"]
         self.assertEqual((alpha["price"], alpha["price_basis"], alpha["trend"]),
                          (Decimal(2_500_000_000), "입력하신 참고 가격(분양가·호가)", None))
         cost = Decimal(2_800_000_000) * (1 + Decimal("0.035"))
-        self.assertEqual((beta["cost_with_fees"], beta["spread"]), (cost, cost - general))
+        self.assertEqual((beta["cost_with_fees"], beta["spread"]), (cost, cost - headline))
         self.assertEqual(beta["change_6m"], Decimal(2_800_000_000) / Decimal(2_600_000_000) - 1)
         # Six months ago both homes and the target traded lower; the trend compares pre-tax spreads at both ends.
         home_then = Decimal(1_500_000_000) - Decimal(240_000_000)
@@ -733,7 +773,8 @@ class ReviewFixTests(Upgrade):
 
     def test_the_target_trend_is_flat_when_nothing_moved(self):
         from smith import move_plan
-        proceeds = {"before_tax": Decimal(1_000), "general": Decimal(800), "exempt": Decimal(900), "six_months_ago": Decimal(1_000),
+        proceeds = {"before_tax": Decimal(1_000), "general": Decimal(800), "headline": Decimal(800), "case": "general",
+                    "exempt": Decimal(900), "six_months_ago": Decimal(1_000),
                     "tax_known": True, "hold": []}
         row = move_plan._target("t", {"label": "X"}, {"estimate": Decimal(3_000), "estimate_basis": 3, "change_6m": Decimal(0)},
                                 proceeds, None)

@@ -31,7 +31,8 @@ DSR_LIMIT = Decimal("0.40")
 LOAN_RATE = Decimal("0.045")
 LOAN_YEARS = 30
 # Assumption: homes acquired in a regulated area need two years of residence for the one-home exemption.
-RESIDENCE_YEARS_FOR_EXEMPTION = 2
+RESIDENCE_YEARS_FOR_EXEMPTION = 2   # Years held and lived in for the one-home exemption (regulated-area purchases).
+TAX_CASES = ("exempt", "general")
 HORIZON_MONTHS = 48
 _EARNED = ("salary", "business_income", "rental_income")
 _MONTHS = {"monthly": 1, "quarterly": 3, "annual": 12}
@@ -141,26 +142,40 @@ def _sale(amount: Decimal | None, prop: dict[str, Any] | None, acquisition: dict
                 "cash_out": None, "basis": "평가액이나 담보대출을 원화로 환산하지 못함"}
     taxes = _capital_gains(price, acquisition, owner, prop.get("occupancy"), today)
     before_tax = price - amount - loans
-    net = {key: before_tax - value["total"] for key, value in taxes.items()} if taxes else None
-    # The headline figure is the general-taxation case (the smaller inflow); the exemption case is beside it.
-    inflow = before_tax if net is None else net["general"]
-    basis = f"{price_basis} − 보증금 − 담보대출" + (" − 양도세(일반 과세 기준, 비과세 요건 충족 시 별도)" if taxes else
-                                             " (취득가를 몰라 양도세는 빼지 않음)")
-    return {"price": price, "price_basis": price_basis, "loans": loans, "tax": taxes, "net_inflow": net,
+    net = {key: before_tax - taxes[key]["total"] for key in TAX_CASES} if taxes else None
+    # The headline figure is the exemption case when its requirements are known to be met (client e-mail
+    # 2026-10-21), else the general-taxation case (the smaller inflow); the other case is shown beside it.
+    case = None if taxes is None else taxes["headline"]
+    inflow = before_tax if net is None else net[case]
+    basis = f"{price_basis} − 보증금 − 담보대출" + (
+        " − 양도세(1세대 1주택 비과세 기준: 2년 보유·거주 확인, 12억 원 초과분만 과세)" if case == "exempt" else
+        " − 양도세(일반 과세 기준, 비과세 요건 충족 시 별도)" if taxes else " (취득가를 몰라 양도세는 빼지 않음)")
+    return {"price": price, "price_basis": price_basis, "loans": loans, "tax": taxes, "tax_case": case, "net_inflow": net,
             "before_tax": before_tax, "cash_out": -inflow, "basis": basis}
 
 
 def _capital_gains(price: Decimal, acquisition: dict[str, Any], owner: str, occupancy: str | None,
-                   today: date) -> dict[str, dict[str, Decimal]] | None:
-    """The one-home exemption case and the general case, as tax.notes estimates them; None without the
-    acquisition year and price."""
+                   today: date) -> dict[str, Any] | None:
+    """The one-home exemption case and the general case (TAX_CASES), as tax.notes estimates them, and which one
+    leads (`headline`): the exemption when the home is known to have been held and lived in for two years (the
+    client's own home, or a `residence_years` entry in the local config; client e-mail 2026-10-21), else the
+    general case. None without the acquisition year and price."""
     year, acquired = acquisition.get("acquired_year"), acquisition.get("acquired_price")
     if not year or not acquired:
         return None
     held = max(0, today.year - int(year) - 1)  # Only the year is known: count full years conservatively.
-    lived = held if owner == "self" and occupancy == "owner_occupied" else RESIDENCE_YEARS_FOR_EXEMPTION
+    residence = acquisition.get("residence_years")
+    if owner == "self" and occupancy == "owner_occupied":
+        lived, residence_known = held, True
+    elif residence is not None:
+        lived, residence_known = int(residence), True
+    else:
+        lived, residence_known = RESIDENCE_YEARS_FOR_EXEMPTION, False
+    exempt_known = residence_known and min(held, lived) >= RESIDENCE_YEARS_FOR_EXEMPTION
     return {"exempt": tax.capital_gains(price, Decimal(acquired), held=held, lived=lived, one_home=True),
-            "general": tax.capital_gains(price, Decimal(acquired), held=held, lived=0, one_home=False)}
+            "general": tax.capital_gains(price, Decimal(acquired), held=held, lived=0, one_home=False),
+            "headline": "exempt" if exempt_known else "general", "residence_known": residence_known, "held": held,
+            "lived": lived}
 
 
 def _loan(view: LedgerView, owner: str, today: date) -> dict[str, Any]:
@@ -216,7 +231,7 @@ def _stress_sale(amount: Decimal | None, sale: dict[str, Any], drop: Decimal, ac
     taxes = _capital_gains(stressed, acquisition, owner, occupancy, today)
     if taxes is None:
         return {"need": None, "basis": "unknown", "jeonse_dropped": None}
-    shortfall = amount + sale["loans"] - (stressed - taxes["general"]["total"])
+    shortfall = amount + sale["loans"] - (stressed - taxes[taxes["headline"]]["total"])
     return {"need": max(Decimal(0), shortfall), "basis": "sale", "jeonse_dropped": None}
 
 

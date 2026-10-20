@@ -461,25 +461,27 @@ def _home_baseline(available_self: Decimal, household: Decimal | None, household
 def _partner_home_tax(view: LedgerView, household: dict[str, Any] | None, baseline: Decimal,
                       today: date) -> dict[str, Any] | None:
     """The baseline less the estimated capital-gains tax when the partner's home is sold for the move:
-    the one-home exemption case (two years of residence) and the general case. None without the
-    partner's home or its acquisition data in the local profile."""
+    the one-home exemption case (two years of residence) and the general case, and which one leads (`case`:
+    the exemption when the residence is recorded, client e-mail 2026-10-21). None without the partner's home
+    or its acquisition data in the local profile."""
     config = (household or {}).get("properties") or {}
     homes = [r for r in view.records if r.kind is Kind.ASSET and r.fields["category"] == "real_estate"
              and r.owner_id != "self"]
     if not homes:
         return None
     totals = {"exempt": Decimal(0), "general": Decimal(0)}
+    cases = set()
     for record in homes:
         spec = config.get(record.record_id) or {}
         value = base_amount(view, record)
-        if value is None or not spec.get("acquired_year") or not spec.get("acquired_price"):
+        taxes = lease._capital_gains(value, spec, record.owner_id, record.fields.get("occupancy"), today) if value is not None else None
+        if taxes is None:
             return None
-        held = max(0, today.year - int(spec["acquired_year"]) - 1)
-        acquired = Decimal(spec["acquired_price"])
-        totals["exempt"] += tax.capital_gains(value, acquired, held=held, lived=lease.RESIDENCE_YEARS_FOR_EXEMPTION,
-                                              one_home=True)["total"]
-        totals["general"] += tax.capital_gains(value, acquired, held=held, lived=0, one_home=False)["total"]
-    return {"tax": totals, "available": {key: baseline - total for key, total in totals.items()}}
+        for key in lease.TAX_CASES:
+            totals[key] += taxes[key]["total"]
+        cases.add(taxes["headline"])
+    return {"tax": totals, "available": {key: baseline - total for key, total in totals.items()},
+            "case": "exempt" if cases == {"exempt"} else "general"}
 
 
 def _timeline(view: LedgerView, pay: list[future_income.Inflow]) -> list[dict[str, Any]]:

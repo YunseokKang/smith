@@ -1019,7 +1019,11 @@ def _home_lead(home: dict[str, Any]) -> str:
         text += f", 배우자 부동산 순자산을 더해 {_pct(home['ratio_household'], 0)}"
     text += "입니다. 집값 연 2%와 투자 수익 연 4%를 가정했습니다."
     after = home.get("after_tax")
-    if after:
+    if after and after.get("case") == "exempt":
+        text += (f" 배우자 주택은 2년 보유·거주를 확인해 주셔서 팔 때 양도세를 1세대 1주택 비과세 기준 약 {_short(after['tax']['exempt'])}"
+                 f"(12억 원 초과분만 과세)으로 보며, 요건을 못 갖추면 약 {_short(after['tax']['general'])}입니다. 혼인신고를 하시면 혼인일부터 "
+                 "10년 안에 이 집을 먼저 파는 순서가 안전합니다. 현행 법령 확인이 필요합니다.")
+    elif after:
         text += (f" 배우자 주택을 팔아 쓰는 경우의 양도세는 1세대 1주택 비과세 요건을 갖추면 약 {_short(after['tax']['exempt'])}, 일반 "
                  f"과세면 약 {_short(after['tax']['general'])}이며, 혼인신고 시점과 2년 거주 여부에 따라 갈립니다. 현행 법령 확인이 필요합니다.")
     if home.get("pay_at_target") is None and home.get("pay_after_target") is None:
@@ -1102,8 +1106,10 @@ def _lease_plan(data: dict[str, Any]) -> str:
     if plan["default"] == "sale":
         pass
     elif sale["net_inflow"] is not None:
-        lead += (f" 전세를 끼고 팔거나 만기에 맞춰 파는 경우에는 돈이 나가지 않고 약 {_short(-sale['cash_out'])}이 들어옵니다. 1세대 1주택 비과세 "
-                 f"요건을 갖추면 약 {_short(sale['net_inflow']['exempt'])}이며, 현행 법령 확인이 필요합니다.")
+        lead += (f" 전세를 끼고 팔거나 만기에 맞춰 파는 경우에는 돈이 나가지 않고 약 {_short(-sale['cash_out'])}이 들어옵니다. "
+                 + (f"2년 보유·거주를 확인해 주셔서 1세대 1주택 비과세 기준이며, 요건을 못 갖추면 약 {_short(sale['net_inflow']['general'])}입니다."
+                    if sale.get("tax_case") == "exempt" else
+                    f"1세대 1주택 비과세 요건을 갖추면 약 {_short(sale['net_inflow']['exempt'])}이며, 현행 법령 확인이 필요합니다."))
     elif sale["cash_out"] is not None:
         lead += f" 팔아서 돌려드리는 경우에는 약 {_short(-sale['cash_out'])}이 들어옵니다. 취득가를 알려 주시면 양도세까지 계산해 드립니다."
     if loan["amount"] is not None:
@@ -1648,20 +1654,35 @@ def _move_targets(data: dict[str, Any]) -> str:
     if not plan:
         return ""
     pr, pay = plan["proceeds"], plan["pay"]
-    lead = (f"{plan['horizon']:%Y년 %m월} 무렵 두 집을 모두 팔면 손에 남는 돈은 약 <b>{_short(pr['general'])}</b>"
-            + ("입니다(실거래·원장 기준 매도가에서 담보대출·보증금·양도세 일반 과세분을 뺀 값)." if pr["tax_known"]
+    case = pr["case"] if pr["tax_known"] else None
+    exempt_homes = [h["label"] for h in plan["homes"] if h["tax_case"] == "exempt"]
+    general_homes = [h["label"] for h in plan["homes"] if h["tax_case"] == "general"]
+    # The headline sentence carries its own fallback (the brief keeps two sentences and the cheapest target comes
+    # first): the case the figure leads with and what the other case would give (client e-mail 2026-10-21: the
+    # exemption leads once the residence is known).
+    lead = (f"{plan['horizon']:%Y년 %m월} 무렵 두 집을 모두 팔면 손에 남는 돈은 약 <b>{_short(pr['headline'])}</b>"
+            + (f"입니다(실거래·원장 기준 매도가에서 담보대출·보증금과 1세대 1주택 비과세 기준의 양도세를 뺀 값, 요건을 못 갖추면 일반 "
+               f"과세로 약 {_short(pr['general'])})." if case == "exempt" else
+               f"입니다(실거래·원장 기준 매도가에서 담보대출·보증금·양도세를 뺀 값: {', '.join(exempt_homes)}은 비과세 기준, "
+               f"{', '.join(general_homes)}은 거주 기간이 확인되지 않아 일반 과세)." if case == "mixed" else
+               "입니다(실거래·원장 기준 매도가에서 담보대출·보증금·양도세 일반 과세분을 뺀 값)." if pr["tax_known"]
                else "입니다(매도가에서 담보대출·보증금을 뺀 값, 취득가를 몰라 양도세는 빼지 않음)."))
-    if pr["exempt"] is not None and pr["tax_known"]:
+    if case == "exempt":
+        lead += (" 두 집 모두 2년 보유·거주가 확인되어 12억 원 초과분만 과세로 보았고, 두 집을 판 뒤 새 집을 사는 전제입니다"
+                 "(현행 법령 확인 필요).")
+    elif pr["exempt"] is not None and pr["tax_known"]:
         lead += f" 각 집에 1세대 1주택 비과세가 적용되면 약 {_short(pr['exempt'])}까지 늘어나며, 현행 법령 확인이 필요합니다."
     for h in plan["homes"]:
-        if h["tax"] is not None:
+        if h["tax"] is not None and h["tax_case"] == "exempt":
+            lead += f" {h['label']}의 양도세는 비과세 기준 약 {_short(h['tax']['exempt'])}(요건 미충족 시 약 {_short(h['tax']['general'])})입니다."
+        elif h["tax"] is not None:
             lead += (f" {h['label']}의 양도세는 일반 과세 약 {_short(h['tax']['general'])}, 비과세 요건 충족 시 약 "
                      f"{_short(h['tax']['exempt'])}입니다.")
     if pay["base"] is not None:
         lead += (f" 그때까지 받을 성과급·주식 보상은 확정·예상분 세후 약 <b>{_short(pay['base'])}</b>(확정분만 {_short(pay['adverse'])})이며, "
                  "지급 전까지는 확정이 아닙니다.")
     trends = {"widening": "벌어지는 중", "narrowing": "좁혀지는 중", "flat": "큰 변화 없음"}
-    rows, bars = [], [("두 집 매도 순수익", pr["general"], True)]
+    rows, bars = [], [("두 집 매도 순수익", pr["headline"], True)]
     for t in plan["targets"]:
         # The narrative knows each target by its alias ("후보 1"); the mail pairs the alias with the name.
         named = f"{t['alias']} · {t['label']}"

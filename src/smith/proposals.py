@@ -389,7 +389,9 @@ def _lease_sale(lease: dict[str, Any], plan: dict[str, Any]) -> Proposal:
     priced = sale["cash_out"] is not None
     inflow = -sale["cash_out"] if priced else None
     taxed = sale["net_inflow"]
+    exempt_led = sale.get("tax_case") == "exempt"
     exempt = ("" if not priced else
+              f"(요건을 못 갖추면 일반 과세로 약 {short_won(taxed['general'])}, 현행 법령 확인 필요)" if exempt_led else
               f"(1세대 1주택 비과세 요건을 갖추면 약 {short_won(taxed['exempt'])}, 현행 법령 확인 필요)" if taxed else
               "(취득가를 몰라 양도세는 빼지 않았습니다)")
     shortfall = plan["need"]
@@ -407,15 +409,19 @@ def _lease_sale(lease: dict[str, Any], plan: dict[str, Any]) -> Proposal:
         title=(f"{lease['due']:%Y년 %m월} 돌려드릴 전세보증금 {short_won(amount)}은 계획하신 대로 만기에 맞춰 집을 팔아 매도 대금으로 "
                f"돌려드리고, {left}. 매도 시점과 두 집의 매도 순서를 {deadline:%Y년 %m월}까지 정해 두시길 권합니다."),
         why=(f"보증금 만기가 {months}개월 남았고, 고객님 계획은 만기에 맞춰 이 집을 파는 것입니다. "
-             + (f"{sale['price_basis']} 기준 매도가에서 보증금과 담보대출, 양도세(일반 과세)를 빼면 {left}{exempt}." if priced else
-                f"매도가나 담보대출을 환산하지 못해 {left}.")),
+             + (f"{sale['price_basis']} 기준 매도가에서 보증금과 담보대출, 양도세"
+                + ("(2년 보유·거주를 확인해 주셔서 1세대 1주택 비과세 기준, 12억 원 초과분만 과세)" if exempt_led else "(일반 과세)")
+                + f"를 빼면 {left}{exempt}." if priced else f"매도가나 담보대출을 환산하지 못해 {left}.")),
         effect=("매도 잔금일을 보증금 만기에 맞추면 고객님 돈 없이 보증금을 돌려드리고, 양도세가 적게 나오는 매도 순서를 미리 고를 수 "
                 "있습니다."),
-        risks=("만기까지 팔리지 않으면 보증금을 먼저 돌려줘야 하므로, 새 세입자 승계나 퇴거자금대출을 예비로 확인해 두십시오. 매도 순서와 "
-               "혼인신고 시점에 따라 양도세가 크게 달라집니다(현행 법령 확인 필요)."),
+        risks=("만기까지 팔리지 않으면 보증금을 먼저 돌려줘야 하므로, 새 세입자 승계나 퇴거자금대출을 예비로 확인해 두십시오. "
+               + ("혼인신고를 하시면 혼인일부터 10년 안에 이 집을 먼저 파는 순서가 안전하고, 새 집을 먼저 사면 세대 주택 수가 늘어 비과세 요건이 "
+                  "달라집니다(현행 법령 확인 필요)." if exempt_led else
+                  "매도 순서와 혼인신고 시점에 따라 양도세가 크게 달라집니다(현행 법령 확인 필요).")),
         timing=f"{deadline:%Y.%m}까지 매도 일정·순서 결정(만기 {DECISION_LEAD_MONTHS}개월 전)",
         reconsider="매도 계획이 바뀌거나 집값·대출 잔액이 크게 바뀌면 다시 계산합니다.",
-        certainty="계산(실거래·원장 기준 매도가, 양도세 일반 과세 추정) + 고객님 계획(만기 매도)",
+        certainty=("계산(실거래·원장 기준 매도가, 양도세 1세대 1주택 비과세 추정: 2년 보유·거주 확인) + 고객님 계획(만기 매도)" if exempt_led
+                   else "계산(실거래·원장 기준 매도가, 양도세 일반 과세 추정) + 고객님 계획(만기 매도)"),
         figures=figures)
 
 
@@ -427,7 +433,9 @@ def _lease_alternatives(plan: dict[str, Any]) -> str:
         inflow = -sale["cash_out"]
         taxed = sale["net_inflow"]
         parts.append(f" 전세를 끼고 팔거나 만기에 맞춰 파는 경우에는 돈이 나가지 않고, {sale['price_basis']}에서 보증금과 담보대출"
-                     + (f", 양도세를 빼면 약 {short_won(inflow)}이 들어옵니다(1세대 1주택 비과세 요건을 갖추면 약 "
+                     + (f", 양도세(비과세 기준)를 빼면 약 {short_won(inflow)}이 들어옵니다(요건을 못 갖추면 약 "
+                        f"{short_won(taxed['general'])}, 현행 법령 확인 필요)." if taxed and sale.get("tax_case") == "exempt" else
+                        f", 양도세를 빼면 약 {short_won(inflow)}이 들어옵니다(1세대 1주택 비과세 요건을 갖추면 약 "
                         f"{short_won(taxed['exempt'])}, 현행 법령 확인 필요)." if taxed else
                         f"을 빼면 약 {short_won(inflow)}이 들어옵니다(취득가를 몰라 양도세는 빼지 않았습니다)."))
     if loan["amount"] is not None:
@@ -1154,7 +1162,11 @@ def _home_tiers(home: dict[str, Any]) -> str:
         text += f", 배우자 부동산 순자산을 더해 {percent(home['ratio_household'], 0)}"
     text += "입니다."
     after = home.get("after_tax")
-    if after:
+    if after and after.get("case") == "exempt":
+        text += (f" 배우자 주택은 2년 보유·거주를 확인해 주셔서 팔 때 양도세를 비과세 기준 약 {short_won(after['tax']['exempt'])}으로 보아 "
+                 f"준비 가능액은 약 {short_won(after['available']['exempt'])}이고, 요건을 못 갖추면 약 {short_won(after['tax']['general'])}을 "
+                 f"내 약 {short_won(after['available']['general'])}입니다(현행 법령 확인 필요).")
+    elif after:
         text += (f" 배우자 주택을 팔아 쓰는 경우 양도세는 1세대 1주택 비과세 요건을 갖추면 약 {short_won(after['tax']['exempt'])}, 일반 "
                  f"과세면 약 {short_won(after['tax']['general'])}이어서, 준비 가능액은 각각 약 {short_won(after['available']['exempt'])}과 "
                  f"{short_won(after['available']['general'])}입니다(혼인신고 시점과 2년 거주 여부에 따름, 현행 법령 확인 필요).")
