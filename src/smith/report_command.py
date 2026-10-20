@@ -229,6 +229,10 @@ def _activate(args: argparse.Namespace) -> int:
 # the scheduled time) instead of researching again.
 FRESH_BRIEF = timedelta(hours=3)
 PREPARE_AHEAD = timedelta(hours=1)
+# The product review team (smith.picks, about 20 minutes and a dozen model calls) runs in its own window well ahead
+# of a slot, never in the prepare hour or the send path, so a report is never delayed by it (review 2026-10-20).
+REVIEW_AHEAD = timedelta(hours=4)
+REVIEW_LEAD = timedelta(hours=2)
 
 
 def target_regions(config: dict[str, Any] | None) -> tuple[str, ...]:
@@ -260,9 +264,18 @@ def _research(db: Path, now: datetime, *, reuse_fresh: bool = True, kind: str | 
                                        secrets=credentials.all_secrets(), kind=kind, target_regions=regions)
 
 
+def review_slot(reports: dict[str, Any], tz: str, now: datetime) -> datetime | None:
+    """The scheduled slot whose product reviews should run now: the next slot between REVIEW_LEAD and
+    REVIEW_AHEAD away. None inside the last REVIEW_LEAD (the prepare step and the report itself own that time)."""
+    from smith import delivery
+
+    ahead = delivery.slots_between(reports, tz, now, now + REVIEW_AHEAD)
+    return ahead[0] if ahead and ahead[0] - now >= REVIEW_LEAD else None
+
+
 def _review_products(db: Path, config: dict[str, Any], now: datetime, kind: str | None) -> None:
     """The product reviews a report of `kind` needs (smith.picks: the review team), run when none is fresh.
-    A failure is logged and recorded; the report goes out without the picks table."""
+    A failure is logged and recorded; the report shows the proposal without the picks table."""
     from smith import credentials, picks
     from smith.config import local_time
     from smith.payload import load_view
@@ -369,7 +382,10 @@ def _publish_once(args: argparse.Namespace) -> int:
                 if not prepared.get("reused") and prepared["outcome"] != "skipped":
                     _say(args.db, f"Prepared research for {upcoming[0]:%m-%d %H:%M} ({upcoming_kind}): "
                                   f"{prepared['outcome']}")
-                _review_products(args.db, config, now, upcoming_kind)
+                return 0
+            review_for = review_slot(config["reports"], tz, now)
+            if review_for is not None:
+                _review_products(args.db, config, now, editions.for_day(config, review_for.date()))
                 return 0
             _say(args.db, "No report due.", log=False)  # Every 15 minutes: not worth a log line.
             return 0
@@ -400,7 +416,6 @@ def _publish_once(args: argparse.Namespace) -> int:
     _say(args.db, f"Research ({kind}) {researched['outcome']}{' (prepared)' if researched.get('reused') else ''}: "
                   f"{researched.get('items', researched.get('error_code'))}")
     brief_id = researched["brief_id"] if researched["outcome"] == "success" else None
-    _review_products(args.db, config, datetime.now(timezone.utc), kind)
     publish_at = datetime.now(timezone.utc)
     result = delivery.publish(args.db, recipient=recipient, credentials=stored, now=publish_at,
                               slot=slot, missed=missed, kind=kind, tz=tz, sync_failures=sync_failures,

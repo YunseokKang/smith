@@ -84,16 +84,17 @@ def _plan(view: LedgerView, record: Any, prop: dict[str, Any] | None, acquisitio
     loan = _loan(view, record.owner_id, today)
     # The client's plan (`lease_exit = "sell"` in the local config, e-mail 2026-10-19): the home is sold when the
     # lease ends, so the sale returns the deposit and only a shortfall of the sale would be the household's own.
-    planned_sale = acquisition.get("lease_exit") == "sell" and sale["cash_out"] is not None
-    stress = (_stress_sale(amount, sale, drop) if planned_sale
-              else _stress_need(amount, jeonse if jeonse_known else None, drop))
+    # The plan holds even when the sale cannot be priced: the need is then unknown, never the re-let figure.
+    planned_sale = acquisition.get("lease_exit") == "sell"
+    stress = (_stress_sale(amount, sale, drop, acquisition, record.owner_id, (prop or {}).get("occupancy"), today)
+              if planned_sale else _stress_need(amount, jeonse if jeonse_known else None, drop))
     return {"record_id": record.record_id, "owner": record.owner_id, "amount": amount, "due": due, "months": months,
             "jeonse": jeonse, "jeonse_basis": basis, "jeonse_known": jeonse_known,
             "relet": relet, "sale": sale, "loan": loan, "stress": stress,
             # The figure the plans use: the planned sale's shortfall (none when it brings money in), else the re-let
             # need when the market level is known, else the whole deposit.
             "default": "sale" if planned_sale else "relet" if relet["need"] is not None else "full",
-            "need": (max(Decimal(0), sale["cash_out"]) if planned_sale else
+            "need": ((None if sale["cash_out"] is None else max(Decimal(0), sale["cash_out"])) if planned_sale else
                      relet["need"] if relet["need"] is not None else amount),
             "scenarios": _scenarios(relet, sale, loan, planned_sale),
             "assumptions": {"relet_buffer_rate": RELET_BUFFER_RATE, "dsr_limit": DSR_LIMIT, "loan_rate": LOAN_RATE,
@@ -204,12 +205,18 @@ def _yearly_payment_per_won(rate: Decimal, years: int) -> Decimal:
     return monthly / (1 - (1 + monthly) ** -months) * 12
 
 
-def _stress_sale(amount: Decimal | None, sale: dict[str, Any], drop: Decimal) -> dict[str, Any]:
+def _stress_sale(amount: Decimal | None, sale: dict[str, Any], drop: Decimal, acquisition: dict[str, Any], owner: str,
+                 occupancy: str | None, today: date) -> dict[str, Any]:
     """What the stress scenario must still find when the home is sold at the lease's end: the deposit and the
-    secured loans less the price fallen by `drop`, before tax (a lower price only lowers the tax)."""
+    secured loans less the price fallen by `drop` and the capital-gains tax at that lower price (general case).
+    Unknown without the acquisition year and price: the tax cannot be estimated (review 2026-10-20)."""
     if amount is None or sale["price"] is None or sale["loans"] is None:
         return {"need": None, "basis": "unknown", "jeonse_dropped": None}
-    shortfall = amount + sale["loans"] - sale["price"] * (1 - drop)
+    stressed = sale["price"] * (1 - drop)
+    taxes = _capital_gains(stressed, acquisition, owner, occupancy, today)
+    if taxes is None:
+        return {"need": None, "basis": "unknown", "jeonse_dropped": None}
+    shortfall = amount + sale["loans"] - (stressed - taxes["general"]["total"])
     return {"need": max(Decimal(0), shortfall), "basis": "sale", "jeonse_dropped": None}
 
 

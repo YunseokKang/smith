@@ -899,11 +899,13 @@ def last_product_review_failure(conn: sqlite3.Connection, product_class: str) ->
     return datetime.fromisoformat(row[1]) if row is not None and row[0] == "failure" else None
 
 
-def latest_product_review(conn: sqlite3.Connection, product_class: str, *, since: datetime) -> dict[str, Any] | None:
-    """The newest successful review of a product class created at or after `since`."""
+def latest_product_review(conn: sqlite3.Connection, product_class: str, *, since: datetime,
+                          until: datetime | None = None) -> dict[str, Any] | None:
+    """The newest successful review of a product class created at or after `since` and, with `until`, at or
+    before it (a report rebuilt as of a past time reads the review it had then)."""
     row = conn.execute("SELECT review_id, created_at, model, review FROM product_reviews WHERE product_class = ? AND "
-                       "outcome = 'success' AND created_at >= ? ORDER BY created_at DESC LIMIT 1",
-                       (product_class, _db_time(since))).fetchone()
+                       "outcome = 'success' AND created_at >= ? AND created_at <= ? ORDER BY created_at DESC LIMIT 1",
+                       (product_class, _db_time(since), _db_time(until) if until is not None else "9999")).fetchone()
     if row is None:
         return None
     review_id, created_at, model, review = row

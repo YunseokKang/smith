@@ -308,13 +308,12 @@ def _lease_return(facts: dict[str, Any]) -> Proposal | Undetermined | None:
         return None
     lease = min(facts["leases"], key=lambda item: item["due"])
     amount, months, surplus, need = lease["amount"], lease["months"], facts["available"], lease["need"]
+    plan = lease["plan"]
+    if amount is not None and _planned_sale(lease):
+        return _lease_sale(lease, plan)   # The plan's proposal says itself when the sale cannot be priced.
     if amount is None or need is None:
         return Undetermined("전세보증금 반환 계획", "보증금 금액을 원화로 환산하지 못했습니다(환율 없음).")
-    plan = lease["plan"]
     relet = plan is not None and plan["default"] == "relet"
-    sale_plan = plan is not None and plan["default"] == "sale"
-    if sale_plan:
-        return _lease_sale(lease, plan)
     accumulated = _accumulated(facts, months)
     coverage = accumulated / need if accumulated is not None and need else None
     deadline = _add_months(lease["due"], -DECISION_LEAD_MONTHS)
@@ -387,20 +386,29 @@ def _lease_sale(lease: dict[str, Any], plan: dict[str, Any]) -> Proposal:
     amount, months = lease["amount"], lease["months"]
     deadline = _add_months(lease["due"], -DECISION_LEAD_MONTHS)
     sale = plan["sale"]
-    inflow = -sale["cash_out"]
+    priced = sale["cash_out"] is not None
+    inflow = -sale["cash_out"] if priced else None
     taxed = sale["net_inflow"]
-    exempt = (f"(1세대 1주택 비과세 요건을 갖추면 약 {short_won(taxed['exempt'])}, 현행 법령 확인 필요)" if taxed else
+    exempt = ("" if not priced else
+              f"(1세대 1주택 비과세 요건을 갖추면 약 {short_won(taxed['exempt'])}, 현행 법령 확인 필요)" if taxed else
               "(취득가를 몰라 양도세는 빼지 않았습니다)")
     shortfall = plan["need"]
-    left = (f"약 {short_won(inflow)}이 남습니다" if inflow >= 0 else f"약 {short_won(shortfall)}이 모자랍니다")
+    left = (f"남는 금액은 아직 계산하지 못했습니다({sale['basis']})" if not priced else
+            f"약 {short_won(inflow)}이 남습니다" if inflow >= 0 else f"약 {short_won(shortfall)}이 모자랍니다")
+    # Within a year of the due date with the sale short of the deposit, the decision cannot wait (review 2026-10-20).
+    priority = 1 if months <= 12 and shortfall is not None and shortfall > 0 else 2
+    figures = {"amount": amount, "months": Decimal(months)}
+    if priced:
+        figures.update(need=shortfall, sale_net_inflow=inflow)
     return Proposal(
-        key="lease-return", priority=2, identity=f"lease-return:{lease['due']}:sale",
+        key="lease-return", priority=priority, identity=f"lease-return:{lease['due']}:sale",
         headline=f"보증금 매도 대금 반환·일정 확정({deadline:%Y.%m})",
         watch=("sale_net_inflow",), tolerance=Decimal("0.15"),
         title=(f"{lease['due']:%Y년 %m월} 돌려드릴 전세보증금 {short_won(amount)}은 계획하신 대로 만기에 맞춰 집을 팔아 매도 대금으로 "
                f"돌려드리고, {left}. 매도 시점과 두 집의 매도 순서를 {deadline:%Y년 %m월}까지 정해 두시길 권합니다."),
-        why=(f"보증금 만기가 {months}개월 남았고, 고객님 계획은 만기에 맞춰 이 집을 파는 것입니다. {sale['price_basis']} 기준 매도가에서 "
-             f"보증금과 담보대출, 양도세(일반 과세)를 빼면 {left}{exempt}."),
+        why=(f"보증금 만기가 {months}개월 남았고, 고객님 계획은 만기에 맞춰 이 집을 파는 것입니다. "
+             + (f"{sale['price_basis']} 기준 매도가에서 보증금과 담보대출, 양도세(일반 과세)를 빼면 {left}{exempt}." if priced else
+                f"매도가나 담보대출을 환산하지 못해 {left}.")),
         effect=("매도 잔금일을 보증금 만기에 맞추면 고객님 돈 없이 보증금을 돌려드리고, 양도세가 적게 나오는 매도 순서를 미리 고를 수 "
                 "있습니다."),
         risks=("만기까지 팔리지 않으면 보증금을 먼저 돌려줘야 하므로, 새 세입자 승계나 퇴거자금대출을 예비로 확인해 두십시오. 매도 순서와 "
@@ -408,7 +416,7 @@ def _lease_sale(lease: dict[str, Any], plan: dict[str, Any]) -> Proposal:
         timing=f"{deadline:%Y.%m}까지 매도 일정·순서 결정(만기 {DECISION_LEAD_MONTHS}개월 전)",
         reconsider="매도 계획이 바뀌거나 집값·대출 잔액이 크게 바뀌면 다시 계산합니다.",
         certainty="계산(실거래·원장 기준 매도가, 양도세 일반 과세 추정) + 고객님 계획(만기 매도)",
-        figures={"amount": amount, "months": Decimal(months), "need": shortfall, "sale_net_inflow": inflow})
+        figures=figures)
 
 
 def _lease_alternatives(plan: dict[str, Any]) -> str:
@@ -520,8 +528,9 @@ def _glide(facts: dict[str, Any]) -> dict[str, Any] | None:
         if lease["amount"] is None:
             continue
         own = lease["amount"]
-        if _planned_sale(lease):
-            own = lease["need"]  # The sale at the lease's end returns the deposit; only a shortfall is own money.
+        if _planned_sale(lease) and lease["need"] is not None:
+            own = lease["need"]  # The sale at the lease's end returns the deposit; only a shortfall is own money
+            #                      (an unpriced sale keeps the whole deposit: the conservative figure).
         elif lease["jeonse"] is not None and lease["jeonse_basis"] >= MIN_BASIS:
             own = max(Decimal(0), own - lease["jeonse"])
         label = "전세보증금 반환" + ("" if lease["owner"] == "self" else "(가족 명의)")
@@ -976,8 +985,8 @@ def spending_room(facts: dict[str, Any]) -> dict[str, Any] | None:
         if lease["amount"] is None or liquid is None:
             return None
         # The household's own cash in the default scenario (lease.plans): the re-let gap plus the buffer, or
-        # the whole deposit when the market level is unknown.
-        net = lease["need"]
+        # the whole deposit when the market level is unknown or a planned sale cannot be priced.
+        net = lease["need"] if lease["need"] is not None else lease["amount"]
         used = min(liquid, net)
         need = max(Decimal(0), (net - liquid) / lease["months"])
         committed.append(("보증금 반환 준비", need))
@@ -1081,11 +1090,13 @@ def _strategy(facts: dict[str, Any]) -> list[Track]:
         if lease["amount"] is None:
             continue
         if _planned_sale(lease):
-            inflow = -lease["plan"]["sale"]["cash_out"]
+            cash_out = lease["plan"]["sale"]["cash_out"]
+            inflow = None if cash_out is None else -cash_out
             tracks.append(Track(
-                "전세보증금 반환", "on_track" if lease["need"] == 0 else "attention",
+                "전세보증금 반환", "unknown" if inflow is None else "on_track" if lease["need"] == 0 else "attention",
                 f"{lease['due']:%Y년 %m월} {short_won(lease['amount'])}, 계획대로 만기에 매도하면 매도 대금으로 반환"
-                + (f"(약 {short_won(inflow)} 남음)" if inflow >= 0 else f"(약 {short_won(lease['need'])} 부족)"),
+                + ("(매도가·대출을 환산하지 못해 남는 금액 미상)" if inflow is None else
+                   f"(약 {short_won(inflow)} 남음)" if inflow >= 0 else f"(약 {short_won(lease['need'])} 부족)"),
                 "매도가 만기보다 늦어질 때를 대비해 새 세입자 승계나 퇴거자금대출을 예비로 확인해 두십시오."))
             continue
         accumulated = _accumulated(facts, lease["months"])

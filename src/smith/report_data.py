@@ -98,6 +98,7 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     # The products the review team chose for a proposal that moves money (report design §26), sized here.
     reviews = picks.load(conn, known_at)
     advice["proposals"] = picks.attach(advice["proposals"], reviews, view.rates)
+    advice["pending_products"] = picks.pending(view, kind, reviews)  # Live, but no usable review yet: the card says so.
     plan = tax.facts(view, as_of.date(), household)
     pension_stack = pension.stack(view, household, as_of.date())
     data = {"kind": kind, "as_of": as_of, "baseline": baseline, "kpis": kpis,

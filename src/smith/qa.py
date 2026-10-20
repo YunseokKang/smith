@@ -343,6 +343,12 @@ def answer(db: Path, data: dict[str, Any], question: Question, *, now: datetime,
         reason, *detail = problem.split(":")
         memos.append(PROMISE_MEMO if reason == "promise" else narrative.MEMOS.get(reason, "확인되지 않은 부분이 있습니다.")
                      + (f"({detail[0]})." if reason == "ungrounded-number" and detail else ""))
+    if promises_change(output["answer"]["text"]):
+        # Fail closed (review 2026-10-20): a promise the repair left is replaced by the one true sentence, not sent
+        # with a footnote the client may not read.
+        output = {**output, "answer": {**output["answer"], "text": neutralize_promises(output["answer"]["text"])}}
+        if PROMISE_MEMO not in memos:
+            memos.append(PROMISE_MEMO)
     claimed = _client_figures(question.text, payload, output["answer"]["text"])
     if claimed:
         memos.append(f"말씀하신 수치({', '.join(claimed[:3])})는 원장에서 확인되지 않은 값이라, 그 가정을 전제로 "
@@ -384,9 +390,24 @@ def _client_figures(question: str, payload: dict[str, Any], answer_text: str) ->
 
 
 # Promises of a change Smith cannot make by itself (client e-mail 2026-10-19: an answer said the next report
-# would be recalculated and the layout changed, which only an update of Smith can do).
-_PROMISE = re.compile(r"다음 보고서?부터|반영해 ?두었|반영했습니다|반영하도록 (?:하겠|했)|바로 반영|적용해 ?두었")
+# would be recalculated and the layout changed, which only an update of Smith can do): a change said to be done
+# (반영·적용·수정·변경·조치해 두었다/했다) or promised from the next report.
+_PROMISE = re.compile(r"다음 (?:보고서|리포트)부터|(?:반영|적용|수정|변경|조치)(?:해 ?두었|했습니다|하도록 (?:하겠|했)|하겠습니다)"
+                      r"|바로 (?:반영|적용)|고쳐 ?두었|바꿔 ?두었")
 PROMISE_MEMO = "보고서의 계산·구성·설정은 Smith를 업데이트해야 바뀝니다. 말씀하신 내용은 기억해 두었습니다."
+SAFE_SENTENCE = "말씀하신 내용은 기억해 두었고, Smith를 업데이트하면 보고서에 반영됩니다."
+
+
+def neutralize_promises(text: str) -> str:
+    """The answer with every sentence that promises a change replaced by SAFE_SENTENCE (once), the rest as it was."""
+    kept, replaced = [], False
+    for sentence in narrative._SENTENCE_END.split(text):
+        if not promises_change(sentence):
+            kept.append(sentence)
+        elif not replaced:
+            kept.append(SAFE_SENTENCE)
+            replaced = True
+    return " ".join(s for s in kept if s).strip()
 
 
 def _problems(output: dict[str, Any], payload: dict[str, Any]) -> str | None:

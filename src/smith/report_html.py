@@ -708,8 +708,11 @@ def _proposals(advice: dict[str, Any], full: bool, edition: editions.Edition | N
             detail += (f'<div style="font-size:13px;font-weight:700;color:{INK};margin-top:12px">옮길 곳 1~{len(p.table) - 1}순위'
                        + (f" · 분기 {_short(step)}" if step is not None else "") + "</div>"
                        + _table(list(p.table[0]), [list(row) for row in p.table[1:]]) + _sources(p.table_links)
-                       + f'<div style="font-size:12px;color:{MUTED};margin-top:4px">비중은 1순위부터 50·30·20%(두 개면 60·40%, 가정)이고, '
-                       "가격은 조사 시점 종가라 주문 전 다시 확인하십시오.</div>")
+                       + f'<div style="font-size:12px;color:{MUTED};margin-top:4px">수량은 분기 금액을 1순위에 모두 넣을 때이고 '
+                       "2·3순위는 1순위 대신 고를 때의 대안입니다. 가격은 조사 시점 종가라 주문 전 다시 확인하십시오.</div>")
+        elif p.key in (advice.get("pending_products") or ()):
+            detail += (f'<div style="font-size:12px;color:{MUTED};margin-top:10px">옮길 상품 1~3순위는 검토 팀의 확인이 끝나는 대로 '
+                       "다음 보고서에 싣습니다.</div>")
         # One card open at a time (user review 2026-10-18): the first proposal shows its detail, the others
         # show the badges and the title until tapped.
         state = " open" if number == 1 else ""

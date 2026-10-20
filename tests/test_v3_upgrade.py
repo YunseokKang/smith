@@ -490,6 +490,30 @@ class MailRequestTests(Upgrade):
         # Without the setting the re-let path stays the default.
         self.assertEqual(self.report("property")["lease_plans"][0]["default"], "relet")
 
+    def test_an_unpriced_planned_sale_is_unknown_and_the_stress_sale_pays_its_tax(self):
+        """Review 2026-10-20: the plan holds when the sale cannot be priced (the need is unknown, never the re-let
+        figure), the stress sale subtracts the capital-gains tax at the fallen price, and a shortfall within a year
+        is an act-now proposal."""
+        from smith import lease
+        sale = {"price": Decimal(1_100_000_000), "loans": Decimal(0)}
+        acquired = {"acquired_year": 2019, "acquired_price": 600_000_000}
+        stressed = lease._stress_sale(Decimal(900_000_000), sale, Decimal("0.3"), acquired, "partner", "leased_out", AT.date())
+        self.assertEqual(stressed["basis"], "sale")
+        self.assertGreater(stressed["need"], Decimal(900_000_000) - Decimal(770_000_000))     # The tax widens the gap ...
+        self.assertEqual(lease._stress_sale(Decimal(900_000_000), sale, Decimal("0.3"), {}, "partner", None, AT.date()),
+                         {"need": None, "basis": "unknown", "jeonse_dropped": None})          # ... and without a cost basis, unknown.
+        due = date(2027, 8, 1)
+        unpriced = {"amount": Decimal(336_000_000), "months": 10, "due": due}
+        plan = {"need": None, "sale": {"cash_out": None, "net_inflow": None, "price_basis": "원장 평가액(실거래 3건 미만)",
+                                       "basis": "평가액이나 담보대출을 원화로 환산하지 못함"}}
+        proposal = proposals._lease_sale(unpriced, plan)
+        self.assertIn("남는 금액은 아직 계산하지 못했습니다", proposal.title)
+        self.assertEqual((proposal.priority, "need" in proposal.figures), (2, False))
+        short = {"need": Decimal(50_000_000), "sale": {"cash_out": Decimal(50_000_000), "net_inflow": None,
+                                                        "price_basis": "원장 평가액(실거래 3건 미만)", "basis": "x"}}
+        self.assertEqual(proposals._lease_sale(unpriced, short).priority, 1)                 # 10 months, 5천만 원 short.
+        self.assertEqual(proposals._lease_sale({**unpriced, "months": 20}, short).priority, 2)
+
     def test_the_lease_exit_setting_is_validated(self):
         from smith.realestate import RealEstateError, validate_properties
         spec = {"lawd_cd": "11110", "apt_name": "A", "exclusive_area_m2": 59.9}
@@ -508,10 +532,16 @@ class MailRequestTests(Upgrade):
         from smith import qa
         for text, promised in (("다음 보고서부터 2028년 8월 기준으로 다시 계산해 드리겠습니다.", True),
                                ("더 크고 눈에 띄게 배치하도록 반영해 두었습니다.", True),
+                               ("목표 시점을 2028년 8월로 수정했습니다.", True),
+                               ("그렇게 조치하겠습니다.", True),
                                ("말씀하신 내용은 기억해 두었고, Smith를 업데이트하면 계산에 반영됩니다.", False),
                                ("원하시면 매도 순서별 세금을 계산해 드리겠습니다.", False)):
             with self.subTest(text):
                 self.assertEqual(qa.promises_change(text), promised)
+        # Fail closed (review 2026-10-20): a promise the repair left is replaced by the one true sentence.
+        self.assertEqual(qa.neutralize_promises("좋은 점을 짚어 주셨습니다. 다음 보고서부터 그렇게 계산해 드리겠습니다. "
+                                                "배치도 반영해 두었습니다. 지금 수치로는 95%입니다."),
+                         f"좋은 점을 짚어 주셨습니다. {qa.SAFE_SENTENCE} 지금 수치로는 95%입니다.")
         self.assertIn("warm, kind", qa.SYSTEM_PROMPT)
         self.assertIn("You cannot change Smith", qa.SYSTEM_PROMPT)
 
