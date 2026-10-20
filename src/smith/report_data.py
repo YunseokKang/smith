@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, localcontext
 from typing import Any
 
-from smith import (cases, checklist, editions, future_income, holdings, lease, ledger, move_plan, pension, principles,
+from smith import (cases, checklist, editions, future_income, holdings, lease, ledger, move_plan, pension, picks, principles,
                    product_review, proposals, realestate, stress, tax)
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import LedgerView, base_amount, load_view, unrealized_gain
@@ -95,6 +95,9 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     advice["proposals"] = [p for p in advice["proposals"] if editions.carries(kind, p.key)]
     advice["undetermined"] = [u for u in advice["undetermined"] if editions.carries(kind, u.key)]
     advice["assumptions"] = advice["assumptions"] + future_income.assumptions(pay)
+    # The products the review team chose for a proposal that moves money (report design §26), sized here.
+    reviews = picks.load(conn, known_at)
+    advice["proposals"] = picks.attach(advice["proposals"], reviews, view.rates)
     plan = tax.facts(view, as_of.date(), household)
     pension_stack = pension.stack(view, household, as_of.date())
     data = {"kind": kind, "as_of": as_of, "baseline": baseline, "kpis": kpis,
@@ -116,6 +119,7 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
             "move_plan": move_plan.plan(view, sectors["real_estate"]["properties"], household, pay, today=as_of.date(),
                                         horizon=_move_horizon(view, lease_plans), market=targets_market),
             "spending_split": _spending_split(view),
+            "product_reviews": reviews,
             "research_regions": sorted({t["region"] for t in ((household or {}).get("targets") or {}).values()
                                         if t.get("region")}),
             "completeness": {"complete": view.summary.complete, "areas": view.summary.incomplete_areas,

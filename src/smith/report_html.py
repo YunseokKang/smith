@@ -24,7 +24,7 @@ from html import escape
 from typing import Any
 
 from smith.fmt import short_won as _short
-from smith import editions, principles, stress
+from smith import editions, picks, principles, stress
 from smith.holdings import STANCES
 from smith.proposals import Track
 from smith.realestate import MIN_BASIS
@@ -126,7 +126,8 @@ def system_notes(data: dict[str, Any]) -> list[str]:
     story = data.get("narrative") or {}
     advice = data.get("advice") or {}
     _, reasons = _status(data, requests_shown=edition is None or "requests" in edition.sections)
-    return _system_notes(data, story, reasons) + _data_lines(data, advice.get("assumptions") or [], story.get("status"))
+    return (_system_notes(data, story, reasons) + picks.notes(data.get("product_reviews") or {})
+            + _data_lines(data, advice.get("assumptions") or [], story.get("status")))
 
 
 def _page(bands: list[str]) -> str:
@@ -701,6 +702,14 @@ def _proposals(advice: dict[str, Any], full: bool, edition: editions.Edition | N
             pointer = f"자세히: {escape(home.label)} 보고" if home else f"근거의 성격: {escape(p.certainty)}"
             detail = (f'<div style="font-size:14px;line-height:1.6;color:{BODY}">{escape(_first_sentence(p.why))}</div>'
                       f'<div style="font-size:12px;color:{MUTED};margin-top:6px">{pointer}</div>')
+        if p.table:
+            # The researched products the action moves money into (client request 2026-10-20).
+            step = p.figures.get("per_quarter")
+            detail += (f'<div style="font-size:13px;font-weight:700;color:{INK};margin-top:12px">옮길 곳 1~{len(p.table) - 1}순위'
+                       + (f" · 분기 {_short(step)}" if step is not None else "") + "</div>"
+                       + _table(list(p.table[0]), [list(row) for row in p.table[1:]]) + _sources(p.table_links)
+                       + f'<div style="font-size:12px;color:{MUTED};margin-top:4px">비중은 1순위부터 50·30·20%(두 개면 60·40%, 가정)이고, '
+                       "가격은 조사 시점 종가라 주문 전 다시 확인하십시오.</div>")
         # One card open at a time (user review 2026-10-18): the first proposal shows its detail, the others
         # show the badges and the title until tapped.
         state = " open" if number == 1 else ""

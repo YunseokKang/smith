@@ -260,6 +260,27 @@ def _research(db: Path, now: datetime, *, reuse_fresh: bool = True, kind: str | 
                                        secrets=credentials.all_secrets(), kind=kind, target_regions=regions)
 
 
+def _review_products(db: Path, config: dict[str, Any], now: datetime, kind: str | None) -> None:
+    """The product reviews a report of `kind` needs (smith.picks: the review team), run when none is fresh.
+    A failure is logged and recorded; the report goes out without the picks table."""
+    from smith import credentials, picks
+    from smith.config import local_time
+    from smith.payload import load_view
+
+    try:
+        with closing(ledger.connect_read_only(db)) as conn:
+            view = load_view(conn, as_of=local_time(now), known_at=now)
+            specs = picks.due(view, kind, conn, now)
+        for spec in specs:
+            outcome = picks.review_and_store(db, view, spec, profile(config), now=now, today=local_time(now).date(),
+                                             secrets=credentials.all_secrets())
+            detail = (f"picks {outcome['picks']}, verified {outcome['verified']}" if outcome["outcome"] == "success"
+                      else outcome.get("error_code", ""))
+            _say(db, f"Product review ({spec.key}): {outcome['outcome']} {detail}".rstrip())
+    except Exception as error:  # noqa: BLE001 - a product review must never block a report.
+        _say(db, f"Product review crashed: {type(error).__name__}")
+
+
 def _narrator(db: Path, now: datetime, brief_id: str | None = None, pipeline: str = "single") -> Any:
     """The narrative stage as a callback on report data (6c/6d), pinned to `brief_id` when research
     succeeded; failures leave deterministic content."""
@@ -348,6 +369,7 @@ def _publish_once(args: argparse.Namespace) -> int:
                 if not prepared.get("reused") and prepared["outcome"] != "skipped":
                     _say(args.db, f"Prepared research for {upcoming[0]:%m-%d %H:%M} ({upcoming_kind}): "
                                   f"{prepared['outcome']}")
+                _review_products(args.db, config, now, upcoming_kind)
                 return 0
             _say(args.db, "No report due.", log=False)  # Every 15 minutes: not worth a log line.
             return 0
@@ -378,6 +400,7 @@ def _publish_once(args: argparse.Namespace) -> int:
     _say(args.db, f"Research ({kind}) {researched['outcome']}{' (prepared)' if researched.get('reused') else ''}: "
                   f"{researched.get('items', researched.get('error_code'))}")
     brief_id = researched["brief_id"] if researched["outcome"] == "success" else None
+    _review_products(args.db, config, datetime.now(timezone.utc), kind)
     publish_at = datetime.now(timezone.utc)
     result = delivery.publish(args.db, recipient=recipient, credentials=stored, now=publish_at,
                               slot=slot, missed=missed, kind=kind, tz=tz, sync_failures=sync_failures,

@@ -65,6 +65,10 @@ class Proposal:
     # The status-line badge: the action in about 15-25 characters, no sentence (report design §20, user review
     # 2026-10-18: the full title repeated three times on the first screen). Empty falls back to the title.
     headline: str = ""
+    # Researched products for the action (narrative `picks`, priced and sized by code): a header row then rows,
+    # and their sources. Empty without a verified pick.
+    table: tuple[tuple[str, ...], ...] = ()
+    table_links: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)

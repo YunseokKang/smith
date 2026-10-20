@@ -42,7 +42,7 @@ from smith.proposals import Proposal
 
 # v10: executive headline, rounded amounts, total-balance-sheet mindset, employer double concentration, no internal
 # vocabulary (user spec 2026-10-17); v9: stress test, spending room, peer benchmark; v8: expected pay is not wealth.
-PROMPT_VERSION = "narrative-v16"  # v16: the headline is the week's decision, stress is an extreme check; v15: concrete words.
+PROMPT_VERSION = "narrative-v17"  # v17: product picks as input; v16: the headline is the week's decision.
 MODEL = "fable"
 BUDGET_USD = "5.00"
 # Two calls at most: the write (the markets day with twenty-odd holdings ran past 10 minutes on 2026-10-17) and a
@@ -277,7 +277,9 @@ Write:
   retirement) and whether a change of course is needed.
 - order: the proposal keys in the order the client should act on them (most important first).
 - proposal_notes: at most 3, for the proposals where the research changes the picture most, one sentence of market or policy
-  context with refs. At most one note per proposal key. Skip proposals with nothing to add.
+  context with refs. At most one note per proposal key. Skip proposals with nothing to add. A proposal's
+  product_picks are the products Smith's review team verified and chose: you may name them as they are written;
+  never name, suggest or compare any other product.
 - insights: up to 2 outside changes that matter for this household: what happened (body), what it means
   for this household (implication), refs. Label forecasts as forecasts.
 - watch: up to 2 things to watch before the next report and why, with refs.
@@ -733,7 +735,9 @@ def _proposal(p: Proposal) -> dict[str, Any]:
             "risks": p.risks, "timing": p.timing, "reconsider": p.reconsider, "certainty": p.certainty,
             "times_already_shown": p.times_shown,
             "figures": {name: str(value.quantize(Decimal("0.0001")) if abs(value) < 1 else won(value))
-                        for name, value in p.figures.items()}}
+                        for name, value in p.figures.items()},
+            # The products Smith's review team chose for this action (report design §26), already sized by code.
+            "product_picks": [{"rank": row[0], "product": row[1], "reason": row[2], "buy": row[3]} for row in p.table[1:]]}
 
 
 # --- the call ---------------------------------------------------------------------------------------------

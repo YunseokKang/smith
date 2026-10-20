@@ -268,3 +268,14 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
   운영 코드는 바꾸지 않는다(결과는 같고 테스트가 쓰지 않는 충돌 안전성만 빠짐). 12초 → 6.4초.
 - 예방: 새 테스트 모듈이 임시 파일 원장을 쓰면 같은 훅을 넣는다. 느린 테스트는 `--durations 10`으로 먼저 보고, 시간이 SQL 실행에
   몰려 있으면 이 원인을 의심한다.
+
+### TS-028 Git Bash의 `TZ=Asia/Seoul date`가 한국 시간이 아니라 UTC를 냄 (2026-10-19)
+
+- 증상: 수동 가져오기 파일의 `as_of`·`effective_at`을 `TZ=Asia/Seoul date ... +%H:%M:00+09:00`으로 만들었더니 실제 16:30 KST의 이체가
+  07:32 KST로 기록됨. 이보다 앞서 손으로 적은 18:00 KST는 "미래 시각"으로 거부됨.
+- 원인: Windows의 Git Bash(MSYS) `date`는 IANA 이름 `Asia/Seoul`을 알지 못해 조용히 UTC를 쓴다. 그 값에 `+09:00`을 붙여 9시간 이른
+  시각이 되었다. 원장은 정정(`correction`)으로 `effective_at`을 바꾸는 것을 허용하지 않아(revision 1의 시각 유지) 그대로 두었다
+  (`transfer-irp-shinhan-2026-topup`, 금액·공제 계산에는 영향 없음).
+- 해결: 현재 한국 시간은 Python으로 만든다. `.\.venv\Scripts\python.exe -c "from datetime import datetime, timezone, timedelta;
+  print(datetime.now(timezone(timedelta(hours=9))).isoformat(timespec='minutes'))"`.
+- 예방: 원장 가져오기 시각은 셸 `date`로 만들지 않는다. 가져오기 전에 시각이 지금보다 앞서고 실제 사건 시각과 맞는지 확인한다.

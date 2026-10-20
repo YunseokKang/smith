@@ -25,7 +25,7 @@ from smith.records import (
 logger = logging.getLogger(__name__)
 _END_OF_TIME = datetime.max.replace(tzinfo=timezone.utc)
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 _V1 = (
     """CREATE TABLE imports (
         import_id TEXT PRIMARY KEY,
@@ -337,8 +337,22 @@ _V16 = (
         AND (SELECT count(DISTINCT json_extract(a.payload, '$.client_question')) FROM advice_runs a
              WHERE a.use_case = 'mail-answer' AND a.created_at = mail_questions.claimed_at) = 1""",
 )
+# Product reviews (report design §26): the candidates a product scout found, the independent checks, the
+# critiques and the picks for a proposal that moves money. No household amounts or identifiers.
+_V17 = (
+    """CREATE TABLE product_reviews (
+        review_id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        product_class TEXT NOT NULL,
+        outcome TEXT NOT NULL CHECK (outcome IN ('success', 'failure')),
+        error_code TEXT,
+        model TEXT,
+        cost_usd TEXT,
+        review TEXT
+    )""",
+)
 _MIGRATIONS = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8, 9: _V9, 10: _V10, 11: _V11, 12: _V12,
-               13: _V13, 14: _V14, 15: _V15, 16: _V16}
+               13: _V13, 14: _V14, 15: _V15, 16: _V16, 17: _V17}
 _COLUMNS = ("record_id, revision, kind, owner_id, source, status, change_type, corrects_revision, "
             "reason, effective_at, recorded_at, import_id, fields")
 
@@ -867,6 +881,34 @@ def _brief(row: tuple) -> dict[str, Any]:
     brief_id, created_at, topics, model, brief = row
     return {"brief_id": brief_id, "created_at": datetime.fromisoformat(created_at), "topics": json.loads(topics),
             "model": model, "brief": json.loads(brief)}
+
+
+def record_product_review(conn: sqlite3.Connection, *, review_id: str, created_at: datetime, product_class: str,
+                          outcome: str, error_code: str | None = None, model: str | None = None,
+                          cost_usd: str | None = None, review: dict[str, Any] | None = None) -> None:
+    """Store one product review run (smith.picks). The review carries public product facts only."""
+    conn.execute("INSERT INTO product_reviews VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                 (review_id, _db_time(created_at), product_class, outcome, error_code, model, cost_usd,
+                  None if review is None else json.dumps(review, ensure_ascii=False)))
+
+
+def last_product_review_failure(conn: sqlite3.Connection, product_class: str) -> datetime | None:
+    """When the newest review of a product class failed, its time; None when there is none or it succeeded."""
+    row = conn.execute("SELECT outcome, created_at FROM product_reviews WHERE product_class = ? ORDER BY created_at DESC "
+                       "LIMIT 1", (product_class,)).fetchone()
+    return datetime.fromisoformat(row[1]) if row is not None and row[0] == "failure" else None
+
+
+def latest_product_review(conn: sqlite3.Connection, product_class: str, *, since: datetime) -> dict[str, Any] | None:
+    """The newest successful review of a product class created at or after `since`."""
+    row = conn.execute("SELECT review_id, created_at, model, review FROM product_reviews WHERE product_class = ? AND "
+                       "outcome = 'success' AND created_at >= ? ORDER BY created_at DESC LIMIT 1",
+                       (product_class, _db_time(since))).fetchone()
+    if row is None:
+        return None
+    review_id, created_at, model, review = row
+    return {"review_id": review_id, "created_at": datetime.fromisoformat(created_at), "model": model,
+            "review": json.loads(review)}
 
 
 PROPOSAL_DECISIONS = ("accepted", "declined", "done")
