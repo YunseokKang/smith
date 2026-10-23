@@ -510,7 +510,9 @@ Gmail API, 기본 권한은 `gmail.send` 하나. 질의응답을 켜면 `--read`
   돌지 않을 때 사본을 `data/smith.db`로 복사한다.
 - 실행: Windows 작업 스케줄러가 로그온 상태에서 15분마다 `pythonw -m smith report run-due`를 호출한다(자격 증명
   저장소 접근에 사용자 세션 필요). 동시 실행은 무시(IgnoreNew), 배터리 전환 시에도 중단하지 않는다. 등록은
-  `scripts/install-schedule.ps1`(재실행하면 같은 정의로 교체, `-Remove`로 삭제)로 재현한다.
+  `scripts/install-schedule.ps1`(재실행하면 같은 정의로 교체, `-Remove`로 삭제)로 재현한다. 같은 `run-due`가 보고서가
+  없는 틱에서 사건 안내(report-design §29, `smith.events`)를 하루 한 번 `[events] check_time` 이후에 점검하고, 보고서를
+  보낸 직후 한 번 더 점검한다(`event_checks`·`event_notes`, 원장 v18). 사건 안내는 보고서 슬롯을 쓰지 않는다.
 - 점검: `smith doctor`가 원장(스키마·무결성), 설정, 자격 증명(존재 여부만), 스케줄러(상태·마지막 결과·다음 실행·실행
   코드 위치), 출처별 마지막 동기화, 조사, 발송, 메일 답변, 최근 실행 로그 오류를 한 번에 보인다. 아무것도 쓰지
   않는다. 스케줄러는 `schtasks`가 콘솔 없이 한국어 필드명을 내므로 PowerShell `Get-ScheduledTask` JSON으로 읽는다.

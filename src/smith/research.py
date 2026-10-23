@@ -30,7 +30,7 @@ from smith import editions, headless, holdings, ledger, sources
 from smith.payload import LedgerView, check_outbound, mask_identifiers
 from smith.records import Kind
 
-PROMPT_VERSION = "research-v2"
+PROMPT_VERSION = "research-v3"  # v3: the rates topic asks for the latest meeting's vote and the governor's guidance.
 MODEL = "fable"
 BUDGET_USD = "10.00"
 TIMEOUT_SECONDS = 1800
@@ -163,7 +163,10 @@ def topics(view: LedgerView, kind: str | None = None, target_regions: tuple[str,
     if any(r.fields.get("account_type") in ("pension_savings", "irp", "isa") for r in assets):
         found.append(("pension_tax", "연금·절세 계좌",
                       "연금저축·IRP·ISA 세제 혜택(세액공제 한도·공제율·납입 한도)의 현행 기준과 개정 동향"))
-    found.append(("rates", "금리 전망", "한국은행 기준금리 결정과 향후 경로 전망, 시장 금리(국고채·CD) 흐름, 미국 연준 정책"))
+    # The vote split and the governor's forward guidance are what a bank's same-day note leads with (report design
+    # §28); the deterministic side (the rate's steps, the next meeting) comes from the stored series and calendar.
+    found.append(("rates", "금리 전망", "한국은행 기준금리 결정과 향후 경로 전망(가장 최근 금융통화위원회 결정의 표결이 만장일치였는지, "
+                                     "총재가 향후 방향에 대해 언급한 내용), 시장 금리(국고채·CD) 흐름, 미국 연준 정책"))
     if any(r.fields.get("market") == "US" or r.fields["currency"] == "USD" for r in assets):
         found.append(("us_stocks", "미국 주식·환율", "미국 주식시장(S&P 500·나스닥 대형 기술주) 최근 흐름과 원/달러 환율 전망"))
     if any(r.fields.get("market") == "KR" for r in assets):

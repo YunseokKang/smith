@@ -131,6 +131,18 @@ class EditionTests(unittest.TestCase):
         self.assertIn("자세히:", overview)                                  # Summary cards point to their day.
         self.assertIn("목요 변화 점검", render(self.data("thursday"))[0])   # The original kinds are unchanged.
 
+    def test_a_themed_report_says_where_the_other_areas_are(self):
+        rates = render(self.data("rates"))[1]
+        self.assertIn("하루에 한 주제만 보고합니다: 월 종합 보고 · 화 투자·시장 · 수 부동산 · <b>목 금리·대출</b> · "
+                      "금 세금·연금 · 토 생활·목표.", rates)
+        self.assertNotIn("하루에 한 주제만", render(self.data("monday"))[1])     # The original full report is whole.
+        # A paused day (not in [reports] weekdays) is left out; a day's edition comes from [reports.editions].
+        with closing(ledger.connect_read_only(self.db)) as conn:
+            paused = build_report(conn, as_of=AT, known_at=AT, baseline=None, kind="rates",
+                                  schedule={"weekdays": ["monday", "thursday"], "editions": {"monday": "monday"}})
+        self.assertIn("월 종합 보고(전체) · <b>목 금리·대출</b>.", render(paused)[1])
+        self.assertEqual(editions.week_plan(None)[1], ("화", "markets", "투자·시장"))
+
     def test_a_question_on_a_themed_report_sees_every_area_at_that_time(self):
         from smith import qa
         with closing(ledger.connect(self.db)) as conn:

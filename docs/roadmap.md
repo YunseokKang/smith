@@ -138,6 +138,23 @@
             `product_picks`(`narrative-v17`), 시스템 노트. 첫 상품군 `core-etf`. 리뷰 반영(`product-review-v2`): 공식 호스트 허용 목록,
             가격은 숫자·통화·날짜 대조, 확인된 사실만 비평·선정에, 1순위는 코드 규칙(`rank_first`), 선정 0은 실패, 재구축 상한(`until`).
             남은 점: 보험·연금·예금 상품군 명세(요청 때), 발송 스냅샷.
+      - [x] 전문가 피드백 반영(2026-10-22, FR-25, report-design §27): 금리 시나리오 양방향(`RATE_SHOCKS` ±, `_diverging`), 환율 민감도
+            (`report_data._fx_sensitivity`: 100원당·1년 영향, `sector_metrics.fx`, `narrative-v19`·`team-v4`), 요일판 하단 안내 한 줄
+            (`editions.week_plan`, `build_report(schedule=)`). 남은 점: 지수 대비 포트폴리오 성과 비교(사용자 결정 대기).
+      - [x] 은행 시황 안내에서 배움(2026-10-22, FR-26, report-design §28): 정책금리 경로(`SeriesSpec.policy`, `describe().moves`),
+            금통위 일정(`evidence.BOK_RATE_MEETINGS`, 숫자 칸과 부채 차트 아래의 0.25%p 문장), `sector_metrics.policy`(`narrative-v20`),
+            조사 질문에 표결·총재 발언(`research-v3`). 사건 기반 당일 안내는 같은 날 사용자 결정으로 아래 항목에서 구현.
+      - [x] 사건 안내(2026-10-22, FR-27, report-design §29, `events.py`): 금통위 결정(ECOS 또는 공식 출처로 확인된 조사, 격자 검증)과
+            보유 종목 2% 변동(`report_data.holding_changes`, 종목별 분해)을 정기 보고와 별개의 메일로. `run-due`가 16:10 이후 하루 한 번과
+            아침 보고 직후 점검, `event_notes`·`event_checks`(원장 v18), `smith events check|preview|status`, `[events]` 설정.
+            리뷰 반영(2026-10-23): 원자적 claim과 claim 시각 fencing(`ledger.claim_event_note`·`advance_event_note`), 메일 요청 전
+            `unknown/sending`, 미발송 안내의 원장 재시도(`retryable_event_notes`, 종목 변동은 저장한 측정 창으로 재구성), 결정은 공식 페이지
+            본문에서 코드가 읽음(`events.read_decision`, `event-research-v2`).
+            남은 점: 코스피·S&P 500 일별 시계열, FOMC 사건, 사건 안내에 대한 메일 답장 맥락.
+      - [x] 은퇴 나이 3단계와 연금 표 결함(2026-10-23, FR-28, report-design §30): `pension.RETIREMENT_TIERS`(50·55·60), 국민연금 가입
+            개월 비례(`contribution_months`·`contribution_end`), 연금 없는 기간·연금 밖 필요액, 공제 최적 분할(`tax.credit_split`)과 ISA 줄,
+            공제 밖 원금 비과세, `pension-credit` 우선순위·문구(`credit_gain`), 비율 키 9개(메일 답변 오경고), 노후 궤도를 스택으로 통일
+            (`tax.retirement` 삭제), `narrative-v21`. 남은 점: 연금 밖 필요액과 연금 밖 자산의 통합 자금 계획.
       - [ ] PB 보강 후보(§16.6): 매각 세금 vs 담보 대출 비교(대출 조건 입력 뒤), 보험 보장 레코드와 저효율 보험 점검, 공동명의 실익,
             20년 순자산 경로·실질 목표액·인적 자본 통합(은퇴 시점 뒤), 투자 기준값 설정화(IPS).
       - [ ] **다음**: 통합 자금 계획(보증금 반환 + 주택 이전 + 예정 소득의 목표별 배분), R-ONE 지수, 은퇴 시점 확정 후 노후 계획.

@@ -134,11 +134,12 @@ def publish(db: Path, *, recipient: str, credentials: tuple[str, str, str], now:
             missed: list[datetime], kind: str, sender: Sender = gmail.send, tz: str = DEFAULT_TIMEZONE,
             sync_failures: list[str] | None = None, narrator: Narrator | None = None,
             household: dict[str, Any] | None = None, lineage: dict[str, str | None] | None = None,
-            plan: dict[str, str] | None = None) -> dict[str, Any]:
+            schedule: dict[str, Any] | None = None) -> dict[str, Any]:
     """Claim, build, send and record one report. Returns the final run record fields.
 
     `lineage` carries the config hash and code version; with the ledger time, brief, model runs and a
-    digest of the canonical report data they are stored on the run before sending.
+    digest of the canonical report data they are stored on the run before sending. `schedule` is the
+    `[reports]` table: its editions name the themes of missed slots and the week's plan in the footer.
 
     `narrator(data)` adds the verified narrative (6c/6d) to the report data in place; it handles its own
     failures, so a report always goes out with at least its deterministic content.
@@ -167,7 +168,7 @@ def publish(db: Path, *, recipient: str, credentials: tuple[str, str, str], now:
     try:
         with closing(ledger.connect_read_only(db)) as conn:
             data = build_report(conn, as_of=now, known_at=now, baseline=baseline, kind=kind, tz=tz,
-                                household=household)
+                                household=household, schedule=schedule)
         if narrator is not None:
             narrator(data)
         # Lateness is judged at send time: the narrative stage can take many minutes after `now`.
@@ -175,7 +176,7 @@ def publish(db: Path, *, recipient: str, credentials: tuple[str, str, str], now:
         data["delivery_note"] = _delivery_note(None if slot is None else local_time(slot, tz),
                                                [local_time(m, tz) for m in missed], local_time(send_at, tz),
                                                [r for r in unresolved if r["report_id"] != report_id], tz,
-                                               sync_failures or [], kind=kind, plan=plan)
+                                               sync_failures or [], kind=kind, plan=(schedule or {}).get("editions"))
         subject, html = render(data)
         if slot is not None and send_at - slot > LATE_AFTER:
             subject = subject.replace("[Smith]", "[Smith · 지연 발송]", 1)

@@ -35,6 +35,9 @@ class SeriesSpec:
     # A required series that comes back empty fails the provider (a renamed code must not leave old values
     # looking fresh). An optional one is simply absent that day: used for a judgement that says "unknown".
     required: bool = True
+    # A policy rate set in steps at meetings: describe() lists its moves (date, size) over the past year, so a
+    # report can say how the rate got where it is (report design §28).
+    policy: bool = False
 
     @property
     def link(self) -> str:
@@ -42,9 +45,19 @@ class SeriesSpec:
         return self.source_url.split(" ", 1)[0]
 
 
+BOK_BASE_RATE = "722Y001/0101000"
+FED_TARGET_UPPER = "DFEDTARU"
+# Bank of Korea rate-setting meetings (통화정책방향 결정회의), eight a year. The 2026 dates are the Bank's published
+# schedule (https://www.bok.or.kr/portal/singl/crncyPolicyDrcMtg/listYear.do?mtgSe=A&menuNo=200755, read on
+# 2026-10-22); the stored base-rate series steps on 2026-07-16 and 2026-08-27 fall on two of them. Add each new
+# year's dates when the Bank publishes them (December). Once the table is behind the report day,
+# next_policy_meeting() returns None and the reports say nothing about the next meeting rather than guess.
+BOK_RATE_MEETINGS = (date(2026, 1, 15), date(2026, 2, 26), date(2026, 4, 10), date(2026, 5, 28), date(2026, 7, 16),
+                     date(2026, 8, 27), date(2026, 10, 22), date(2026, 11, 26))
+
 SERIES = (
-    SeriesSpec("ecos", "722Y001/0101000", "Bank of Korea base rate", "%",
-               "https://ecos.bok.or.kr/ (722Y001 0101000)", 10),
+    SeriesSpec("ecos", BOK_BASE_RATE, "Bank of Korea base rate", "%",
+               "https://ecos.bok.or.kr/ (722Y001 0101000)", 10, policy=True),
     SeriesSpec("ecos", "817Y002/010200000", "Korea treasury 3Y", "%", "https://ecos.bok.or.kr/ (817Y002 010200000)", 10),
     SeriesSpec("ecos", "817Y002/010210000", "Korea treasury 10Y", "%", "https://ecos.bok.or.kr/ (817Y002 010210000)", 10),
     SeriesSpec("ecos", "817Y002/010502000", "Korea CD 91D", "%", "https://ecos.bok.or.kr/ (817Y002 010502000)", 10),
@@ -58,7 +71,8 @@ SERIES = (
     # days a release was missed and the figure is stale.
     SeriesSpec("ecos", "121Y006/BECBLA0302", "Korea bank mortgage rate (new loans, weighted average)", "%",
                "https://ecos.bok.or.kr/ (121Y006 BECBLA0302)", 100, period="M", required=False),
-    SeriesSpec("fred", "DFEDTARU", "Fed funds target upper", "%", "https://fred.stlouisfed.org/series/DFEDTARU", 10),
+    SeriesSpec("fred", FED_TARGET_UPPER, "Fed funds target upper", "%", "https://fred.stlouisfed.org/series/DFEDTARU", 10,
+               policy=True),
     SeriesSpec("fred", "DFF", "Fed funds effective", "%", "https://fred.stlouisfed.org/series/DFF", 10),
     SeriesSpec("fred", "DGS2", "US treasury 2Y", "%", "https://fred.stlouisfed.org/series/DGS2", 10),
     SeriesSpec("fred", "DGS10", "US treasury 10Y", "%", "https://fred.stlouisfed.org/series/DGS10", 10),
@@ -160,22 +174,45 @@ def _json(response: tuple[int, bytes]) -> tuple[int, dict[str, Any]]:
 def describe(series: dict[tuple[str, str], dict[date, tuple[str, date | None]]], *,
              as_of: date) -> list[dict[str, Any]]:
     """Latest value per configured series on or before `as_of`, with changes in units (percentage
-    points for rates) against about 3 and 12 months earlier, and a stale flag."""
+    points for rates) against about 3 and 12 months earlier, a stale flag, and for a policy rate its steps
+    over the past year (`moves`, empty for the other series)."""
     rows = []
     for spec in SERIES:
         points = {day: value for day, value in series.get((spec.provider, spec.series_id), {}).items()
                   if day <= as_of}
         latest_day = max(points, default=None)
         row: dict[str, Any] = {"spec": spec, "observed_on": latest_day, "value": None, "published_on": None,
-                               "change_3m": None, "change_12m": None, "stale": True}
+                               "change_3m": None, "change_12m": None, "stale": True, "moves": []}
         if latest_day is not None:
             value = Decimal(points[latest_day][0])
             row.update(value=value, published_on=points[latest_day][1],
                        stale=(as_of - latest_day).days > spec.max_age_days,
                        change_3m=_change(points, value, latest_day - timedelta(days=91)),
-                       change_12m=_change(points, value, latest_day - timedelta(days=365)))
+                       change_12m=_change(points, value, latest_day - timedelta(days=365)),
+                       moves=_moves(points, latest_day) if spec.policy else [])
         rows.append(row)
     return rows
+
+
+def _moves(points: dict[date, tuple[str, date | None]], latest_day: date) -> list[tuple[date, Decimal]]:
+    """The steps of a policy rate in the year to `latest_day`: (date, size) wherever the value differs from the
+    previous observation. The comparison starts from the last observation before the window, so a step on the
+    window's first day counts too."""
+    start = latest_day - timedelta(days=365)
+    before = max((day for day in points if day < start), default=None)
+    previous = None if before is None else Decimal(points[before][0])
+    moves = []
+    for day in sorted(day for day in points if start <= day <= latest_day):
+        value = Decimal(points[day][0])
+        if previous is not None and value != previous:
+            moves.append((day, value - previous))
+        previous = value
+    return moves
+
+
+def next_policy_meeting(today: date, meetings: tuple[date, ...] = BOK_RATE_MEETINGS) -> date | None:
+    """The Bank of Korea rate meeting on or after `today`, or None when the published table has no later date."""
+    return next((day for day in meetings if day >= today), None)
 
 
 def _change(points: dict[date, tuple[str, date | None]], value: Decimal, then: date) -> Decimal | None:

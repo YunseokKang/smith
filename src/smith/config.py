@@ -23,6 +23,8 @@ KNOWN_KEYS = {
     "household": {"birth_year", "partner_birth_year", "retirement_monthly_spend", "marriage_registered", "cohabiting",
                   "annual_gross_salary", "retirement_age"},
     "backup": {"dir", "keep"},
+    # Same-day event notes (report design §29): the daily check time and the holdings' move that counts.
+    "events": {"enabled", "check_time", "portfolio_move_pct"},
 }
 # `lease_exit`: how the client plans to return a lease deposit on this home ("relet": a new tenant, the default;
 # "sell": the home is sold when the lease ends, client e-mail 2026-10-19). `residence_years`: whole years the
@@ -97,6 +99,7 @@ def load_config(path: Path) -> dict:
         raise ValueError("mail.answer_replies must be a boolean")
     _check_household(config.get("household", {}))
     _check_backup(config.get("backup", {}))
+    _check_events(config.get("events", {}))
     if "properties" in config or "targets" in config:
         from smith.realestate import RealEstateError, validate_properties, validate_targets
         try:
@@ -155,6 +158,24 @@ def _check_backup(backup: object) -> None:
     keep = backup.get("keep", 1)
     if not isinstance(keep, int) or isinstance(keep, bool) or not 1 <= keep <= 1000:
         raise ValueError("backup.keep must be a whole number from 1 to 1000")
+
+
+def _check_events(events: object) -> None:
+    """Optional `[events]` (report design §29): whether same-day event notes go out, the local time of the daily
+    check, and the day's move of the listed holdings (percent) that counts as an event."""
+    if not isinstance(events, dict):
+        raise ValueError("events must be a table")
+    if not isinstance(events.get("enabled", False), bool):
+        raise ValueError("events.enabled must be a boolean")
+    clock = events.get("check_time", "16:10")
+    try:
+        if not isinstance(clock, str) or len(clock) != 5 or time.fromisoformat(clock).tzinfo is not None:
+            raise ValueError()
+    except ValueError:
+        raise ValueError("events.check_time must be HH:MM") from None
+    pct = events.get("portfolio_move_pct", 2.0)
+    if isinstance(pct, bool) or not isinstance(pct, (int, float)) or not 0.5 <= pct <= 20:
+        raise ValueError("events.portfolio_move_pct must be a number from 0.5 to 20")
 
 
 def _is_email(value: object) -> bool:

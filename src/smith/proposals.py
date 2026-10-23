@@ -10,7 +10,7 @@ from datetime import date
 from decimal import ROUND_CEILING, Decimal
 from typing import Any
 
-from smith import future_income, holdings, tax
+from smith import future_income, holdings, pension, tax
 from smith.fmt import percent, short_won
 from smith.payload import LedgerView, base_amount
 from smith.realestate import MIN_BASIS
@@ -109,7 +109,7 @@ HEADLINE_MAX = 32  # Characters of the status-line badge (proposals.fit_headline
 def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
           active: dict[str, dict[str, Any]] | None = None, household: dict[str, Any] | None = None,
           pay: list[future_income.Inflow] | None = None, review: dict[str, Any] | None = None,
-          lease_plans: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+          lease_plans: list[dict[str, Any]] | None = None, pension_stack: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return proposals (most urgent first), the strategy tracks and the follow-up of earlier proposals.
 
     `active` maps proposal identities to their current instance (ledger.active_proposals). Unless the
@@ -120,6 +120,10 @@ def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
     """
     facts = _facts(view, kpis, sectors, review, lease_plans or [])
     facts["tax"] = tax.facts(view, facts["today"], household)
+    # The retirement track reads the pension stack by retirement age (report design §30), the same one the tax
+    # day shows; report_data passes it in, other callers get it computed here.
+    facts["pension_stack"] = (pension.stack(view, household, facts["today"], plan=tax.pension_plan(facts["tax"]))
+                              if pension_stack is None else pension_stack)
     facts["pay"] = pay or []  # Expected pay (future_income.inflows): shown beside the long-range tracks only.
     facts["glide"] = _glide(facts)
     facts["reserve_swap"] = reserve_swap(facts)
@@ -728,32 +732,50 @@ def _pension_credit(facts: dict[str, Any]) -> Proposal | None:
     if not facts["pension_accounts"]:
         return None
     today, plan = facts["today"], tax.pension_plan(facts["tax"])
-    if not plan["irp_room"] and not plan["excess"]:
+    gain, rest = plan["credit_gain"], plan["next_rest"]
+    # Without credit room this year, more credit next year or a part no credit covers, there is nothing to do.
+    if not plan["irp_room"] and not gain and not rest:
         return None
-    title = (f"{today.year}년 12월 31일까지 IRP에 {short_won(plan['irp_room'])}을 넣어 세액공제 한도를 채우시길 권합니다."
-             if plan["irp_room"] else "연금 납입을 연금저축과 IRP로 나눠 공제 한도를 넘는 납입을 줄이시길 권합니다.")
-    excess = (f" 올해 납입 예상은 연금저축 {short_won(plan['savings_paid'])}, IRP {short_won(plan['irp_paid'])}으로, "
-              f"공제 한도를 넘는 {short_won(plan['excess'])}은 올해 공제를 받지 못합니다." if plan["excess"] else "")
-    split = (f" 내년부터는 월 {short_won(plan['monthly'])}을 연금저축 {short_won(plan['next_savings'])}, IRP "
-             f"{short_won(plan['next_irp'])}으로 나누고, 나머지 {short_won(plan['next_rest'])}은 ISA처럼 다른 절세 계좌에 넣으면 "
-             "공제를 빠짐없이 받습니다." if plan["monthly"] else "")
+    room = bool(plan["irp_room"])
+    if room:
+        title = f"{today.year}년 12월 31일까지 IRP에 {short_won(plan['irp_room'])}을 넣어 세액공제 한도를 채우시길 권합니다."
+        headline = f"연내 IRP {short_won(plan['irp_room'])} 납입(세액공제)"
+    elif gain:
+        title = f"연금 납입을 연금저축과 IRP로 나눠 세액공제 대상을 연 {short_won(gain)} 늘리시길 권합니다."
+        headline = "연금 납입 계좌 나누기"
+    else:
+        # The credit is already full (review 2026-10-23: the card said splitting would earn it): only where the part
+        # no credit covers is kept is open, and it is no deadline.
+        title = f"연금저축에 공제 한도를 넘게 넣는 월 {short_won(rest)}은 내년부터 ISA로 돌리는 방안을 검토해 보십시오."
+        headline = "공제 밖 연금 납입, ISA 검토"
+    excess = (f" 올해 납입 예상은 연금저축 {short_won(plan['savings_paid'])}, IRP {short_won(plan['irp_paid'])}으로, 공제 한도를 "
+              f"넘는 {short_won(plan['excess'])}은 공제를 받지 못하지만 꺼낼 때 원금에 세금이 붙지 않습니다." if plan["excess"] else "")
+    split = (f" 내년부터 월 {short_won(plan['monthly'])}을 연금저축 {short_won(plan['next_savings'])}, IRP "
+             f"{short_won(plan['next_irp'])}으로 나누면 공제 대상이 연 {short_won(gain)} 늘어 세금이 최대 약 "
+             f"{short_won(gain * tax.CREDIT_RATE_HIGH)} 줄어듭니다." if gain else
+             " 세액공제는 지금 납입으로도 내년 한도를 다 받아 나눠도 늘지 않습니다." if plan["monthly"] else "")
+    elsewhere = (f" 공제 밖 월 {short_won(rest)}을 ISA에 넣으면 이익 {short_won(tax.ISA_TAX_FREE)}까지 비과세이고, 3년 만기 뒤 연금 "
+                 f"계좌로 옮기면 옮긴 돈의 10%(최대 {short_won(tax.ISA_TRANSFER_CREDIT_CAP)})를 더 공제받습니다. 연금저축에 그대로 두어도 "
+                 "원금은 비과세이고 이익은 연금으로 받을 때 낮은 세율이라, 손해가 아니라 선택입니다." if rest else "")
     return Proposal(
-        key="pension-credit", priority=1 if today.month >= 10 else 2, identity=f"pension-credit:{today.year}",
-        headline=(f"연내 IRP {short_won(plan['irp_room'])} 납입(세액공제)" if plan["irp_room"] else "연금 납입 계좌 나누기"),
-        watch=("irp_room", "excess"), tolerance=Decimal("0.2"),
+        key="pension-credit", priority=(1 if today.month >= 10 else 2) if room else 2 if gain else 3,
+        identity=f"pension-credit:{today.year}", headline=headline,
+        watch=("irp_room", "excess", "credit_gain"), tolerance=Decimal("0.2"),
         title=title,
         why=("연금저축과 IRP(개인형 퇴직연금)에 넣은 돈은 합해서 연 900만 원(연금저축만은 600만 원)까지 세금을 돌려받습니다"
              "(세액공제, 공제율 13.2%: 소득세 12%와 지방소득세 1.2%를 합한 실효율)." + excess
              + (f" IRP에는 올해 {short_won(plan['irp_paid'])}이 들어가 공제 한도가 {short_won(plan['irp_room'])} 남아 있습니다."
-                if plan["irp_room"] else "")),
+                if room else "")),
         effect=((f"남은 한도를 채우면 세금이 최대 약 {short_won(plan['refund_gain'])} 줄어듭니다(실제 감소액은 내실 세금 "
-                 "범위 안에서 정해집니다)." if plan["irp_room"] else "") + split),
+                 "범위 안에서 정해집니다)." if room else "") + split + elsewhere).strip(),
         risks=("연금 계좌의 돈은 55세 전에 꺼내면 공제받은 세금을 다시 내야 합니다. 가까운 큰 지출(보증금 반환)에 쓸 돈은 넣지 "
-               "마십시오. 한도를 넘게 낸 연금저축 납입분은 다음 해 공제로 돌려 신청할 수 있는지 금융회사에 확인하십시오."),
-        timing=f"{today.year}.12.31까지(올해 공제분)",
+               "마십시오. 한도를 넘게 낸 연금저축 납입분은 다음 해 공제로 돌려 신청할 수 있는지 금융회사에 확인하십시오."
+               + (" ISA는 의무 가입 기간이 3년입니다." if rest else "")),
+        timing=f"{today.year}.12.31까지(올해 공제분)" if room else f"{today.year + 1}년 1월 납입부터",
         reconsider="올해 IRP에 이미 넣은 금액이 있거나 납입 계획이 바뀌면 다시 계산합니다.",
         certainty=(f"계산(정기 이체를 공제 대상 납입으로 가정) + 세법 기준 {tax.RULES_YEAR}년(현행 법령 확인 필요)"),
-        figures={"irp_room": plan["irp_room"], "excess": plan["excess"], "refund_gain": plan["refund_gain"]})
+        figures={"irp_room": plan["irp_room"], "excess": plan["excess"], "refund_gain": plan["refund_gain"],
+                 "credit_gain": gain, "next_rest": rest})
 
 
 def _overseas_harvest(facts: dict[str, Any]) -> Proposal | Undetermined | None:
@@ -942,7 +964,7 @@ def _variable_rate(facts: dict[str, Any]) -> Proposal | Undetermined | None:
         return Undetermined(topic, "CD 금리의 1년 변화 자료가 없습니다(금리 동기화를 확인하십시오).")
     change = cd["change_12m"] / 100
     monthly = total * change / 12
-    one = next(s["monthly_increase"] for s in debt["shocks"] if s["shock"] == Decimal("0.01"))
+    one = next(s["monthly_change"] for s in debt["shocks"] if s["shock"] == Decimal("0.01"))
     direction = "내렸습니다" if change < 0 else "올랐습니다" if change > 0 else "그대로입니다"
     return Proposal(
         key="variable-rate", priority=3, watch=("variable_total", "monthly_change"), tolerance=Decimal("0.3"),
@@ -1113,45 +1135,67 @@ def _strategy(facts: dict[str, Any]) -> list[Track]:
             "전세보증금 반환", status,
             f"{lease['due']:%Y년 %m월} {short_won(lease['amount'])}, 만기 때 예상 가용 자금 {short_won(accumulated)}",
             "주택 이전 목표와 같은 자금을 나눠 써야 하므로, 두 목표를 합친 자금 계획이 필요합니다." if home else ""))
-    pension = facts["pension_total"]
-    home_goal = any(g["category"] == "home" and g["target_date"] > facts["today"] for g in facts["summary"].goals)
-    share = future_income.retirement_share(facts["pay"], home=home, home_goal=home_goal)
-    plan = tax.retirement(facts["tax"], extra=share)
-    if plan is None or not plan["paths"]:
-        tracks.append(Track(
-            "노후 준비", "unknown",
-            f"연금 계좌 {short_won(pension)}" if pension is not None else "연금 계좌 정보 없음",
-            "은퇴 시기와 은퇴 후 월 생활비 목표가 없어 궤도를 판단할 수 없습니다. 알려 주시면 필요한 적립액을 계산해 드리겠습니다."))
-        return tracks
-    mid = next((p for p in plan["paths"] if p["age"] == 60), plan["paths"][-1])
-    paths = ", ".join(f"{p['age']}세 {percent(p['ratio'], 0)}" for p in plan["paths"])
-    # The status stays on the pension accounts alone; the plan with expected pay is shown beside it.
-    tracks.append(Track(
-        "노후 준비", "on_track" if mid["ratio"] >= 1 else "attention",
-        f"월 {short_won(plan['spend'])}(현재 가치) 생활에 필요한 자금 약 {short_won(plan['need'])}, 연금 계좌만으로는 {paths}"
-        + (f"(예정 소득 포함 시 {mid['age']}세 {percent(mid['ratio_with_pay'], 0)})"
-           if share and mid["ratio_with_pay"] is not None else ""),
-        (f"지금 연금 계좌 {short_won(plan['assets'] if pension is None else pension)}에 매년 {short_won(plan['yearly'])}씩 "
-         "더하고 실질 연 3%로 불린다고 가정했습니다(국민연금·퇴직금·부동산 제외). "
-         + (f"환율이 없어 원화로 바꾸지 못한 연금 자산·납입 {plan['unconverted']}건은 빼고 계산했으므로, 위 비율은 확인된 "
-            "금액만으로 본 하한입니다. " if plan["unconverted"] else "")
-         + _retirement_pay_note(share, plan, home_goal)
-         + "은퇴 시기를 정하시면 부족분을 무엇으로 채울지(부동산 축소, 추가 적립, 국민연금) 구체적으로 계산해 드리겠습니다.")))
+    tracks.append(_retirement_track(facts, home))
     return tracks
 
 
-def _retirement_pay_note(share: list[Any] | None, plan: dict[str, Any], home_goal: bool) -> str:
-    """How expected pay enters the retirement plan beside it (never in the status)."""
+def _retirement_track(facts: dict[str, Any], home: dict[str, Any] | None) -> Track:
+    """The long-range retirement track from the pension stack by retirement age (report design §30): the four
+    pipelines' after-tax readiness at 50, 55 and 60, and what must be held outside the pensions at each. The
+    status is the headline tier's (the client's retirement age, or 60); expected pay is shown beside it."""
+    accounts = facts["pension_total"]
+    stack = facts["pension_stack"]
+    tiers = [] if stack is None or stack["age"] is None else [t for t in stack["tiers"] if t["retire_age"] > stack["age"]]
+    if not tiers:
+        return Track("노후 준비", "unknown",
+                     f"연금 계좌 {short_won(accounts)}" if accounts is not None else "연금 계좌 정보 없음",
+                     "출생 연도와 은퇴 후 월 생활비 목표가 없어 궤도를 판단할 수 없습니다. 알려 주시면 은퇴 나이별로 계산해 드리겠습니다.")
+    head = next((t for t in tiers if t["retire_age"] == stack["retirement_age"]), tiers[-1])
+    ratios = ", ".join(f"{t['retire_age']}세 {percent(t['ratio'], 0)}" for t in tiers)
+    needs = [(t["retire_age"], t["outside_need"]) for t in tiers]
+    need_text =", ".join(f"{a}세 {'최대 ' if n['upper_bound'] else ''}{short_won(n['total'])}" for a, n in needs if n is not None)
+    gaps = [t for t in tiers if t["years_without_pension"]]
+    lower = (f" {', '.join(pension.LABELS.get(k, k) for k in stack['unknown'])}은 수령액을 몰라, 준비율은 그 이상이고 연금 밖에서 "
+             "준비할 돈은 최대치입니다." if stack["unknown"] else "")
+    home_goal = any(g["category"] == "home" and g["target_date"] > facts["today"] for g in facts["summary"].goals)
+    share = future_income.retirement_share(facts["pay"], home=home, home_goal=home_goal)
+    birth = facts["tax"]["birth_year"]
+    added = None if birth is None else tax.set_aside(share, int(birth) + head["retire_age"])
+    need = head["outside_need"]
+    # An upper bound above zero cannot say the plan falls short: the unknown pension may cover it (unknown, not zero).
+    status = ("unknown" if need is None else "on_track" if need["total"] <= 0
+              else "unknown" if need["upper_bound"] else "attention")
+    if need is not None and need["upper_bound"]:
+        need = None  # The expected-pay share of a ceiling would understate what the pay covers: left out.
+    return Track(
+        "노후 준비", status,
+        f"월 {short_won(stack['target'])}(현재 가치) 목표에 4대 연금 세후 준비율은 은퇴 나이별로 {ratios}",
+        ((f"연금 밖에서 은퇴할 때 갖고 있어야 할 돈은 {need_text}(오늘 돈 가치)입니다. " if need_text else "")
+         + (f"{gaps[0]['retire_age']}세에 은퇴하면 첫 연금까지 {gaps[0]['years_without_pension']}년이 비어 그동안의 생활비가 "
+            "모두 연금 밖의 돈입니다. " if gaps else "")
+         + "연금 계좌는 납입이 은퇴 때 멈추고 55세부터 받으며, 국민연금은 줄어든 가입 기간만큼 줄여 계산했습니다(퇴직금·부동산 제외)."
+         + lower + " " + _retirement_pay_note(share, added, need, tax.set_aside(share, None), head["retire_age"], home_goal)
+         + ("" if stack["retirement_age_set"] else "은퇴 나이를 정하시면 그 나이를 기준으로 계산합니다.")))
+
+
+def _retirement_pay_note(share: list[Any] | None, added: Decimal | None, need: dict[str, Decimal] | None,
+                         total: Decimal | None, retire: int, home_goal: bool) -> str:
+    """How expected pay enters the retirement plan beside it (never in the status): the pay set aside, grown to
+    the retirement age, against what must be held outside the pensions then."""
     if share is None:
         return "예정 소득을 더한 노후 계산은 주택 목표 계산에 미상 금액이 있어 하지 않았습니다. "
     if not share:
         return ""
     used = ("주택 목표에 필요한 만큼을 먼저 쓰고 남는 몫과 주택 목표일 이후에 받는 몫" if home_goal
             else "기준 시나리오의 예정 소득")
-    if not plan["pay_set_aside"]:
+    if not total:
         return f"예정 소득은 모두 주택 목표에 필요해, 노후 계산에 더할 몫이 없습니다({used} 기준). "
-    return (f"{used}(확정·예상분, 세후 추정 약 {short_won(plan['pay_set_aside'])})을 노후 자금으로 모아 실질 연 3%로 "
-            "불린다고 보면 괄호 안 비율이 됩니다. 받기 전까지는 확정이 아니어서 상태 판단에는 넣지 않았습니다. ")
+    if added is None or need is None or not need["total"]:
+        return ""
+    covered = min(Decimal(1), added / need["total"])
+    return (f"{used}(확정·예상분, 세후 추정 약 {short_won(total)})을 노후 자금으로 모아 실질 연 3%로 불리면 {retire}세 은퇴 때 "
+            f"약 {short_won(added)}으로, 연금 밖에서 필요한 돈의 {percent(covered, 0)}입니다. 받기 전까지는 확정이 아니어서 상태 "
+            "판단에는 넣지 않았습니다. ")
 
 
 def _home_tiers(home: dict[str, Any]) -> str:

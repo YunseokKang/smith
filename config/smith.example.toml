@@ -31,6 +31,15 @@ thursday = "rates"       # 금리·대출: 이자 부담, 추가 상환 판단
 friday = "tax"           # 세금·연금: 세액공제, 해외주식 공제, 연말정산
 saturday = "life"        # 생활·목표: 현금흐름, 비상금, 목표 진행 (웹 조사 없음)
 
+# Same-day event notes, apart from the daily editions (report design §29): a short mail when the Bank of Korea
+# sets the policy rate or the listed holdings' total value (not one stock) moves more than `portfolio_move_pct`
+# percent since the last check. The check
+# runs at `check_time` (after the Korean close) and again right after each morning report; `run-due` does both.
+[events]
+enabled = true
+check_time = "16:10"
+portfolio_move_pct = 2.0
+
 # Optional, in the local config: a verified ledger copy after each sent report (see `smith backup`).
 # Backups hold real financial data; prefer a drive you control, never Git or a shared cloud folder.
 # [backup]

@@ -42,7 +42,7 @@ from smith.proposals import Proposal
 
 # v10: executive headline, rounded amounts, total-balance-sheet mindset, employer double concentration, no internal
 # vocabulary (user spec 2026-10-17); v9: stress test, spending room, peer benchmark; v8: expected pay is not wealth.
-PROMPT_VERSION = "narrative-v18"  # v18: principles are consensus, not law; v17: product picks as input.
+PROMPT_VERSION = "narrative-v21"  # v21: pension stack by retirement age 50/55/60; v20: policy-rate path, next meeting.
 MODEL = "fable"
 BUDGET_USD = "5.00"
 # Two calls at most: the write (the markets day with twenty-odd holdings ran past 10 minutes on 2026-10-17) and a
@@ -227,7 +227,15 @@ Input JSON:
   sector_metrics.pension_insurance.pension_stack: every retirement pipeline (national pension, insurer's
   annuity, pension savings, IRP) with its start age, gross and after-tax monthly payout in today's won, the
   basis (stated by the client, estimated by code, or unknown with what is missing), the monthly target and
-  the readiness ratio over the known pipelines (a lower bound while any is unknown).
+  the readiness ratio over the known pipelines (a lower bound while any is unknown). The retirement age is
+  undecided unless retirement_age_chosen_by_client: retirement_age_tiers gives the stack at 50, 55 and 60
+  (contributions stop at retirement, pension accounts pay from 55, the national pension shrinks with the
+  contribution months lost), the years without any pension and what must be held outside the pensions at
+  retirement (a ceiling when held_outside_is_upper_bound: say "최대"). Never write one retirement age as if it
+  were the client's plan; compare the ages. The projection
+  assumes the credit-maximizing split (projected_monthly_contributions; the part no credit covers kept in an ISA
+  or similar), the same split the tax proposal makes; headline_net_with_current_contributions is the total if
+  the client keeps contributing as now.
   sector_metrics.pension_insurance.annuity_reviews: each insurer's annuity (by number) on its own
   illustration: what is still paid and what comes back for life, the forward internal rate of return by
   lifespan, the same money in a broad index fund at 4/6/8%, the break-even return (or which side of the
@@ -237,7 +245,14 @@ Input JSON:
   sector_metrics.debt.unused_credit_lines: credit lines with nothing drawn; they cost nothing and are
   liquidity room, never a loan to repay. sector_metrics.debt.refinance: the mortgage against the market
   average rate on new bank mortgages, with the verdict (keep, review, unknown), the yearly saving, the
-  assumed fee and the months to earn it back.
+  assumed fee and the months to earn it back. sector_metrics.debt.rate_shocks: the month's interest change
+  on the variable-rate loans for rate moves both ways (a negative rate_change is a cut and lowers the
+  interest; deposit yields fall with it, so prepayment is judged by the spread). sector_metrics.fx: the
+  dollar assets' won value per 100 won of exchange-rate move, and what the past year's move did to today's
+  dollars; it sizes an exposure and is never a forecast of the rate. sector_metrics.policy: each policy rate's
+  steps over the past year (dates and sizes, as decimal ratios) and the next Bank of Korea rate meeting. On a
+  meeting day say what one 0.25%p step would do to the loans (debt.rate_shocks scale linearly); never predict the
+  decision, and take the vote and the governor's guidance only from the brief.
   sector_metrics.real_estate.move_plan: the move-target complexes by alias (후보 1, 후보 2: write them so;
   the mail pairs each alias with its name) with price basis, trades and six-month change, against the net
   proceeds of selling both homes (price basis per home, loans, deposit, tax cases): the spread now (after
@@ -453,7 +468,7 @@ def sector_metrics(view: Any, data: dict[str, Any]) -> dict[str, Any]:
                  "spending_split": _split_metrics(data.get("spending_split"))},
         "debt": {"variable_rate_total": won(debt["variable_total"]),
                  "monthly_interest_estimate": won(debt["monthly_interest_estimate"]),
-                 "rate_shocks": [{"rate_rise": str(x["shock"]), "monthly_interest_increase": won(x["monthly_increase"])}
+                 "rate_shocks": [{"rate_change": str(x["shock"]), "monthly_interest_change": won(x["monthly_change"])}
                                  for x in debt["shocks"]],
                  "unused_credit_lines": [{"limit": won(l["limit"]), "drawn": won(l["drawn"])}
                                          for l in debt.get("credit_lines", [])],
@@ -479,7 +494,33 @@ def sector_metrics(view: Any, data: dict[str, Any]) -> dict[str, Any]:
                               "annuity_reviews": [_annuity_metrics(r, i) for i, r in enumerate(data.get("annuity_reviews") or [], 1)]},
         "stress": _stress_metrics(data["stress"]),
         "spending_room": _spending_metrics(advice.get("spending_room")),
+        "fx": _fx_metrics(s["macro"].get("fx")),
+        "policy": _policy_metrics(s["macro"].get("policy")),
     }
+
+
+def _policy_metrics(policy: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The policy rates' steps over the past year and the next Bank of Korea rate meeting (report design §28).
+    Steps are decimal ratios (0.0025 is 0.25%p), like every rate the model receives."""
+    if not policy:
+        return None
+
+    def steps(row: dict[str, Any] | None) -> list[dict[str, str]]:
+        return [{"date": day.isoformat(), "rate_change": str(delta / 100)} for day, delta in (row or {}).get("moves") or []]
+    meeting = policy.get("next_meeting")
+    return {"bok_steps_12m": steps(policy.get("bok")), "fed_upper_steps_12m": steps(policy.get("fed")),
+            "next_bok_rate_meeting": None if meeting is None else meeting.isoformat(),
+            "bok_rate_meeting_today": bool(policy.get("meeting_today"))}
+
+
+def _fx_metrics(fx: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The won/dollar rate against today's dollar assets (report design §27); None without dollar assets."""
+    if fx is None:
+        return None
+    return {"usd_assets": won(fx["usd_assets"]), "usd_amount": f"{fx['usd_amount']:.0f}",
+            "won_change_per_100_won_move": won(fx["per_100_won"]),
+            "rate_change_12m_won": None if fx["change_12m"] is None else str(fx["change_12m"]),
+            "won_change_over_12m_on_todays_dollars": won(fx["year_effect"])}
 
 
 def _split_metrics(split: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -560,14 +601,31 @@ def _stack_metrics(stack: dict[str, Any] | None) -> dict[str, Any] | None:
     """The pension stack (report design §18.5) for the narrative; None without a retirement target."""
     if stack is None:
         return None
-    return {"monthly_target_today_won": won(stack["target"]), "payout_age_assumed": stack["payout_age"],
+    contributions = stack["contributions"]
+    return {"monthly_target_today_won": won(stack["target"]), "headline_retirement_age": stack["retirement_age"],
+            "retirement_age_chosen_by_client": stack["retirement_age_set"],
             "pipelines": [{"key": p["key"], "label": p["label"], "start_age": p["start_age"],
                            "gross_monthly": won(p["gross_monthly"]), "net_monthly": won(p["net_monthly"]),
                            "nominal_monthly_at_start": won(p.get("nominal_monthly")),
                            "basis": p["basis"], "basis_text": p["basis_text"], "missing": p["missing"]}
                           for p in stack["pipelines"]],
             "total_net_monthly_known": won(stack["total_net"]), "readiness_ratio": f"{stack['ratio']:.4f}",
-            "unknown_pipelines": stack["unknown"], "lower_bound": not stack["complete"]}
+            "unknown_pipelines": stack["unknown"], "lower_bound": not stack["complete"],
+            # Report design §30: the stack at each retirement age, and the contributions it assumes.
+            "retirement_age_tiers": [
+                {"retirement_age": t["retire_age"], "net_monthly_once_all_started": won(t["total_net"]),
+                 "readiness_ratio": f"{t['ratio']:.4f}", "first_pension_age": t["first_income_age"],
+                 "years_without_pension": t["years_without_pension"],
+                 "held_outside_pensions_at_retirement": None if t["outside_need"] is None else won(t["outside_need"]["total"]),
+                 # An unknown pension counts as nothing in it: then the figure is only a ceiling (review 2026-10-23).
+                 "held_outside_is_upper_bound": None if t["outside_need"] is None else t["outside_need"]["upper_bound"],
+                 "pipelines_net_monthly": {p["key"]: won(p["net_monthly"]) for p in t["pipelines"]}}
+                for t in stack["tiers"] if stack["age"] is None or t["retire_age"] > stack["age"]],
+            "projected_monthly_contributions": {"pension_savings": won(contributions["pension_savings"]),
+                                                "irp": won(contributions["irp"]), "isa_or_similar": won(contributions["isa"])},
+            "current_monthly_contributions": {k: won(v) for k, v in contributions["current"].items()},
+            "headline_net_with_current_contributions": (None if stack["current_split"] is None
+                                                        else won(stack["current_split"]["total_net"]))}
 
 
 def _swap_metrics(swap: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -1315,7 +1373,10 @@ def _figures(text: str) -> set[str]:
 # Ratios computed by code are decimal fractions (0.0361 is 3.61%); these keys hold them.
 _RATIO_KEYS = frozenset({"share", "share_of_assets", "share_of_securities", "usd_share_of_assets", "return_on_cost",
                          "loan_to_value", "liabilities_to_assets", "premium_to_income", "change_vs_previous_6m",
-                         "annual_rate", "rate_rise", "top1_share", "top5_share", "overseas_share",
+                         "annual_rate", "rate_rise", "rate_change", "top1_share", "top5_share", "overseas_share",
+                         # Ratios the e-mail answer flagged as unverified (2026-10-23: "74%" was the readiness ratio).
+                         "readiness_ratio", "break_even_return", "irr", "change_6m", "gap", "share_of_income",
+                         "fixed_share_of_income", "discretionary_share_of_income", "market_average_rate_new_mortgages",
                          "concentration_limit", "drawdown", "share_of_securities_with_grants",
                          # Stress test (sector_metrics.stress): the scenario's drops and the net-worth fall.
                          "property_drop", "stock_drop", "net_worth_drop_ratio",

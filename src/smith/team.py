@@ -28,7 +28,7 @@ from typing import Any
 from smith import headless, narrative
 from smith.payload import check_outbound, mask_identifiers
 
-PROMPT_VERSION = "team-v3"
+PROMPT_VERSION = "team-v4"  # v4: sector_metrics.fx (FX sensitivity) for the debt and investment areas.
 SPECIALIST_BUDGET_USD = "2.00"
 # All specialists run at once (five minutes at most), then the editor's write and repair. The editor
 # reads more than the single writer (about 70 KB against 50 KB) and timed out at its ten minutes on real
@@ -137,14 +137,14 @@ AREAS = (
          "month, prepayment against investing, and the lease deposit the household owes.",
          assets=_collateral, liabilities=lambda item: True,
          cash_flow=lambda item: item["category"] == "loan_payment" or item["liability_ref"] is not None,
-         context=("exposures", "evidence", "announcements"), metrics=("debt", "real_estate")),
+         context=("exposures", "evidence", "announcements"), metrics=("debt", "real_estate", "fx", "policy")),
     Area("investment", "투자·포트폴리오",
          "investments: concentration by holding, currency and market, unrealized gains and return on cost, "
          "holdings without a cost basis, and what Hermes manages (only ever to be discussed with Hermes).",
          assets=lambda a, h: bool(a.get("symbol")) or a["category"] in ("stock", "fund", "bond", "crypto", "unclassified")
          or a["managed_by"] == "hermes",
          liabilities=lambda item: False, cash_flow=lambda item: item["category"] == "internal_transfer",
-         context=("exposures", "evidence"), extra=("tax",), metrics=("securities",)),
+         context=("exposures", "evidence"), extra=("tax",), metrics=("securities", "fx")),
     Area("real_estate", "부동산·주거",
          "real estate and housing: each property's ledger value against official transaction data, "
          "loan-to-value, the lease (jeonse) deposit and reverse-jeonse risk, and the home-move goal.",

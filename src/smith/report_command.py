@@ -73,7 +73,7 @@ def run(args: argparse.Namespace) -> int:
             return _compare(args, now=now, kind=kind, tz=tz, config=config, brief_id=brief_id)
         with closing(ledger.connect_read_only(args.db)) as conn:
             data = build_report(conn, as_of=now, known_at=now, baseline=args.since, kind=kind, tz=tz,
-                                household=profile(config) if config else None)
+                                household=profile(config) if config else None, schedule=(config or {}).get("reports"))
     except (sqlite3.Error, ledger.LedgerError) as error:
         print(f"Ledger error ({type(error).__name__}): not a readable Smith ledger.")
         return 1
@@ -374,6 +374,8 @@ def _publish_once(args: argparse.Namespace) -> int:
             except Exception as error:  # noqa: BLE001 - answering questions must never block a report.
                 _say(args.db, f"Answering questions crashed: {type(error).__name__}")
         if found is None:
+            # Same-day event notes (report design §29): once a day after the check time, apart from the reports.
+            _check_events(args.db, config, now, reason="slot", sync=True)
             upcoming = delivery.slots_between(config["reports"], tz, now, now + PREPARE_AHEAD)
             if upcoming:
                 # Prepare: research ahead of the scheduled time so the report itself is not delayed.
@@ -420,7 +422,7 @@ def _publish_once(args: argparse.Namespace) -> int:
     result = delivery.publish(args.db, recipient=recipient, credentials=stored, now=publish_at,
                               slot=slot, missed=missed, kind=kind, tz=tz, sync_failures=sync_failures,
                               narrator=_narrator(args.db, publish_at, brief_id), household=profile(config),
-                              lineage=lineage(args.config), plan=config["reports"].get("editions"))
+                              lineage=lineage(args.config), schedule=config["reports"])
     # The subject can carry an amount (net-worth change); the plain-text log gets only the run id and outcome.
     _say(args.db, f"Report {result['status']}: run {(result.get('report_id') or '-')[:8]} "
                   f"{result.get('error_code') or ''}".rstrip())
@@ -428,7 +430,36 @@ def _publish_once(args: argparse.Namespace) -> int:
         print(f"Subject: {result['subject']}")
     if result["status"] == "sent" and (config.get("backup") or {}).get("dir"):
         _backup_after_send(args.db, config["backup"])
+    # The holdings and the evidence were just refreshed: look for events (the US session overnight) without syncing.
+    if args.action == "run-due":
+        _check_events(args.db, config, datetime.now(timezone.utc), reason="after-report", sync=False)
     return 0 if result["status"] in ("sent", "skipped") else 1
+
+
+def _check_events(db: Path, config: dict[str, Any], now: datetime, *, reason: str, sync: bool) -> None:
+    """The same-day event notes (smith.events, report design §29): at the daily check time (`reason` "slot", once a
+    day) or right after a report ("after-report"). Research runs in the headless sandbox; a failure is logged and
+    the event retried at a later check. Never blocks the reports."""
+    from smith import credentials, events
+
+    if not (config.get("events") or {}).get("enabled"):
+        return
+    try:
+        if reason == "slot":
+            with closing(ledger.connect(db)) as conn:
+                if events.slot_due(conn, config, now) is None:
+                    return
+        outcomes = events.check(db, config, now=now, reason=reason, sync=sync, researcher=events.research_event,
+                                recipient=config.get("mail", {}).get("recipient"), credentials=credentials.load_gmail(),
+                                secrets=credentials.all_secrets(), say=lambda message: _say(db, message))
+        for outcome in outcomes:
+            # The detail can be the subject (an amount): the log gets the key and the status only.
+            _say(db, f"Event {outcome['key']}: {outcome['status']}"
+                     + (f" ({outcome['detail']})" if outcome["status"] != "sent" and outcome.get("detail") else ""))
+        if not outcomes:
+            _say(db, f"Event check ({reason}): nothing", log=reason != "slot")
+    except Exception as error:  # noqa: BLE001 - an event check must never block or fail a report run.
+        _say(db, f"Event check crashed: {type(error).__name__}")
 
 
 def _backup_after_send(db: Path, settings: dict[str, Any]) -> None:

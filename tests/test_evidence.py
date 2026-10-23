@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from smith import ledger
 from smith.announcements import FEEDS, Announcement, FeedError, fetch_feed
-from smith.evidence import SERIES, EvidenceError, describe, fetch_provider
+from smith.evidence import SERIES, EvidenceError, describe, fetch_provider, next_policy_meeting
 
 START, END = date(2025, 9, 1), date(2026, 10, 4)
 
@@ -56,7 +56,11 @@ class EvidenceTests(unittest.TestCase):
     def test_describe_reports_latest_changes_and_staleness(self):
         series = {("fred", "DGS10"): {date(2025, 10, 1): ("4.12", None), date(2026, 7, 1): ("4.49", None),
                                       date(2026, 10, 1): ("5.24", None)},
-                  ("fred", "DFF"): {date(2026, 8, 1): ("3.88", None)}}
+                  ("fred", "DFF"): {date(2026, 8, 1): ("3.88", None)},
+                  # A policy rate steps at meetings; a step on the window's first day counts (the point before seeds it).
+                  ("ecos", "722Y001/0101000"): {date(2025, 9, 30): ("2.25", None), date(2025, 10, 4): ("2.5", None),
+                                                date(2026, 7, 16): ("2.75", None), date(2026, 8, 27): ("3", None),
+                                                date(2026, 10, 4): ("3", None)}}
         rows = {row["spec"].series_id: row for row in describe(series, as_of=date(2026, 10, 4))}
         self.assertEqual((rows["DGS10"]["value"], rows["DGS10"]["change_3m"], rows["DGS10"]["change_12m"]),
                          (Decimal("5.24"), Decimal("0.75"), Decimal("1.12")))
@@ -64,6 +68,14 @@ class EvidenceTests(unittest.TestCase):
         self.assertTrue(rows["DFF"]["stale"])
         self.assertIsNone(rows["DFF"]["change_12m"])  # No point near a year earlier: unknown, not zero.
         self.assertIsNone(rows["DGS2"]["value"])
+        self.assertEqual(rows["722Y001/0101000"]["moves"], [(date(2025, 10, 4), Decimal("0.25")), (date(2026, 7, 16), Decimal("0.25")),
+                                                            (date(2026, 8, 27), Decimal("0.25"))])
+        self.assertEqual(rows["DGS10"]["moves"], [])                 # Market rates move daily: no step list.
+
+    def test_the_next_rate_meeting_comes_from_the_published_calendar(self):
+        self.assertEqual(next_policy_meeting(date(2026, 10, 22)), date(2026, 10, 22))   # The meeting day itself.
+        self.assertEqual(next_policy_meeting(date(2026, 10, 23)), date(2026, 11, 26))
+        self.assertIsNone(next_policy_meeting(date(2026, 11, 27)))                      # The table ends: no guess.
 
 
 if __name__ == "__main__":

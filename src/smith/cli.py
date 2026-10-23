@@ -61,9 +61,10 @@ def main(argv: list[str] | None = None) -> int:
     macro.add_argument("--db", type=Path, default=DEFAULT_DB)
     macro.add_argument("--days", type=int, default=400, help="sync: history window in days (default: 400)")
     macro.add_argument("--as-of", type=date.fromisoformat, help="show: YYYY-MM-DD (default: today)")
-    from smith import (advise_command, backup_command, doctor_command, followup_command, mail_command, picks_command,
-                       memory_command, realestate_command, report_command)
+    from smith import (advise_command, backup_command, doctor_command, events_command, followup_command, mail_command,
+                       picks_command, memory_command, realestate_command, report_command)
     advise_command.add_parser(sub, DEFAULT_DB)
+    events_command.add_parser(sub, DEFAULT_DB)
     memory_command.add_parser(sub, DEFAULT_DB)
     backup_command.add_parser(sub, DEFAULT_DB)
     doctor_command.add_parser(sub, DEFAULT_DB)
@@ -78,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
                 "report": report_command.run, "mail": mail_command.run,
                 "research": followup_command.run_research, "proposal": followup_command.run_proposal,
                 "realestate": realestate_command.run, "doctor": doctor_command.run, "backup": backup_command.run,
-                "memory": memory_command.run, "picks": picks_command.run}
+                "memory": memory_command.run, "picks": picks_command.run, "events": events_command.run}
     return commands[args.command](args)
 
 

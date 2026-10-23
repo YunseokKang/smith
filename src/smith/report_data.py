@@ -10,8 +10,8 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, localcontext
 from typing import Any
 
-from smith import (cases, checklist, editions, future_income, holdings, lease, ledger, move_plan, pension, picks, principles,
-                   product_review, proposals, realestate, stress, tax)
+from smith import (cases, checklist, editions, evidence, future_income, holdings, lease, ledger, move_plan, pension, picks,
+                   principles, product_review, proposals, realestate, stress, tax)
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import LedgerView, base_amount, load_view, unrealized_gain
 from smith.records import TRANSFER_CATEGORIES, Kind, RecordInput, Status
@@ -43,29 +43,35 @@ COMPOSITION_LABELS = {"real_estate": "부동산", "securities": "주식·펀드"
 _FIXED_CATEGORIES = ("loan_payment", "insurance_premium", "housing_cost", "tax")
 _MONTHS = {"monthly": 1, "quarterly": 3, "annual": 12}
 EMERGENCY_MONTHS = 6       # Assumption: emergency reserve of six months of outflow.
-RATE_SHOCKS = (Decimal("0.005"), Decimal("0.01"), Decimal("0.02"))
+# Rate moves applied to the variable-rate loans, cuts included (expert review 2026-10-22: scenarios ran one way).
+RATE_SHOCKS = (Decimal("-0.01"), Decimal("-0.005"), Decimal("0.005"), Decimal("0.01"), Decimal("0.02"))
+FX_SERIES = "731Y001/0000001"  # ECOS won per dollar (BOK reference rate): the year's move for the FX sensitivity.
+_FX_ASSUMPTION = ("환율 민감도: 지금 보유한 달러 금액(원장 환율로 환산)에 환율 변화를 곱한 값. 1년 변화는 한국은행 기준 환율의 "
+                  "관측일 기준이며 환율 전망이 아님")
 SECURED_LOAN_CATEGORIES = ("mortgage",)  # Loans that count in a property's loan-to-value ratio.
 TIMELINE_YEARS = 5
 
 
 def build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetime,
                  baseline: datetime | None, kind: str, tz: str = DEFAULT_TIMEZONE,
-                 household: dict[str, Any] | None = None) -> dict[str, Any]:
+                 household: dict[str, Any] | None = None, schedule: dict[str, Any] | None = None) -> dict[str, Any]:
     """Assemble report data. `baseline` is the previous report's time; None marks a first report.
 
     `as_of` is converted to the household timezone first, because calendar dates come from it.
     The whole build reads one ledger snapshot: an import landing mid-build cannot give the KPIs one
-    ledger state and the change analysis or proposals another.
+    ledger state and the change analysis or proposals another. `schedule` is the `[reports]` table
+    (weekdays and editions), so a daily edition can say where the other areas are; None means the default plan.
     """
     with ledger.snapshot(conn), localcontext() as context:
         context.prec = DECIMAL_PRECISION  # The same precision policy as the summary (no rounded products).
         return _build_report(conn, as_of=local_time(as_of, tz), known_at=known_at,
                              baseline=None if baseline is None else local_time(baseline, tz), kind=kind,
-                             household=household)
+                             household=household, schedule=schedule)
 
 
 def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetime,
-                  baseline: datetime | None, kind: str, household: dict[str, Any] | None) -> dict[str, Any]:
+                  baseline: datetime | None, kind: str, household: dict[str, Any] | None,
+                  schedule: dict[str, Any] | None) -> dict[str, Any]:
     view = load_view(conn, as_of=as_of, known_at=known_at)
     change = None if baseline is None else decompose(conn, baseline, as_of, known_at)
     salary = (household or {}).get("annual_gross_salary")
@@ -86,8 +92,12 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     # the stress test (reverse-jeonse gap, not the whole deposit) and the property day's section.
     lease_plans = lease.plans(view, sectors["real_estate"]["properties"], household, today=as_of.date(),
                               property_drop=stress.PROPERTY_DROP)
+    plan = tax.facts(view, as_of.date(), household)
+    # The pension stack by retirement age (report design §30) follows the credit split the tax proposal makes, and
+    # the long-range retirement track reads the same stack, so the report states one retirement picture.
+    pension_stack = pension.stack(view, household, as_of.date(), plan=tax.pension_plan(plan))
     advice = proposals.build(view, kpis, sectors, active=ledger.active_proposals(conn), household=household, pay=pay,
-                             review=review, lease_plans=lease_plans)
+                             review=review, lease_plans=lease_plans, pension_stack=pension_stack)
     # The status badge stays household-wide: urgent proposals of every area, whatever today's theme.
     advice["household_urgent"] = [p.key for p in advice["proposals"] if p.priority == 1]
     # A daily edition carries only its own proposal rules and their pending judgements; each rule belongs
@@ -95,13 +105,13 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     advice["proposals"] = [p for p in advice["proposals"] if editions.carries(kind, p.key)]
     advice["undetermined"] = [u for u in advice["undetermined"] if editions.carries(kind, u.key)]
     advice["assumptions"] = advice["assumptions"] + future_income.assumptions(pay)
+    if sectors["macro"]["fx"] is not None:
+        advice["assumptions"].append(_FX_ASSUMPTION)
     # The products the review team chose for a proposal that moves money (report design §26), sized here.
     reviews = picks.load(conn, known_at)
     advice["proposals"] = picks.attach(advice["proposals"], reviews, view.rates)
     advice["pending_products"] = picks.pending(view, kind, reviews)  # Live, but no usable review yet: the card says so.
-    plan = tax.facts(view, as_of.date(), household)
-    pension_stack = pension.stack(view, household, as_of.date())
-    data = {"kind": kind, "as_of": as_of, "baseline": baseline, "kpis": kpis,
+    data = {"kind": kind, "as_of": as_of, "baseline": baseline, "kpis": kpis, "schedule": schedule,
             "change": change, "timeline": _timeline(view, pay), "sectors": sectors, "holdings": review,
             "future_income": expected, "advice": advice, "lease_plans": lease_plans,
             # One bad year with several shocks at once (report design §16.2), household-wide like the badge.
@@ -208,6 +218,35 @@ def decompose(conn: sqlite3.Connection, t0: datetime, t1: datetime, known_at: da
             "correction": restated_start - start, "parts": parts, "balanced": balanced, "groups": groups,
             "from": t0.date(), "to": t1.date(),
             "complete": not unconverted, "unconverted_currencies": sorted(unconverted)}
+
+
+def holding_changes(conn: sqlite3.Connection, t0: datetime, t1: datetime, known_at: datetime) -> list[dict[str, Any]]:
+    """Per listed holding (a record with a symbol), its base-currency value at t0 and the market, FX and trade
+    parts of its change to t1: the split of `decompose`, one row per holding, for the event note that asks which
+    holdings moved (report design §29). A holding whose currency has no rate reads `unconverted` with zero parts
+    (unknown, left out of the caller's sums); one bought after t0 has no `start`."""
+    with ledger.snapshot(conn):
+        before, after = _active(conn, t0, known_at), _active(conn, t1, known_at)
+        rates0, rates1 = _rates(conn, t0, known_at), _rates(conn, t1, known_at)
+    rows = []
+    with localcontext() as context:
+        context.prec = DECIMAL_PRECISION
+        for record_id in sorted(set(before) | set(after)):
+            earlier, later = before.get(record_id), after.get(record_id)
+            record = later or earlier
+            if record.kind is not Kind.ASSET or not record.fields.get("symbol"):
+                continue
+            unconverted: set[str] = set()
+            parts = _record_change(earlier, later, rates0, rates1, unconverted)
+            currency = record.fields["currency"]
+            start = (None if earlier is None or currency not in rates0
+                     else Decimal(earlier.fields["value"]) * rates0[currency])
+            rows.append({"record_id": record_id, "name": record.fields.get("instrument_name") or record.fields["symbol"],
+                         "symbol": record.fields["symbol"], "market": record.fields.get("market"),
+                         "hermes": record.fields.get("managed_by") == "hermes", "start": start,
+                         "market_change": parts.get("market", Decimal(0)), "fx": parts.get("fx", Decimal(0)),
+                         "trades": parts.get("trades", Decimal(0)), "unconverted": bool(unconverted)})
+    return rows
 
 
 def _active(conn: sqlite3.Connection, as_of: datetime, known_at: datetime) -> dict[str, RecordInput]:
@@ -531,7 +570,22 @@ def _pay_rows(pay: list[future_income.Inflow], horizon: date) -> list[dict[str, 
 def _sectors(view: LedgerView) -> dict[str, Any]:
     return {"cash": _cash_sector(view), "debt": _debt_sector(view), "securities": _securities_sector(view),
             "real_estate": _real_estate_sector(view), "pension_insurance": _pension_insurance_sector(view),
-            "macro": {"evidence": view.evidence, "exposures": view.exposures, "announcements": view.announcements}}
+            "macro": {"evidence": view.evidence, "exposures": view.exposures, "announcements": view.announcements,
+                      "fx": _fx_sensitivity(view), "policy": _policy_outlook(view)}}
+
+
+def _policy_outlook(view: LedgerView) -> dict[str, Any]:
+    """Where the policy rates stand and the next Bank of Korea rate meeting (report design §28, learnt from a bank's
+    same-day market note): each policy series' steps over the past year come from the stored series, the meeting on
+    or after the report day from the published calendar. `next_meeting` is None, and logged, once the calendar
+    table is behind the report day: the reports then say nothing about the next meeting rather than guess."""
+    today = view.as_of.date()
+    rows = {r["spec"].series_id: r for r in view.evidence if r["spec"].policy}
+    meeting = evidence.next_policy_meeting(today)
+    if meeting is None:
+        logger.warning("No Bank of Korea rate meeting on or after %s in evidence.BOK_RATE_MEETINGS: extend the table", today)
+    return {"bok": rows.get(evidence.BOK_BASE_RATE), "fed": rows.get(evidence.FED_TARGET_UPPER),
+            "next_meeting": meeting, "meeting_today": meeting == today}
 
 
 def _cash_sector(view: LedgerView) -> dict[str, Any]:
@@ -592,11 +646,31 @@ def _debt_sector(view: LedgerView) -> dict[str, Any]:
     lines = [l for l in rows if l["credit_limit"] is not None]
     unused = _total(None if l["amount"] is None else max(Decimal(0), l["credit_limit"] - l["amount"]) for l in lines)
     return {"loans": rows, "variable_total": variable_total,
-            "shocks": [{"shock": s, "monthly_increase": None if variable_total is None else variable_total * s / 12}
+            # The month's interest change for each rate move, negative for a cut (RATE_SHOCKS runs both ways).
+            "shocks": [{"shock": s, "monthly_change": None if variable_total is None else variable_total * s / 12}
                        for s in RATE_SHOCKS],
             "monthly_interest_estimate": view.summary.monthly_loan_interest_estimate,
             "unused_credit": unused if lines else None,
             "credit_lines": [{"label": l["label"], "limit": l["credit_limit"], "drawn": l["amount"]} for l in lines]}
+
+
+def _fx_sensitivity(view: LedgerView) -> dict[str, Any] | None:
+    """What the won/dollar rate does to the dollar assets (expert review 2026-10-22: the rates report listed them
+    without saying what a move costs): the won value of today's dollars per 100 won of move, and over the past
+    year's move of the BOK reference rate. The ledger rate (the one the balance sheet converts with) sizes the
+    dollars; the year's change is the evidence series', so both rates are kept for the notes. None without dollar
+    assets or a ledger rate; the year's effect is None without the series, never zero."""
+    usd_in_won = view.summary.by_currency.get("USD")
+    rate = view.rates.get("USD")
+    if not usd_in_won or not rate:
+        return None
+    dollars = usd_in_won / rate
+    row = next((r for r in view.evidence if r["spec"].series_id == FX_SERIES and r["value"] is not None), None)
+    change = None if row is None else row["change_12m"]
+    return {"usd_assets": usd_in_won, "usd_amount": dollars, "ledger_rate": rate, "per_100_won": dollars * 100,
+            "series_rate": None if row is None else row["value"],
+            "series_observed_on": None if row is None else row["observed_on"],
+            "change_12m": change, "year_effect": None if change is None else dollars * change}
 
 
 def _securities_sector(view: LedgerView) -> dict[str, Any]:

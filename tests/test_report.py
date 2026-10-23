@@ -376,8 +376,49 @@ class ReportTests(unittest.TestCase):
                 currency="KRW", amount="120000", frequency="monthly", start_date="2026-01-01", end_date="2026-09-30")])
         sectors = build_report(self.conn, as_of=later, known_at=later, baseline=None, kind="monday")["sectors"]
         self.assertIsNone(sectors["debt"]["variable_total"])
-        self.assertIsNone(sectors["debt"]["shocks"][0]["monthly_increase"])
+        self.assertIsNone(sectors["debt"]["shocks"][0]["monthly_change"])
         self.assertEqual(sectors["pension_insurance"]["monthly_premiums"], Decimal(0))
+
+    def test_rate_scenarios_run_both_ways_and_dollar_assets_get_a_per_100_won_sensitivity(self):
+        from smith import narrative
+        # Variable loan 400,000 at T1; 12 shares x 110 USD at 1,400 = 1,848,000 won of dollar assets.
+        ledger.store_evidence(self.conn, [("ecos", "731Y001/0000001", date(2025, 10, 1), "1300", None),
+                                          ("ecos", "731Y001/0000001", date(2026, 10, 1), "1400", None),
+                                          # The base rate stepped twice, on the 2026 meeting days of 07-16 and 08-27.
+                                          ("ecos", "722Y001/0101000", date(2025, 10, 1), "2.5", None),
+                                          ("ecos", "722Y001/0101000", date(2026, 7, 16), "2.75", None),
+                                          ("ecos", "722Y001/0101000", date(2026, 8, 27), "3", None),
+                                          ("ecos", "722Y001/0101000", date(2026, 10, 1), "3", None)], retrieved_at=T1)
+        data = build_report(self.conn, as_of=T1, known_at=T1, baseline=None, kind="rates")
+        shocks = {s["shock"]: s["monthly_change"] for s in data["sectors"]["debt"]["shocks"]}
+        self.assertEqual(sorted(shocks), [Decimal("-0.01"), Decimal("-0.005"), Decimal("0.005"), Decimal("0.01"), Decimal("0.02")])
+        self.assertEqual((shocks[Decimal("0.01")].quantize(Decimal("0.01")), shocks[Decimal("-0.01")]),
+                         (Decimal("333.33"), -shocks[Decimal("0.01")]))
+        fx = data["sectors"]["macro"]["fx"]
+        self.assertEqual((fx["usd_amount"], fx["per_100_won"], fx["change_12m"], fx["year_effect"]),
+                         (Decimal(1320), Decimal(132_000), Decimal(100), Decimal(132_000)))
+        html = render(data)[1]
+        for text in ("1%p 내리면 그만큼 줄어듭니다", "-1.0%p", "▼ -333원", "100원 움직일 때", "1,300원→1,400원", "늘었습니다",
+                     # The policy rate's path and the next meeting (report design §28): 400,000 x 0.25% / 12 = 83 won.
+                     "한국은행 기준금리 3%는 07.16 +0.25%p, 08.27 +0.25%p 뒤 동결(10.01 기준)입니다.", "다음 금통위 10.22",
+                     "다음 금통위는 10월 22일(목)입니다. 0.25%p 움직이면 월 이자가 약 83원 달라집니다."):
+            self.assertIn(text, html)
+        metrics = narrative.build_payload(data["view"], data, None)["sector_metrics"]
+        self.assertEqual(metrics["debt"]["rate_shocks"][0], {"rate_change": "-0.01", "monthly_interest_change": "-333"})
+        self.assertEqual((metrics["fx"]["won_change_per_100_won_move"], metrics["fx"]["rate_change_12m_won"]), ("132000", "100"))
+        self.assertEqual(metrics["policy"], {"bok_steps_12m": [{"date": "2026-07-16", "rate_change": "0.0025"},
+                                                               {"date": "2026-08-27", "rate_change": "0.0025"}],
+                                             "fed_upper_steps_12m": [], "next_bok_rate_meeting": "2026-10-22",
+                                             "bok_rate_meeting_today": False})
+        meeting_day = datetime(2026, 10, 22, tzinfo=timezone.utc)      # 09:00 KST on the October meeting day.
+        on_the_day = render(build_report(self.conn, as_of=meeting_day, known_at=meeting_day, baseline=None, kind="rates"))[1]
+        self.assertIn("오늘 금통위가 기준금리를 정합니다", on_the_day)
+        self.assertIn("오늘 금통위", on_the_day)
+        # Without the series the year's effect is unknown, not zero; without dollars there is no sensitivity.
+        bare = build_report(self.conn, as_of=T0, known_at=T0, baseline=None, kind="rates")["sectors"]["macro"]["fx"]
+        self.assertEqual((bare["year_effect"], bare["per_100_won"]), (None, Decimal(100_000)))
+        self.assertNotIn("환율 민감도", render(build_report(ledger.connect(":memory:"), as_of=T1, known_at=T1,
+                                                           baseline=None, kind="rates"))[1])
 
     def test_new_foreign_records_need_only_the_current_rate(self):
         conn = ledger.connect(":memory:")

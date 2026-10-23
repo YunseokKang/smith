@@ -197,6 +197,10 @@ _KIND_FIELDS: dict[Kind, dict[str, _Field]] = {
         # won or the nominal amount of the first payment year (pension_income only).
         "pension_source": _Field(_enum(PENSION_SOURCES), nullable=True),
         "price_basis": _Field(_enum(PRICE_BASES), nullable=True),
+        # A national pension estimate's premise (pension_income only): the contribution months it counts and the
+        # month contributions end, so an earlier retirement can be scaled (report design §30).
+        "contribution_months": _Field(_decimal(positive=True), nullable=True),
+        "contribution_end": _Field(_date, nullable=True),
         # The insurance policy (surrender-value asset) a premium pays into or an annuity pays from.
         "policy_record_id": _Field(_reference, nullable=True),
     },
@@ -418,9 +422,14 @@ def _check_cashflow(fields: dict[str, str | None], path: str, problems: _Problem
         problems.add(f"{path}.target_record_id", "is only allowed for category internal_transfer")
     if fields.get("policy_record_id") is not None and category is not None and category not in POLICY_CATEGORIES:
         problems.add(f"{path}.policy_record_id", "is only allowed for categories insurance_premium and pension_income")
-    for name in ("pension_source", "price_basis"):
+    for name in ("pension_source", "price_basis", "contribution_months", "contribution_end"):
         if fields.get(name) is not None and category is not None and category != "pension_income":
             problems.add(f"{path}.{name}", "is only allowed for category pension_income")
+    months = fields.get("contribution_months")
+    if months is not None and "." in months:
+        problems.add(f"{path}.contribution_months", "must be a whole number of months")
+    if (months is None) != (fields.get("contribution_end") is None):
+        problems.add(f"{path}.contribution_months", "and contribution_end must be given together")
     start, end = fields.get("start_date"), fields.get("end_date")
     if fields.get("frequency") == "once" and end is not None:
         problems.add(f"{path}.end_date", "must be omitted for a one-time cash flow")

@@ -298,12 +298,17 @@ class PensionTests(Upgrade):
     def test_the_four_pipelines_stack_against_the_target_and_the_missing_one_is_asked_for(self):
         data = self.report("tax")
         stack = data["pension_stack"]
-        self.assertEqual([p["key"] for p in stack["pipelines"]], list(pension.PIPELINES))
-        national, annuity, savings, irp = stack["pipelines"]
+        # IRP 50만 + pension savings 30만: the credit covers 75만 a month, so 5만 is kept apart (an ISA or similar).
+        self.assertEqual([p["key"] for p in stack["pipelines"]], list(pension.PIPELINES) + ["isa"])
+        national, annuity, savings, irp, isa = stack["pipelines"]
+        self.assertEqual((irp["monthly_contribution"], isa["monthly_contribution"]), (Decimal(450_000), Decimal(50_000)))
         self.assertEqual((national["basis"], national["net_monthly"], national["start_age"]), ("unknown", None, 65))
         growth = (1 + tax.REAL_RETURN) ** 24                                      # 36 -> 60.
         projected = Decimal(30_000_000) * growth + Decimal(300_000) * 12 * (growth - 1) / tax.REAL_RETURN
         self.assertEqual(savings["gross_monthly"], projected * tax.WITHDRAWAL_RATE / 12)
+        # This year's IRP above the credit (60만) comes back tax-free: the IRP pays tax on a taxable share below one.
+        self.assertLess(irp["taxable_share"], 1)
+        self.assertEqual(irp["net_monthly"], irp["gross_monthly"] * (1 - pension.PRIVATE_HIGH_TAX * irp["taxable_share"]))
         # Pension savings and IRP together pay out more than the separate-taxation limit a year: the high rate.
         self.assertGreater((savings["gross_monthly"] + irp["gross_monthly"]) * 12, pension.PRIVATE_SEPARATE_LIMIT)
         self.assertTrue(savings["high_private_tax"])
@@ -312,7 +317,12 @@ class PensionTests(Upgrade):
         self.assertEqual(annuity["net_monthly"], annuity["gross_monthly"])            # Tax-free by assumption.
         self.assertFalse(annuity["premiums_counted"])                                 # 240,000 a month: cover, not savings.
         self.assertEqual(stack["unknown"], ["national"])
-        self.assertEqual(stack["total_net"], annuity["net_monthly"] + savings["net_monthly"] + irp["net_monthly"])
+        self.assertEqual(stack["total_net"], annuity["net_monthly"] + savings["net_monthly"] + irp["net_monthly"]
+                         + isa["net_monthly"])
+        self.assertEqual([t["retire_age"] for t in stack["tiers"]], [50, 55, 60])
+        # The national pension is unknown, not zero: what must be held outside the pensions is only a ceiling.
+        self.assertTrue(all(t["outside_need"]["upper_bound"] for t in stack["tiers"]))
+        self.assertIn("최대 ", render(data)[1])
         self.assertEqual(stack["ratio"], stack["total_net"] / Decimal(5_500_000))
         self.assertIn("pension-pipelines", [r.key for r in data["requests"]])
         page = render(data)[1]
@@ -766,10 +776,52 @@ class ReviewFixTests(Upgrade):
         early = dict(HOUSEHOLD, retirement_age=50)
         stack = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="tax", household=early)["pension_stack"]
         savings = next(p for p in stack["pipelines"] if p["key"] == "pension_savings")
-        growth = (1 + tax.REAL_RETURN) ** (55 - 36)
-        projected = Decimal(30_000_000) * growth + Decimal(300_000) * 12 * (growth - 1) / tax.REAL_RETURN
-        self.assertEqual((stack["payout_age"], savings["start_age"]), (55, 55))
+        # Contributions stop at retirement (50, 14 years from 36); the balance waits until 55 to pay out.
+        paid = (1 + tax.REAL_RETURN) ** 14
+        projected = (Decimal(30_000_000) * paid + Decimal(300_000) * 12 * (paid - 1) / tax.REAL_RETURN) * (1 + tax.REAL_RETURN) ** 5
+        self.assertEqual((stack["payout_age"], savings["start_age"], stack["retirement_age"]), (55, 55, 50))
         self.assertEqual(savings["gross_monthly"], projected * tax.WITHDRAWAL_RATE / 12)
+
+    def test_each_retirement_age_scales_the_national_pension_and_counts_the_years_without_a_pension(self):
+        # The service's estimate assumes 420 months until age 60 (2050-08 for a client born in 1990).
+        self.apply("np", [flow("np", "pension_income", "1800000", "inflow", pension_source="national", start_date="2055-09-01",
+                               amount_basis="net", contribution_months="420", contribution_end="2050-08-31")])
+        undecided = {k: v for k, v in HOUSEHOLD.items() if k != "retirement_age"}
+        data = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="tax", household=undecided)
+        stack = data["pension_stack"]
+        self.assertEqual((stack["retirement_age"], stack["retirement_age_set"]), (60, False))
+        tiers = {t["retire_age"]: t for t in stack["tiers"]}
+        national = {age: t["pipelines"][0]["net_monthly"] for age, t in tiers.items()}
+        self.assertEqual(national, {60: Decimal(1_800_000), 55: Decimal(1_800_000) * 360 / 420,
+                                    50: Decimal(1_800_000) * 300 / 420})
+        # Retiring at 50: nothing until the pension accounts at 55 (the ISA row is savings, not a pension).
+        self.assertEqual((tiers[50]["first_income_age"], tiers[50]["years_without_pension"]), (55, 5))
+        self.assertEqual(tiers[60]["years_without_pension"], 0)
+        # Earlier retirement: less paid in, less national pension, more to hold outside the pensions.
+        self.assertLess(tiers[50]["total_net"], tiers[55]["total_net"])
+        self.assertLess(tiers[55]["total_net"], tiers[60]["total_net"])
+        self.assertGreater(tiers[50]["outside_need"]["total"], tiers[55]["outside_need"]["total"])
+        # The first five years after a retirement at 50 are paid entirely from outside the pensions.
+        first_years = sum(Decimal(5_500_000) * 12 / (1 + tax.REAL_RETURN) ** y for y in range(5))
+        self.assertGreater(tiers[50]["outside_need"]["bridge"], first_years)
+        # The e-mail answer flagged the readiness ratio it quoted as unverified (2026-10-23): every tier's ratio,
+        # written as a percent, is now grounded in the inputs.
+        from smith import narrative
+        payload = narrative.build_payload(data["view"], data, None)
+        for tier in tiers.values():
+            text = f"준비율 {tier['ratio'] * 100:.0f}%"
+            with self.subTest(text=text):
+                self.assertIsNone(narrative.check_block([text], [], payload))
+        self.assertIsNotNone(narrative.check_block(["준비율 99%"], [], payload))
+        page = render(data)[1]
+        for text in ("50·55·60세 세 경우로 계산", "연금 없는 기간", "5년(55세까지)", "연금 밖에서 준비할 돈", "60세 은퇴 기준"):
+            self.assertIn(text, page)
+        # Both fields or neither, whole months, pension_income only.
+        for bad in ({"contribution_months": "420"}, {"contribution_months": "420.5", "contribution_end": "2050-08-31"},):
+            with self.subTest(bad=bad), self.assertRaises(ImportRejected):
+                self.apply("bad-np", [flow("np2", "pension_income", "1", "inflow", pension_source="national", **bad)])
+        with self.assertRaises(ImportRejected):
+            self.apply("bad-np2", [flow("x", "salary", "1", "inflow", contribution_months="1", contribution_end="2050-01-01")])
 
     def test_the_target_trend_is_flat_when_nothing_moved(self):
         from smith import move_plan

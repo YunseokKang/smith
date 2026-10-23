@@ -25,7 +25,7 @@ from smith.records import (
 logger = logging.getLogger(__name__)
 _END_OF_TIME = datetime.max.replace(tzinfo=timezone.utc)
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 _V1 = (
     """CREATE TABLE imports (
         import_id TEXT PRIMARY KEY,
@@ -351,8 +351,32 @@ _V17 = (
         review TEXT
     )""",
 )
+# Event notes (report design §29): one row per event (a rate decision, a day's move of the holdings) with its
+# delivery state, and the checks that looked for events (a check's time bounds the next move measurement).
+# Details hold the note's figures and research refs, never identifiers.
+_V18 = (
+    """CREATE TABLE event_notes (
+        event_key TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        event_date TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'unknown', 'failed', 'skipped')),
+        attempts INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        subject TEXT,
+        message_id TEXT,
+        error_code TEXT,
+        details TEXT
+    )""",
+    """CREATE TABLE event_checks (
+        checked_at TEXT PRIMARY KEY,
+        reason TEXT NOT NULL,
+        baseline TEXT NOT NULL,
+        events TEXT NOT NULL
+    )""",
+)
 _MIGRATIONS = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8, 9: _V9, 10: _V10, 11: _V11, 12: _V12,
-               13: _V13, 14: _V14, 15: _V15, 16: _V16, 17: _V17}
+               13: _V13, 14: _V14, 15: _V15, 16: _V16, 17: _V17, 18: _V18}
 _COLUMNS = ("record_id, revision, kind, owner_id, source, status, change_type, corrects_revision, "
             "reason, effective_at, recorded_at, import_id, fields")
 
@@ -1257,6 +1281,111 @@ def _from_row(row: tuple) -> StoredRevision:
     record = RecordInput(record_id, Kind(kind), owner_id, datetime.fromisoformat(effective_at), revision,
                          Status(status), ChangeType(change_type), corrects, reason, json.loads(fields))
     return StoredRevision(record, source, datetime.fromisoformat(recorded_at), import_id)
+
+
+def record_event_check(conn: sqlite3.Connection, *, checked_at: datetime, reason: str, baseline: datetime,
+                       events: list[str]) -> None:
+    """One look for events (smith.events): when, why (the daily slot, after a report, manual), the time the move
+    was measured from, and the event keys found."""
+    conn.execute("INSERT INTO event_checks VALUES (?, ?, ?, ?)",
+                 (_db_time(checked_at), reason, _db_time(baseline), json.dumps(events)))
+
+
+def last_event_check(conn: sqlite3.Connection) -> datetime | None:
+    row = conn.execute("SELECT checked_at FROM event_checks ORDER BY checked_at DESC LIMIT 1").fetchone()
+    return None if row is None else datetime.fromisoformat(row[0])
+
+
+_EVENT_COLUMNS = ("event_key, kind, event_date, status, attempts, created_at, updated_at, subject, message_id, "
+                  "error_code, details")
+
+
+def event_note(conn: sqlite3.Connection, key: str) -> dict[str, Any] | None:
+    row = conn.execute(f"SELECT {_EVENT_COLUMNS} FROM event_notes WHERE event_key = ?", (key,)).fetchone()
+    return None if row is None else _event_row(row)
+
+
+def event_notes(conn: sqlite3.Connection, *, limit: int = 20) -> list[dict[str, Any]]:
+    rows = conn.execute(f"SELECT {_EVENT_COLUMNS} FROM event_notes ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
+    return [_event_row(row) for row in rows]
+
+
+EVENT_FINAL = ("sent", "unknown", "skipped")   # Never attempted again: delivered, possibly delivered, given up.
+
+
+def claim_event_note(conn: sqlite3.Connection, *, key: str, kind: str, event_date: date, now: datetime,
+                     lease: timedelta, max_attempts: int,
+                     details: dict[str, Any] | None = None) -> tuple[str | None, str, dict[str, Any] | None]:
+    """Atomically claim one event note for building (review 2026-10-23: two overlapping runs both read "no note"
+    and both sent). Returns (token, outcome, stored details): the token is the claim time, which every later
+    transition of this attempt must match (`advance_event_note`), so a run whose claim was taken over cannot write
+    or send. No token when the note is final, claimed by another run within `lease`, or out of attempts (then
+    marked skipped). `details` are stored only on a new note; a retried note keeps what it was claimed with (the
+    measurement window of a move)."""
+    token = _db_time(now)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute("SELECT status, attempts, error_code, updated_at, details FROM event_notes WHERE event_key = ?",
+                           (key,)).fetchone()
+        if row is None:
+            conn.execute("INSERT INTO event_notes VALUES (?, ?, ?, 'pending', 1, ?, ?, NULL, NULL, 'building', ?)",
+                         (key, kind, event_date.isoformat(), token, token,
+                          None if details is None else json.dumps(details, ensure_ascii=False)))
+            conn.execute("COMMIT")
+            return token, "claimed", details
+        status, attempts, error_code, updated_at, stored = row
+        stored = None if stored is None else json.loads(stored)
+        if status in EVENT_FINAL:
+            conn.execute("ROLLBACK")
+            return None, f"already-{status}", stored
+        if error_code == "building" and datetime.fromisoformat(updated_at) > now - lease:
+            conn.execute("ROLLBACK")
+            return None, "in-progress", stored
+        if attempts >= max_attempts:
+            conn.execute("UPDATE event_notes SET status = 'skipped', error_code = 'attempts-exhausted', updated_at = ? "
+                         "WHERE event_key = ?", (token, key))
+            conn.execute("COMMIT")
+            return None, "skipped", stored
+        kept = stored if stored is not None else details
+        conn.execute("UPDATE event_notes SET status = 'pending', error_code = 'building', attempts = attempts + 1, "
+                     "updated_at = ?, details = ? WHERE event_key = ?",
+                     (token, None if kept is None else json.dumps(kept, ensure_ascii=False), key))
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+    return token, "claimed", kept
+
+
+def advance_event_note(conn: sqlite3.Connection, *, key: str, token: str, from_status: str, status: str,
+                       error_code: str | None = None, subject: str | None = None, message_id: str | None = None,
+                       details: dict[str, Any] | None = None) -> bool:
+    """Move a claimed note from `from_status` to `status`, only while this attempt still holds it (its claim time
+    `token`). The transition to `unknown`/`sending` is committed before the mail request, so a run that dies after
+    Gmail accepted the message never sends it again. Returns False when the claim was lost: the caller must stop."""
+    cursor = conn.execute(
+        "UPDATE event_notes SET status = ?, error_code = ?, subject = COALESCE(?, subject), message_id = COALESCE(?, message_id), "
+        "details = COALESCE(?, details) WHERE event_key = ? AND updated_at = ? AND status = ?",
+        (status, error_code, subject, message_id, None if details is None else json.dumps(details, ensure_ascii=False),
+         key, token, from_status))
+    return cursor.rowcount == 1
+
+
+def retryable_event_notes(conn: sqlite3.Connection, *, since: date) -> list[dict[str, Any]]:
+    """Notes not delivered yet whose event is on or after `since`: pending (unconfirmed, a failed build or a claim
+    that outlived its lease) or failed with a definite error. A move is detected only once (the next check measures
+    from this one), so these are its only way back (review 2026-10-23)."""
+    rows = conn.execute(f"SELECT {_EVENT_COLUMNS} FROM event_notes WHERE status IN ('pending', 'failed') AND event_date >= ? "
+                        "ORDER BY event_date", (since.isoformat(),)).fetchall()
+    return [_event_row(row) for row in rows]
+
+
+def _event_row(row: tuple) -> dict[str, Any]:
+    (key, kind, event_date, status, attempts, created_at, updated_at, subject, message_id, error_code, details) = row
+    return {"event_key": key, "kind": kind, "event_date": date.fromisoformat(event_date), "status": status,
+            "attempts": attempts, "created_at": datetime.fromisoformat(created_at),
+            "updated_at": datetime.fromisoformat(updated_at), "subject": subject, "message_id": message_id,
+            "error_code": error_code, "details": None if details is None else json.loads(details)}
 
 
 def _db_time(value: datetime) -> str:

@@ -69,16 +69,42 @@ class TaxTests(unittest.TestCase):
         self.assertEqual(plan["excess"], Decimal(930_000))             # Above the 6M pension savings limit.
         self.assertEqual(plan["irp_room"], Decimal(3_000_000))         # 9M total minus 6M credited, no IRP yet.
         self.assertEqual(plan["refund_gain"], Decimal("396000.000"))   # 3M x 13.2%.
-        self.assertEqual((plan["next_savings"], plan["next_irp"]), (Decimal(500_000), Decimal(250_000)))
+        # 99만 a month into pension savings alone: 50만 stays, 25만 moves to the IRP, 24만 has no credit to earn.
+        self.assertEqual((plan["next_savings"], plan["next_irp"], plan["next_rest"]),
+                         (Decimal(500_000), Decimal(250_000), Decimal(240_000)))
+        self.assertEqual(plan["credit_gain"], Decimal(3_000_000))      # 6M credited now, 9M with the split.
+        # The split keeps what is already optimal, adds no money and only moves what earns more credit.
+        cases = {"80만 + 20만": ((800_000, 200_000), (500_000, 250_000, 250_000)),
+                 "30만 + 0": ((300_000, 0), (300_000, 0, 0)),
+                 "60만 + 0": ((600_000, 0), (500_000, 100_000, 0)),
+                 "30만 + 50만": ((300_000, 500_000), (300_000, 450_000, 50_000))}
+        for name, ((savings, irp), expected) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(tax.credit_split(Decimal(savings), Decimal(irp)), tuple(Decimal(x) for x in expected))
+        self.assertEqual(tax.yearly_credit_base(Decimal(990_000), Decimal(250_000)), Decimal(9_000_000))  # Already full.
+
+    def test_the_split_proposal_says_when_the_credit_is_already_full(self):
+        # IRP 30만 a month beside the fixture's pension savings: next year's credit is full either way (review 2026-10-23).
+        doc = {"schema_version": 1, "import_id": "t4", "source": "manual", "mode": "patch", "as_of": AT.isoformat(),
+               "owners": [{"id": "self"}], "records": [
+                   rec("irp-account", "asset", category="fund", account_type="irp", currency="KRW", value="1000000",
+                       valuation_method="statement", liquidity="restricted"),
+                   rec("to-irp", "cashflow", category="internal_transfer", direction="outflow", currency="KRW",
+                       amount="300000", frequency="monthly", start_date="2026-01-01", target_record_id="irp-account")]}
+        ledger.apply_import(self.conn, parse_import(json.dumps(doc)), recorded_at=AT)
+        card = next(p for p in self.data()["advice"]["proposals"] if p.key == "pension-credit")
+        self.assertEqual((card.priority, card.headline, card.timing), (3, "공제 밖 연금 납입, ISA 검토", "2027년 1월 납입부터"))
+        self.assertIn("나눠도 늘지 않습니다", card.effect)
+        self.assertIn("손해가 아니라 선택", card.effect)
+        self.assertNotIn("빠짐없이 받습니다", card.effect)
 
     def test_overseas_gains_and_retirement(self):
         t = tax.facts(self.data()["view"], date(2026, 10, 5), HOUSEHOLD)
         harvest = tax.harvest_plan(t)
         self.assertEqual(harvest["gains"], Decimal(5_600_000))         # (500 - 400) x 40 shares x 1,400.
         self.assertEqual((harvest["realize"], harvest["saving"]), (Decimal(2_500_000), Decimal("550000.00")))
-        plan = tax.retirement(t)
-        self.assertEqual((plan["age"], plan["need"]), (37, Decimal(1_800_000_000)))   # 72M a year / 4%.
-        self.assertEqual([p["age"] for p in plan["paths"]], [55, 60, 65])
+        stack = self.data()["pension_stack"]
+        self.assertEqual((stack["age"], [t["retire_age"] for t in stack["tiers"]]), (37, [50, 55, 60]))
 
     def test_a_pension_without_an_fx_rate_makes_the_retirement_track_a_lower_bound(self):
         eur = rec("eur-pension", "asset", category="fund", account_type="pension_savings", currency="EUR",
@@ -89,9 +115,16 @@ class TaxTests(unittest.TestCase):
         data = self.data()
         t = tax.facts(data["view"], date(2026, 10, 5), HOUSEHOLD)
         self.assertEqual((t["pension_assets"], t["pension_unconverted"]), (Decimal(70_000_000), 1))  # Not as zero.
-        self.assertEqual(tax.retirement(t)["unconverted"], 1)
+        self.assertIn("pension_savings", data["pension_stack"]["unknown"])
         track = next(tr for tr in data["advice"]["strategy"] if tr.name == "노후 준비")
-        self.assertIn("확인된 금액만으로 본 하한", track.detail)
+        self.assertIn("연금저축", track.detail)
+        self.assertIn("수령액을 몰라, 준비율은 그 이상이고 연금 밖에서 준비할 돈은 최대치", track.detail)
+        # Review 2026-10-23: an unknown pension is not zero, so the need is a ceiling and cannot set the status.
+        tier = data["pension_stack"]["tiers"][-1]
+        self.assertTrue(tier["outside_need"]["upper_bound"])
+        self.assertIn("pension_savings", tier["outside_need"]["unknown"])
+        self.assertEqual(track.status, "unknown")
+        self.assertIn("최대 ", track.detail)
 
     def test_capital_gains_estimates(self):
         D = Decimal

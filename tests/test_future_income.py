@@ -223,14 +223,11 @@ class FutureIncomeTests(unittest.TestCase):
             with self.subTest(name):
                 share = future_income.retirement_share([before, after], home=goal, home_goal=has_goal)
                 self.assertEqual(None if share is None else [amount for _, amount in share], expected)
-        plan = tax.retirement({"birth_year": 1990, "monthly_spend": 4_000_000, "year": 2026, "pension_monthly": 0,
-                               "pension_assets": Decimal(0)}, extra=[(date(2027, 1, 1), Decimal(1_000_000)),
-                                                                   (date(2060, 1, 1), Decimal(9_000_000))])
-        at_60 = next(p for p in plan["paths"] if p["age"] == 60)
+        extra = [(date(2027, 1, 1), Decimal(1_000_000)), (date(2060, 1, 1), Decimal(9_000_000))]
         # Usable in 2027, retired in 2050: 23 years at the real return; pay after retirement is not counted.
-        self.assertEqual(at_60["with_pay"], Decimal(1_000_000) * (1 + tax.REAL_RETURN) ** 23)
-        self.assertIsNone(tax.retirement({**{"birth_year": 1990, "monthly_spend": 1, "year": 2026, "pension_monthly": 0,
-                                             "pension_assets": Decimal(0)}}, extra=None)["paths"][0]["with_pay"])
+        self.assertEqual(tax.set_aside(extra, 2050), Decimal(1_000_000) * (1 + tax.REAL_RETURN) ** 23)
+        self.assertEqual(tax.set_aside(extra, None), Decimal(10_000_000))
+        self.assertIsNone(tax.set_aside(None, 2050))                         # Unknown, not zero.
 
     def test_unknown_amount_makes_the_goal_figure_unknown_not_smaller(self):
         unknown = future_income.Inflow("x", "self", "stock_compensation", "confirmed", True, date(2027, 1, 1),

@@ -61,7 +61,8 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "markets", ("holdings", "policy", "macro_brief"), ("goal-stocks-glide", "concentration-trim"),
             ("us_stocks", "kr_stocks", "rates"), True, False,
             "markets and the household's listed holdings: how the US and Korean markets and the won/dollar rate "
-            "moved, an opinion on every holding, and the portfolio strategy against the investment policy. Join "
+            "moved (sector_metrics.fx sizes the rate's effect on the dollar assets), an opinion on every holding, and "
+            "the portfolio strategy against the investment policy. Join "
             "macro liquidity (rates), each company's fundamentals (results, guidance, valuation from the research), "
             "the trend and flows, and its standing in its sector. The holding flagged employer_stock concentrates "
             "the client's human capital and financial assets in one company (double concentration): manage it "
@@ -84,8 +85,10 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "rates", ("debt", "macro"), ("prepayment", "variable-rate", "refinance"),
             ("mortgage", "rates", "household_policy"), False, False,
             "interest rates and the household's loans: the loan line-up first, what the variable-rate loan costs "
-            "now and if rates move, whether the mortgage rate is competitive against the market average on new "
-            "bank mortgages (sector_metrics.debt.refinance: keep, or review a refinancing with the fee paid back in "
+            "now and if rates move either way (sector_metrics.debt.rate_shocks: a cut lowers the interest, and deposit "
+            "yields with it), what the won/dollar rate does to the dollar assets (sector_metrics.fx: per 100 won and "
+            "over the past year, never a forecast of the rate), whether the mortgage rate is competitive against the "
+            "market average on new bank mortgages (sector_metrics.debt.refinance: keep, or review a refinancing with the fee paid back in "
             "the stated months), whether extra repayment beats saving, and the policy-rate outlook. A credit line "
             "with nothing drawn (sector_metrics.debt.unused_credit_lines) costs nothing and is liquidity room, never "
             "a loan to repay.", opening=("debt",)),
@@ -94,7 +97,9 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             ("pension_tax", "home_tax"), False, False,
             "tax and pensions: the pension stack first (sector_metrics.pension_insurance.pension_stack: every "
             "pipeline's after-tax monthly payout and start age against the monthly retirement target, the readiness "
-            "ratio, and which pipeline still lacks a figure, asked for in a private banker's words), this year's "
+            "ratio at each retirement age (retirement_age_tiers: 50, 55, 60, with the years without a pension and what "
+            "must be held outside the pensions), and which pipeline still lacks a figure, asked for in a private "
+            "banker's words), this year's "
             "pension credit room, overseas capital-gains deduction, ISA, the year-end settlement checklist, "
             "marriage-registration and home-tax timing, and whether the insurance premiums "
             "(sector_metrics.pension_insurance.insurance_review) are an efficient use of the monthly cash flow. For "
@@ -142,9 +147,29 @@ def of(kind: str) -> Edition | None:
 
 def for_day(config: dict[str, Any] | None, day: date) -> str:
     """The edition for a local calendar day: [reports.editions], then the default plan, then the overview."""
-    name = WEEKDAY_NAMES[day.weekday()]
-    table = ((config or {}).get("reports") or {}).get("editions") or {}
-    return table.get(name) or DEFAULT_PLAN.get(name, "overview")
+    return _kind_for(((config or {}).get("reports") or {}).get("editions"), WEEKDAY_NAMES[day.weekday()])
+
+
+def _kind_for(table: dict[str, str] | None, weekday: str) -> str:
+    return (table or {}).get(weekday) or DEFAULT_PLAN.get(weekday, "overview")
+
+
+def week_plan(schedule: dict[str, Any] | None) -> list[tuple[str, str, str]]:
+    """The week's reports as (weekday letter, kind, label) in weekday order: the scheduled weekdays (`[reports]
+    weekdays`; without a schedule, the days of the default plan) with each day's edition. A reader of one day's
+    report learns from it where the other areas are (expert review 2026-10-22: the rates report was taken for the
+    whole service because it said nothing about the stocks)."""
+    reports = schedule or {}
+    days = reports.get("weekdays") or [name for name in WEEKDAY_NAMES if name in DEFAULT_PLAN]
+    week = []
+    for index, name in enumerate(WEEKDAY_NAMES):
+        if name not in days:
+            continue
+        kind = _kind_for(reports.get("editions"), name)
+        edition = of(kind)
+        label = edition.label if edition is not None else ("변화 점검" if kind == "thursday" else "종합 보고(전체)")
+        week.append((WEEKDAY_KO[index], kind, label))
+    return week
 
 
 def same_series(kind: str) -> tuple[str, ...]:

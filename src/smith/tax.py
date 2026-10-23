@@ -45,7 +45,6 @@ MARRIAGE_GIFT_EXTRA = Decimal(100_000_000)         # Extra gift exemption within
 SAVINGS_INSURANCE_MONTHLY_CAP = Decimal(1_500_000)  # Tax-free if <= this monthly, paid 5+ and kept 10+ years.
 # Retirement: spending in today's won, real return and withdrawal rate are assumptions shown to the reader.
 REAL_RETURN, WITHDRAWAL_RATE = Decimal("0.03"), Decimal("0.04")
-RETIREMENT_AGES = (55, 60, 65)
 # Capital gains on homes: progressive brackets (taxable base upper bound, rate, quick deduction), local tax
 # 10% on top; one-home long-term deduction 4% a year each for holding (3+ years) and residence (2+ years),
 # 40% caps; otherwise 2% a year from 3 years, 30% cap; 2.5M won basic deduction.
@@ -132,8 +131,10 @@ def facts(view: LedgerView, today: date, household: dict[str, Any] | None) -> di
             per_month = Decimal(0)
             total = amount if date.fromisoformat(f["start_date"]).year == today.year else Decimal(0)
         else:
-            per_month = amount / _MONTHS[f["frequency"]]
-            total = per_month * _months_in_year(f, today.year)  # Paid and still to be paid this calendar year.
+            # An ended standing transfer still counts in this year's total, never in the monthly plan.
+            ended = bool(f.get("end_date")) and f["end_date"] < today.isoformat()
+            per_month = Decimal(0) if ended else amount / _MONTHS[f["frequency"]]
+            total = amount / _MONTHS[f["frequency"]] * _months_in_year(f, today.year)  # Paid and still due this year.
         contributions[kind] = contributions.get(kind, Decimal(0)) + total
         contributions[f"{kind}:monthly"] = contributions.get(f"{kind}:monthly", Decimal(0)) + per_month
     pensions = [base_amount(view, r) for r in mine
@@ -150,6 +151,8 @@ def facts(view: LedgerView, today: date, household: dict[str, Any] | None) -> di
         "pension_savings_paid": contributions.get("pension_savings", Decimal(0)),
         "irp_paid": contributions.get("irp", Decimal(0)),
         "pension_monthly": contributions.get("pension_savings:monthly", Decimal(0)) + contributions.get("irp:monthly", Decimal(0)),
+        "savings_monthly": contributions.get("pension_savings:monthly", Decimal(0)),
+        "irp_monthly": contributions.get("irp:monthly", Decimal(0)),
         "has_irp": "irp" in accounts.values(), "has_isa": "isa" in accounts.values(),
         "us_gains": sum((g for g in known if g > 0), Decimal(0)), "us_losses": sum((g for g in known if g < 0), Decimal(0)),
         "us_unknown": len(gains) - len(known), "us_positions": len(us),
@@ -180,20 +183,39 @@ def _months_in_year(fields: dict[str, Any], year: int) -> int:
 # --- calculations behind proposals ------------------------------------------------------------------------
 
 def pension_plan(t: dict[str, Any]) -> dict[str, Decimal]:
-    """This year's credit room and the split that would use it fully."""
+    """This year's credit room, and the monthly split of the standing contributions that earns the full credit
+    from next year (`credit_split`) with the credit it gains over the current split (`credit_gain`, yearly base)."""
     savings, irp = t["pension_savings_paid"], t["irp_paid"]
     credited_savings = min(savings, PENSION_SAVINGS_LIMIT)
     credited = min(credited_savings + irp, PENSION_TOTAL_LIMIT)
     irp_room = max(Decimal(0), PENSION_TOTAL_LIMIT - credited_savings - irp)
     # Everything paid above what can be credited: 6M + 5M gives 11M paid, 9M credited, 2M excess.
     excess = savings + irp - credited
-    monthly = t["pension_monthly"]
+    now_savings, now_irp = t.get("savings_monthly", t["pension_monthly"]), t.get("irp_monthly", Decimal(0))
+    next_savings, next_irp, rest = credit_split(now_savings, now_irp)
     return {"savings_paid": savings, "irp_paid": irp, "irp_room": irp_room, "excess": excess,
             "savings_excess": max(Decimal(0), savings - PENSION_SAVINGS_LIMIT), "credited": credited,
             "refund_gain": irp_room * CREDIT_RATE_HIGH, "max_refund": PENSION_TOTAL_LIMIT * CREDIT_RATE_HIGH,
-            "monthly": monthly, "next_savings": PENSION_SAVINGS_LIMIT / 12,
-            "next_irp": (PENSION_TOTAL_LIMIT - PENSION_SAVINGS_LIMIT) / 12,
-            "next_rest": max(Decimal(0), monthly - PENSION_TOTAL_LIMIT / 12)}
+            "monthly": t["pension_monthly"], "savings_monthly": now_savings, "irp_monthly": now_irp,
+            "next_savings": next_savings, "next_irp": next_irp, "next_rest": rest,
+            "credit_gain": yearly_credit_base(next_savings, next_irp) - yearly_credit_base(now_savings, now_irp)}
+
+
+def credit_split(savings: Decimal, irp: Decimal) -> tuple[Decimal, Decimal, Decimal]:
+    """Monthly (pension savings, IRP, rest) that earns the full pension credit with the fewest changes: pension
+    savings kept up to its own limit, what that frees moved to the IRP up to the combined limit, and the part no
+    credit covers (`rest`) left for another tax-advantaged account such as an ISA. 80만 + 20만 gives 50만 + 25만 and
+    25만 rest; 90만 alone gives 50만 + 25만 and 15만 rest; 30만 + 0 is already optimal (review 2026-10-23: the split
+    used fixed limits and proposed 75만 for a 60만 budget)."""
+    savings_cap, total_cap = PENSION_SAVINGS_LIMIT / 12, PENSION_TOTAL_LIMIT / 12
+    kept = min(savings, savings_cap)
+    to_irp = min(irp + savings - kept, total_cap - kept)
+    return kept, to_irp, savings + irp - kept - to_irp
+
+
+def yearly_credit_base(savings_monthly: Decimal, irp_monthly: Decimal) -> Decimal:
+    """The yearly contributions the pension credit covers for a standing monthly split."""
+    return min(min(savings_monthly * 12, PENSION_SAVINGS_LIMIT) + irp_monthly * 12, PENSION_TOTAL_LIMIT)
 
 
 def harvest_plan(t: dict[str, Any]) -> dict[str, Decimal] | None:
@@ -224,33 +246,7 @@ def capital_gains(price: Decimal, acquired: Decimal, *, held: int, lived: int, o
             "total": progressive(base) * Decimal("1.1")}
 
 
-def retirement(t: dict[str, Any], extra: list[tuple[date, Decimal | None]] | None = None) -> dict[str, Any] | None:
-    """The pension-account track at each retirement age. `extra` is expected pay set aside for retirement
-    (future_income.retirement_share): each amount grows at the real return from the year it is usable to the
-    retirement year, giving `with_pay` beside the plan without it. `extra` None means that amount is unknown."""
-    if not t["birth_year"] or not t["monthly_spend"]:
-        return None
-    age = t["year"] - int(t["birth_year"])
-    spend = Decimal(t["monthly_spend"])
-    need = spend * 12 / WITHDRAWAL_RATE
-    yearly = t["pension_monthly"] * 12
-    paths = []
-    for target in RETIREMENT_AGES:
-        years = target - age
-        if years <= 0:
-            continue
-        growth = (1 + REAL_RETURN) ** years
-        projected = t["pension_assets"] * growth + yearly * (growth - 1) / REAL_RETURN
-        added = _set_aside(extra, int(t["birth_year"]) + target)
-        paths.append({"age": target, "years": years, "projected": projected, "ratio": projected / need,
-                      "with_pay": None if added is None else projected + added,
-                      "ratio_with_pay": None if added is None else (projected + added) / need})
-    # With unconverted pension amounts the projection is a lower bound (known amounts only), never a total.
-    return {"age": age, "need": need, "spend": spend, "paths": paths, "yearly": yearly, "assets": t["pension_assets"],
-            "unconverted": t.get("pension_unconverted", 0), "pay_set_aside": _set_aside(extra, None)}
-
-
-def _set_aside(extra: list[tuple[date, Decimal | None]] | None, retire_year: int | None) -> Decimal | None:
+def set_aside(extra: list[tuple[date, Decimal | None]] | None, retire_year: int | None) -> Decimal | None:
     """Expected pay usable before `retire_year`, grown at the real return until then (today's won); with no
     year, the plain total. None when any amount is unknown."""
     if extra is None:

@@ -105,7 +105,7 @@ def render(data: dict[str, Any]) -> tuple[str, str]:
         sectors = data["sectors"]
         sections += [_allocation(data), _cash(sectors["cash"], data),
                      _spending(advice.get("spending_room"), data.get("spending_split")),
-                     _stress(data["stress"]), _debt(sectors["debt"], advice.get("refinance")),
+                     _stress(data["stress"]), _debt(sectors["debt"], advice.get("refinance"), sectors["macro"].get("policy")),
                      _policy(data, story, full), _holdings(data, story, full),
                      _real_estate(sectors["real_estate"], data.get("figures") or {}), _move_targets(data),
                      _lease_plan(data), _pension_stack(data), _annuity_review(data), _pension(sectors["pension_insurance"]),
@@ -116,6 +116,119 @@ def render(data: dict[str, Any]) -> tuple[str, str]:
     bands.append(_band(CANVAS, "".join(sections), border=True))
     bands.append(_band(SOFT, _footer(_system_warnings(data))))
     return _subject(data, status), _page(bands)
+
+
+def render_event(note: dict[str, Any]) -> tuple[str, str, str]:
+    """Return (subject, html, text) of an event note (report design §29): the hero names the event and what it
+    means for the household in one line, four tiles carry the figures, then what happened and our numbers, the
+    researched why with its sources, and Smith's stance. Never a proposal: those belong to the regular reports."""
+    subject, title, line, tiles, facts, stance = (_bok_event(note) if note["kind"] == "bok_decision"
+                                                  else _move_event(note))
+    hero = (f'<tr><td>{_eyebrow("SMITH · 사건 안내", color=ON_DARK, background=DARK_RAISED)}'
+            f'<div style="font-family:{SANS};font-weight:400;font-size:28px;line-height:1.15;letter-spacing:-0.8px;'
+            f'color:{ON_DARK};margin:4px 0 12px">{escape(title)}</div>'
+            f'<div style="font-size:14px;line-height:1.5;color:{ON_DARK}">{note["as_of"]:%Y년 %m월 %d일 %H:%M} 기준 · '
+            f'{escape(line)}</div></td></tr>' + _tile_grid(tiles))
+    why = _event_research(note)
+    body = (_opened(_section("무엇이 일어났고 우리 집에는", facts[0], facts[1], brief=None))
+            + (_opened(_section("왜 그랬나 (조사)", why[0], why[1], brief=None)) if why else "")
+            + _opened(_section("Smith의 입장", stance, "", brief=None)))
+    guide = "정기 보고와 별개로, 우리 집에 중요한 사건이 있는 날에만 보내는 안내입니다. 제안은 정기 보고에서만 드립니다."
+    html = _page([_band(DARK, hero), _band(CANVAS, body, border=True), _band(SOFT, _footer((), week=guide))])
+    text = (f"{subject}\n\n{title}\n{line}\n\n{_plain(facts[0])}\n\n{_plain(stance)}\n\n"
+            "이 안내는 HTML 형식입니다. HTML을 지원하는 메일 앱에서 확인하시기 바랍니다.")
+    return subject, html, text
+
+
+def _plain(html: str) -> str:
+    return re.sub(r"<[^>]+>", "", html)
+
+
+def _rate_text(value: Decimal) -> str:
+    return f"{value.normalize():f}%"
+
+
+def _bok_event(note: dict[str, Any]) -> tuple[str, str, str, list[tuple[str, str, str]], tuple[str, str], str]:
+    d = note["decision"]
+    label = {"hold": "동결", "hike": f"{d['change']:+.2f}%p 인상", "cut": f"{d['change']:+.2f}%p 인하"}[d["outcome"]]
+    rate, monthly, step = _rate_text(d["rate_after"]), note["monthly_change"], note["step"]
+    ours = ("변동금리 대출이 없어 우리 집 월 이자는 바뀌지 않습니다" if not note["variable_total"] else
+            "우리 집 월 이자는 바뀌지 않습니다" if not monthly else
+            f"변동금리 대출 월 이자가 다음 재산정부터 약 {_signed_short(monthly)} 바뀝니다")
+    subject = (f"[Smith · 사건 안내] {note['day']:%m/%d} 금통위 {label} {rate} · "
+               + ("월 이자 변화 없음" if not monthly else f"월 이자 {_signed_short(monthly)}"))
+    # The vote and the guidance are shown only as the Bank's page states them (review 2026-10-23): otherwise left out.
+    vote = {True: "만장일치", False: "소수 의견 있음", None: ""}[d["vote_unanimous"]]
+    source = "한국은행 ECOS 통계" if d["source"] == "ecos" else "한국은행 공식 페이지"
+    next_meeting = note["next_meeting"]
+    tiles = [("기준금리", rate, f"{label} · 이전 {_rate_text(d['rate_before'])}" + (f" · {vote}" if vote else "")),
+             ("변동금리 대출", _short(note["variable_total"]) if note["variable_total"] else "없음", "잔액"),
+             ("월 이자 변화", "변화 없음" if not monthly else _signed_short(monthly), "현재 잔액 기준 · 재산정 때 반영"),
+             ("다음 금통위", "-" if next_meeting is None else f"{next_meeting.month}월 {next_meeting.day}일",
+              "" if next_meeting is None else f"({editions.WEEKDAY_KO[next_meeting.weekday()]})"
+              + (f" · 0.25%p당 월 {_short(step)}" if step else ""))]
+    lead = (f"{note['day']:%m월 %d일} 한국은행 금융통화위원회가 기준금리를 {rate}로 {label}했습니다"
+            f"({vote + ', ' if vote else ''}출처: {source}). {ours}."
+            + (" 배경과 총재 발언의 조사는 이번에 실패해 결정 숫자만 전합니다." if note.get("research_failed") else ""))
+    rows = ([["결정", f"{_rate_text(d['rate_before'])} → {rate} ({label})"]] + ([["표결", vote]] if vote else [])
+            + ([["향후 방향(한국은행 원문)", f"“{d['guidance']}”"]] if d.get("guidance") else []) + [
+            ["변동금리 대출 잔액", _short(note["variable_total"]) if note["variable_total"] else "없음"],
+            ["월 이자 변화(현재 잔액 기준)", "변화 없음" if not monthly else _signed_short(monthly)],
+            ["0.25%p 한 단계의 월 이자 차이", _short(step) if step else "-"]])
+    stance = {
+        "hold": ("이번 결정은 우리 집 월 이자를 바꾸지 않습니다. 미리 갚는 방식과 대환 판단은 정기 보고의 기준 그대로이고, 다음 "
+                 "금통위 전에 대출 금리 재산정 통지가 오면 그 숫자로 다시 봅니다. 결정 자체로 매매하거나 상환 계획을 바꾸지 않습니다."),
+        "hike": (f"변동금리 대출 월 이자가 다음 재산정부터 약 {_signed_short(monthly) if monthly else '0원'} 바뀝니다. 미리 갚을지는 "
+                 "대출 금리와 세후 예금 금리의 차이로 판단하는 정기 보고의 기준 그대로이며, 목요 금리·대출 보고에서 새 금리로 "
+                 "시나리오를 다시 계산합니다."),
+        "cut": (f"변동금리 대출 월 이자가 다음 재산정부터 약 {_signed_short(monthly) if monthly else '0원'} 바뀝니다. 금리가 내리면 "
+                "예금 이자도 함께 낮아지므로 미리 갚을지는 두 금리의 차이로 판단하며, 목요 금리·대출 보고에서 새 금리로 시나리오를 "
+                "다시 계산합니다."),
+    }[d["outcome"]]
+    return subject, f"금통위, 기준금리 {rate} {label}", ours, tiles, (lead, _table(["항목", "내용"], rows)), stance
+
+
+def _move_event(note: dict[str, Any]) -> tuple[str, str, str, list[tuple[str, str, str]], tuple[str, str], str]:
+    ratio, change, since = note["ratio"], note["change"], note["since"]
+    pct = f"{ratio * 100:+.1f}%"
+    movers = note["movers"]
+    top = movers[0] if movers else None
+    by_market = note["by_market"]
+    markets = " · ".join(f"{label} {_signed_short(by_market[key])}" for key, label in (("KR", "한국 상장"), ("US", "미국 상장"))
+                         if key in by_market)
+    subject = f"[Smith · 사건 안내] {note['day']:%m/%d} 보유 종목 {pct} ({_signed_short(change)})"
+    line = f"{since:%m.%d %H:%M} 이후 {_signed_short(change)} · 시장 손익 {_signed_short(note['market'])} · 환율 {_signed_short(note['fx'])}"
+    tiles = [("보유 종목 변동", _signed_short(change), f"{since:%m.%d %H:%M} 이후 · 평가액 {_short(note['start'])} 기준"),
+             ("변동률", pct, "시장 손익과 환율 효과"),
+             ("가장 크게 움직인 종목", str(top["name"])[:12] if top else "-",
+              f"{_signed_short(top['change'])} ({top['ratio'] * 100:+.1f}%)" if top else ""),
+             ("스트레스 가정 대비", f"{note['stress_share'] * 100:.0f}%", "주식 30% 하락 가정의 비율")]
+    lead = (f"지난 점검({since:%m월 %d일 %H:%M}) 이후 보유 종목 평가액이 {_signed_short(change)}({pct}) 움직였습니다. 시장 손익이 "
+            f"{_signed_short(note['market'])}, 환율 효과가 {_signed_short(note['fx'])}입니다." + (f" {markets}." if markets else ""))
+    rows = [[str(m["name"]), _signed_short(m["change"]), f"{m['ratio'] * 100:+.1f}%"] for m in movers]
+    stance = (f"하루 변동으로 매매하지 않습니다. 이번 변동은 Smith의 스트레스 테스트가 가정하는 주식 30% 하락의 "
+              f"{note['stress_share'] * 100:.0f}%입니다. 정기 보고의 제안(분기 정리 일정, 날짜 있는 목표 자금의 이동)은 그대로이고, "
+              "종목별 판단은 다음 화요 투자·시장 보고에서 다시 봅니다.")
+    return (subject, f"보유 종목 {pct} ({since:%m.%d} 이후)", line, tiles,
+            (lead, _table(["종목", "변동", "변동률"], rows) if rows else ""), stance)
+
+
+def _event_research(note: dict[str, Any]) -> tuple[str, str] | None:
+    """The researched background of an event: each finding with its source link, dated, marked 공식 or 참고."""
+    items = [i for i in note.get("items") or [] if not i.get("decision_source")]
+    if not items:
+        return (("원인 조사는 이번에 실패했습니다. 숫자는 Smith의 계산이며, 배경은 다음 정기 보고에서 다룹니다.", "")
+                if note.get("research_failed") else None)
+    lead = f"조사에서 확인한 배경 {len(items)}건입니다. 공식 출처는 '공식', 언론·기관 자료는 '참고'로 표시했습니다."
+    rows = []
+    for item in items:
+        official = item.get("tier") == "official"
+        rows.append(f'<div style="margin:10px 0"><div style="font-size:14px;font-weight:600;line-height:1.5;color:{INK}">'
+                    f'<a href="{escape(item["source_url"])}" style="color:{INK};text-decoration:underline">{escape(item["headline"])}</a> '
+                    f'{_pill("공식" if official else "참고", "good" if official else "neutral")} '
+                    f'<span style="font-family:{MONO};font-size:12px;color:{MUTED}">{escape(item["published_on"])}</span></div>'
+                    f'<div style="font-size:13px;line-height:1.6;color:{BODY}">{escape(item["detail"])}</div></div>')
+    return lead, "".join(rows)
 
 
 def system_notes(data: dict[str, Any]) -> list[str]:
@@ -171,7 +284,8 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
         "macro": lambda: _macro(sectors["macro"]), "macro_brief": lambda: _macro(sectors["macro"], compact=True),
         "real_estate": lambda: _real_estate(sectors["real_estate"], data.get("figures") or {}),
         "lease_plan": lambda: _lease_plan(data), "move_targets": lambda: _move_targets(data),
-        "debt": lambda: _debt(sectors["debt"], advice.get("refinance")), "tax": lambda: _tax(advice, data, True),
+        "debt": lambda: _debt(sectors["debt"], advice.get("refinance"), sectors["macro"].get("policy")),
+        "tax": lambda: _tax(advice, data, True),
         "pension": lambda: _pension(sectors["pension_insurance"], advice.get("insurance_review")),
         "pension_stack": lambda: _pension_stack(data), "annuity_review": lambda: _annuity_review(data),
         "cash": lambda: _cash(sectors["cash"], data),
@@ -195,7 +309,7 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
     sections = [renderers[name]() for name in edition.sections if name not in edition.opening]
     if any(sections):
         bands.append(_band(CANVAS, "".join(sections), border=True))
-    bands.append(_band(SOFT, _footer(_system_warnings(data))))
+    bands.append(_band(SOFT, _footer(_system_warnings(data), week=_week_line(data))))
     return _subject(data, status), _page(bands)
 
 
@@ -251,22 +365,28 @@ def _tiles(data: dict[str, Any], edition: editions.Edition) -> list[tuple[str, s
         one = next((x for x in debt["shocks"] if x["shock"] == Decimal("0.01")), None)
         base = next((r for r in s["macro"]["evidence"] if r["spec"].series_id == "722Y001/0101000" and r["value"] is not None),
                     None)
+        policy = s["macro"].get("policy") or {}
+        meeting = policy.get("next_meeting")
+        when = "" if base is None else f"{base['observed_on']:%m.%d} 기준"
+        if meeting is not None:  # The rate-setting day matters more than the observation day (§28).
+            when += (" · " if when else "") + ("오늘 금통위" if policy.get("meeting_today") else f"다음 금통위 {meeting:%m.%d}")
         return [("변동금리 대출", "미상" if debt["variable_total"] is None else _short(debt["variable_total"]), "잔액"),
                 ("월 이자(추정)", "미상" if debt["monthly_interest_estimate"] is None
                  else _short(debt["monthly_interest_estimate"]), "현재 금리 기준"),
-                ("금리 1%p 오르면", "-" if one is None or one["monthly_increase"] is None
-                 else "+" + _short(one["monthly_increase"]), "월 이자 증가"),
-                ("한국은행 기준금리", "미상" if base is None else f"{base['value']}%",
-                 "" if base is None else f"{base['observed_on']:%m.%d} 기준")]
+                ("금리 1%p 오르면", "-" if one is None or one["monthly_change"] is None
+                 else "+" + _short(one["monthly_change"]), "월 이자 증가 · 내리면 같은 폭 감소"),
+                ("한국은행 기준금리", "미상" if base is None else f"{base['value']}%", when)]
     if edition.tiles == "tax":
         plan = data["tax_plan"]
         room = (("세액공제 남은 한도", "한도 채움", "올해는 더 넣어도 공제가 늘지 않습니다") if not plan["irp_room"] else
                 ("세액공제 남은 한도", _short(plan["irp_room"]), f"채우면 약 {_short(plan['refund_gain'])} 더 환급(추정)"))
         lower = f" · 환산 못 한 {plan['pension_unconverted']}건 제외(최소치)" if plan["pension_unconverted"] else ""
         stack = data.get("pension_stack")
+        others = [] if stack is None else [t for t in _retirement_tiers(stack) if t["retire_age"] != stack["retirement_age"]]
         first = (("올해 연금 납입(예상)", _short(plan["savings_paid"] + plan["irp_paid"]), "연금저축 + IRP" + lower) if stack is None
                  else ("노후 준비율(4대 연금 세후)", _pct(stack["ratio"], 0),
-                       f"목표 월 {_short(stack['target'])} · 세후 월 {_short(stack['total_net'])}"
+                       f"{stack['retirement_age']}세 은퇴 기준 · "
+                       + " · ".join(f"{t['retire_age']}세 {_pct(t['ratio'], 0)}" for t in others)
                        + (f" · {len(stack['unknown'])}개 미상 제외" if stack["unknown"] else "")))
         return [first,
                 room,
@@ -565,12 +685,19 @@ def _hero_segments(data: dict[str, Any], tiles: str | None) -> tuple[str, list[t
         stack = data.get("pension_stack")
         if stack is None:
             return "", [], ""
-        segments = [(p["label"], p["net_monthly"], "") for p in stack["pipelines"] if p["net_monthly"] is not None]
+        known = [p for p in stack["pipelines"] if p["net_monthly"] is not None]
+        segments = [(p["label"], p["net_monthly"], "") for p in known]
         gap = stack["target"] - stack["total_net"]
+        if len(segments) + (gap > 0) > len(SEGMENTS):
+            # Five hues at most, and the fold-in "기타" would hide the shortfall: the two pension accounts share one.
+            accounts = [p for p in known if p["key"] in ("pension_savings", "irp")]
+            segments = [(p["label"], p["net_monthly"], "") for p in known if p not in accounts]
+            segments.insert(2, ("연금저축·IRP", sum((p["net_monthly"] for p in accounts), Decimal(0)), ""))
         if gap > 0:
             segments.append(("목표까지 부족", gap, ""))
         note = f"세후 월 수령액 합계 {_short(stack['total_net'])} / 목표 월 {_short(stack['target'])}"
-        return "노후 월 현금흐름 준비", segments, note + (f" · 미상 {len(stack['unknown'])}개 제외" if stack["unknown"] else "")
+        return (f"노후 월 현금흐름 준비({stack['retirement_age']}세 은퇴 기준)", segments,
+                note + (f" · 미상 {len(stack['unknown'])}개 제외" if stack["unknown"] else ""))
     if tiles == "life":
         split = data.get("spending_split")
         if split is None:
@@ -1231,16 +1358,18 @@ def _toss_cash_note(toss: dict[str, Any]) -> str:
     return note
 
 
-def _debt(debt: dict[str, Any], refinance: dict[str, Any] | None = None) -> str:
-    """The loan line-up (the rates day's opening view): the variable-rate total and the 1%p shock, the credit
-    lines with nothing drawn as liquidity room, and the refinancing verdict on the mortgage (§18.4)."""
+def _debt(debt: dict[str, Any], refinance: dict[str, Any] | None = None, policy: dict[str, Any] | None = None) -> str:
+    """The loan line-up (the rates day's opening view): the variable-rate total and what each rate move, up or
+    down, does to the month's interest (expert review 2026-10-22: the scenarios ran one way only), the next rate
+    meeting and what one step would cost (§28), the credit lines with nothing drawn as liquidity room, and the
+    refinancing verdict on the mortgage (§18.4)."""
     one = next((s for s in debt["shocks"] if s["shock"] == Decimal("0.01")), None)
     if debt["variable_total"] is None:
         lead = ("<b>변동금리</b>(몇 달마다 시장 금리에 맞춰 이자율이 바뀌는 방식) 대출 가운데 환율이 없어 원화로 바꾸지 못한 "
-                "대출이 있어, 합계와 금리 상승 시 이자 증가액을 계산하지 않았습니다.")
+                "대출이 있어, 합계와 금리 변동 시 이자 변화액을 계산하지 않았습니다.")
     else:
         lead = (f"<b>변동금리</b> 대출 <b>{_short(debt['variable_total'])}</b>"
-                + (f"은 금리가 1%p 오르면 월 이자가 약 <b>{_short(one['monthly_increase'])}</b> 늘어납니다."
+                + (f"은 금리가 1%p 오르면 월 이자가 약 <b>{_short(one['monthly_change'])}</b> 늘고, 1%p 내리면 그만큼 줄어듭니다."
                    if one and debt["variable_total"] else "이 있습니다."))
     unused = debt.get("unused_credit")
     for line in debt.get("credit_lines", []):
@@ -1252,20 +1381,38 @@ def _debt(debt: dict[str, Any], refinance: dict[str, Any] | None = None) -> str:
     verdict = ""
     if refinance is not None:
         verdict = _refinance_block(refinance)
-    bars = _bars([(f"+{s['shock'] * 100:.1f}%p", s["monthly_increase"], s["shock"] == Decimal("0.01"))
-                  for s in debt["shocks"]])
+    # Zero-centred: cuts to the left in blue (less interest), rises to the right in red, on today's balance.
+    moves = [(f"{s['shock'] * 100:+.1f}%p", s["monthly_change"]) for s in debt["shocks"] if s["monthly_change"] is not None]
+    bars = ""
+    if any(value for _, value in moves):
+        bars = (_diverging(moves)
+                + f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin:4px 0 10px">{_meeting_note(debt, policy)}'
+                  '지금 잔액에 금리 변화만 적용한 월 이자의 변화이며, 금리 전망이 아닙니다. 금리가 내리면 예금 이자도 함께 낮아지므로, '
+                  '미리 갚을지는 대출 금리와 세후 예금 금리의 차이로 판단합니다.</div>')
     table = _table(["대출", "잔액", "금리", "방식", "만기"],
                    [[l["label"], _short(l["amount"]) + (f"(한도 {_short(l['credit_limit'])} 미사용)" if l.get("credit_limit") is not None
                                                         and l["amount"] == 0 else ""),
                      f"{l['rate'] * 100:.2f}%", RATE_TYPE_LABELS.get(l["rate_type"], l["rate_type"]),
                      (l["maturity"] or "-")[:7].replace("-", ".")]
                     for l in debt["loans"]])
-    note = "" if one is None or one["monthly_increase"] is None else f"1%p 상승 시 월 +{_short(one['monthly_increase'])}"
+    note = "" if one is None or not one["monthly_change"] else f"금리 ±1%p에 월 이자 ±{_short(one['monthly_change'])}"
     if refinance is not None and refinance["verdict"] != "unknown":
         note += (" · " if note else "") + ("대환 없이 유지 유리" if refinance["verdict"] == "keep" else "대환 검토")
     if unused:
         note += (" · " if note else "") + f"미사용 한도 {_short(unused)}"
     return _section("부채·금리 현황 및 금리 변동 민감도", lead, verdict + bars + table, note=escape(note))
+
+
+def _meeting_note(debt: dict[str, Any], policy: dict[str, Any] | None) -> str:
+    """The next Bank of Korea rate meeting and what one 0.25%p step would do to the month's interest (§28): the
+    decision is never predicted. Empty without a calendar date or a variable-rate total."""
+    meeting = (policy or {}).get("next_meeting")
+    if meeting is None or not debt["variable_total"]:
+        return ""
+    step = debt["variable_total"] * Decimal("0.0025") / 12
+    when = ("오늘 금통위가 기준금리를 정합니다(결과는 발표 뒤 다음 보고에 반영)." if policy.get("meeting_today")
+            else f"다음 금통위는 {meeting.month}월 {meeting.day}일({editions.WEEKDAY_KO[meeting.weekday()]})입니다.")
+    return f"{when} 0.25%p 움직이면 월 이자가 약 {_short(step)} 달라집니다. "
 
 
 def _refinance_block(r: dict[str, Any]) -> str:
@@ -1729,14 +1876,18 @@ def _pension_stack(data: dict[str, Any]) -> str:
     stack = data.get("pension_stack")
     if stack is None:
         return _section("노후 현금흐름 준비율", "은퇴 후 월 생활비 목표(지금 물가 기준)를 알려 주시면 4대 연금을 합쳐 준비율을 보여 드립니다.", "")
-    target = stack["target"]
-    lead = (f"은퇴 후 월 <b>{_short(target)}</b>(현재 가치)을 목표로 보면, 알려진 연금의 세후 월 수령액 합계는 약 "
-            f"<b>{_short(stack['total_net'])}</b>으로 준비율 <b>{_pct(stack['ratio'], 0)}</b>입니다.")
+    target, head = stack["target"], stack["retirement_age"]
+    tiers = _retirement_tiers(stack)
+    # The two sentences the card keeps (report design §21): which ages, then each age's after-tax total and ratio.
+    lead = ((f"{head}세 은퇴를 기준으로 계산했고 50·55·60세도 함께 보입니다." if stack["retirement_age_set"] else
+             f"은퇴 나이를 정하지 않으셔서 {'·'.join(str(t['retire_age']) for t in tiers)}세 세 경우로 계산했고, 아래 연금 표는 "
+             f"{head}세 기준입니다.")
+            + f" 은퇴 후 월 <b>{_short(target)}</b>(현재 가치) 목표에 모든 연금이 나온 뒤의 세후 월 합계는 "
+            + ", ".join(f"{t['retire_age']}세 은퇴 <b>{_short(t['total_net'])}</b>({_pct(t['ratio'], 0)})" for t in tiers) + "입니다.")
     if stack["unknown"]:
         missing = [p for p in stack["pipelines"] if p["net_monthly"] is None]
         lead += (f" {', '.join(p['label'] for p in missing)}은 아직 수령액을 몰라 뺀 하한이며, 답장으로 알려 주시면 바로 반영합니다: "
                  + " ".join(f"{p['label']}는 {p['missing']}." for p in missing if p["missing"]))
-    lead += f" 연금 계좌는 {stack['payout_age']}세 개시를 가정했고, 세후는 가정 세율이라 현행 법령 확인이 필요합니다."
     rows = []
     for p in stack["pipelines"]:
         # A stated payout starts on a date; with only the birth year its age is approximate (review 2026-10-18).
@@ -1748,8 +1899,51 @@ def _pension_stack(data: dict[str, Any]) -> str:
         basis = (("입력값" if p["basis_text"].startswith("알려 주신") else "추정") if p["net_monthly"] is not None
                  else f"입력 필요: {p['missing']}")
         rows.append([p["label"], start, gross, _short(p["net_monthly"]), basis])
-    inner = _gauge("목표 월 생활비 대비 준비율", stack["ratio"], "") + _table(["연금", "개시", "월 예상(세전)", "세후", "근거"], rows)
-    return _section("노후 현금흐름 준비율: 4대 연금 스택", lead, inner, note=escape(f"준비율 {_pct(stack['ratio'], 0)}"))
+    inner = (_tier_table(tiers) + _gauge(f"{head}세 은퇴 기준 목표 월 생활비 대비 준비율", stack["ratio"], "")
+             + _table(["연금", "개시", "월 예상(세전)", "세후", "근거"], rows) + _stack_note(stack))
+    return _section("노후 현금흐름 준비율: 4대 연금 스택", lead, inner,
+                    note=escape("준비율 " + " · ".join(f"{t['retire_age']}세 은퇴 {_pct(t['ratio'], 0)}" for t in tiers)))
+
+
+def _retirement_tiers(stack: dict[str, Any]) -> list[dict[str, Any]]:
+    """The retirement ages still ahead of the client (report design §30)."""
+    return [t for t in stack["tiers"] if stack["age"] is None or t["retire_age"] > stack["age"]]
+
+
+def _tier_table(tiers: list[dict[str, Any]]) -> str:
+    """One row per retirement age: the years before the first pension, the after-tax total once every pension
+    has started, the ratio, and what must be held outside the pensions at retirement (today's won)."""
+    rows = []
+    for t in tiers:
+        gap = t["years_without_pension"]
+        need = t["outside_need"]
+        bound = need is not None and need["upper_bound"]
+        rows.append([f"{t['retire_age']}세", "-" if gap is None else f"{gap}년({t['first_income_age']}세까지)" if gap else "없음",
+                     _short(t["total_net"]) + (" 이상" if t["unknown"] else ""), _pct(t["ratio"], 0) + (" 이상" if t["unknown"] else ""),
+                     "미상" if need is None else ("최대 " if bound else "") + _short(need["total"])])
+    note = ("연금 없는 기간은 은퇴부터 첫 연금(55세부터 받는 연금 계좌, 65세 국민연금)까지입니다. 연금 밖에서 준비할 돈은 그 기간의 생활비와 "
+            "모든 연금이 나온 뒤에도 남는 부족분을 은퇴 시점의 오늘 돈 가치로 합한 것이며, 퇴직금·부동산은 넣지 않았습니다.")
+    if any(t["unknown"] for t in tiers):
+        note += " 수령액을 모르는 연금은 0원으로 볼 수 없어, 합계와 준비율은 그 이상, 연금 밖에서 준비할 돈은 그 이하일 수 있는 최대치입니다."
+    if any(p["key"] == "isa" for t in tiers for p in t["pipelines"]):
+        note += " ISA 등 줄은 공제 밖 납입을 주택 이전에 쓰지 않고 노후까지 남긴다는 가정입니다."
+    return (_table(["은퇴 나이", "연금 없는 기간", "모든 연금 개시 후 세후 월", "준비율", "연금 밖에서 준비할 돈"], rows)
+            + f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin:4px 0 12px">{escape(note)}</div>')
+
+
+def _stack_note(stack: dict[str, Any]) -> str:
+    """How the contributions were projected (report design §30): the credit split the tax proposal makes, and the
+    total with the current split beside it, so the two never read as a contradiction."""
+    c = stack["contributions"]
+    if not c["changed"] or stack["current_split"] is None:
+        return ""
+    now = c["current"]
+    text = (f"납입은 세액공제를 빠짐없이 받는 연금저축 월 {_short(c['pension_savings'])}, IRP 월 {_short(c['irp'])}으로 나누고"
+            + (f" 공제 밖 월 {_short(c['isa'])}은 ISA 등에 모은다고" if c["isa"] else "") + " 계산했습니다. "
+            f"지금처럼 연금저축 월 {_short(now['pension_savings'])}, IRP 월 {_short(now['irp'])}을 계속 넣으면 "
+            f"{stack['retirement_age']}세 은퇴 기준 세후 합계는 약 {_short(stack['current_split']['total_net'])}입니다. "
+            "공제받지 않은 납입 원금은 꺼낼 때 세금이 없어 그만큼 세금을 빼지 않았습니다(현행 법령 확인 필요).")
+    return f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin:8px 0 4px">{escape(text)}</div>'
 
 
 def _experiences(story: dict[str, Any]) -> str:
@@ -1829,7 +2023,11 @@ def _macro(macro: dict[str, Any], *, compact: bool = False) -> str:
     rates = [(SERIES_LABELS.get(r["spec"].series_id, r["spec"].label), r["change_12m"]) for r in rows
              if r["spec"].unit == "%" and r["change_12m"] is not None]
     rising = sum(1 for _, change in rates if change > 0)
-    lead = (f"지난 1년간 주요 금리 {len(rates)}개 중 <b>{rising}개가 올랐습니다</b>. 단위는 <b>%p</b>입니다. "
+    # The policy rates' path first (§28: a bank's note leads with the decision and how it was reached), then the
+    # count of market rates that rose; the section's summary keeps these two sentences.
+    path = _policy_path(macro.get("policy"))
+    lead = ((path + " ") if path else "") + (
+            f"지난 1년간 주요 금리 {len(rates)}개 중 <b>{rising}개가 올랐습니다</b>(단위 <b>%p</b>). "
             "금리가 오르면 변동금리 대출 이자는 늘고, 예금 이자와 채권 수익률은 높아지며, 주식·부동산 가격에는 "
             "대체로 부담이 됩니다.")
     lead += (" 우리 집 대출·예금에 미치는 영향은 금리·대출 보고에서 다룹니다." if compact else
@@ -1841,14 +2039,56 @@ def _macro(macro: dict[str, Any], *, compact: bool = False) -> str:
                      f"{r['value']}{'%' if r['spec'].unit == '%' else '원'}", _delta(r["change_12m"]),
                      (f"{r['spec'].provider.upper()} {r['observed_on']:%m.%d}", r["spec"].link)] for r in rows])
     if compact:
-        return _section("시장 금리와 환율", lead, chart + table)
+        return _section("시장 금리와 환율", lead, chart + table + _fx_block(macro.get("fx")))
     table += _table(["금리·환율 변화에 노출된 자산·부채", "금액"],
                     [[_exposure_label(e.key), _won(e.amount)] for e in macro["exposures"].exposures])
+    table += _fx_block(macro.get("fx"))
     news = macro["announcements"][:5]
     if news:
         table += _table(["최근 공식 발표(제목을 누르면 원문)", "날짜"],
                         [[(a.title, a.link), f"{a.published_at:%Y.%m.%d}"] for a in news])
     return _section("거시 환경", lead, chart + table)
+
+
+def _policy_path(policy: dict[str, Any] | None) -> str:
+    """One sentence on where the two policy rates stand and how they got there over the past year, from the stored
+    series (§28): each step's date and size, "뒤 동결" when the last step is behind the latest observation."""
+    parts = [_rate_path(label, (policy or {}).get(key)) for label, key in (("한국은행 기준금리", "bok"), ("미국 기준금리(상단)", "fed"))]
+    parts = [p for p in parts if p]
+    return "" if not parts else "이고, ".join(parts) + "입니다."
+
+
+def _rate_path(label: str, row: dict[str, Any] | None) -> str:
+    if row is None or row["value"] is None:
+        return ""
+    moves = row.get("moves") or []
+    when = f"({row['observed_on']:%m.%d} 기준)"
+    if not moves:
+        return f"{label} {row['value']}%는 지난 1년 변동이 없었음{when}"
+    # Dates carry the year once the year's steps straddle a year end ("10.30, 12.11, 09.17" reads out of order).
+    form = "%m.%d" if all(day.year == row["observed_on"].year for day, _ in moves) else "%y.%m.%d"
+    steps = ", ".join(f"{day:{form}} {delta:+.2f}%p" for day, delta in moves[-4:])
+    held = " 뒤 동결" if moves[-1][0] < row["observed_on"] else ""
+    return f"{label} {row['value']}%는 {steps}{held}{when}"
+
+
+def _fx_block(fx: dict[str, Any] | None) -> str:
+    """The won/dollar rate against the dollar assets (expert review 2026-10-22: the exposure table named the
+    dollar assets without saying what a move does to them): what 100 won of move does to today's dollars, and
+    what the past year's move did to them. Nothing without dollar assets; no second sentence without the series."""
+    if fx is None:
+        return ""
+    body = (f"달러 자산 {_short(fx['usd_assets'])}(약 {fx['usd_amount']:,.0f}달러)은 원/달러 환율이 100원 움직일 때 "
+            f"약 {_short(fx['per_100_won'])} 오르내립니다.")
+    change = fx["change_12m"]
+    if change:
+        then = fx["series_rate"] - change
+        body += (f" 지난 1년 환율이 {abs(change):,.1f}원 {'내려' if change < 0 else '올라'}({then:,.0f}원→{fx['series_rate']:,.0f}원, "
+                 f"한국은행 기준 환율 {fx['series_observed_on']:%m.%d}) 지금 보유한 달러의 원화 가치는 약 "
+                 f"{_short(abs(fx['year_effect']))} {'줄었습니다' if change < 0 else '늘었습니다'}.")
+    return (f'<div style="background:{SOFT};border-radius:16px;padding:14px 16px;margin:12px 0 4px">'
+            f'<div style="font-size:12px;font-weight:600;color:{MUTED};margin-bottom:6px">환율 민감도</div>'
+            f'<div style="font-size:14px;line-height:1.6;color:{BODY}">{escape(body)}</div></div>')
 
 
 def _exposure_label(key: str) -> str:
@@ -1884,14 +2124,29 @@ def _requests(requests: list[Any], full: bool, rest_where: str = "월요 보고"
     return _section("다음에 확인할 것", lead, "".join(rows))
 
 
-def _footer(warnings: list[str] | tuple[str, ...] = ()) -> str:
+def _footer(warnings: list[str] | tuple[str, ...] = (), week: str = "") -> str:
     """One line (report design §18.1): what Smith never does, and that the reasons are a reply away. A problem
-    with the report itself (stale data, no narrative) adds one warning line above it."""
+    with the report itself (stale data, no narrative) adds one warning line above it; a daily edition adds the
+    week's plan (`week`, HTML) so a reader of one day knows where the other areas are (§27)."""
     warn = ("" if not warnings else
             f'<div style="font-size:13px;line-height:1.6;color:{INK};margin-bottom:8px">▲ 확인 필요: '
             f'{escape(" · ".join(warnings))}. 자세한 사유는 이 메일에 답장으로 물어 주십시오.</div>')
-    return (f'<tr><td>{warn}<div style="font-size:12px;line-height:1.6;color:{MUTED}">Smith는 조회 전용 자문입니다(매매·이체·대출 '
+    guide = "" if not week else f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-bottom:6px">{week}</div>'
+    return (f'<tr><td>{warn}{guide}<div style="font-size:12px;line-height:1.6;color:{MUTED}">Smith는 조회 전용 자문입니다(매매·이체·대출 '
             '실행 없음). 세금·법령은 실행 전 확인하시고, 판단 근거는 답장으로 물어 주십시오.</div></td></tr>')
+
+
+def _week_line(data: dict[str, Any]) -> str:
+    """The week's reports with today's in bold, for the daily editions only (report design §27): one report a
+    day covers one area, and this line says so where the top of the mail no longer does (§21)."""
+    if editions.of(data["kind"]) is None:
+        return ""
+    week = editions.week_plan(data.get("schedule"))
+    if not week:
+        return ""
+    items = " · ".join(f"<b>{day} {escape(label)}</b>" if kind == data["kind"] else f"{day} {escape(label)}"
+                       for day, kind, label in week)
+    return f"Smith는 하루에 한 주제만 보고합니다: {items}. 오늘 다루지 않은 분야는 그 요일의 보고에 있습니다."
 
 
 def _data_lines(data: dict[str, Any], assumptions: list[str], ai: dict[str, Any] | None = None) -> list[str]:
