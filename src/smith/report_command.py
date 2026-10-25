@@ -328,10 +328,28 @@ def _say(db: Path, message: str, *, log: bool = True) -> None:
 
 def _publish(args: argparse.Namespace) -> int:
     try:
-        return _publish_once(args)
+        code = _publish_once(args)
     except Exception as error:  # noqa: BLE001 - an unattended run must leave a trace of any crash.
         _say(args.db, f"{args.action} crashed: {type(error).__name__}")
         raise
+    if args.action == "run-due":
+        _run_daily(args)   # After the reports (review 2026-10-25): a due report never waits behind the daily mail.
+    return code
+
+
+def _run_daily(args: argparse.Namespace) -> None:
+    """The daily-routine mail (daily design §7) on the same scheduled task, apart from the reports; never raises."""
+    from smith import daily_command
+    from smith.config import load_config
+
+    try:
+        config = load_config(args.config)
+        if not config.get("daily", {}).get("enabled"):
+            return
+        for line in daily_command.run_due(args.db, config, now=datetime.now(timezone.utc)):
+            _say(args.db, line)
+    except Exception as error:  # noqa: BLE001 - the daily mail must never block or fail the scheduled task.
+        _say(args.db, f"Daily mail crashed: {type(error).__name__}")
 
 
 def _publish_once(args: argparse.Namespace) -> int:
@@ -349,14 +367,6 @@ def _publish_once(args: argparse.Namespace) -> int:
     slot, missed = None, []
     kind = args.kind or editions.for_day(config, now.astimezone(ZoneInfo(tz)).date())
     if args.action == "run-due":
-        if config.get("daily", {}).get("enabled"):
-            # The daily-routine mail (daily design §7) rides on the same scheduled task, apart from the reports.
-            from smith import daily_command
-            try:
-                for line in daily_command.run_due(args.db, config, now=now):
-                    _say(args.db, line)
-            except Exception as error:  # noqa: BLE001 - the daily mail must never block a report.
-                _say(args.db, f"Daily mail crashed: {type(error).__name__}")
         if not config["reports"]["enabled"]:
             print("Scheduled reports are disabled (reports.enabled = false).")
             return 0

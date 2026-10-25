@@ -25,7 +25,7 @@ from smith.records import (
 logger = logging.getLogger(__name__)
 _END_OF_TIME = datetime.max.replace(tzinfo=timezone.utc)
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 _V1 = (
     """CREATE TABLE imports (
         import_id TEXT PRIMARY KEY,
@@ -401,8 +401,18 @@ _V19 = (
         run_id TEXT NOT NULL
     )""",
 )
+# v20: what each daily mail contained when it was sent (the model's input and the prose), so a reply to that mail is
+# answered from that mail and not from a fresh lookup that may have moved on (user decision 2026-10-25). Kept a year.
+_V20 = (
+    """CREATE TABLE daily_snapshots (
+        run_key TEXT PRIMARY KEY,
+        day TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        snapshot TEXT NOT NULL
+    )""",
+)
 _MIGRATIONS = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8, 9: _V9, 10: _V10, 11: _V11, 12: _V12,
-               13: _V13, 14: _V14, 15: _V15, 16: _V16, 17: _V17, 18: _V18, 19: _V19}
+               13: _V13, 14: _V14, 15: _V15, 16: _V16, 17: _V17, 18: _V18, 19: _V19, 20: _V20}
 _COLUMNS = ("record_id, revision, kind, owner_id, source, status, change_type, corrects_revision, "
             "reason, effective_at, recorded_at, import_id, fields")
 
@@ -1526,3 +1536,49 @@ def _daily_row(row: tuple) -> dict[str, Any]:
             "updated_at": datetime.fromisoformat(updated_at),
             "finished_at": None if finished_at is None else datetime.fromisoformat(finished_at), "subject": subject,
             "html_sha256": html_sha256, "message_id": message_id, "error_code": error_code}
+
+
+def recover_daily_runs(conn: sqlite3.Connection, *, now: datetime, lease: timedelta) -> list[dict[str, Any]]:
+    """Close daily-mail runs interrupted longer than `lease` ago, whatever their day (review 2026-10-25: a `sending`
+    row of a past day would otherwise stay open for ever). `building` had not contacted Gmail and becomes a retryable
+    failure; `sending` may have been delivered and becomes unknown, never resent."""
+    cutoff = _db_time(now - lease)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        stale = conn.execute("SELECT run_key, status FROM daily_runs WHERE status IN ('building', 'sending') AND created_at < ?",
+                             (cutoff,)).fetchall()
+        for run_key, status in stale:
+            outcome, code = (("failed", "interrupted-before-send") if status == "building" else ("unknown", "interrupted-during-send"))
+            conn.execute("UPDATE daily_runs SET status = ?, error_code = ?, updated_at = ?, finished_at = ? WHERE run_key = ?",
+                         (outcome, code, _db_time(now), _db_time(now), run_key))
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+    return [{"run_key": key, "was": status} for key, status in stale]
+
+
+SNAPSHOT_KEEP_DAYS = 365
+
+
+def record_daily_snapshot(conn: sqlite3.Connection, *, run_key: str, day: date, created_at: datetime,
+                          snapshot: dict[str, Any]) -> None:
+    """Store what a daily mail contained (model input, prose, subject, links) when it was about to be sent."""
+    conn.execute("INSERT OR REPLACE INTO daily_snapshots VALUES (?, ?, ?, ?)",
+                 (run_key, day.isoformat(), _db_time(created_at), json.dumps(snapshot, ensure_ascii=False, default=str)))
+
+
+def daily_snapshot(conn: sqlite3.Connection, run_key: str) -> dict[str, Any] | None:
+    row = conn.execute("SELECT snapshot FROM daily_snapshots WHERE run_key = ?", (run_key,)).fetchone()
+    if row is None:
+        return None
+    try:
+        found = json.loads(row[0])
+    except ValueError:
+        return None
+    return found if isinstance(found, dict) else None
+
+
+def purge_daily_snapshots(conn: sqlite3.Connection, *, before: datetime) -> int:
+    """Drop snapshots older than `before` (retention); returns how many went."""
+    return conn.execute("DELETE FROM daily_snapshots WHERE created_at < ?", (_db_time(before),)).rowcount

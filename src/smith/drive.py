@@ -11,6 +11,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -48,11 +49,46 @@ def has_scope(granted: set[str]) -> bool:
     return SCOPE in granted
 
 
-def takeout_archives(token: str, *, getter: gmail.Getter = gmail.get) -> list[Archive]:
-    """Every Takeout zip in Drive, newest export first (parts in order)."""
-    query = "name contains 'takeout-' and name contains '.zip' and trashed = false"
-    params = {"q": query, "orderBy": "createdTime desc", "pageSize": "50", "spaces": "drive",
-              "fields": "files(id,name,size,createdTime)"}
+def takeout_archives(token: str, *, getter: gmail.Getter = gmail.get, now: datetime | None = None) -> list[Archive]:
+    """Every Takeout zip in Drive that Google itself put there, newest export first (parts in order).
+
+    Provenance is checked, not assumed (review 2026-10-25): the file is owned by the account, sits in a `Takeout`
+    folder the account owns, is a zip by MIME type, and its name stamp lies within two days of its creation time
+    and not in the future — so a shared or renamed file cannot pose as the newest export.
+    """
+    now = now or datetime.now(timezone.utc)
+    folders = _list(token, "name = 'Takeout' and mimeType = 'application/vnd.google-apps.folder' and 'me' in owners "
+                           "and trashed = false", "files(id)", getter)
+    folder_ids = {str(f.get("id")) for f in folders if isinstance(f, dict) and f.get("id")}
+    if not folder_ids:
+        return []
+    files = _list(token, "name contains 'takeout-' and name contains '.zip' and trashed = false and 'me' in owners",
+                  "files(id,name,size,createdTime,mimeType,parents,ownedByMe)", getter)
+    found = []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        match = _NAME.match(str(item.get("name", "")))
+        file_id = str(item.get("id", ""))
+        if not match or not re.fullmatch(r"[A-Za-z0-9_-]{10,128}", file_id):
+            continue
+        if item.get("ownedByMe") is not True or "zip" not in str(item.get("mimeType", "")).lower():
+            continue
+        if not folder_ids & {str(p) for p in item.get("parents", []) if p}:
+            continue
+        created = _time(str(item.get("createdTime", "")))
+        stamped = _time(match.group("stamp"))
+        if created is None or stamped is None or created > now + timedelta(days=1) or abs((created - stamped).days) > 2:
+            continue
+        size = item.get("size")
+        found.append(Archive(file_id, str(item["name"]), match.group("stamp"), int(match.group("part")),
+                             int(size) if str(size).isdigit() else None, str(item.get("createdTime", "")),
+                             int(match.group("batch") or 0)))
+    return sorted(found, key=lambda a: (a.stamp, -a.batch, -a.part), reverse=True)
+
+
+def _list(token: str, query: str, fields: str, getter: gmail.Getter) -> list[Any]:
+    params = {"q": query, "orderBy": "createdTime desc", "pageSize": "100", "spaces": "drive", "fields": fields}
     try:
         status, body = getter(f"{FILES_URL}?{urllib.parse.urlencode(params)}", {"Authorization": f"Bearer {token}"})
     except OSError:
@@ -64,17 +100,18 @@ def takeout_archives(token: str, *, getter: gmail.Getter = gmail.get) -> list[Ar
         raise DriveError("api-not-enabled" if "accessNotConfigured" in reasons else "no-scope")
     if status != 200:
         raise DriveError(f"http-{status}")
-    found = []
-    for item in body.get("files", []) if isinstance(body.get("files"), list) else []:
-        match = _NAME.match(str(item.get("name", "")))
-        file_id = str(item.get("id", ""))
-        if not match or not re.fullmatch(r"[A-Za-z0-9_-]{10,128}", file_id):
-            continue
-        size = item.get("size")
-        found.append(Archive(file_id, str(item["name"]), match.group("stamp"), int(match.group("part")),
-                             int(size) if str(size).isdigit() else None, str(item.get("createdTime", "")),
-                             int(match.group("batch") or 0)))
-    return sorted(found, key=lambda a: (a.stamp, -a.batch, -a.part), reverse=True)
+    files = body.get("files", [])
+    return files if isinstance(files, list) else []
+
+
+def _time(text: str) -> datetime | None:
+    """RFC 3339 ("2026-10-25T06:48:54.430Z") or a Takeout stamp ("20261025T064834Z") as an aware datetime."""
+    try:
+        if re.fullmatch(r"\d{8}T\d{6}Z", text):
+            return datetime.strptime(text, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def newest_export(archives: list[Archive]) -> list[Archive]:

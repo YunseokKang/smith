@@ -46,6 +46,11 @@ class SendTests(unittest.TestCase):
         self.assertIn("조카 생일 D-7", self.sent[0])
         with closing(ledger.connect(self.db)) as conn:
             self.assertIsNone(daily_send.due(conn, CONFIG, at(day, 6, 20)))            # Sent: not due again.
+            stored = ledger.daily_snapshot(conn, "2026-11-20")                     # The mail as sent, for later replies.
+            self.assertEqual((stored["day"], stored["payload"]["date"], stored["subject"].startswith("[Smith][하루 일과]")),
+                             ("2026-11-20", "2026-11-20", True))
+            self.assertEqual(ledger.purge_daily_snapshots(conn, before=at(day, 6, 0)), 0)
+            self.assertEqual(ledger.purge_daily_snapshots(conn, before=at(date(2027, 12, 1), 6, 0)), 1)
             run = ledger.daily_run(conn, "2026-11-20")
             self.assertEqual((run["status"], run["message_id"], run["attempts"]), ("sent", "m1", 1))
             self.assertEqual(ledger.shown_reminder_keys(conn, ["birthday:nephew:2026:D-7"]), {"birthday:nephew:2026:D-7"})
@@ -62,13 +67,27 @@ class SendTests(unittest.TestCase):
         self.assertTrue(self.sent[0].startswith("[Smith][하루 일과 · 지연 발송] 11/20"))
         manual = daily_send.publish(self.db, CONFIG, now=at(day, 9, 30), day=day, trigger="manual",
                                     recipient="client@example.com", credentials=CREDS, sender=self.sender, collector=collector)
-        self.assertEqual(manual["status"], "sent")                                        # A manual send has its own key.
+        self.assertEqual((manual["status"], manual["error_code"]), ("skipped", "already-sent"))   # The day is the unit.
+        forced = daily_send.publish(self.db, CONFIG, now=at(day, 9, 40), day=day, trigger="manual", force=True,
+                                    recipient="client@example.com", credentials=CREDS, sender=self.sender, collector=collector)
+        self.assertEqual(forced["status"], "sent")                                        # Only --force sends a second one.
         self.assertTrue(self.sent[1].startswith("[Smith][하루 일과] 11/20"))                 # Never marked late.
         other = date(2026, 11, 21)
         daily_send.publish(self.db, CONFIG, now=at(other, 7, 0), day=other, trigger="manual",
                            recipient="client@example.com", credentials=CREDS, sender=self.sender, collector=collector)
         with closing(ledger.connect(self.db)) as conn:
             self.assertIsNone(daily_send.due(conn, CONFIG, at(other, 7, 30)))             # A manual mail satisfies the day.
+            # A scheduled attempt while the manual one is still building is refused by the same key.
+            token, outcome = ledger.claim_daily_run(conn, run_key="2026-11-22", day=date(2026, 11, 22), run_id="x", trigger="manual",
+                                                    now=at(date(2026, 11, 22), 6, 0), lease=daily_send.LEASE, max_attempts=3)
+            self.assertEqual(outcome, "claimed")
+            self.assertEqual(ledger.claim_daily_run(conn, run_key="2026-11-22", day=date(2026, 11, 22), run_id="y", trigger="scheduled",
+                                                    now=at(date(2026, 11, 22), 6, 1), lease=daily_send.LEASE, max_attempts=3)[1], "in-progress")
+            # Interrupted runs of any past day are closed by the recovery step: sending becomes unknown, never resent.
+            ledger.advance_daily_run(conn, run_key="2026-11-22", token=token, from_status="building", status="sending")
+            closed = ledger.recover_daily_runs(conn, now=at(date(2026, 11, 23), 9, 0), lease=daily_send.LEASE)
+            self.assertEqual([(c["run_key"], c["was"]) for c in closed], [("2026-11-22", "sending")])
+            self.assertEqual(ledger.daily_run(conn, "2026-11-22")["status"], "unknown")
 
     def test_uncertain_outcome_is_never_resent_and_clean_failures_are_bounded(self):
         day = date(2026, 11, 20)

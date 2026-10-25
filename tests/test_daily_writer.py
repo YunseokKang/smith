@@ -48,6 +48,19 @@ class WriterTests(unittest.TestCase):
         self.assertEqual(prose["news"], [{"ref": "R1", "summary": "금통위를 앞두고 시장이 관망세입니다."}])
         self.assertEqual(len(problems), 5)   # weather_line (12·25 not in input), sentence, tasks_line, a key, a ref.
 
+    def test_numbers_are_checked_as_tokens_of_the_input(self):
+        data = data_for_test()
+        payload = daily.payload(data)
+        payload["weather"] = {"today": {"tmin": 12.0, "tmax": 25.0, "pop_max": 30}}
+        weather_pool = daily_writer.pool("weather_line", payload)
+        self.assertEqual(daily_writer._foreign_numbers("기온 12도에서 25도, 비 30%", weather_pool), [])
+        self.assertEqual(daily_writer._foreign_numbers("기온 20도", weather_pool), ["20"])      # The date no longer vouches for 20.
+        self.assertEqual(daily_writer._foreign_numbers("강수확률 9%", weather_pool), ["9"])     # Single digits are checked too.
+        self.assertEqual(daily_writer._foreign_numbers("일정 0건, 뉴스 1건", daily_writer.pool("agenda_line", payload)), [])   # Counts.
+        self.assertEqual(daily_writer._foreign_numbers("1950년 참전", daily_writer.pool("sentence", payload)), ["1950"])     # Not the sentence's.
+        self.assertTrue(daily_writer._attributed("처칠에 따르면 성공은 열정을 잃지 않는 것이다"))
+        self.assertTrue(daily_writer._attributed("니체의 말처럼 춤추는 별을 낳으려면"))
+
     def test_tastes_are_known_only_from_memory_about_that_person(self):
         data = data_for_test()
         facts = [Fact("family", "와이프는 향수와 꽃을 좋아한다", DAY, "대화")]

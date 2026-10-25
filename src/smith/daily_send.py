@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from smith import daily, daily_art, daily_html, gmail, ledger, people
+from smith import daily, daily_art, daily_html, gmail, keep, ledger, people
 from smith.config import local_time
 
 LEASE = timedelta(minutes=30)
@@ -61,20 +61,27 @@ def run_due(db: Path, config: dict[str, Any], *, now: datetime, recipient: str |
             credentials: tuple[str, str, str] | None, sender: Sender = gmail.send, collector: Collector | None = None,
             modeler: Modeler | None = None) -> list[str]:
     """Called by `smith report run-due`: sends today's mail when it is due. Returns log lines."""
+    lines: list[str] = []
     with closing(ledger.connect(db)) as conn:
+        for run in ledger.recover_daily_runs(conn, now=now, lease=LEASE):
+            lines.append(f"daily run {run['run_key']} interrupted while {run['was']}: closed")
+        ledger.purge_daily_snapshots(conn, before=now - timedelta(days=ledger.SNAPSHOT_KEEP_DAYS))
         day = due(conn, config, now)
     if day is None:
-        return []
+        return lines
     result = publish(db, config, now=now, day=day, trigger="scheduled", recipient=recipient, credentials=credentials,
                      sender=sender, collector=collector, modeler=modeler)
-    return [f"daily {day.isoformat()}: {result['status']}" + (f" ({result['error_code']})" if result.get("error_code") else "")]
+    return lines + [f"daily {day.isoformat()}: {result['status']}" + (f" ({result['error_code']})" if result.get("error_code") else "")]
 
 
 def publish(db: Path, config: dict[str, Any], *, now: datetime, day: date, trigger: str, recipient: str | None,
             credentials: tuple[str, str, str] | None, sender: Sender = gmail.send, collector: Collector | None = None,
-            modeler: Modeler | None = None) -> dict[str, Any]:
-    """Claim, build, send and record one day's mail. Returns {"status", "run_key", "subject", "error_code"}."""
-    key = day.isoformat() if trigger == "scheduled" else f"{day.isoformat()}#manual-{uuid.uuid4().hex[:6]}"
+            modeler: Modeler | None = None, force: bool = False) -> dict[str, Any]:
+    """Claim, build, send and record one day's mail. Returns {"status", "run_key", "subject", "error_code"}.
+
+    The day is the unit of claiming for scheduled and manual sends alike (review 2026-10-25: two keys let a manual
+    and a scheduled run both go out); only an explicit `force` sends a second mail under its own key."""
+    key = day.isoformat() if not force else f"{day.isoformat()}#manual-{uuid.uuid4().hex[:6]}"
     run_id = uuid.uuid4().hex
     with closing(ledger.connect(db)) as conn:
         token, outcome = ledger.claim_daily_run(conn, run_key=key, day=day, run_id=run_id, trigger=trigger, now=now,
@@ -104,19 +111,32 @@ def publish(db: Path, config: dict[str, Any], *, now: datetime, day: date, trigg
         # Committed before the request: a run that dies after Gmail accepted the mail never sends it again.
         held = ledger.advance_daily_run(conn, run_key=key, token=token, from_status="building", status="sending",
                                         subject=subject, html_sha256=digest)
+        if held:
+            # What this mail contains, kept with the run so a reply to it is answered from it (user decision 2026-10-25).
+            ledger.record_daily_snapshot(conn, run_key=key, day=day, created_at=now, snapshot=snapshot(data, subject, carried))
     if not held:
         return {"status": "skipped", "run_key": key, "subject": subject, "error_code": "claim-lost"}
     shown = [r.occurrence.key + f":D-{r.days_left}" for r in data["reminders"]] + [c["key"] for c in carried]
+    thought = str((data.get("prose") or {}).get("thought_id") or "")
     images = daily_art.payload(daily_art.images_for(data))
     try:
         message_id = sender(credentials, recipient=recipient, subject=subject, html=html, text=text, images=images)
     except gmail.MailError as error:
         status = "unknown" if error.uncertain else "failed"
         if status == "unknown":
-            _mark_shown(db, shown, day, run_id)
+            _mark_shown(db, shown, day, run_id, thought)
         return _finish(db, key, token, "sending", status, error_code=error.code, subject=subject)
-    _mark_shown(db, shown, day, run_id)
+    _mark_shown(db, shown, day, run_id, thought)
     return _finish(db, key, token, "sending", "sent", message_id=message_id, subject=subject)
+
+
+def snapshot(data: dict[str, Any], subject: str, carried: list[dict[str, Any]]) -> dict[str, Any]:
+    """The mail as sent: the model-facing payload (already identifier-masked), the prose, the subject, the news links
+    (for citations in a later reply) and the carried reminders. No HTML, no coordinates, no ids beyond news refs."""
+    news = data.get("news") or []
+    return {"version": 1, "day": data["day"].isoformat(), "subject": subject, "payload": daily.payload(data),
+            "prose": data.get("prose"), "carried": [{"label": c["label"], "date": c["date"].isoformat()} for c in carried],
+            "news_links": {n.get("ref"): [n.get("source_title") or n.get("headline"), n.get("source_url")] for n in news if n.get("ref")}}
 
 
 def carry_over(db: Path, book: people.Book | None, day: date) -> list[dict[str, Any]]:
@@ -139,9 +159,12 @@ def carry_over(db: Path, book: people.Book | None, day: date) -> list[dict[str, 
     return [c for c in candidates if c["key"] not in already and c["key"].rsplit(":D-", 1)[0] not in today_keys]
 
 
-def _mark_shown(db: Path, keys: list[str], day: date, run_id: str) -> None:
+def _mark_shown(db: Path, keys: list[str], day: date, run_id: str, thought: str = "") -> None:
+    """What a delivered (or possibly delivered) mail carried: its reminders, and the Keep entry behind its sentence."""
     with closing(ledger.connect(db)) as conn:
         ledger.record_reminders_shown(conn, keys, shown_on=day, run_id=run_id)
+    if thought:
+        keep.mark_used(keep.directory(db), thought, day)
 
 
 def _finish(db: Path, key: str, token: str, from_status: str, status: str, *, error_code: str | None = None,

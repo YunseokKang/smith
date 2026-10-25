@@ -20,6 +20,8 @@ def add_parser(sub: Any, default_db: Path) -> None:
     command.add_argument("--as-of", type=date.fromisoformat, help="YYYY-MM-DD (default: today in the household timezone)")
     command.add_argument("--model", action="store_true",
                          help="preview: also run the news research and the writer (headless model calls; audited in the ledger)")
+    command.add_argument("--force", action="store_true",
+                         help="send: send again although the day's mail already went out (a second run under its own key)")
     command.add_argument("--out", type=Path, help="preview: where to write the HTML (default reports/daily-preview-<date>.html)")
     command.add_argument("--config", type=Path, default=DEFAULT_LOCAL_CONFIG)
     command.add_argument("--db", type=Path, default=default_db)
@@ -42,7 +44,7 @@ def run(args: argparse.Namespace) -> int:
             print("\n".join(daily_send.describe(conn)))
         return 0
     if args.action == "send":
-        return _send(args.db, config, now=now, day=day, with_model=args.model)
+        return _send(args.db, config, now=now, day=day, with_model=args.model, force=args.force)
     inputs = daily.collect(args.db, config, now=now, day=day)
     data = daily.assemble(inputs, day=day, tz=tz, now=now,
                           airways_sensitive=bool(config.get("daily", {}).get("airways_sensitive", False)))
@@ -70,7 +72,7 @@ PREPARE_AHEAD = timedelta(hours=1)
 def run_due(db: Path, config: dict[str, Any], *, now: datetime) -> list[str]:
     """For `smith report run-due`: send today's mail when due, with the model steps. In the hour before the slot the
     news research runs ahead (it is reused for six hours), so the 06:00 mail only waits for the writer. Returns log lines."""
-    from smith import credentials, daily_news, daily_send, headless, mail_command
+    from smith import credentials, daily_news, daily_send, headless
 
     lines: list[str] = []
     day = local_time(now, config["app"]["timezone"]).date()
@@ -86,7 +88,8 @@ def run_due(db: Path, config: dict[str, Any], *, now: datetime) -> list[str]:
                 lines.append(f"daily news prepared for {day.isoformat()}: {news['outcome']}, {len(news['items'])} item(s)")
         except headless.HeadlessError as error:
             lines.append(f"daily news not prepared ({error})")
-    lines += daily_send.run_due(db, config, now=now, recipient=mail_command.recipient(DEFAULT_LOCAL_CONFIG),
+    # The recipient comes from the same config the scheduler loaded (review 2026-10-25: never a second file).
+    lines += daily_send.run_due(db, config, now=now, recipient=config.get("mail", {}).get("recipient"),
                                 credentials=credentials.load_gmail(), modeler=_with_model)
     return lines
 
@@ -115,12 +118,14 @@ def _sync_keep(db: Path, now: datetime) -> list[str]:
     return []
 
 
-def _send(db: Path, config: dict[str, Any], *, now: datetime, day: date, with_model: bool) -> int:
+def _send(db: Path, config: dict[str, Any], *, now: datetime, day: date, with_model: bool, force: bool = False) -> int:
     from smith import credentials, daily_send
 
     recipient = config.get("mail", {}).get("recipient")
     result = daily_send.publish(db, config, now=now, day=day, trigger="manual", recipient=recipient,
-                                credentials=credentials.load_gmail(), modeler=_with_model if with_model else None)
+                                credentials=credentials.load_gmail(), modeler=_with_model if with_model else None, force=force)
+    if result["status"] == "skipped" and result.get("error_code") == "already-sent":
+        print("Today's mail already went out; add --force to send another one.")
     print(f"{result['status']}: {result.get('subject') or ''}" + (f" ({result['error_code']})" if result.get("error_code") else ""))
     return 0 if result["status"] == "sent" else 1
 

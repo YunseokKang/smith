@@ -114,6 +114,8 @@ class ErrorTests(unittest.TestCase):
     def test_clean_and_place(self):
         self.assertEqual(agenda.clean("A &nbsp; <b>B</b> www.x.com/q C mail me@x.com", 50), "A B C mail [식별정보 제거]")
         self.assertEqual(agenda.clean("x" * 30, 10), "xxxxxxxxx…")
+        self.assertEqual(agenda.clean("Zoom 비번: A_b#12 접속코드 abc-defg-hij 끝", 100), "Zoom [접속 정보 제거] [접속 정보 제거] 끝")
+        self.assertEqual(agenda.clean("meeting code 123 4567 890, password=Qw/er.ty", 100), "[접속 정보 제거], [접속 정보 제거]")
         self.assertEqual(agenda.place("스타벅스 판교점"), "스타벅스 판교점")
         self.assertIsNone(agenda.place("회의실 3B"))
         self.assertIsNone(agenda.place(""))

@@ -31,6 +31,7 @@ REUSE_DAYS = 60
 SYNC_EVERY_HOURS = 24
 MIN_CHARS, MAX_CHARS = 20, 1200
 MODEL_CHARS = 300
+MAX_ZIP_ENTRIES, MAX_ZIP_BYTES, MAX_ENTRY_BYTES = 20_000, 200 * 1024 * 1024, 20 * 1024 * 1024
 PICK = 6
 THOUGHT_LABELS = ("생각", "thought", "thoughts", "일기", "메모", "idea", "아이디어", "다짐", "원칙")
 STUDY_LABELS = ("학습", "근골격", "스트레칭", "운동", "영어", "일본어", "study")
@@ -330,7 +331,7 @@ def sync(folder: Path, token: str, *, now: datetime, lister: Any = None, downloa
 
     state = sync_state(folder)
     try:
-        archives = (lister or drive.takeout_archives)(token)
+        archives = (lister or (lambda t: drive.takeout_archives(t, now=now)))(token)
     except drive.DriveError as error:
         return {"outcome": "error", "stamp": None, "imported": 0, "error_code": error.code}
     parts = drive.newest_export(archives)
@@ -383,7 +384,12 @@ def _documents(source: Path):
                 yield path.name, path.read_text(encoding="utf-8-sig")
         return
     with zipfile.ZipFile(source) as archive:
-        for name in sorted(archive.namelist()):
+        infos = archive.infolist()
+        # An archive is trusted only within bounds (review 2026-10-25: a zip bomb must not fill the disk).
+        if len(infos) > MAX_ZIP_ENTRIES or sum(i.file_size for i in infos) > MAX_ZIP_BYTES or any(i.file_size > MAX_ENTRY_BYTES for i in infos):
+            raise ValueError("archive-too-large")
+        for info in sorted(infos, key=lambda i: i.filename):
+            name = info.filename
             if name.endswith(".json") and "/Keep/" in name.replace("\\", "/"):
                 yield name.rsplit("/", 1)[-1], archive.read(name).decode("utf-8-sig", "replace")
 

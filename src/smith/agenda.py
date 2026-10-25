@@ -38,10 +38,12 @@ OVERDUE_SHOWN = 5
 TIGHT_GAP_MINUTES = 15
 _URL = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 _HTML = re.compile(r"<[^>]{1,200}>")
-# A meeting id or passcode: a label, then an ASCII code (digits, letters, spaces, dashes) ending on a letter or digit, so
-# the next Korean label ("비밀번호") is never swallowed into the previous value.
-_ACCESS = re.compile(r"(?:회의\s*(?:id|번호)|meeting\s*id|passcode|비밀번호|암호|pin|password)\s*[:：]?\s*"
-                     r"[A-Za-z0-9][A-Za-z0-9 -]{1,22}[A-Za-z0-9]", re.IGNORECASE)
+# A meeting id or passcode: a label (Korean or English, long and short forms), an optional separator, then the value —
+# one non-space token of any characters (codes carry _ # / . too) and up to three further digit groups (review
+# 2026-10-25: "Zoom 비번: A_b#12 접속코드 abc-defg-hij" must not reach a model).
+_ACCESS = re.compile(r"(?:회의\s*(?:id|아이디|번호|코드)|meeting\s*(?:id|code|number)|접속\s*(?:코드|번호|정보)|참가\s*코드|"
+                     r"passcode|pass\s*code|password|pwd|pin|비밀번호|비번|암호|패스워드)\s*(?:[:：=]|은|는)?\s*"
+                     r"\S{3,40}(?:\s+\d{2,6}){0,3}", re.IGNORECASE)
 
 
 class AgendaError(Exception):

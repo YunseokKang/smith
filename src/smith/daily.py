@@ -177,6 +177,9 @@ def payload(data: dict[str, Any]) -> dict[str, Any]:
         "weather": weather_part,
         "agenda": agenda.for_model(data["events"], (tasks["overdue"] + tasks["due_today"]), data["day"]),
         "tasks_overdue_total": tasks["overdue_total"],
+        # The counts a writer may state (its numbers are checked against the input's number tokens).
+        "counts": {"events": len(data["events"]), "tasks_overdue": tasks["overdue_total"], "tasks_today": len(tasks["due_today"]),
+                   "reminders": len(data["reminders"]), "news": 0 if data["news"] is None else len(data["news"])},
         "reminders": people.for_model(data["reminders"]),
         "upcoming": [{"label": o.label, "date": o.on.isoformat(), "days_left": (o.on - data["day"]).days,
                       "milestone": o.milestone} for o in data["upcoming"]],

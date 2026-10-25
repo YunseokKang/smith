@@ -23,15 +23,28 @@ def takeout_zip(notes: dict[str, str]) -> bytes:
 
 class DriveTests(unittest.TestCase):
     def test_archives_are_parsed_and_grouped_by_export(self):
+        def mine(file_id, name, size, created, **overrides):
+            item = {"id": file_id, "name": name, "size": size, "createdTime": created, "mimeType": "application/x-zip",
+                    "parents": ["takeoutfolderidxx"], "ownedByMe": True}
+            item.update(overrides)
+            return item
+
         def getter(url, headers):
             self.assertIn("Bearer tok", headers["Authorization"])
+            if "vnd.google-apps.folder" in url:
+                self.assertIn("%27me%27+in+owners", url)
+                return 200, {"files": [{"id": "takeoutfolderidxx"}]}
             self.assertIn("name+contains+%27takeout-%27", url)
-            return 200, {"files": [{"id": "fileB2xxxxxxxxxx", "name": "takeout-20261101T060000Z-1-002.zip", "size": "10"},
-                                   {"id": "fileB1xxxxxxxxxx", "name": "takeout-20261101T060000Z-1-001.zip", "size": "20"},
-                                   {"id": "fileB0xxxxxxxxxx", "name": "takeout-20261101T060000Z-001.zip", "size": "2"},
-                                   {"id": "fileA1xxxxxxxxxx", "name": "takeout-20260901T060000Z-3-001.zip", "size": "5"},
+            return 200, {"files": [mine("fileB2xxxxxxxxxx", "takeout-20261101T060000Z-1-002.zip", "10", "2026-11-01T06:05:00Z"),
+                                   mine("fileB1xxxxxxxxxx", "takeout-20261101T060000Z-1-001.zip", "20", "2026-11-01T06:05:00Z"),
+                                   mine("fileB0xxxxxxxxxx", "takeout-20261101T060000Z-001.zip", "2", "2026-11-01T06:05:00Z"),
+                                   mine("fileA1xxxxxxxxxx", "takeout-20260901T060000Z-3-001.zip", "5", "2026-09-01T06:05:00Z"),
+                                   mine("sharedxxxxxxxxxx", "takeout-20991231T000000Z-1-001.zip", "9", "2026-10-30T00:00:00Z"),   # Stamp lies.
+                                   mine("notminexxxxxxxxx", "takeout-20261102T060000Z-1-001.zip", "9", "2026-11-02T06:00:00Z", ownedByMe=False),
+                                   mine("elsewherexxxxxxx", "takeout-20261103T060000Z-1-001.zip", "9", "2026-11-03T06:00:00Z", parents=["other"]),
+                                   mine("notzipxxxxxxxxxx", "takeout-20261104T060000Z-1-001.zip", "9", "2026-11-04T06:00:00Z", mimeType="text/html"),
                                    {"id": "otherxxxxxxxxxxx", "name": "photo.zip"}]}
-        archives = drive.takeout_archives("tok", getter=getter)
+        archives = drive.takeout_archives("tok", getter=getter, now=datetime(2026, 11, 5, tzinfo=timezone.utc))
         self.assertEqual([a.name for a in archives], ["takeout-20261101T060000Z-001.zip", "takeout-20261101T060000Z-1-001.zip",
                                                       "takeout-20261101T060000Z-1-002.zip", "takeout-20260901T060000Z-3-001.zip"])
         newest = drive.newest_export(archives)
@@ -42,6 +55,8 @@ class DriveTests(unittest.TestCase):
             with self.subTest(code=code), self.assertRaises(drive.DriveError) as caught:
                 drive.takeout_archives("tok", getter=lambda url, headers, s=status, b=body: (s, b))
             self.assertEqual(caught.exception.code, code)
+        no_folder = lambda url, headers: (200, {"files": []})  # noqa: E731
+        self.assertEqual(drive.takeout_archives("tok", getter=no_folder), [])         # No Takeout folder: nothing is trusted.
 
 
 class SyncTests(unittest.TestCase):
@@ -91,6 +106,16 @@ class SyncTests(unittest.TestCase):
             self.assertEqual((err["outcome"], err["error_code"]), ("error", "no-scope"))
             empty = keep.sync(Path(folder) / "other", "tok", now=NOW, lister=lambda token: [])
             self.assertEqual(empty["outcome"], "none")
+
+    def test_oversized_archives_are_refused(self):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("Takeout/Keep/big.json", b"0" * (keep.MAX_ENTRY_BYTES + 1))
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "big.zip"
+            path.write_bytes(buffer.getvalue())
+            with self.assertRaises(ValueError):
+                keep.import_takeout(path, Path(folder) / "keep")
 
 
 if __name__ == "__main__":
