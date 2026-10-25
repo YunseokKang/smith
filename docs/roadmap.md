@@ -202,6 +202,9 @@
                   용도별 전달(문장 6·선물 2·답장 5), `smith keep sync|search`. 사용자 설정(매달 예약)·`--drive` 재동의·첫 동기화 완료
                   (2026-10-25, 61개 노트). Takeout 데이터 파일명 `takeout-<stamp>-1-001.zip` 반영, 월 단위 일기 노트를 항목으로 분할
                   (`keep.entries`), 회고 항목 우선 점수. 남은 점: 첫 정기 메일의 문장 품질 확인, 학습 메모 라벨 설정화.
+            - [x] 7d-7(2026-10-25) 날씨 요정·날씨 그림·기분 그림(`daily_art.py`, Fluent Emoji 3D MIT 동봉, `gmail.send(images=)` 인라인
+                  첨부), 날씨 기준 구 표기(`[daily.weather] label`), 쓰기 모델 `mood`, 헤드리스 검증기에 맞춘 문자열 스키마(`history.year`,
+                  `research.needed`). 리뷰 문서 `REVIEW-REQUEST-2026-10-25-daily.md`.
       - [ ] 후속(§9): 일정 살 붙이기, 주간 미리보기, 저녁 메일, `smith ask`와 주제 라우터(Keep 창고가 1차 자료), 메모 변경 이력.
 - [ ] 이후 Hermes 조회 API 연결 및 전용 앱.
 

@@ -51,7 +51,7 @@ def run(args: argparse.Namespace) -> int:
         return 0
     if args.model:
         _with_model(args.db, config, data, now=now, day=day)
-    subject, html, text = daily_html.render(data)
+    subject, html, text = daily_html.render(data, inline=True)
     out = args.out or PREVIEW_DIR / f"daily-preview-{day.isoformat()}.html"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(html, encoding="utf-8")

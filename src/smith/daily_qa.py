@@ -41,9 +41,10 @@ ANSWER_SCHEMA = {
         "remember": {"type": "array", "maxItems": 3, "items": {
             "type": "object", "additionalProperties": False, "required": ["topic", "fact"],
             "properties": {"topic": _TEXT(20), "fact": _TEXT(memory.MAX_FACT_CHARS)}}},
+        # The headless validator knows strings, arrays and objects only: `needed` is "yes" or "no".
         "research": {"type": "object", "additionalProperties": False, "required": ["needed", "subject", "kind", "queries", "anchors"],
-                     "properties": {"needed": {"type": "boolean"}, "subject": _TEXT(120),
-                                    "kind": {"type": "string", "enum": ["person", "place", "event", "company", "topic", "none"]},
+                     "properties": {"needed": _TEXT(3), "subject": _TEXT(120),
+                                    "kind": {"type": "string", "maxLength": 12},
                                     "queries": {"type": "array", "maxItems": 5, "items": _TEXT(200)},
                                     "anchors": {"type": "array", "maxItems": 6, "items": _TEXT(80)}}},
     },
@@ -56,7 +57,7 @@ FINDINGS_SCHEMA = {
             "required": ["claim", "source_title", "source_url", "published_on", "publisher", "confidence"],
             "properties": {"claim": _TEXT(600), "source_title": _TEXT(300), "source_url": _TEXT(2000),
                            "published_on": _TEXT(32), "publisher": _TEXT(200),
-                           "confidence": {"type": "string", "enum": ["confirmed", "single-source", "unconfirmed"]}}}},
+                           "confidence": {"type": "string", "maxLength": 16}}}},
         "identity": {"type": "object", "additionalProperties": False, "required": ["matched_anchors", "note"],
                      "properties": {"matched_anchors": {"type": "array", "maxItems": 6, "items": _TEXT(80)}, "note": _TEXT(600)}},
         "gaps": {"type": "array", "maxItems": 10, "items": _TEXT(300)},
@@ -75,9 +76,9 @@ Write in warm, natural Korean, speaking to the client directly, short paragraphs
 - Money, holdings, loans, taxes: say that the finance mail's thread is the place ("재무 메일에 답장해 주시면 그 자료로
   답해 드립니다") and answer only the calendar side, if any.
 - A question about a person, place, event or company that the input cannot answer is a research request: set
-  research.needed = true with the subject, its kind, two to five web queries, and anchors (the clues you have for
-  identity: organisation, title, city, the event in the calendar). Then keep answer.text to one short line saying you
-  are looking it up. On the second pass (research_findings present) write the full answer: facts first, each with its
+  research.needed = "yes" with the subject, its kind (person, place, event, company or topic), two to five web
+  queries, and anchors (the clues you have for identity: organisation, title, city, the event in the calendar). Then
+  keep answer.text to one short line saying you are looking it up. Otherwise research.needed = "no" and kind "none". On the second pass (research_findings present) write the full answer: facts first, each with its
   ref in brackets like [R2]; separate 확인됨 (two sources), 한 출처 (single-source) and 미확인; say plainly when the
   identity could not be confirmed (동명이인) and what clue would settle it; never state private matters (address,
   family, health, wealth, contact details).
@@ -179,7 +180,8 @@ def answer(db: Path, ctx: dict[str, Any], question_text: str, *, now: datetime, 
     problems: list[str] = []
     researched = False
     request = output.get("research") or {}
-    if request.get("needed") and request.get("kind") not in (None, "none") and request.get("queries"):
+    if str(request.get("needed", "")).lower() in ("yes", "true") and request.get("kind") in ("person", "place", "event", "company", "topic") \
+            and request.get("queries"):
         findings, identity, gaps = research(request, now=now, secrets=secrets, caller=call)
         researched = True
         for item in findings:

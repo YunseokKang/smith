@@ -30,7 +30,7 @@ ASK_TASTES = "취향을 알려 주시면 다음부터 더 맞춰 드릴게요."
 _TEXT = lambda n: {"type": "string", "maxLength": n}  # noqa: E731
 SCHEMA = {
     "type": "object", "additionalProperties": False,
-    "required": ["headline", "weather_line", "agenda_line", "anniversaries", "news", "sentence", "thought_id", "history",
+    "required": ["headline", "weather_line", "agenda_line", "anniversaries", "news", "sentence", "thought_id", "mood", "history",
                  "tasks_line"],
     "properties": {
         "headline": _TEXT(LIMITS["headline"] * 2), "weather_line": _TEXT(LIMITS["weather_line"] * 2),
@@ -41,9 +41,10 @@ SCHEMA = {
         "news": {"type": "array", "maxItems": 12, "items": {
             "type": "object", "additionalProperties": False, "required": ["ref", "summary"],
             "properties": {"ref": _TEXT(8), "summary": _TEXT(LIMITS["summary"] * 2)}}},
-        "sentence": _TEXT(LIMITS["sentence"] * 2), "thought_id": _TEXT(120),
+        "sentence": _TEXT(LIMITS["sentence"] * 2), "thought_id": _TEXT(120), "mood": _TEXT(20),
+        # The headless validator knows strings, arrays and objects only: the year travels as text and is parsed here.
         "history": {"type": "object", "additionalProperties": False, "required": ["year", "line"],
-                    "properties": {"year": {"type": "integer"}, "line": _TEXT(LIMITS["history"] * 2)}},
+                    "properties": {"year": _TEXT(8), "line": _TEXT(LIMITS["history"] * 2)}},
         "tasks_line": _TEXT(LIMITS["tasks_line"] * 2),
     },
 }
@@ -71,8 +72,9 @@ reader directly without a title or honorific name; short sentences; no emoji.
   sentence — you may echo a short phrase of that note — and set thought_id to its id. When none fits, write your own
   encouraging sentence and set thought_id to "". Never a famous person's quotation, never a name.
 - history: from history_events pick the one event most worth a smile or a thought this morning (a Korean one when it
-  is as good) and write one or two lines in Korean on what happened and why it is remembered; year must be that event's
-  year from the list. With an empty list, year 0 and line "".
+  is as good) and write one or two lines in Korean on what happened and why it is remembered; year (as text, e.g.
+  "1597") must be that event's year from the list. With an empty list, year "" and line "".
+- mood: the picture beside the sentence, one key from `moods` (given in the input) that fits the sentence, or "".
 - tasks_line: one gentle sentence when tasks_overdue_total > 0 (no scolding), else "".
 
 Numbers: use only numbers that appear in the input. Never write a URL, an e-mail address or a phone number."""
@@ -91,10 +93,12 @@ def write_and_record(db: Path, data: dict[str, Any], *, now: datetime, secrets: 
     notes = keep.load(keep.directory(db))
     family_notes = {r.occurrence.key: keep.for_model(keep.search(notes, r.occurrence.label.split()[0], limit=2))
                     for r in data["reminders"]}
+    from smith import daily_art
+
     payload = {**daily.payload(data), "client_memory": memory.for_model(chosen),
                "family_notes": {k: v for k, v in family_notes.items() if v},
                "reminder_keys": [r.occurrence.key for r in data["reminders"]],
-               "news_refs": [n.get("ref") for n in (data["news"] or [])]}
+               "news_refs": [n.get("ref") for n in (data["news"] or [])], "moods": daily_art.MOODS}
     text = json.dumps(payload, ensure_ascii=False, default=str)
     check_outbound(text, secrets)
     run_id, cost, outcome, error_code, prose, problems = f"daily-{uuid.uuid4().hex[:12]}", None, "failure", None, None, []
@@ -168,11 +172,17 @@ def verify(output: dict[str, Any], data: dict[str, Any], payload_text: str, *,
     aside = output.get("history") if isinstance(output.get("history"), dict) else {}
     years = {e.year for e in data.get("history_events", [])}
     line = _clean(aside.get("line"), LIMITS["history"])
-    year = aside.get("year")
-    if line and isinstance(year, int) and year in years and not _foreign_numbers(line, payload_text):
+    try:
+        year = int(str(aside.get("year", "")).strip())
+    except ValueError:
+        year = None
+    if line and year in years and not _foreign_numbers(line, payload_text):
         prose["history"] = {"year": year, "line": line}
     elif line:
         problems.append("history: year not in the list or a number not in input")
+    from smith import daily_art
+    mood = str(output.get("mood") or "")
+    prose["mood"] = mood if mood in daily_art.MOODS else ""
     return prose, problems
 
 

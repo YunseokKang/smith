@@ -29,19 +29,24 @@ FOOTER = ("Smith는 조회 전용입니다: 캘린더·할 일을 바꾸지 않�
 WEEKDAY_SHORT = "월화수목금토일"
 
 
-def render(data: dict[str, Any]) -> tuple[str, str, str]:
-    """(subject, html, text) for one day's mail."""
+def render(data: dict[str, Any], *, inline: bool = False) -> tuple[str, str, str]:
+    """(subject, html, text) for one day's mail. `inline` embeds the pictures as data URIs (the preview file); a sent
+    mail references them by cid and carries them as attachments (`daily_art.images_for` + `daily_art.payload`)."""
+    from smith import daily_art
+
     prose = data.get("prose") or {}
+    images = daily_art.images_for(data)
+    pictures = {cid: daily_art.source(cid, images, inline=inline) for cid in images}
     subject = _subject(data)
     cards = [card for card in (_history(data, prose), _calendar(data, prose), _anniversaries(data, prose), _news(data, prose),
-                               _sentence(prose), _tasks(data), _holidays(data), _finance(data)) if card]
+                               _sentence(prose, pictures.get("mood")), _tasks(data), _holidays(data), _finance(data)) if card]
     footer_lines = [FOOTER]
     if data["failures"]:
         footer_lines.append("오늘 받지 못한 자료: " + ", ".join(f"{k}({v})" for k, v in sorted(data["failures"].items())))
     footer = ('<tr><td style="padding:4px 6px 12px">'
               + "".join(f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-bottom:6px">{escape(line)}</div>'
                         for line in footer_lines) + "</td></tr>")
-    html = _page(_hero(data, prose) + "".join(cards) + footer)
+    html = _page(_hero(data, prose, pictures) + "".join(cards) + footer)
     return subject, html, _text(data, prose, subject)
 
 
@@ -106,7 +111,8 @@ def _light(signal: weather.Signal) -> str:
             f'{shape}</span> {escape(signal.label)}</div>{detail}</div></td>')
 
 
-def _hero(data: dict[str, Any], prose: dict[str, Any]) -> str:
+def _hero(data: dict[str, Any], prose: dict[str, Any], pictures: dict[str, str | None] | None = None) -> str:
+    pictures = pictures or {}
     day = data["day"]
     greeting = "편안한 휴일 아침입니다" if data["rest_day"] else "좋은 아침입니다"
     date_line = f"{day:%m월 %d일} {data['weekday']}요일" + (f" · {data['holiday']}" if data["holiday"] else "")
@@ -129,10 +135,18 @@ def _hero(data: dict[str, Any], prose: dict[str, Any]) -> str:
     severe = block is not None and block["advice"].severe
     line_style = (f"background:{LIGHTS['critical'][0]};color:#ffffff;border-radius:14px;padding:12px 14px;" if severe
                   else f"color:{BODY};border-left:4px solid {ACCENT};padding:2px 0 2px 12px;")
-    return (f'<tr><td style="padding:0 0 12px"><div style="background:{HERO};border-radius:24px;padding:24px 22px 18px">'
-            f'<div style="font-size:13px;font-weight:700;color:{ACCENT};letter-spacing:0.2px">SMITH · 하루 일과</div>'
-            f'<div style="font-size:26px;line-height:1.25;letter-spacing:-0.6px;color:{INK};margin:8px 0 2px">{escape(greeting)}</div>'
-            f'<div style="font-size:14px;color:{MUTED}">{escape(date_line)}</div>'
+    # The weather fairy and today's weather picture sit to the right of the greeting (daily_art).
+    figures = "".join(f'<img src="{escape(src, quote=True)}" width="{size}" height="{size}" alt="{alt}" '
+                      f'style="display:inline-block;width:{size}px;height:{size}px;vertical-align:bottom;margin-left:4px">'
+                      for cid, size, alt in (("fairy", 84, "날씨 요정"), ("weather", 72, "오늘의 날씨"))
+                      for src in [pictures.get(cid)] if src)
+    top = ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
+           f'<td style="vertical-align:bottom"><div style="font-size:13px;font-weight:700;color:{ACCENT};letter-spacing:0.2px">SMITH · 하루 일과</div>'
+           f'<div style="font-size:26px;line-height:1.25;letter-spacing:-0.6px;color:{INK};margin:8px 0 2px">{escape(greeting)}</div>'
+           f'<div style="font-size:14px;color:{MUTED}">{escape(date_line)}</div></td>'
+           + (f'<td style="width:170px;text-align:right;vertical-align:bottom">{figures}</td>' if figures else "")
+           + "</tr></table>")
+    return (f'<tr><td style="padding:0 0 12px"><div style="background:{HERO};border-radius:24px;padding:24px 22px 18px">{top}'
             f'<div style="font-size:20px;font-weight:700;line-height:1.35;color:{INK};margin:16px 0 8px">{escape(headline)}</div>'
             + (f'<div style="font-size:15px;line-height:1.6;{line_style}">{"⚠ " if severe else ""}{escape(line)}</div>' if line else "")
             + lights_html
@@ -261,11 +275,17 @@ def _news(data: dict[str, Any], prose: dict[str, Any]) -> str:
     return _card("오늘의 뉴스", f"간밤의 국내외 소식 {len(news)}건입니다. 링크는 도달을 확인한 것만 싣습니다.", "".join(blocks))
 
 
-def _sentence(prose: dict[str, Any]) -> str:
+def _sentence(prose: dict[str, Any], picture: str | None = None) -> str:
     sentence = prose.get("sentence")
     if not sentence:
         return ""
-    return _card("오늘의 문장", "", f'<div style="font-size:18px;line-height:1.6;color:{INK}">“{escape(sentence)}”</div>', accent=True)
+    text = f'<div style="font-size:18px;line-height:1.6;color:{INK}">“{escape(sentence)}”</div>'
+    if picture:
+        text = ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
+                f'<td style="width:76px;vertical-align:middle"><img src="{escape(picture, quote=True)}" width="64" height="64" '
+                f'alt="오늘의 기분" style="display:block;width:64px;height:64px"></td>'
+                f'<td style="vertical-align:middle">{text}</td></tr></table>')
+    return _card("오늘의 문장", "", text, accent=True)
 
 
 def _tasks(data: dict[str, Any]) -> str:

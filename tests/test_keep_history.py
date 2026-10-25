@@ -106,11 +106,11 @@ class WriterAsideTests(unittest.TestCase):
         payload_text = str(daily.payload(data))
         output = {"headline": "", "weather_line": "", "agenda_line": "", "anniversaries": [], "news": [], "tasks_line": "",
                   "sentence": "속도보다 방향, 오늘은 하나만 제대로 끝내 보는 하루.", "thought_id": "n1#0",
-                  "history": {"year": 1597, "line": "명량에서 열세 척이 물길을 읽어 이긴 날, 준비가 운을 만든다는 말을 떠올리게 해요."}}
+                  "history": {"year": "1597", "line": "명량에서 열세 척이 물길을 읽어 이긴 날, 준비가 운을 만든다는 말을 떠올리게 해요."}}
         prose, problems = daily_writer.verify(output, data, payload_text, tastes_known={})
         self.assertEqual((prose["thought_id"], prose["history"]["year"]), ("n1#0", 1597))
         self.assertEqual(problems, [])
-        output["history"] = {"year": 1066, "line": "헤이스팅스 전투."}
+        output["history"] = {"year": "1066", "line": "헤이스팅스 전투."}
         output["thought_id"] = "nope"
         prose, problems = daily_writer.verify(output, data, payload_text, tastes_known={})
         self.assertNotIn("history", prose)

@@ -88,6 +88,15 @@ class AssembleTests(unittest.TestCase):
         data["prose"] = {"weather_line": "비와 바람이 있는 날이라 우산과 외투를 챙기세요.", "sentence": "오늘도 한 걸음.",
                          "anniversaries": [{"key": "birthday:nephew:2026", "idea": "돌잔치 선물로 은수저 세트"}]}
         _, html, _ = daily_html.render(data)
+        self.assertIn('src="cid:fairy"', html)                                        # The mail references attachments...
+        self.assertIn('src="cid:weather"', html)
+        self.assertIn('src="cid:mood"', html)
+        _, inline_html, _ = daily_html.render(data, inline=True)
+        self.assertIn("data:image/png;base64,", inline_html)                           # ...and the preview embeds them.
+        from smith import daily_art
+        self.assertEqual(daily_art.weather_key(REPORT, data["weather"]["advice"]), "storm")   # A relevant 강풍주의보 wins.
+        self.assertEqual(sorted(daily_art.images_for(data)), ["fairy", "mood", "weather"])
+        self.assertEqual(daily_art.mood_key("nope", date(2026, 11, 20)) in daily_art.MOODS, True)
         self.assertIn("비와 바람이 있는 날이라", html)
         self.assertIn("오늘의 문장", html)
         self.assertIn("돌잔치 선물로 은수저 세트", html)

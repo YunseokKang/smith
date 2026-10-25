@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from smith import daily, daily_html, gmail, ledger, people
+from smith import daily, daily_art, daily_html, gmail, ledger, people
 from smith.config import local_time
 
 LEASE = timedelta(minutes=30)
@@ -107,8 +107,9 @@ def publish(db: Path, config: dict[str, Any], *, now: datetime, day: date, trigg
     if not held:
         return {"status": "skipped", "run_key": key, "subject": subject, "error_code": "claim-lost"}
     shown = [r.occurrence.key + f":D-{r.days_left}" for r in data["reminders"]] + [c["key"] for c in carried]
+    images = daily_art.payload(daily_art.images_for(data))
     try:
-        message_id = sender(credentials, recipient=recipient, subject=subject, html=html, text=text)
+        message_id = sender(credentials, recipient=recipient, subject=subject, html=html, text=text, images=images)
     except gmail.MailError as error:
         status = "unknown" if error.uncertain else "failed"
         if status == "unknown":

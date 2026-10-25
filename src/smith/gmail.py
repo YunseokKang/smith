@@ -220,8 +220,10 @@ def _read(token: str, path: str, getter: Getter) -> dict[str, Any]:
 
 def send(credentials: tuple[str, str, str], *, recipient: str, subject: str, html: str, text: str,
          poster: Poster = post, thread_id: str | None = None, in_reply_to: str | None = None,
-         references: str | None = None) -> str:
+         references: str | None = None, images: dict[str, bytes] | None = None) -> str:
     """Send one message to the configured recipient and return Gmail's message id.
+
+    `images` are inline PNG attachments keyed by the cid the HTML references (`<img src="cid:weather">`).
 
     Raises:
         MailError: with `uncertain=True` when the send request may have been accepted.
@@ -244,6 +246,9 @@ def send(credentials: tuple[str, str, str], *, recipient: str, subject: str, htm
         message["References"] = references or in_reply_to
     message.set_content(text)
     message.add_alternative(html, subtype="html")
+    for cid, data in (images or {}).items():
+        message.get_payload()[-1].add_related(data, maintype="image", subtype="png", cid=f"<{cid}>", filename=f"{cid}.png",
+                                              disposition="inline")
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
     body = {"raw": raw, **({"threadId": thread_id} if thread_id else {})}
     try:
