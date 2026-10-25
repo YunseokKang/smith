@@ -1,6 +1,7 @@
 import http.client
 import json
 import os
+import subprocess
 import tempfile
 import time
 import unittest
@@ -213,6 +214,57 @@ class UseTests(unittest.TestCase):
         self.assertIn("커피 안 마심", notes[key][0]["note"])
 
 
+class AliasTests(unittest.TestCase):
+    def test_names_go_out_as_aliases_and_come_back_with_particles(self):
+        found = book_of(JUNHO, AUNT, person(1, "김민석", "대학 동기"))
+        text = '{"q": "김민석님이랑 준호형, 이모티콘 회의, 이모네 김장", "note": "민석 아이 둘"}'
+        hidden = contacts.aliases(found, text)
+        out = hidden.hide(text)
+        for name in ("김민석", "민석", "준호형"):
+            self.assertNotIn(name, out)
+        self.assertIn("이모티콘", out)                                                # Not a name there.
+        self.assertNotIn("이모네", out)
+        back = {alias: name for alias, name in hidden.names.items()}
+        minseok = next(a for a, n in back.items() if n == "김민석")
+        junho = next(a for a, n in back.items() if n == "김준호")
+        self.assertEqual(hidden.show(f"{minseok}가 오고 {junho}은 늦어요. {minseok}와 {junho}로"),
+                         "김민석이 오고 김준호는 늦어요. 김민석과 김준호로")
+        self.assertEqual(hidden.show({"a": [f"{minseok}님"]}), {"a": ["김민석님"]})
+
+    def test_the_prefix_avoids_tokens_already_in_the_input(self):
+        hidden = contacts.aliases(book_of(JUNHO), '{"task": "P1 보고서", "q": "김준호"}')
+        self.assertEqual(list(hidden.names), ["Q1"])
+
+    def test_a_writer_payload_carries_no_contact_name(self):
+        found = book_of(JUNHO, AUNT)
+        data = assembled(found, [lunch("김준호 팀장 점심")])
+        raw = json.dumps(daily.payload(data), ensure_ascii=False, default=str)
+        out = contacts.aliases(data["contacts"], raw).hide(raw)
+        self.assertIn("준호", raw)
+        self.assertNotIn("준호", out)
+        self.assertNotIn("이모", out)
+
+
+    def test_the_writer_call_is_aliased_and_its_prose_named(self):
+        data = assembled(book_of(JUNHO), [lunch("김준호 팀장 점심")])
+        key = next(r.occurrence.key for r in data["reminders"] if r.occurrence.label == "김준호 생일")
+        sent = []
+
+        def run(args, **kwargs):
+            sent.append(kwargs["input"])
+            prose = {"headline": "", "weather_line": "", "agenda_line": "P1 팀장과 점심이 있어요", "news": [],
+                     "anniversaries": [{"key": key, "idea": "P1가 커피를 안 마시니 차 선물이 좋겠어요"}], "sentence": "",
+                     "thought_id": "", "mood": "", "history": {"year": "", "line": ""}, "tasks_line": ""}
+            out = {"type": "result", "subtype": "success", "is_error": False, "total_cost_usd": 0.01, "structured_output": prose}
+            return subprocess.CompletedProcess(args, 0, json.dumps(out), "")
+        with tempfile.TemporaryDirectory() as folder:
+            result = daily_writer.write_and_record(Path(folder) / "smith.db", data, now=NOW, secrets=[],
+                                                   executable=Path("claude.exe"), runner=run)
+        self.assertNotIn("준호", sent[0])
+        self.assertEqual(result["prose"]["agenda_line"], "김준호 팀장과 점심이 있어요")
+        self.assertEqual(result["prose"]["anniversaries"][0]["idea"], "김준호가 커피를 안 마시니 차 선물이 좋겠어요")
+
+
 class ReplyTests(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
@@ -231,8 +283,8 @@ class ReplyTests(unittest.TestCase):
         return result, seen
 
     def test_named_contact_answers_and_memory_stays_clean(self):
-        output = {"answer": {"text": "민준이와 서연이입니다.", "refs": []}, "follow_up": [],
-                  "remember": [{"topic": "other", "fact": "김준호 팀장 아이는 민준·서연"},
+        output = {"answer": {"text": "P1가 적어 두신 아이는 민준이와 서연이입니다.", "refs": []}, "follow_up": [],
+                  "remember": [{"topic": "other", "fact": "P1 팀장 아이는 민준·서연"},
                                {"topic": "family", "fact": "준호 아이는 민준과 서연이다"},
                                {"topic": "other", "fact": "아이는 둘이다"},
                                {"topic": "family", "fact": "와이프는 꽃을 좋아한다"}],
@@ -240,14 +292,17 @@ class ReplyTests(unittest.TestCase):
         ctx = {"today": {"reminders": [{"label": "이모 생일", "person": "이모"}, {"label": "아버지 생신"}]}, "window": {}}
         result, seen = self.ask("김준호 아이 이름이 뭐였지?", output, ctx)
         sent = seen[0][2]
-        self.assertEqual([c["name"] for c in sent["client_contacts"]], ["김준호"])
+        self.assertNotIn("준호", json.dumps(sent, ensure_ascii=False))                # The name never leaves (alias P1).
+        self.assertEqual([c["name"] for c in sent["client_contacts"]], ["P1"])
+        self.assertIn("아이 둘", sent["client_contacts"][0]["note"])                  # The note itself may go.
+        self.assertEqual(result["text"], "김준호가 적어 두신 아이는 민준이와 서연이입니다.")   # Name and particle back.
         self.assertEqual([r["label"] for r in sent["today"]["reminders"]], ["아버지 생신"])   # Other contacts cut.
         self.assertEqual(result["remember"], [("family", "와이프는 꽃을 좋아한다")])
 
     def test_an_address_book_answer_never_goes_to_the_web(self):
         output = {"answer": {"text": "찾아보겠습니다.", "refs": []}, "follow_up": [], "remember": [],
-                  "research": {"needed": "yes", "subject": "김준호", "kind": "person",
-                               "queries": ["김준호 한빛상사 팀장"], "anchors": ["한빛상사", "팀장"]}}
+                  "research": {"needed": "yes", "subject": "P1", "kind": "person",
+                               "queries": ["P1 한빛상사 팀장"], "anchors": ["한빛상사", "팀장"]}}
         result, seen = self.ask("김준호 팀장 자세히 조사해줘", output)
         self.assertEqual([(u, w) for u, w, _ in seen], [("daily-answer", False), ("daily-answer-refused", False)])
         self.assertIn("주소록에 이 분의 메모가 있어", result["memos"][0])

@@ -213,7 +213,7 @@
                   하루 1회 동기화(`checked_at`), 기념일 합류(`[daily] contact_reminders` = noted·starred·all), 일정 행 아래 "이 분은",
                   답장 `client_contacts`(`daily-answer-v4`), 선물 제안 메모. 리뷰 반영(P1 5·P2 2): 낱말 단위·동명이인 모호 처리,
                   모델 호출당 연락처 3명, 주소록 답이면 코드가 웹 조사 차단, 연락처 답장의 기억 제한, 오류 정규화·상태(`partial`·
-                  `stale`·`sync-<코드>`)·잠금. 첫 동기화 817명(2026-10-25). 남은 점: 가명 전달·민감 메모 전달(사용자 결정),
+                  `stale`·`sync-<코드>`)·잠금. 첫 동기화 817명(2026-10-25). 가명 전달(P1·P2, 사용자 결정; `daily-writer-v3`·`daily-answer-v5`). 남은 점:
                   `people.json`과의 중복 생일 대조.
       - [ ] 후속(§9): 일정 살 붙이기, 주간 미리보기, 저녁 메일, `smith ask`와 주제 라우터(Keep 창고가 1차 자료), 메모 변경 이력.
 - [ ] 이후 Hermes 조회 API 연결 및 전용 앱.

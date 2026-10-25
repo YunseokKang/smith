@@ -11,8 +11,9 @@ The notes then serve three things: birthdays and anniversaries join the househol
 `[daily] contact_reminders` policy picks, so a full address book does not flood the mail; a lunar birthday is read from
 "음력 M/D" in the note), a person named in today's calendar gets a one-line "이 분은" under the event, and a reply asking
 about someone gets that contact's note. Third-party data stays local and reaches a model only for at most
-MODEL_PEOPLE people per call. A name counts only as a whole word and a name two contacts share picks nobody, so a
-note never rides on a chance match (review 2026-10-25). Smith never writes to the address book.
+MODEL_PEOPLE people per call, and never by name: `aliases` swaps every contact name for P1, P2, ... before a model call
+and back afterwards (user decision 2026-10-25). A name counts only as a whole word and a name two contacts share picks
+nobody, so a note never rides on a chance match (review 2026-10-25). Smith never writes to the address book.
 """
 import base64
 import hashlib
@@ -465,6 +466,94 @@ def _word_ends(rest: str) -> bool:
             return False
         rest = rest[len(suffix):]
     return False
+
+
+# --- pseudonyms for model calls (user decision 2026-10-25) ------------------------------------------------------------
+# A model never sees a contact's name: every name, nickname and given name of a contact that an input names becomes P1,
+# P2, ... just before the call, and code puts the names back into the output. The note itself may go (the client's
+# decision: without the name, health or family details in it are not tied to a person).
+
+# Particle pairs (after a final consonant, after a vowel), longest first; the model chose them for "P1" (피원), so they are
+# set again for the real name.
+_PARTICLES = (("이랑", "랑"), ("으로", "로"), ("이", "가"), ("은", "는"), ("을", "를"), ("과", "와"))
+
+
+@dataclass(frozen=True)
+class Aliases:
+    """The pseudonyms of one model call: `words` are replaced (longest first) before the call, `names` restored after."""
+    words: tuple[tuple[str, str], ...]   # (word as written in the input, alias)
+    names: dict[str, str]                # alias -> the name written back
+
+    def hide(self, text: str) -> str:
+        for word, alias in self.words:
+            text = _replace_words(text, word, alias)
+        return text
+
+    def show(self, value: Any) -> Any:
+        """`value` (a model output: text, or lists and dicts of it) with every alias turned back into its name."""
+        if isinstance(value, str):
+            for alias in sorted(self.names, key=len, reverse=True):   # P10 before P1.
+                value = _restore(value, alias, self.names[alias])
+            return value
+        if isinstance(value, list):
+            return [self.show(v) for v in value]
+        if isinstance(value, dict):
+            return {k: self.show(v) for k, v in value.items()}
+        return value
+
+
+def aliases(found: list[Contact], text: str) -> Aliases:
+    """Pseudonyms for every contact `text` names as a word. All keys of one display name share its alias, and so does
+    the given name of a three- or four-syllable Korean name (a note or a question may use it); a key that several
+    different names share gets an alias of its own, restored to that key. The prefix avoids tokens already in `text`."""
+    owners: dict[str, set[str]] = {}
+    for contact in found:
+        for key in keys(contact):
+            owners.setdefault(key, set()).add(contact.name)
+    targets: dict[str, str] = {}   # word -> what its alias restores to
+    for key in owners:
+        if _names(text, key):
+            names = owners[key]
+            targets[key] = next(iter(names)) if len(names) == 1 else key
+    for name in sorted({t for t in targets.values() if t in owners and owners[t] == {t}}):
+        given = name[1:] if len(name) in (3, 4) and re.fullmatch(r"[가-힣]+", name) else ""
+        if given and given not in owners and given not in targets:
+            targets[given] = name
+    prefix = next(p for p in ("P", "Q", "X", "PP") if not re.search(rf"(?<![0-9A-Za-z]){p}\d", text))
+    alias_of = {name: f"{prefix}{n}" for n, name in enumerate(sorted(set(targets.values())), 1)}
+    words = tuple(sorted(((w, alias_of[t]) for w, t in targets.items()), key=lambda pair: -len(pair[0])))
+    return Aliases(words, {a: name for name, a in alias_of.items()})
+
+
+def _replace_words(text: str, word: str, alias: str) -> str:
+    out, i = [], 0
+    start = text.find(word)
+    while start != -1:
+        before = text[start - 1] if start else ""
+        if not before.isalnum() and _word_ends(text[start + len(word):]):
+            out += [text[i:start], alias]
+            i = start + len(word)
+        start = text.find(word, start + len(word))
+    return "".join(out) + text[i:]
+
+
+def _restore(text: str, alias: str, name: str) -> str:
+    last = name[-1] if name else ""
+    hangul = "가" <= last <= "힣"
+    final = (ord(last) - 0xAC00) % 28 if hangul else 0   # 0: no final consonant; 8: ㄹ.
+    out, i = [], 0
+    for match in re.finditer(rf"(?<![0-9A-Za-z]){re.escape(alias)}(?!\d)", text):
+        out += [text[i:match.start()], name]
+        i = match.end()
+        for with_final, without in _PARTICLES:
+            particle = next((p for p in (with_final, without) if text.startswith(p, i)
+                             and not ("가" <= text[i + len(p):i + len(p) + 1] <= "힣")), None)
+            if particle is not None and hangul:
+                consonant = final != 0 and not (with_final == "으로" and final == 8)
+                out.append(with_final if consonant else without)
+                i += len(particle)
+                break
+    return "".join(out) + text[i:]
 
 
 def _get(url: str, token: str, getter: gmail.Getter) -> dict[str, Any]:
