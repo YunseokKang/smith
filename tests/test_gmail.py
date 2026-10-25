@@ -51,6 +51,12 @@ class GmailTests(unittest.TestCase):
             with self.subTest(label), self.assertRaises(gmail.MailError) as caught:
                 gmail.login("cid", "secret", open_browser=fake_browser(**browser_args)[0], poster=poster)
             self.assertEqual(caught.exception.code, code)
+        # The daily mail asks for the two read-only scopes as well, and a grant without them is refused.
+        browser, seen = fake_browser()
+        with self.assertRaises(gmail.MailError) as caught:
+            gmail.login("cid", "secret", open_browser=browser, poster=poster, daily=True)
+        self.assertEqual(caught.exception.code, "daily-scope-not-granted")
+        self.assertEqual(seen["scope"].split(), [gmail.SCOPE, *gmail.DAILY_SCOPES])
 
     def test_send_builds_the_message_and_flags_uncertain_outcomes(self):
         sent = {}

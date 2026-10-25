@@ -31,7 +31,7 @@ from typing import Any
 from smith.payload import mask_identifiers
 
 TOPICS = {"profile": "가구·인적 사항", "property": "부동산·주거", "plan": "계획·일정", "preference": "선호·원칙",
-          "other": "기타"}
+          "family": "가족·지인", "other": "기타"}   # family: tastes and facts behind gift ideas (FR-31 ②).
 PINNED = ("profile", "preference")   # Always sent: they shape every answer.
 MAX_FACT_CHARS = 300
 BUDGET_CHARS = 4000                  # About 25 facts; beyond this only the most relevant are sent.

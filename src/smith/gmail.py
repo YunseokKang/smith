@@ -30,6 +30,10 @@ from smith.net import open_url
 
 SCOPE = "https://www.googleapis.com/auth/gmail.send"
 READ_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+# The daily mail (FR-31) reads the primary calendar and open tasks; both scopes are read-only (see agenda.py).
+DAILY_SCOPES = ("https://www.googleapis.com/auth/calendar.events.readonly", "https://www.googleapis.com/auth/tasks.readonly")
+# Keep notes arrive as scheduled Takeout archives in Drive (daily design §13); Drive is read-only and touched by name only.
+DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 # Every message Smith sends carries this header, so a reply reader never mistakes Smith's own mail
 # (for example an answer whose send outcome, and so its id, is unknown) for a question.
 SMITH_HEADER = "X-Smith-Message"
@@ -94,8 +98,11 @@ Getter = Callable[[str, dict[str, str]], tuple[int, dict[str, Any]]]
 
 
 def login(client_id: str, client_secret: str, *, open_browser: Callable[[str], Any] = webbrowser.open,
-          poster: Poster = post, read: bool = False) -> str:
+          poster: Poster = post, read: bool = False, daily: bool = False, drive: bool = False) -> str:
     """Run the browser consent flow on a loopback port and return a refresh token.
+
+    `read` adds gmail.readonly (reply answering); `daily` adds the calendar and tasks read-only scopes; `drive` adds
+    drive.readonly (Takeout archives of Keep).
 
     Raises:
         MailError: consent was denied or timed out, the state did not match, or no refresh token came back.
@@ -120,12 +127,13 @@ def login(client_id: str, client_secret: str, *, open_browser: Callable[[str], A
         def log_message(self, *args: Any) -> None:  # The query holds the one-time code; never log it.
             pass
 
+    wanted = (SCOPE,) + ((READ_SCOPE,) if read else ()) + (DAILY_SCOPES if daily else ()) + ((DRIVE_SCOPE,) if drive else ())
     with http.server.HTTPServer(("127.0.0.1", 0), Handler) as server:
         server.timeout = 1
         redirect_uri = f"http://127.0.0.1:{server.server_address[1]}"
         open_browser(AUTH_URL + "?" + urllib.parse.urlencode({
             "client_id": client_id, "redirect_uri": redirect_uri, "response_type": "code",
-            "scope": f"{SCOPE} {READ_SCOPE}" if read else SCOPE,
+            "scope": " ".join(wanted),
             "code_challenge": challenge, "code_challenge_method": "S256", "state": state,
             "access_type": "offline", "prompt": "consent"}))
         deadline = time.monotonic() + _LOGIN_TIMEOUT_SECONDS
@@ -148,6 +156,10 @@ def login(client_id: str, client_secret: str, *, open_browser: Callable[[str], A
         raise MailError("send-scope-not-granted")
     if read and READ_SCOPE not in granted:
         raise MailError("read-scope-not-granted")
+    if daily and any(scope not in granted for scope in DAILY_SCOPES):
+        raise MailError("daily-scope-not-granted")
+    if drive and DRIVE_SCOPE not in granted:
+        raise MailError("drive-scope-not-granted")
     return str(payload["refresh_token"])
 
 

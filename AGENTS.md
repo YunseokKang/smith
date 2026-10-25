@@ -184,6 +184,7 @@ If `docs/INDEX.md` exists, use it to locate relevant topics. Otherwise use the c
 - `docs/toss-openapi.md`: verified Toss Securities Open API facts and the read-only allowlist.
 - `docs/report-design.md`: report reader principles, structure, sector pipeline and verification.
 - `docs/design-reference.md`: user-supplied visual design reference for reports (style only, no brand marks).
+- `docs/daily-design.md`: the daily-routine mail (personal-secretary scope, data sources, date DB, subject scheme).
 - `docs/roadmap.md`: implementation status and next work.
 - `docs/dev-notes.md`: Windows development environment and troubleshooting log.
 

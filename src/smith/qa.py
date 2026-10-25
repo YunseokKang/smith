@@ -149,6 +149,7 @@ class Question:
     text: str
     header_id: str          # RFC 822 Message-ID of the client's reply, for In-Reply-To.
     references: str
+    product: str = "report"   # "report": a finance report thread; "daily": a daily-routine mail thread (daily_qa).
 
 
 # --- finding questions -------------------------------------------------------------------------------------
@@ -167,6 +168,8 @@ def find(db: Path, credentials: tuple[str, str, str], recipient: str, *, now: da
     with closing(ledger.connect_read_only(db)) as conn:
         runs = [r for r in ledger.report_runs(conn, limit=200) if r["status"] == "sent" and r["message_id"]
                 and datetime.fromisoformat(r["created_at"]) >= now - LOOKBACK]
+        # Daily-routine mails are threads of their own (daily design §6): their replies get the daily context.
+        runs += [{**r, "report_id": r["run_key"], "product": "daily"} for r in ledger.sent_daily_runs(conn, since=now - LOOKBACK)]
         known = ledger.seen_questions(conn) | ledger.answer_message_ids(conn) | {r["message_id"] for r in runs}
     threads: dict[str, dict[str, Any]] = {}
     for run in runs:
@@ -195,7 +198,8 @@ def find(db: Path, credentials: tuple[str, str, str], recipient: str, *, now: da
                 continue
             received = datetime.fromtimestamp(int(message.get("internalDate", "0")) / 1000, tz=timezone.utc)
             questions.append(Question(message_id, thread_id, run["report_id"], received, run["subject"] or "Smith 보고",
-                                      text, headers.get("message-id", ""), headers.get("references", "")))
+                                      text, headers.get("message-id", ""), headers.get("references", ""),
+                                      run.get("product", "report")))
     return questions, skipped
 
 
@@ -490,9 +494,11 @@ def render(question: Question, result: dict[str, Any], data: dict[str, Any]) -> 
 def poll(db: Path, *, recipient: str, credentials: tuple[str, str, str], now: datetime, build: Any,
          secrets: list[str], executable: Path | None = None, runner: headless.Runner = subprocess.run,
          sender: Any = gmail.send, reader: gmail.Getter = gmail.get, poster: gmail.Poster = gmail.post,
-         tz: str = DEFAULT_TIMEZONE) -> list[dict[str, Any]]:
+         tz: str = DEFAULT_TIMEZONE, daily: Any = None) -> list[dict[str, Any]]:
     """Answer new questions. `build(report)` rebuilds the data of the report a question replies to (from
-    its run record and lineage; None only if the run is unknown, then current data).
+    its run record and lineage; None only if the run is unknown, then current data). `daily(question, history)`
+    answers a daily-thread question with the daily context and returns (html, text, result); without it such a
+    question is left for the next run.
 
     A question is claimed (answering), marked sending just before the reply, then answered, failed or
     unknown. Interrupted runs are recovered first: answering becomes a retryable failure, sending becomes
@@ -511,11 +517,17 @@ def poll(db: Path, *, recipient: str, credentials: tuple[str, str, str], now: da
     questions.sort(key=lambda q: q.received_at)  # A later question in a thread sees the answer to an earlier one.
     built: dict[str | None, tuple[dict[str, Any] | None, dict[str, Any]]] = {}
     for question in questions:
-        if question.report_id not in built:
-            with closing(ledger.connect_read_only(db)) as conn:
-                report = None if question.report_id is None else ledger.get_report(conn, question.report_id)
-            built[question.report_id] = (report, build(report))
-        report, data = built[question.report_id]
+        if question.product == "daily":
+            if daily is None:
+                results.append({"message_id": question.message_id, "status": "deferred", "error_code": "no-daily-answerer"})
+                continue
+            report, data = None, {}
+        else:
+            if question.report_id not in built:
+                with closing(ledger.connect_read_only(db)) as conn:
+                    report = None if question.report_id is None else ledger.get_report(conn, question.report_id)
+                built[question.report_id] = (report, build(report))
+            report, data = built[question.report_id]
         with closing(ledger.connect(db)) as conn:
             claimed = ledger.claim_question(conn, message_id=question.message_id, thread_id=question.thread_id,
                                             report_id=question.report_id, received_at=question.received_at, now=now,
@@ -527,9 +539,12 @@ def poll(db: Path, *, recipient: str, credentials: tuple[str, str, str], now: da
             with closing(ledger.connect_read_only(db)) as conn:
                 history = ledger.thread_turns(conn, thread_id=question.thread_id, before=question.received_at,
                                               limit=MAX_HISTORY_TURNS)
-            result = answer(db, data, question, now=now, secrets=secrets, executable=executable or headless.find_claude(),
-                            runner=runner, report=report, history=history, tz=tz)
-            html, text = render(question, result, data)
+            if question.product == "daily":
+                html, text, result = daily(question, history)
+            else:
+                result = answer(db, data, question, now=now, secrets=secrets, executable=executable or headless.find_claude(),
+                                runner=runner, report=report, history=history, tz=tz)
+                html, text = render(question, result, data)
         except Exception as error:  # noqa: BLE001 - nothing was sent; a clean, retryable failure.
             code = str(getattr(error, "code", None) or type(error).__name__)[:80]
             _finish(db, question, "failed", now, error_code=code)

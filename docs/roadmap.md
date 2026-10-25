@@ -160,6 +160,49 @@
       - [ ] **다음**: 통합 자금 계획(보증금 반환 + 주택 이전 + 예정 소득의 목표별 배분), R-ONE 지수, 은퇴 시점 확정 후 노후 계획.
       - [ ] 다음 후보: 근거 URL 도달 확인(SSRF 방어·근거 문구 대조), 공식 API 직접 수집(국토부 실거래가, R-ONE, ECOS 주담대·COFIX), 통합 자금 계획(보증금 반환 + 주택 이전),
             노후 목표 입력, 제안 이력 기반 성과 점검.
+- [ ] 7단계: 하루 일과 메일(개인 비서 1단계, FR-30~32, `docs/daily-design.md`). 사용자 결정 2026-10-25.
+      - [x] 7a(2026-10-25) Google OAuth 권한 추가(`smith mail login --read --daily`: `calendar.events.readonly`·`tasks.readonly`,
+            저장된 클라이언트 재사용), Calendar·Tasks 조회 어댑터 `agenda.py`(`fields` 마스크, 설명·메모 정리, 장소는 숫자 없는
+            장소명, 겹침·간격), `smith agenda check|events|tasks`. 사용자 재동의·실데이터 확인 완료. 남은 점: 제목 체계 `[Smith][재무]`
+            (다른 세션의 보고서 코드 커밋 뒤), `smith doctor`의 권한 점검.
+      - [x] 7b(2026-10-25) 날짜 DB `people.py`(`data/people.json`, `smith people check|list|today|add|date`, 음력 변환
+            `korean_lunar_calendar`, 한국 나이 큰 기념일, D-7·D-0·D-30 규칙, `for_model`은 호칭·D-N·선물 창의 나이만). 남은 점:
+            알림 기록 `daily_reminders`(7d), 한국천문연구원 특일 정보 수집(7d), 구글 연락처 생일(`eventType=birthday`)과의 중복 처리.
+      - [x] 7c(2026-10-25) 날씨 `weather.py`(기상청 단기예보·초단기실황·특보 현황, 에어코리아 측정소·권역 예보, 꽃가루 3수종,
+            격자 변환식, 출처별 실패), 준비물 규칙 `advise`(기관지 예민 한 단계 선행), `[daily]`·`[daily.weather]` 설정,
+            `smith weather`. 키는 기존 `datagokr`. 실호출 확인(분당구).
+      - [ ] 7d 메일 조립·발송·답장.
+            - [x] 7d-1(2026-10-25) 입력 조립 `daily.py`(`collect`: 날씨·캘린더·할 일·공휴일·날짜 DB, 출처별 실패; `assemble`·`payload`),
+                  공휴일 `holidays.py`(천문연 특일 정보, `data/holidays.json` 캐시, 연휴 계산), 공공데이터 공통 호출 `datagokr.py`,
+                  재무 날짜 줄(금통위·세금 통상 일정), HTML `daily_html.py`(보고서 헬퍼 재사용, 모델 없이도 완결), `smith daily preview|inputs`.
+                  실데이터 미리보기 확인(10/25).
+            - [x] 7d-2(2026-10-25) 뉴스 조사 `daily_news.py`(웹 호출 1회, 개인 데이터 없음; 매체 허용 목록 `HOSTS`·https·2일 이내 날짜·중복
+                  제거 → `sources.verify` 도달 확인; `research_briefs`에 저장, 6시간 안 재사용), 쓰기 모델 `daily_writer.py`(`daily-writer-v1`:
+                  머리말·날씨 문장·일정 한 줄·선물 제안·뉴스 요약·오늘의 문장·할 일 한 줄; 검증: 입력에 없는 숫자·링크·귀속 인용 제거, 알림 키·뉴스
+                  ref 밖 항목 제거, 취향 기억 없는 사람의 제안엔 취향 요청 문장; `advice_runs` 감사 `daily-writer`), `smith daily preview --model`,
+                  디자인 따뜻한 톤·신호등(사용자 검수), 기념일 표(남은 날 순). 남은 점: 실제 모델 출력 품질 확인, 매체 목록 설정화.
+            - [x] 7d-3(2026-10-25) 발송 `daily_send.py`: `daily_runs`·`daily_reminders`(원장 v19), 하루 한 회차(수동 발송은 별도 키), 원자적
+                  claim·토큰 fencing·`sending` 선기록·결과 미상 비재발송·실패 3회 상한·임대 30분, 06:00 이후 당일만 발송(놓친 날은 보내지 않고
+                  알림만 "지난 알림"으로 한 번 이월), 지연 발송 제목 `[Smith][하루 일과 · 지연 발송]`, `smith daily send|status`,
+                  `smith report run-due`에 연결(`[daily] enabled`일 때, 보고서 설정과 무관), 회차 1시간 전 뉴스 선조사(`PREPARE_AHEAD`),
+                  수동 발송도 그날 회차를 채움. 첫 샘플 발송 완료(2026-10-25 15:2x, 수동, 뉴스 3건·쓰기 모델 정상), 로컬 설정 `enabled = true`
+                  (2026-10-26 06:00부터 정기). 남은 점: `smith doctor` 점검, 답장 1회 실확인.
+            - [x] 7d-4(2026-10-25) 답장 질의응답 `daily_qa.py`: `qa.find`가 `daily_runs`의 발송 스레드도 읽고(`Question.product`), `qa.poll`이
+                  하루 일과 질문을 `daily` 답변기로 보낸다(재무 자료 없음; 오늘 payload·14일 일정·할 일·아침 뉴스·45일 날짜·기억). 조사 요청:
+                  1차 답변이 `research.needed`를 내면 FR-33 규칙의 웹 호출 1회(`daily-research-v1`, 15분·공개 자료·직업 정보·단서 2개 일치)
+                  → `sources.verify` → 2차 답변(ref 인용, 확인됨/한 출처/미확인, 동일인 미확인 메모). 제3자 사실은 기억에 쓰지 않음
+                  (`_third_party`). 감사 `advice_runs`(`daily-answer`, `daily-research`). 남은 점: 실제 답장 1회 확인, 일일 한도 공유 확인.
+      - [ ] 7e **보류(다음 단계, 사용자 2026-10-25)** 여행 모드 자동 전환(FR-34, §12): 위치 메일 라벨 읽기(엄격 파싱, 본인 발신), `fromGmail` 예약 일정 추정, 집 반경
+            판정, 현지 06:00 회차, Open-Meteo 날씨·시간대, 외교부 여행경보·환율 한 줄, 좌표 7일 보관, `smith daily trip`.
+            - [x] 7d-5(2026-10-25, 사용자 검수) 오늘의 문장을 Keep 메모에서(`keep.py`: Takeout 가져오기·선택·60일 회전, `smith keep
+                  import|status|pick`), 역사의 오늘(`history.py`: 한국어 위키백과 사건 절, 90일 캐시, 본문 첫 카드), 뉴스 요약 절반(120자),
+                  `daily-writer-v2`(thought_id·history 검증). 남은 점: 고객의 Takeout 가져오기, Drive 자동 갱신(§9).
+            - [x] 7d-6(2026-10-25, FR-35) Keep 자동 동기화 `drive.py`(Takeout zip만 이름으로 목록·다운로드, `drive.readonly`,
+                  `smith mail login --drive`), `keep.sync`(하루 1회 `run-due`, 새 stamp만, part 합치기, zip 삭제), `keep.search`(글자 묶음),
+                  용도별 전달(문장 6·선물 2·답장 5), `smith keep sync|search`. 사용자 설정(매달 예약)·`--drive` 재동의·첫 동기화 완료
+                  (2026-10-25, 61개 노트). Takeout 데이터 파일명 `takeout-<stamp>-1-001.zip` 반영, 월 단위 일기 노트를 항목으로 분할
+                  (`keep.entries`), 회고 항목 우선 점수. 남은 점: 첫 정기 메일의 문장 품질 확인, 학습 메모 라벨 설정화.
+      - [ ] 후속(§9): 일정 살 붙이기, 주간 미리보기, 저녁 메일, `smith ask`와 주제 라우터(Keep 창고가 1차 자료), 메모 변경 이력.
 - [ ] 이후 Hermes 조회 API 연결 및 전용 앱.
 
 테스트는 단계별 실제 위험에 맞춘다. 첫 외부 테스트는 조회만 수행한다.

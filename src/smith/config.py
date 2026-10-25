@@ -25,7 +25,12 @@ KNOWN_KEYS = {
     "backup": {"dir", "keep"},
     # Same-day event notes (report design §29): the daily check time and the holdings' move that counts.
     "events": {"enabled", "check_time", "portfolio_move_pct"},
+    # The daily-routine mail (daily design §2, §3.1, §7): schedule, news topics, the district for weather and the
+    # household's airway sensitivity that moves air-quality and pollen cautions one grade earlier.
+    "daily": {"enabled", "time", "weekdays", "news_count", "news_topics", "airways_sensitive", "weather"},
 }
+DAILY_WEATHER_KEYS = {"lat", "lon", "air_station", "air_region", "pollen_area_no", "warning_keywords", "label"}
+DAILY_WEATHER_OPTIONAL = {"label"}   # The district name the mail shows as the weather's basis ("성남시 분당구").
 # `lease_exit`: how the client plans to return a lease deposit on this home ("relet": a new tenant, the default;
 # "sell": the home is sold when the lease ends, client e-mail 2026-10-19). `residence_years`: whole years the
 # owner's household has lived in the home (client e-mail 2026-10-21): with two or more, and two years held, the
@@ -100,6 +105,7 @@ def load_config(path: Path) -> dict:
     _check_household(config.get("household", {}))
     _check_backup(config.get("backup", {}))
     _check_events(config.get("events", {}))
+    _check_daily(config.get("daily", {}))
     if "properties" in config or "targets" in config:
         from smith.realestate import RealEstateError, validate_properties, validate_targets
         try:
@@ -176,6 +182,51 @@ def _check_events(events: object) -> None:
     pct = events.get("portfolio_move_pct", 2.0)
     if isinstance(pct, bool) or not isinstance(pct, (int, float)) or not 0.5 <= pct <= 20:
         raise ValueError("events.portfolio_move_pct must be a number from 0.5 to 20")
+
+
+def _check_daily(daily: object) -> None:
+    """Optional `[daily]` (daily design §7): the morning mail's schedule and news topics, plus `[daily.weather]`, the
+    district-level location every weather source is asked about (a point for the KMA grid, an AirKorea station, a
+    dust-forecast region, a pollen area code, the words that make a warning relevant)."""
+    if not isinstance(daily, dict):
+        raise ValueError("daily must be a table")
+    for key in ("enabled", "airways_sensitive"):
+        if not isinstance(daily.get(key, False), bool):
+            raise ValueError(f"daily.{key} must be a boolean")
+    clock = daily.get("time", "06:00")
+    try:
+        if not isinstance(clock, str) or len(clock) != 5 or time.fromisoformat(clock).tzinfo is not None:
+            raise ValueError()
+    except ValueError:
+        raise ValueError("daily.time must be HH:MM") from None
+    days = daily.get("weekdays", sorted(WEEKDAYS))
+    if not isinstance(days, list) or not days or any(d not in WEEKDAYS for d in days):
+        raise ValueError("daily.weekdays must list weekday names")
+    count = daily.get("news_count", 5)
+    if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 10:
+        raise ValueError("daily.news_count must be a whole number from 1 to 10")
+    topics = daily.get("news_topics", [])
+    if not isinstance(topics, list) or len(topics) > 10 or any(not isinstance(t, str) or not t.strip() for t in topics):
+        raise ValueError("daily.news_topics must be up to 10 short texts")
+    if "weather" not in daily:
+        return
+    spot = daily["weather"]
+    if not isinstance(spot, dict):
+        raise ValueError("daily.weather must be a table")
+    unknown = sorted(set(spot) - DAILY_WEATHER_KEYS)
+    missing = sorted(DAILY_WEATHER_KEYS - DAILY_WEATHER_OPTIONAL - set(spot))
+    if unknown or missing:
+        raise ValueError("daily.weather: " + "; ".join(p for p in (f"unknown {', '.join(unknown)}" if unknown else "",
+                                                                 f"missing {', '.join(missing)}" if missing else "") if p))
+    lat, lon = spot["lat"], spot["lon"]
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in (lat, lon)) or not (33 <= lat <= 39 and 124 <= lon <= 132):
+        raise ValueError("daily.weather.lat/lon must be a point in Korea (a district office, not a home address)")
+    for key in ("air_station", "air_region", "pollen_area_no", "label"):
+        if key in spot and (not isinstance(spot[key], str) or not spot[key].strip()):
+            raise ValueError(f"daily.weather.{key} must be text")
+    words = spot["warning_keywords"]
+    if not isinstance(words, list) or not words or any(not isinstance(w, str) or not w.strip() for w in words):
+        raise ValueError("daily.weather.warning_keywords must list the district's names, such as [\"경기\", \"성남\"]")
 
 
 def _is_email(value: object) -> bool:

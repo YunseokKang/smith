@@ -25,7 +25,7 @@ from smith.records import (
 logger = logging.getLogger(__name__)
 _END_OF_TIME = datetime.max.replace(tzinfo=timezone.utc)
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 _V1 = (
     """CREATE TABLE imports (
         import_id TEXT PRIMARY KEY,
@@ -375,8 +375,34 @@ _V18 = (
         events TEXT NOT NULL
     )""",
 )
+# v19: the daily-routine mail (daily design §7): one run per local day (a manual send gets its own key), the same
+# building/sending fence as reports and event notes, and the reminders each sent mail carried so a reminder from a
+# morning whose mail never went out rides along once and never twice.
+_V19 = (
+    """CREATE TABLE daily_runs (
+        run_key TEXT PRIMARY KEY,
+        day TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        trigger TEXT NOT NULL CHECK (trigger IN ('scheduled', 'manual')),
+        status TEXT NOT NULL CHECK (status IN ('building', 'sending', 'sent', 'failed', 'unknown', 'skipped')),
+        attempts INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        finished_at TEXT,
+        subject TEXT,
+        html_sha256 TEXT,
+        message_id TEXT,
+        error_code TEXT
+    )""",
+    "CREATE INDEX daily_runs_day ON daily_runs (day)",
+    """CREATE TABLE daily_reminders (
+        reminder_key TEXT PRIMARY KEY,
+        shown_on TEXT NOT NULL,
+        run_id TEXT NOT NULL
+    )""",
+)
 _MIGRATIONS = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8, 9: _V9, 10: _V10, 11: _V11, 12: _V12,
-               13: _V13, 14: _V14, 15: _V15, 16: _V16, 17: _V17, 18: _V18}
+               13: _V13, 14: _V14, 15: _V15, 16: _V16, 17: _V17, 18: _V18, 19: _V19}
 _COLUMNS = ("record_id, revision, kind, owner_id, source, status, change_type, corrects_revision, "
             "reason, effective_at, recorded_at, import_id, fields")
 
@@ -1391,3 +1417,112 @@ def _event_row(row: tuple) -> dict[str, Any]:
 def _db_time(value: datetime) -> str:
     # One fixed UTC format keeps text comparison in SQL chronological.
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
+# --- Daily-routine mail runs (daily design §7) ---------------------------------------------------------------------
+
+DAILY_FINAL = ("sent", "unknown", "skipped")   # Never attempted again: delivered, possibly delivered, given up.
+_DAILY_COLUMNS = ("run_key, day, run_id, trigger, status, attempts, created_at, updated_at, finished_at, subject, "
+                  "html_sha256, message_id, error_code")
+
+
+def claim_daily_run(conn: sqlite3.Connection, *, run_key: str, day: date, run_id: str, trigger: str, now: datetime,
+                    lease: timedelta, max_attempts: int) -> tuple[str | None, str]:
+    """Atomically claim one daily-mail run for building. Returns (token, outcome): the token is the claim time every
+    later transition must match (`advance_daily_run`). No token when the run is final ("already-<status>"), held by
+    another run within `lease` ("in-progress"), or out of attempts ("skipped"). A `sending` run whose lease ran out
+    may have reached Gmail: it becomes unknown and is never sent again."""
+    token = _db_time(now)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute("SELECT status, attempts, created_at FROM daily_runs WHERE run_key = ?", (run_key,)).fetchone()
+        if row is None:
+            conn.execute(f"INSERT INTO daily_runs ({_DAILY_COLUMNS}) VALUES (?, ?, ?, ?, 'building', 1, ?, ?, NULL, NULL, "
+                         "NULL, NULL, NULL)", (run_key, day.isoformat(), run_id, trigger, token, token))
+            conn.execute("COMMIT")
+            return token, "claimed"
+        status, attempts, created_at = row
+        if status in DAILY_FINAL:
+            conn.execute("ROLLBACK")
+            return None, f"already-{status}"
+        if status in ("building", "sending") and datetime.fromisoformat(created_at) > now - lease:
+            conn.execute("ROLLBACK")
+            return None, "in-progress"
+        if status == "sending":
+            conn.execute("UPDATE daily_runs SET status = 'unknown', error_code = 'interrupted-during-send', updated_at = ?, "
+                         "finished_at = ? WHERE run_key = ?", (token, token, run_key))
+            conn.execute("COMMIT")
+            return None, "already-unknown"
+        if attempts >= max_attempts:
+            conn.execute("UPDATE daily_runs SET status = 'skipped', error_code = 'attempts-exhausted', updated_at = ?, "
+                         "finished_at = ? WHERE run_key = ?", (token, token, run_key))
+            conn.execute("COMMIT")
+            return None, "skipped"
+        conn.execute("UPDATE daily_runs SET status = 'building', run_id = ?, attempts = attempts + 1, created_at = ?, "
+                     "updated_at = ?, finished_at = NULL, error_code = NULL, message_id = NULL WHERE run_key = ?",
+                     (run_id, token, token, run_key))
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+    return token, "claimed"
+
+
+def advance_daily_run(conn: sqlite3.Connection, *, run_key: str, token: str, from_status: str, status: str,
+                      error_code: str | None = None, subject: str | None = None, html_sha256: str | None = None,
+                      message_id: str | None = None, finished_at: datetime | None = None) -> bool:
+    """Move a claimed run from `from_status` to `status` while this attempt still holds it (claim time `token`).
+    The step to `sending` is committed before the mail request. Returns False when the claim was lost."""
+    cursor = conn.execute(
+        "UPDATE daily_runs SET status = ?, error_code = ?, subject = COALESCE(?, subject), "
+        "html_sha256 = COALESCE(?, html_sha256), message_id = COALESCE(?, message_id), updated_at = ?, "
+        "finished_at = COALESCE(?, finished_at) WHERE run_key = ? AND created_at = ? AND status = ?",
+        (status, error_code, subject, html_sha256, message_id, _db_time(datetime.now(timezone.utc)),
+         _optional_time(finished_at), run_key, token, from_status))
+    return cursor.rowcount == 1
+
+
+def daily_run(conn: sqlite3.Connection, run_key: str) -> dict[str, Any] | None:
+    row = conn.execute(f"SELECT {_DAILY_COLUMNS} FROM daily_runs WHERE run_key = ?", (run_key,)).fetchone()
+    return None if row is None else _daily_row(row)
+
+
+def daily_runs(conn: sqlite3.Connection, *, limit: int = 20) -> list[dict[str, Any]]:
+    """Most recent daily-mail runs first."""
+    rows = conn.execute(f"SELECT {_DAILY_COLUMNS} FROM daily_runs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+    return [_daily_row(row) for row in rows]
+
+
+def daily_runs_for_day(conn: sqlite3.Connection, day: date) -> list[dict[str, Any]]:
+    """Every run (scheduled or manual) of one local day."""
+    rows = conn.execute(f"SELECT {_DAILY_COLUMNS} FROM daily_runs WHERE day = ? ORDER BY created_at", (day.isoformat(),)).fetchall()
+    return [_daily_row(row) for row in rows]
+
+
+def sent_daily_runs(conn: sqlite3.Connection, *, since: datetime) -> list[dict[str, Any]]:
+    """Delivered daily mails with a Gmail id since `since`: the threads whose replies are daily questions."""
+    rows = conn.execute(f"SELECT {_DAILY_COLUMNS} FROM daily_runs WHERE status = 'sent' AND message_id IS NOT NULL "
+                        "AND created_at >= ? ORDER BY created_at DESC", (_db_time(since),)).fetchall()
+    return [_daily_row(row) for row in rows]
+
+
+def shown_reminder_keys(conn: sqlite3.Connection, keys: list[str]) -> set[str]:
+    if not keys:
+        return set()
+    marks = ",".join("?" for _ in keys)
+    return {row[0] for row in conn.execute(f"SELECT reminder_key FROM daily_reminders WHERE reminder_key IN ({marks})", keys)}
+
+
+def record_reminders_shown(conn: sqlite3.Connection, keys: list[str], *, shown_on: date, run_id: str) -> None:
+    conn.executemany("INSERT OR IGNORE INTO daily_reminders VALUES (?, ?, ?)",
+                     [(key, shown_on.isoformat(), run_id) for key in keys])
+
+
+def _daily_row(row: tuple) -> dict[str, Any]:
+    (run_key, day, run_id, trigger, status, attempts, created_at, updated_at, finished_at, subject, html_sha256,
+     message_id, error_code) = row
+    return {"run_key": run_key, "day": date.fromisoformat(day), "run_id": run_id, "trigger": trigger, "status": status,
+            "attempts": attempts, "created_at": datetime.fromisoformat(created_at),
+            "updated_at": datetime.fromisoformat(updated_at),
+            "finished_at": None if finished_at is None else datetime.fromisoformat(finished_at), "subject": subject,
+            "html_sha256": html_sha256, "message_id": message_id, "error_code": error_code}

@@ -17,6 +17,10 @@ def add_parser(sub: Any) -> None:
     mail.add_argument("--client-file", type=Path, help="login: Google 'Desktop app' client JSON (keep it outside the repo)")
     mail.add_argument("--read", action="store_true",
                       help="login: also grant read access, used only to read replies in Smith's own report threads")
+    mail.add_argument("--daily", action="store_true",
+                      help="login: also grant read-only access to the primary calendar and tasks (daily mail)")
+    mail.add_argument("--drive", action="store_true",
+                      help="login: also grant read-only Drive access, used only for the scheduled Takeout archives of Keep")
     mail.add_argument("--db", type=Path, default=Path("data/smith.db"))
     mail.add_argument("--config", type=Path, default=DEFAULT_LOCAL_CONFIG,
                       help="test: local config holding [mail] recipient (default: config/smith.local.toml)")
@@ -38,16 +42,22 @@ def run(args: argparse.Namespace) -> int:
 
 
 def _login(args: argparse.Namespace) -> int:
-    if args.client_file is None:
+    stored = credentials.load_gmail()
+    if args.client_file is None and stored is None:
         print("Pass --client-file with the downloaded 'Desktop app' client JSON.")
         return 2
     try:
-        client_id, client_secret = gmail.load_client_file(args.client_file)
-        scope = "send and read permission" if args.read else "send-only permission"
-        print(f"Opening the browser for Google consent ({scope}). Waiting up to 5 minutes...")
-        if args.read:
-            print("Google shows an 'unverified app' screen for read access: choose Advanced, then continue to the app.")
-        refresh_token = gmail.login(client_id, client_secret, read=args.read)
+        if args.client_file is not None:
+            client_id, client_secret = gmail.load_client_file(args.client_file)
+        else:  # Re-consenting with more scopes: the stored client is reused, so the JSON file is not needed again.
+            client_id, client_secret = stored[0], stored[1]   # type: ignore[index]
+            print("Reusing the stored Google client; the grant is replaced by the one you consent to now.")
+        granted = (["send"] + (["Gmail read"] if args.read else []) + (["calendar read", "tasks read"] if args.daily else [])
+                   + (["Drive read (Takeout archives)"] if args.drive else []))
+        print(f"Opening the browser for Google consent ({', '.join(granted)}). Waiting up to 5 minutes...")
+        if args.read or args.daily or args.drive:
+            print("Google shows an 'unverified app' screen for these scopes: choose Advanced, then continue to the app.")
+        refresh_token = gmail.login(client_id, client_secret, read=args.read, daily=args.daily, drive=args.drive)
     except gmail.MailError as error:
         print(f"Gmail login failed ({error.code}). Nothing stored.")
         return 1
@@ -55,6 +65,10 @@ def _login(args: argparse.Namespace) -> int:
     print("Gmail grant saved to the OS credential store. You may delete the client JSON file now.")
     if args.read:
         print("To answer replies on schedule, set `answer_replies = true` under [mail] in the local config.")
+    if args.daily:
+        print("Check the calendar and tasks reads with `smith agenda check`, then `smith agenda events` and `smith agenda tasks`.")
+    if args.drive:
+        print("Check the Keep archive sync with `smith keep sync`.")
     return 0
 
 
@@ -81,9 +95,14 @@ def answer(db: Path, config_path: Path, *, verbose: bool = False) -> int:
 
     def build(report: dict[str, Any] | None) -> dict[str, Any]:
         return qa.rebuild(db, report, now=now, tz=tz, household=household, lineage=current)
+    secrets = credentials.all_secrets()
+    # A reply to any daily mail Smith sent gets the daily answerer, whether or not the schedule is on; it reads
+    # nothing until such a question arrives.
+    from smith import daily_qa
+    daily_answerer = daily_qa.answerer(db, config, now=now, tz=tz, secrets=secrets)
     try:
-        results = qa.poll(db, recipient=to, credentials=stored, now=now, build=build, secrets=credentials.all_secrets(),
-                          tz=tz)
+        results = qa.poll(db, recipient=to, credentials=stored, now=now, build=build, secrets=secrets, tz=tz,
+                          daily=daily_answerer)
     except gmail.MailError as error:
         if verbose or error.code != "no-read-scope":
             print(f"Answering questions failed ({error.code}).")

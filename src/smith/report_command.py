@@ -349,6 +349,14 @@ def _publish_once(args: argparse.Namespace) -> int:
     slot, missed = None, []
     kind = args.kind or editions.for_day(config, now.astimezone(ZoneInfo(tz)).date())
     if args.action == "run-due":
+        if config.get("daily", {}).get("enabled"):
+            # The daily-routine mail (daily design §7) rides on the same scheduled task, apart from the reports.
+            from smith import daily_command
+            try:
+                for line in daily_command.run_due(args.db, config, now=now):
+                    _say(args.db, line)
+            except Exception as error:  # noqa: BLE001 - the daily mail must never block a report.
+                _say(args.db, f"Daily mail crashed: {type(error).__name__}")
         if not config["reports"]["enabled"]:
             print("Scheduled reports are disabled (reports.enabled = false).")
             return 0

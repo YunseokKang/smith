@@ -40,6 +40,28 @@ enabled = true
 check_time = "16:10"
 portfolio_move_pct = 2.0
 
+# The daily-routine mail (docs/daily-design.md): weather and preparations on top, the day's calendar, anniversaries,
+# five news items, an encouraging line, overdue tasks. Separate from the reports, every day at `time`.
+# `airways_sensitive` moves the air-quality and pollen cautions one grade earlier and keeps them on the page.
+[daily]
+enabled = false
+time = "06:00"
+news_count = 5
+news_topics = ["정치", "경제", "문화", "기술", "AI"]
+airways_sensitive = false
+
+# Where the weather is read, at district precision: a district office point for the KMA grid (never a home address),
+# an AirKorea station, the regional dust-forecast name, the KMA pollen area code and the words that make a warning
+# relevant. Keep the real values in the local config.
+# [daily.weather]
+# lat = 37.5735
+# lon = 126.9790
+# air_station = "종로구"
+# air_region = "서울"
+# pollen_area_no = "1111000000"
+# warning_keywords = ["서울"]
+# label = "서울 종로구"                # shown in the mail as the weather's basis
+
 # Optional, in the local config: a verified ledger copy after each sent report (see `smith backup`).
 # Backups hold real financial data; prefer a drive you control, never Git or a shared cloud folder.
 # [backup]
