@@ -10,7 +10,8 @@ requires-python = ">=3.11"
 # tzdata: Windows has no system IANA time zone database; zoneinfo falls back to it.
 # keyring: broker credentials live in the OS credential store, never in files or env vars.
 # korean-lunar-calendar: lunar birthdays and 설·추석 converted offline with the KASI tables (FR-32).
-dependencies = ["tzdata", "keyring", "korean-lunar-calendar"]
+# Pillow draws the health letter's line charts (health design §3); mail clients drop SVG, so the charts are PNG.
+dependencies = ["tzdata", "keyring", "korean-lunar-calendar", "Pillow"]
 
 [project.scripts]
 smith = "smith.cli:main"

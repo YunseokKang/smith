@@ -311,3 +311,12 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
   load_health`). ② `https://health.googleapis.com/$discovery/rest?version=v4`(공개, 인증 불필요)를 받아 스키마를 읽었다: CivilDateTime은
   `{date: {year, month, day}, time: {hours, minutes, seconds}}`. 오류 메시지는 코드가 `notes`에 남겨 다음부터는 바로 보인다.
 - 예방: Google API를 새로 붙일 때 참조 페이지가 모호하면 discovery 문서부터 읽는다. API마다 토큰을 따로 둘지 먼저 확인한다.
+
+### TS-032 CI 실패 메일 "Run failed: tests": 새 의존성을 pyproject에 선언하지 않음 (2026-10-25)
+
+- 증상: 건강 레터 커밋 직후 GitHub Actions `tests`가 실패하고 실패 알림 메일이 왔다. 로그: `ModuleNotFoundError: No module named 'PIL'`.
+- 원인: 그래프 모듈(`health_chart.py`)이 Pillow를 쓰는데 `pyproject.toml`의 `dependencies`에 없었다. 로컬 `.venv`에는 이미 설치돼 있어
+  테스트가 통과했고, CI는 `pip install -e .`만 하므로 빠졌다.
+- 해결: `dependencies`에 `Pillow` 추가. 실패 알림은 GitHub가 실패할 때만 보내므로 CI가 통과하면 멈춘다.
+- 예방: 새 import를 넣으면 `pyproject.toml`에 선언하고, 커밋 전에 깨끗한 환경 기준으로 확인한다
+  (`.\.venv\Scripts\python.exe -m pip freeze | findstr /i 이름`으로 설치 여부만 믿지 않는다).
