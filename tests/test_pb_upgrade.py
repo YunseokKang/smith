@@ -5,10 +5,10 @@ the prose rules (rounded amounts, no internal vocabulary, no alarm banner, syste
 Synthetic household; every figure is checked against hand arithmetic."""
 import json
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from smith import ledger, narrative, report_html, stress
+from smith import delivery, ledger, narrative, proposals, report_html, stress
 from smith.importer import parse_import
 from smith.payload import load_view
 from smith.report_data import build_report
@@ -106,6 +106,95 @@ class CalculatorTests(Upgrade):
         page = render(data)[1]
         self.assertIn("일시 충당", page)
         self.assertIn("자산 전체를 보는 방법", page)
+
+    def test_the_reserve_follows_the_household_months_and_a_small_gap_comes_from_the_surplus(self):
+        # User review 2026-10-24: a gap in pay is not a near-term risk, so the reason names real shocks and the
+        # size is the household's own; a gap two months of surplus close is no reason to sell stock.
+        default = self.proposal(self.report("life"), "emergency-reserve")
+        self.assertNotIn("실직", default.why)
+        self.assertIn("의료비·경조사·집 수리", default.why)
+        self.assertIn("가정", default.certainty)
+        three = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="life",
+                             household=dict(HOUSEHOLD, emergency_months=3))
+        self.assertEqual(three["sectors"]["cash"]["reserve_target"], Decimal(18_720_000))  # 6.24M x 3.
+        reserve = self.proposal(three, "emergency-reserve")
+        self.assertTrue(three["advice"]["reserve_swap"]["one_step"])                  # 8.72M gap > two months of surplus.
+        # Review 2026-10-24: a size in the config is Smith's proposal until the client confirms it.
+        self.assertIn("Smith가 제안하는 월 지출 3개월분", reserve.why)
+        self.assertIn("고객 확인 전", reserve.certainty)
+        self.assertIn("확정하겠습니다", reserve.risks)
+        self.assertEqual(narrative.sector_metrics(three["view"], three)["cash"]["reserve_basis"], "proposed")
+        confirmed = self.proposal(build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="life",
+                                               household=dict(HOUSEHOLD, emergency_months=3, emergency_months_confirmed=True)),
+                                  "emergency-reserve")
+        self.assertIn("고객님이 정하신 월 지출 3개월분", confirmed.why)
+        self.assertIn("기준(고객님 설정", confirmed.certainty)
+        self.assertNotIn("확정하겠습니다", confirmed.risks)
+        two = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="life",
+                           household=dict(HOUSEHOLD, emergency_months=2))
+        gap = two["sectors"]["cash"]["reserve_gap"]
+        self.assertEqual(gap, Decimal(2_480_000))                                      # 12.48M - 10M cash.
+        self.assertFalse(two["advice"]["reserve_swap"]["one_step"])
+        small = self.proposal(two, "emergency-reserve")
+        self.assertEqual(small.priority, 3)
+        self.assertIn("주식을 팔 필요 없이", small.title)
+        self.assertEqual(dict(two["advice"]["spending_room"]["committed"])["비상금 채우기"], gap / 2)
+
+    def test_a_decision_on_one_form_of_the_reserve_never_carries_over_to_another(self):
+        # Review 2026-10-24: the three forms share one identity and the gap and target can stay put while only
+        # the surplus moves; a decision on selling stock must not mark a monthly top-up as in progress or hide it.
+        household = dict(HOUSEHOLD, emergency_months=2)
+        data = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="life", household=household)
+        shown = proposals.snapshot(self.proposal(data, "emergency-reserve"))
+        self.assertEqual(shown["figures"]["form"], "surplus-short")
+        for form, status, outcome in (("swap", "accepted", "renewed"), ("swap", "declined", "renewed"),
+                                      ("surplus", "done", "renewed"), (None, "accepted", "renewed"),
+                                      ("surplus-short", "accepted", "in_progress"),
+                                      ("surplus-short", "declined", "hidden")):
+            with self.subTest(form=form, status=status):
+                figures = {k: v for k, v in shown["figures"].items() if k != "form"}
+                anchor = {**figures, **({"form": form} if form else {})}
+                active = {"emergency-reserve": {"identity": "emergency-reserve", "status": status, "figures": anchor,
+                                                "times_shown": 2}}
+                built = proposals.build(data["view"], data["kpis"], data["sectors"], active=active, household=household)
+                listed = [p for p in built["proposals"] if p.key == "emergency-reserve"]
+                progress = [p for p in built["in_progress"] if p.key == "emergency-reserve"]
+                found = ("renewed" if listed and listed[0].renewed else "in_progress" if progress else
+                         "hidden" if not listed else "shown")
+                self.assertEqual(found, outcome)
+
+    def test_the_liquidity_ladder_names_the_assets_on_each_rung(self):
+        data = self.report("life")
+        sources = data["sectors"]["cash"]["sources"]
+        self.assertEqual(sources["days"], [{"label": "국내 주식", "unit": "종목", "count": 3, "amount": Decimal(170_000_000)}])
+        self.assertEqual([k["label"] for k in sources["months"]], ["실거주 주택(본인)", "임대 중인 주택(배우자)"])
+        page = render(data)[1]
+        self.assertIn("어떤 자산에서", page)
+        self.assertIn("국내 주식 3종목 1.7억 원", page)
+        self.assertIn("은행 통장·예금 1,000만 원", page)
+
+    def test_failed_deal_refresh_is_named_beside_the_deals_not_at_the_top(self):
+        ledger.record_sync_run(self.conn, source="molit", attempted_at=AT - timedelta(days=1), outcome="success")
+        ledger.record_sync_run(self.conn, source="molit", attempted_at=AT - timedelta(hours=1), outcome="failure",
+                               error_code="network-error")
+        data = self.report("property")
+        self.assertEqual(data["sectors"]["real_estate"]["deals_stale"]["last_success_on"], (AT - timedelta(days=1)).date())
+        page = render(data)[1]
+        self.assertIn("실거래가 새로 받지 못함 · 10/16에 받은 값", page)
+        self.assertTrue(any("갱신 실패(network-error)" in n for n in report_html.system_notes(data)))
+        note = delivery._delivery_note(None, [], AT, [], "Asia/Seoul", ["토스증권 보유 내역", delivery.DEALS_FEED])
+        self.assertIn("토스증권 보유 내역", note)
+        self.assertNotIn(delivery.DEALS_FEED, note)
+        self.assertIsNone(delivery._delivery_note(None, [], AT, [], "Asia/Seoul", [delivery.DEALS_FEED]))
+        # The stress year's lease gap rests on the jeonse contracts: a judgement-changing derived figure.
+        life = self.report("life")
+        self.assertTrue(stress.uses_deals(life["stress"]))
+        self.assertIn("실거래가 새로 받지 못함", render(life)[1])
+        metrics = narrative.sector_metrics(life["view"], life)
+        self.assertEqual((metrics["real_estate"]["deals_stale_since"], metrics["stress"]["lease_uses_deals"]),
+                         ("2026-10-16", True))
+        ledger.record_sync_run(self.conn, source="molit", attempted_at=AT - timedelta(minutes=5), outcome="success")
+        self.assertIsNone(self.report("property")["sectors"]["real_estate"]["deals_stale"])
 
     def test_the_lease_deposit_is_a_net_outflow_by_scenario(self):
         data = self.report("property")

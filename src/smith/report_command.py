@@ -430,7 +430,7 @@ def _publish_once(args: argparse.Namespace) -> int:
     if config.get("properties") or config.get("targets"):
         from smith import realestate_command
         if realestate_command.sync(args.db, args.config) != 0:
-            sync_failures.append("아파트 실거래가")
+            sync_failures.append(delivery.DEALS_FEED)
     # Research before claiming the slot (it needs no lease), unless a fresh prepared brief exists.
     researched = _research(args.db, datetime.now(timezone.utc), kind=kind, regions=target_regions(config))
     _say(args.db, f"Research ({kind}) {researched['outcome']}{' (prepared)' if researched.get('reused') else ''}: "

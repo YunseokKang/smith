@@ -26,6 +26,8 @@ from smith.report_html import render
 
 _WEEKDAY_INDEX = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6}
 LATE_AFTER = timedelta(minutes=30)
+DEALS_FEED = "아파트 실거래가"  # The sync failure name for official apartment deals (report_command).
+SECTION_NOTED_FAILURES = {DEALS_FEED}  # Failures the report names where the data is shown, not in the top note.
 Sender = Callable[..., str]
 Narrator = Callable[[dict[str, Any]], None]
 
@@ -261,8 +263,11 @@ def _delivery_note(slot: datetime | None, missed: list[datetime], now: datetime,
         else:
             parts.append(f"{when:%m월 %d일 %H:%M} 보고는 발송 결과를 확인하지 못했습니다. 받은편지함에 없다면 "
                          "이 보고서가 그 내용을 대신합니다.")
-    if sync_failures:
-        parts.append(f"보고서 작성 전 일부 데이터({', '.join(sync_failures)})를 새로 받지 못해 이전 값을 사용했습니다.")
+    # Apartment deals are flagged in the sections that show them (report_data `deals_stale`), not here: at the
+    # top of the letter the notice outweighed what it affects (user review 2026-10-24).
+    top = [name for name in sync_failures if name not in SECTION_NOTED_FAILURES]
+    if top:
+        parts.append(f"보고서 작성 전 일부 데이터({', '.join(top)})를 새로 받지 못해 이전 값을 사용했습니다.")
     return " ".join(parts) or None
 
 

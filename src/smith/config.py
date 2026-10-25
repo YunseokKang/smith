@@ -21,7 +21,8 @@ KNOWN_KEYS = {
     "reports": {"enabled", "weekdays", "time", "delivery", "editions"},
     "mail": {"recipient", "answer_replies"},
     "household": {"birth_year", "partner_birth_year", "retirement_monthly_spend", "marriage_registered", "cohabiting",
-                  "annual_gross_salary", "retirement_age"},
+                  "annual_gross_salary", "retirement_age", "emergency_months",
+                  "emergency_months_confirmed"},
     "backup": {"dir", "keep"},
     # Same-day event notes (report design §29): the daily check time and the holdings' move that counts.
     "events": {"enabled", "check_time", "portfolio_move_pct"},
@@ -147,12 +148,15 @@ def _check_household(household: object) -> None:
         amount = household.get(field)
         if amount is not None and (not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0):
             raise ValueError(f"household.{field} must be a positive whole number of won")
-    for field in ("marriage_registered", "cohabiting"):
+    for field in ("marriage_registered", "cohabiting", "emergency_months_confirmed"):
         if not isinstance(household.get(field, False), bool):
             raise ValueError(f"household.{field} must be a boolean")
     age = household.get("retirement_age")
     if age is not None and (not isinstance(age, int) or isinstance(age, bool) or not 40 <= age <= 90):
         raise ValueError("household.retirement_age must be an age from 40 to 90")
+    months = household.get("emergency_months")
+    if months is not None and (not isinstance(months, int) or isinstance(months, bool) or not 1 <= months <= 12):
+        raise ValueError("household.emergency_months must be a whole number of months from 1 to 12")
 
 
 def _check_backup(backup: object) -> None:

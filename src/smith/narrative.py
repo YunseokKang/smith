@@ -42,7 +42,7 @@ from smith.proposals import Proposal
 
 # v10: executive headline, rounded amounts, total-balance-sheet mindset, employer double concentration, no internal
 # vocabulary (user spec 2026-10-17); v9: stress test, spending room, peer benchmark; v8: expected pay is not wealth.
-PROMPT_VERSION = "narrative-v21"  # v21: pension stack by retirement age 50/55/60; v20: policy-rate path, next meeting.
+PROMPT_VERSION = "narrative-v22"  # v22: no job gap in the reserve, reserve_basis, stale deals; v21: retirement ages.
 MODEL = "fable"
 BUDGET_USD = "5.00"
 # Two calls at most: the write (the markets day with twenty-odd holdings ran past 10 minutes on 2026-10-17) and a
@@ -115,7 +115,8 @@ Eight principles of the writing (the hard rules at the end are checked by code):
    top of the mail): this week's one decision with its main number and its reason in the household's likely,
    everyday terms. Never open with a statistic comparison or the stress scenario. Then, in order: what changed
    since the last report and what it did to this household's net worth; its single bottleneck, said by what it
-   means in a likely event (a few months between jobs, a large unplanned bill), not by an extreme scenario; the
+   means in a likely event (a large unplanned bill such as a medical cost or a home repair, or having to sell
+   stocks after a fall), not by an extreme scenario; the
    one strategy of the period that resolves it. No fragmented warnings, no list of facts, no repeated status
    banner.
 2. Cognitive ease and brevity. In prose, round every won amount to 억 or 만: "약 27.3억 원", "326만 원",
@@ -133,7 +134,10 @@ Eight principles of the writing (the hard rules at the end are checked by code):
    client must never be left asking "what, how much, and can that really happen?". For the stress scenario,
    state its assumptions with their sizes (sector_metrics.stress.scenario) and, when its plausibility matters,
    that rates, stocks and home prices moved together in 2022 (sector_metrics.stress.precedent), while the
-   income stop stands for a job loss, leave or illness.
+   income stop is a low-likelihood extreme assumption (leave or illness of the largest earner) that tests the
+   year, never a forecast. The emergency reserve is never explained or headlined by a gap between jobs, a job
+   loss or a pay stop: say what it pays for (a large sudden bill, not selling stocks after a fall). Income stops
+   belong to the stress scenario only (client 2026-10-24: a gap in pay is not a near-term risk for them).
 4. Total balance sheet. A cash balance below the reserve target never means the household has nothing to
    spend. When sector_metrics.cash.reserve_swap.one_step is true, the reserve is filled once by selling the
    excess above the single-company limit or holdings with an exit opinion (an asset swap), and the monthly
@@ -216,6 +220,12 @@ Input JSON:
   Spending the room is not a failure: money is meant to become life in time.
   sector_metrics.cash.reserve_swap: the reserve gap, the assets sellable within days, the excess above the
   single-company limit, and one_step (true: fill the gap by one asset swap, keep the surplus free).
+  sector_metrics.cash.reserve_basis says whose reserve size it is: client (the client set it), proposed (Smith
+  proposes it and the client has not confirmed: say Smith proposes it, never that the client chose it), default
+  (an assumption). sector_metrics.real_estate.deals_stale_since: when not null, the official apartment deals
+  could not be refreshed and the figures built on them (market prices, the jeonse gap, the move spread, and the
+  stress lease result when sector_metrics.stress.lease_uses_deals) are as of that date; when you cite one of
+  them, say so once ("10월 23일 실거래 기준"). Null means the deals are fresh.
   sector_metrics.real_estate.lease_return_plan: for the nearest lease deposit due, the household's own cash
   under each way of returning it (relet: the reverse-jeonse gap plus a buffer, the default; sale: the net
   cash the sale brings in, with and without the one-home exemption; loan: the move-out loan the
@@ -465,6 +475,7 @@ def sector_metrics(view: Any, data: dict[str, Any]) -> dict[str, Any]:
                  "emergency_months_assumption": str(cash["emergency_months_assumption"]),
                  "hermes_managed": won(cash["hermes"]),
                  "reserve_swap": _swap_metrics(advice.get("reserve_swap")),
+                 "reserve_basis": cash["emergency_months_basis"],
                  "spending_split": _split_metrics(data.get("spending_split"))},
         "debt": {"variable_rate_total": won(debt["variable_total"]),
                  "monthly_interest_estimate": won(debt["monthly_interest_estimate"]),
@@ -483,6 +494,7 @@ def sector_metrics(view: Any, data: dict[str, Any]) -> dict[str, Any]:
                         "properties": [{"ref": view.aliases.get(p["record_id"]), "loan_to_value": ratio(p["ltv"]),
                                         "valuation_basis": p.get("valuation_method")} for p in estate["properties"]],
                         "lease_return_plan": _lease_metrics(view, (data.get("lease_plans") or [None])[0]),
+                        "deals_stale_since": _stale_since(estate.get("deals_stale")),
                         "move_plan": _move_metrics(view, data.get("move_plan"))},
         "home_plan": _home_metrics(data["kpis"]["home_progress"]),
         "pension_insurance": {"restricted_total": won(pension["restricted_total"]),
@@ -707,11 +719,19 @@ def _stress_metrics(st: dict[str, Any]) -> dict[str, Any]:
             "net_worth_drop": won(st["net_worth_drop"]),
             "net_worth_drop_ratio": None if st["net_worth_drop_ratio"] is None else f"{st['net_worth_drop_ratio']:.4f}",
             "lease_deposit_covered": None if st["lease"] is None else st["lease"]["covered"],
+            "lease_uses_deals": stress.uses_deals(st),
             # That the market half has happened, so the client can judge it (user review 2026-10-18).
             "precedent": {"year": str(stress.PRECEDENT["year"]), "base_rate": " → ".join(stress.PRECEDENT["base_rate"]),
                           "kospi": stress.PRECEDENT["kospi"], "seoul_apartment_trade_index": stress.PRECEDENT["seoul_apartments"],
                           "seoul_index_vintage": stress.PRECEDENT["seoul_apartments_vintage"],
-                          "income_stop_stands_for": "a job loss, leave or illness of the largest earner"}}
+                          "income_stop_stands_for": "a low-likelihood extreme: leave or illness of the largest earner"}}
+
+
+def _stale_since(stale: dict[str, Any] | None) -> str | None:
+    """The date of the last deals received when the refresh failed ("never" without one); None when fresh."""
+    if stale is None:
+        return None
+    return "never" if stale["last_success_on"] is None else stale["last_success_on"].isoformat()
 
 
 def _spending_metrics(room: dict[str, Any] | None) -> dict[str, Any] | None:

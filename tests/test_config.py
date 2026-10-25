@@ -41,11 +41,12 @@ class ConfigTests(unittest.TestCase):
 
     def test_local_household_mail_and_property_sections_are_typed(self):
         good = ('\n[mail]\nanswer_replies = true\n[household]\nbirth_year = 1990\nretirement_monthly_spend = 5000000\n'
-                'marriage_registered = false\n[backup]\ndir = "E:/smith-backups"\nkeep = 14\n'
+                'marriage_registered = false\nemergency_months = 3\n[backup]\ndir = "E:/smith-backups"\nkeep = 14\n'
                 '[properties.home]\nlawd_cd = "11110"\napt_name = "예시마을"\nexclusive_area_m2 = 59.9\n')
         bad = [('answer_replies = true', 'answer_replies = "yes"'), ('birth_year = 1990', 'birth_year = "1990"'),
                ('retirement_monthly_spend = 5000000', 'retirement_monthly_spend = 5000000.5'),
                ('marriage_registered = false', 'marriage_registered = "no"'),
+               ('emergency_months = 3', 'emergency_months = 0'), ('emergency_months = 3', 'emergency_months = true'),
                ('exclusive_area_m2 = 59.9', 'exclusive_area_m2 = "59.9"'),
                ('answer_replies = true', 'answer_reply = true'),                  # A typo is not ignored.
                ('exclusive_area_m2 = 59.9', 'exclusive_area = 59.9'),

@@ -105,7 +105,7 @@ def render(data: dict[str, Any]) -> tuple[str, str]:
         sectors = data["sectors"]
         sections += [_allocation(data), _cash(sectors["cash"], data),
                      _spending(advice.get("spending_room"), data.get("spending_split")),
-                     _stress(data["stress"]), _debt(sectors["debt"], advice.get("refinance"), sectors["macro"].get("policy")),
+                     _stress(data["stress"], sectors["real_estate"]), _debt(sectors["debt"], advice.get("refinance"), sectors["macro"].get("policy")),
                      _policy(data, story, full), _holdings(data, story, full),
                      _real_estate(sectors["real_estate"], data.get("figures") or {}), _move_targets(data),
                      _lease_plan(data), _pension_stack(data), _annuity_review(data), _pension(sectors["pension_insurance"]),
@@ -290,7 +290,8 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
         "pension_stack": lambda: _pension_stack(data), "annuity_review": lambda: _annuity_review(data),
         "cash": lambda: _cash(sectors["cash"], data),
         "spending": lambda: _spending(advice.get("spending_room"), data.get("spending_split")),
-        "stress": lambda: _stress(data["stress"]), "stress_summary": lambda: _stress_summary(data["stress"]),
+        "stress": lambda: _stress(data["stress"], sectors["real_estate"]),
+        "stress_summary": lambda: _stress_summary(data["stress"], sectors["real_estate"]),
         "experiences": lambda: _experiences(story),
     }
     # The theme's opening view (the loan line-up, the pension stack, the move targets) comes right under the
@@ -359,7 +360,7 @@ def _tiles(data: dict[str, Any], edition: editions.Edition) -> list[tuple[str, s
                 ("부동산 관련 부채", amount(f["property_debt"]), "담보대출·보증금 반환"),
                 ("돌려드릴 보증금", "-" if lease is None else amount(lease["amount"]),
                  "" if lease is None else f"{lease['date']:%Y.%m} 만기"),
-                ("최근 6개월 실거래", f"{f['property_trades_6m']}건", "같은 단지·같은 면적")]
+                ("최근 6개월 실거래", f"{f['property_trades_6m']}건", _deals_stale(estate) or "같은 단지·같은 면적")]
     if edition.tiles == "rates":
         debt = s["debt"]
         one = next((x for x in debt["shocks"] if x["shock"] == Decimal("0.01")), None)
@@ -937,6 +938,11 @@ def _system_notes(data: dict[str, Any], story: dict[str, Any], reasons: list[str
               for p in (data.get("advice") or {}).get("proposals") or [] if getattr(p, "context_memo", "")]
     notes += [f"자동 점검 메모 · {memo}" for memo in memos]
     notes += [f"입력 안내 · {r.title}: {r.how}" for r in data.get("requests") or []]
+    stale = ((data.get("sectors") or {}).get("real_estate") or {}).get("deals_stale")
+    if stale:  # Named in the deal sections; the footer keeps the failure and its code for the e-mail answers.
+        notes.append(f"데이터 · 아파트 실거래가: {stale['last_failure_on']:%m월 %d일} 갱신 실패({stale['error'] or '-'}), "
+                     + (f"{stale['last_success_on']:%m월 %d일}에 받은 값을 썼습니다." if stale["last_success_on"]
+                        else "받은 값이 없습니다."))
     toss = _toss_cash_note(((data.get("sectors") or {}).get("cash") or {}).get("toss_cash") or {})
     if toss:  # A standing data caveat, not news: kept for the e-mail answers (user review 2026-10-18).
         notes.append("데이터 · " + re.sub(r"<[^>]+>", "", toss).strip())
@@ -1244,7 +1250,9 @@ def _lease_plan(data: dict[str, Any]) -> str:
     if st["basis"] == "reverse_jeonse":
         lead += (f" 스트레스 테스트에서는 전세 시세가 20% 내려 새 세입자 보증금이 {_short(st['jeonse_dropped'])}이 될 때의 차액 "
                  f"<b>{_short(st['need'])}</b>을 감당할 수 있는지로 판정합니다.")
-    return _section("보증금 반환: 실제로 준비할 돈", lead, _table(["반환 방법", "직접 준비할 돈", "근거"], rows))
+    # The jeonse level and the sale price come from the official deals.
+    return _section("보증금 반환: 실제로 준비할 돈", lead, _table(["반환 방법", "직접 준비할 돈", "근거"], rows),
+                    note=_stale_note("", data["sectors"]["real_estate"]))
 
 
 TAX_BASIS_TEXT = {"net_input": "세후 입력", "estimated": "연봉 기준 추정", "assumed": "가정 세율", "as_entered": "입력값",
@@ -1334,8 +1342,23 @@ def _cash(cash: dict[str, Any], data: dict[str, Any]) -> str:
     gauge = "" if covered is None else _gauge("비상금 기준 대비 즉시 가용 자금", covered, "")
     bars = _bars([(label, value, label == "즉시") for label, value in ladder])
     note = "" if covered is None else f"비상금 {_pct(covered, 0)} 확보"
-    return _section("현금·유동성", lead, gauge + bars + _table(["현금화 속도", "금액"], [[l, _won(v)] for l, v in ladder]),
-                    note=escape(note))
+    table = _table(["현금화 속도", "금액", "어떤 자산에서"],
+                   [[label, _won(value), _ladder_sources(label, cash)] for label, value in ladder])
+    return _section("현금·유동성", lead, gauge + bars + table, note=escape(note))
+
+
+def _ladder_sources(label: str, cash: dict[str, Any]) -> str:
+    """The kinds of asset on one rung, largest first (user review 2026-10-24: which assets can become cash)."""
+    from smith.report_data import HERMES_LABEL, LIQUIDITY_LABELS
+    if label == HERMES_LABEL:
+        return "Hermes가 운용하는 계좌(Smith는 매도를 제안하지 않음)"
+    key = next((k for k, v in LIQUIDITY_LABELS.items() if v == label), None)
+    kinds = (cash.get("sources") or {}).get(key) or []
+    parts = []
+    for kind in kinds:
+        count = f" {kind['count']}{kind['unit']}" if kind["count"] > 1 or kind["unit"] == "종목" else ""
+        parts.append(f"{kind['label']}{count} {'미상' if kind['amount'] is None else _short(kind['amount'])}")
+    return " · ".join(parts) or "-"
 
 
 def _toss_cash_note(toss: dict[str, Any]) -> str:
@@ -1481,11 +1504,20 @@ def _stress_lead(st: dict[str, Any], *, detail: bool) -> str:
     p = stress.PRECEDENT
     text += (f" 금리·주가·집값이 함께 움직인 해는 실제로 있었습니다: {p['year']}년 기준금리 {p['base_rate'][0]}→{p['base_rate'][1]}, "
              f"코스피 {p['kospi']}, 서울 아파트 실거래가지수 {p['seoul_apartments']}({p['seoul_apartments_vintage']}). "
-             "소득 중단은 실직·휴직·질병을 가정한 것입니다.")
+             # Client 2026-10-24: a gap in pay is not a near-term risk; the stress year stays as a tail test.
+             "소득 중단은 가능성이 낮은 극단 가정(휴직·질병 등)으로, 그런 일이 겹쳐도 버티는지 보려는 것입니다.")
     return text
 
 
-def _stress(st: dict[str, Any]) -> str:
+def _stress_note(st: dict[str, Any], estate: dict[str, Any] | None) -> str:
+    """The verdict pill, with the stale-deals pill when the lease result rests on the official deals (the
+    reverse-jeonse gap or the sale price): a derived figure that changes the judgement (review 2026-10-24)."""
+    icon, label, _ = STRESS_VERDICT[st["verdict"]]
+    note = escape(f"{icon} {label}")
+    return _stale_note(note, estate) if stress.uses_deals(st) else note
+
+
+def _stress(st: dict[str, Any], estate: dict[str, Any] | None = None) -> str:
     """The composite stress scenario in full (report design §16.2): the lead, the months bars (capped at the
     scenario length) and the before/after table. All figures come from stress.test; unknown shows as 미상."""
     m = st["monthly"]
@@ -1513,17 +1545,15 @@ def _stress(st: dict[str, Any]) -> str:
     horizon = Decimal(st["assumptions"]["income_stop_months"])
     gauge = ("" if st["months_cash"] is None else
              _gauge(f"현금만으로 버티는 기간({horizon:.0f}개월 중)", st["months_cash"] / horizon, ""))
-    icon, label, _ = STRESS_VERDICT[st["verdict"]]
     return _section(STRESS_TITLE, _stress_lead(st, detail=True) + _sources(stress.PRECEDENT_SOURCES),
-                    gauge + bars + _table(["항목", "평소", "가정한 해"], table_rows), note=escape(f"{icon} {label}"),
+                    gauge + bars + _table(["항목", "평소", "가정한 해"], table_rows), note=_stress_note(st, estate),
                     brief=None)
 
 
-def _stress_summary(st: dict[str, Any]) -> str:
+def _stress_summary(st: dict[str, Any], estate: dict[str, Any] | None = None) -> str:
     """The overview's one-paragraph version: verdict and months, no table (the household day has it)."""
-    icon, label, _ = STRESS_VERDICT[st["verdict"]]
     return _section(STRESS_TITLE, _stress_lead(st, detail=False) + " 자세한 표는 생활·목표 보고에 있습니다."
-                    + _sources(stress.PRECEDENT_SOURCES), "", note=escape(f"{icon} {label}"), brief=None)
+                    + _sources(stress.PRECEDENT_SOURCES), "", note=_stress_note(st, estate), brief=None)
 
 
 def _spending(room: dict[str, Any] | None, split: dict[str, Any] | None = None) -> str:
@@ -1749,6 +1779,22 @@ def _opinion_card(position: dict[str, Any], opinion: dict[str, Any]) -> str:
             f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{detail}</table>{source}</div>')
 
 
+def _deals_stale(estate: dict[str, Any] | None) -> str:
+    """The short text beside apartment-deal figures when the last refresh failed (user review 2026-10-24: say it
+    where the deals are shown, not at the top of the letter). Empty when the deals are fresh."""
+    stale = (estate or {}).get("deals_stale")
+    if not stale:
+        return ""
+    when = stale["last_success_on"]
+    return f"실거래가 새로 받지 못함 · {when:%m/%d}에 받은 값" if when else "실거래가 새로 받지 못함"
+
+
+def _stale_note(note: str, estate: dict[str, Any] | None) -> str:
+    """A section's escaped one-line note with the stale-deals pill after it."""
+    stale = _deals_stale(estate)
+    return note + (" " if note else "") + _pill(stale, "warn") if stale else note
+
+
 def _real_estate(estate: dict[str, Any], figures: dict[str, Any] | None = None) -> str:
     props = estate["properties"]
     if not props:
@@ -1791,7 +1837,8 @@ def _real_estate(estate: dict[str, Any], figures: dict[str, Any] | None = None) 
         table += _table(["부동산", "실거래 추정(6개월 중간값)", "6개월 전 대비", "12개월 거래"],
                         [[p["label"], _short(p["market"]["estimate"]), _delta_pct(p["market"]["change_6m"]),
                           f"{p['market']['trades_12m']}건"] for p in market])
-    return _section("부동산·주거", lead, bars + table, note=escape(f"{len(props)}채 · 기준: {basis}"))
+    note = escape(f"{len(props)}채 · 기준: {basis}")
+    return _section("부동산·주거", lead, bars + table, note=_stale_note(note, estate) if market else note)
 
 
 def _move_targets(data: dict[str, Any]) -> str:
@@ -1863,7 +1910,8 @@ def _move_targets(data: dict[str, Any]) -> str:
     trend = (f'<div style="font-size:13px;font-weight:600;color:{INK};margin:14px 0 6px">필요 추가 자금 추이(세전, 6개월 전 → 지금)'
              f'</div>{trend}{withheld}' if trend else withheld)
     note = "" if nearest is None else f"최소 추가 자금 {_short(nearest['spread'])}"
-    return _section("목표 단지 vs 보유 주택 2채 시세 스프레드", lead, _bars(bars) + trend + table, note=escape(note))
+    return _section("목표 단지 vs 보유 주택 2채 시세 스프레드", lead, _bars(bars) + trend + table,
+                    note=_stale_note(escape(note), data["sectors"]["real_estate"]))
 
 
 def _delta_pct(ratio: Decimal | None) -> str:

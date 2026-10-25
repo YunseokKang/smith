@@ -133,12 +133,13 @@ def _sale(amount: Decimal | None, prop: dict[str, Any] | None, acquisition: dict
     market = prop.get("market") or {}
     estimate, trades = market.get("estimate"), market.get("estimate_basis") or 0
     if estimate is not None and trades >= MIN_BASIS:
-        price, price_basis = estimate, f"최근 6개월 실거래 {trades}건 중간값"
+        price, price_basis, from_deals = estimate, f"최근 6개월 실거래 {trades}건 중간값", True
     else:
-        price, price_basis = prop.get("value"), "원장 평가액(실거래 3건 미만)"
+        price, price_basis, from_deals = prop.get("value"), "원장 평가액(실거래 3건 미만)", False
     loans = prop.get("loans")
     if price is None or loans is None:
-        return {"price": price, "price_basis": price_basis, "loans": loans, "tax": None, "net_inflow": None,
+        return {"price": price, "price_basis": price_basis, "from_deals": from_deals, "loans": loans, "tax": None,
+                "net_inflow": None,
                 "cash_out": None, "basis": "평가액이나 담보대출을 원화로 환산하지 못함"}
     taxes = _capital_gains(price, acquisition, owner, prop.get("occupancy"), today)
     before_tax = price - amount - loans
@@ -150,7 +151,8 @@ def _sale(amount: Decimal | None, prop: dict[str, Any] | None, acquisition: dict
     basis = f"{price_basis} − 보증금 − 담보대출" + (
         " − 양도세(1세대 1주택 비과세 기준: 2년 보유·거주 확인, 12억 원 초과분만 과세)" if case == "exempt" else
         " − 양도세(일반 과세 기준, 비과세 요건 충족 시 별도)" if taxes else " (취득가를 몰라 양도세는 빼지 않음)")
-    return {"price": price, "price_basis": price_basis, "loans": loans, "tax": taxes, "tax_case": case, "net_inflow": net,
+    return {"price": price, "price_basis": price_basis, "from_deals": from_deals, "loans": loans, "tax": taxes,
+            "tax_case": case, "net_inflow": net,
             "before_tax": before_tax, "cash_out": -inflow, "basis": basis}
 
 
@@ -232,7 +234,8 @@ def _stress_sale(amount: Decimal | None, sale: dict[str, Any], drop: Decimal, ac
     if taxes is None:
         return {"need": None, "basis": "unknown", "jeonse_dropped": None}
     shortfall = amount + sale["loans"] - (stressed - taxes[taxes["headline"]]["total"])
-    return {"need": max(Decimal(0), shortfall), "basis": "sale", "jeonse_dropped": None}
+    return {"need": max(Decimal(0), shortfall), "basis": "sale", "jeonse_dropped": None,
+            "from_deals": sale.get("from_deals", False)}
 
 
 def _stress_need(amount: Decimal | None, jeonse: Decimal | None, drop: Decimal) -> dict[str, Any]:
@@ -243,4 +246,6 @@ def _stress_need(amount: Decimal | None, jeonse: Decimal | None, drop: Decimal) 
     if jeonse is None:
         return {"need": amount, "basis": "full_deposit", "jeonse_dropped": None}
     dropped = jeonse * (1 - drop)
-    return {"need": max(Decimal(0), amount - dropped), "basis": "reverse_jeonse", "jeonse_dropped": dropped}
+    # The jeonse level is the official contracts' median (lease.plans), so the gap rests on the deals.
+    return {"need": max(Decimal(0), amount - dropped), "basis": "reverse_jeonse", "jeonse_dropped": dropped,
+            "from_deals": True}

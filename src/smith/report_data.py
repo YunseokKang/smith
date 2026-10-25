@@ -42,7 +42,7 @@ COMPOSITION_LABELS = {"real_estate": "부동산", "securities": "주식·펀드"
 # Outflows read as fixed or discretionary when the record does not say (`commitment`), for the spending split.
 _FIXED_CATEGORIES = ("loan_payment", "insurance_premium", "housing_cost", "tax")
 _MONTHS = {"monthly": 1, "quarterly": 3, "annual": 12}
-EMERGENCY_MONTHS = 6       # Assumption: emergency reserve of six months of outflow.
+EMERGENCY_MONTHS = 6       # Assumption: emergency reserve of six months of outflow ([household] emergency_months).
 # Rate moves applied to the variable-rate loans, cuts included (expert review 2026-10-22: scenarios ran one way).
 RATE_SHOCKS = (Decimal("-0.01"), Decimal("-0.005"), Decimal("0.005"), Decimal("0.01"), Decimal("0.02"))
 FX_SERIES = "731Y001/0000001"  # ECOS won per dollar (BOK reference rate): the year's move for the FX sensitivity.
@@ -81,7 +81,7 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     # already carried by the salary (report design §17.4), so they always get an opinion.
     employer = frozenset(s["symbol"] for s in expected["same_stock"] if s["symbol"])
     review = holdings.review(view, employer)
-    kpis, sectors = _kpis(view, change, pay, household), _sectors(view)
+    kpis, sectors = _kpis(view, change, pay, household), _sectors(view, household)
     # Official transactions matched to each property (local data; only derived figures leave this PC).
     market = realestate.analyze(ledger.load_deals(conn, since=as_of.date() - timedelta(days=400)), today=as_of.date())
     for prop in sectors["real_estate"]["properties"]:
@@ -416,6 +416,45 @@ def _liquidity(view: LedgerView) -> dict[str, Decimal | None]:
     return totals
 
 
+# What a rung of the liquidity ladder is made of, in the client's words (user review 2026-10-24: the amounts
+# alone did not say which assets could be turned into cash). Keyed by (category, account_type); stocks split by market.
+_CASH_ACCOUNT_LABELS = {"bank": "은행 통장·예금", "brokerage": "증권 계좌 현금", "isa": "ISA 계좌 현금",
+                        "pension_savings": "연금저축 현금", "irp": "IRP", "dc": "퇴직연금(DC)"}
+_FUND_ACCOUNT_LABELS = {"pension_savings": "연금저축 펀드", "irp": "IRP", "dc": "퇴직연금(DC)", "isa": "ISA 펀드"}
+
+
+def _source_label(record: RecordInput) -> tuple[str, str]:
+    """(kind of asset, counting unit) for the liquidity breakdown."""
+    category, account = record.fields["category"], record.fields.get("account_type")
+    if category in ("cash", "deposit"):
+        return _CASH_ACCOUNT_LABELS.get(account or "", CATEGORY_LABELS[category]), "개"
+    if category == "stock":
+        market = record.fields.get("market")
+        return ("국내 주식" if market == "KR" else "해외 주식" if market not in (None, "other") else "주식"), "종목"
+    if category == "fund":
+        return _FUND_ACCOUNT_LABELS.get(account or "", "펀드"), "개"
+    if category == "real_estate":
+        return _asset_label(record), "채"
+    return CATEGORY_LABELS.get(category, "기타"), "개"
+
+
+def _liquidity_sources(view: LedgerView) -> dict[str, list[dict[str, Any]]]:
+    """Per liquidity rung, the kinds of asset in it with their count and total, largest first. Hermes-managed
+    assets are left out as in `_liquidity`; an amount without an FX rate makes its kind's total unknown."""
+    groups: dict[str, dict[str, dict[str, Any]]] = {key: {} for key in LIQUIDITY_LABELS}
+    for record in view.records:
+        if record.kind is not Kind.ASSET or is_hermes(record):
+            continue
+        label, unit = _source_label(record)
+        entry = groups.setdefault(record.fields["liquidity"], {}).setdefault(
+            label, {"label": label, "unit": unit, "count": 0, "amount": Decimal(0)})
+        amount = base_amount(view, record)
+        entry["count"] += 1
+        entry["amount"] = None if entry["amount"] is None or amount is None else entry["amount"] + amount
+    return {key: sorted(kinds.values(), key=lambda e: (e["amount"] is None, -(e["amount"] or 0)))
+            for key, kinds in groups.items()}
+
+
 def _flows(view: LedgerView) -> tuple[Decimal | None, Decimal | None]:
     """(monthly net, monthly outflow), both unknown when a cash flow could not be converted."""
     summary = view.summary
@@ -567,8 +606,8 @@ def _pay_rows(pay: list[future_income.Inflow], horizon: date) -> list[dict[str, 
     return list(rows.values())
 
 
-def _sectors(view: LedgerView) -> dict[str, Any]:
-    return {"cash": _cash_sector(view), "debt": _debt_sector(view), "securities": _securities_sector(view),
+def _sectors(view: LedgerView, household: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {"cash": _cash_sector(view, household), "debt": _debt_sector(view), "securities": _securities_sector(view),
             "real_estate": _real_estate_sector(view), "pension_insurance": _pension_insurance_sector(view),
             "macro": {"evidence": view.evidence, "exposures": view.exposures, "announcements": view.announcements,
                       "fx": _fx_sensitivity(view), "policy": _policy_outlook(view)}}
@@ -588,19 +627,28 @@ def _policy_outlook(view: LedgerView) -> dict[str, Any]:
             "next_meeting": meeting, "meeting_today": meeting == today}
 
 
-def _cash_sector(view: LedgerView) -> dict[str, Any]:
+def _cash_sector(view: LedgerView, household: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The liquidity ladder, what each rung is made of, and the reserve. The reserve is `[household]
+    emergency_months` of spending when set (client 2026-10-24: a gap in pay is not a near-term risk, so six
+    months read as advice of little use), otherwise the six-month assumption. `emergency_months_basis` says
+    whose number it is: "client" only with `emergency_months_confirmed`, "proposed" for a size Smith chose and
+    the client has not confirmed (review 2026-10-24), "default" for the assumption."""
     liquidity = _liquidity(view)
     _, outflow = _flows(view)
-    reserve = None if outflow is None else outflow * EMERGENCY_MONTHS
+    chosen = (household or {}).get("emergency_months")
+    months = EMERGENCY_MONTHS if chosen is None else chosen
+    basis = ("default" if chosen is None else "client" if (household or {}).get("emergency_months_confirmed")
+             else "proposed")
+    reserve = None if outflow is None else outflow * months
     immediate = liquidity["immediate"]
     gap = None if reserve is None or immediate is None else max(Decimal(0), reserve - immediate)
     ladder = [(LIQUIDITY_LABELS[k], liquidity[k]) for k in ("immediate", "days", "months", "restricted")]
     hermes = _hermes_total(view)
     if hermes != 0:
         ladder.append((HERMES_LABEL, hermes))
-    return {"ladder": ladder, "liquidity": liquidity, "immediate": immediate, "reserve_target": reserve,
-            "reserve_gap": gap, "emergency_months_assumption": EMERGENCY_MONTHS, "hermes": hermes,
-            "toss_cash": _toss_cash(view)}
+    return {"ladder": ladder, "liquidity": liquidity, "sources": _liquidity_sources(view), "immediate": immediate,
+            "reserve_target": reserve, "reserve_gap": gap, "emergency_months_assumption": months,
+            "emergency_months_basis": basis, "hermes": hermes, "toss_cash": _toss_cash(view)}
 
 
 def is_hermes(record: RecordInput) -> bool:
@@ -709,7 +757,21 @@ def _real_estate_sector(view: LedgerView) -> dict[str, Any]:
                            "valuation_method": record.fields["valuation_method"]})
     total = view.summary.total_assets
     share = view.summary.by_category.get("real_estate", Decimal(0)) / total if total else None
-    return {"properties": properties, "share_of_assets": share}
+    return {"properties": properties, "share_of_assets": share, "deals_stale": _deals_stale(view)}
+
+
+def _deals_stale(view: LedgerView) -> dict[str, Any] | None:
+    """The last apartment-deal refresh (source "molit") failed after the last success: the sections that show
+    deal figures say so next to them (user review 2026-10-24: not at the top of the letter). None when fresh."""
+    entry = next((s for s in view.summary.sync if s["source"] == "molit"), None)
+    if entry is None or entry["last_failure"] is None:
+        return None
+    if entry["last_success"] is not None and entry["last_success"] > entry["last_failure"]:
+        return None
+    local = view.as_of.tzinfo  # The report's household timezone: the date the client reads.
+    success = entry["last_success"]
+    return {"last_success_on": None if success is None else success.astimezone(local).date(),
+            "last_failure_on": entry["last_failure"].astimezone(local).date(), "error": entry["last_error"]}
 
 
 def _pension_insurance_sector(view: LedgerView) -> dict[str, Any]:

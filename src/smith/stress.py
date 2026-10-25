@@ -32,7 +32,7 @@ LEASE_HORIZON_MONTHS = 24              # The nearest lease deposit due within th
 LEASE_UNCOVERED = "lease_deposit_uncovered"
 # The scenario's market half has happened (user review 2026-10-18: "is it even possible for these to come
 # together?"): in 2022 the policy rate, stocks and apartment prices moved against the household in one year. The
-# income stop is household-specific (job loss, leave, illness). Figures checked against the sources on 2026-10-18.
+# income stop is household-specific (leave, illness; a low-likelihood extreme, client 2026-10-24). Figures checked against the sources on 2026-10-18.
 # The apartment index is the vintage published in February 2023 (December 2021 -> December 2022); the board later
 # revised the series and rebased it in 2026, and recent citations read -21.78% (review 2026-10-18).
 PRECEDENT = {"year": 2022, "base_rate": ("1.00%", "3.25%"), "kospi": "-24.9%", "seoul_apartments": "-22.09%",
@@ -209,7 +209,8 @@ def _lease(view: LedgerView, today: date, immediate: Decimal | None, sellable: D
     plan = next((p for p in plans or [] if p["record_id"] == record_id), None)
     need, basis = (amount, "full_deposit") if plan is None else (plan["stress"]["need"], plan["stress"]["basis"])
     found = {"due": due, "months": months, "amount": amount, "need": need, "basis": basis,
-             "jeonse_dropped": None if plan is None else plan["stress"]["jeonse_dropped"]}
+             "jeonse_dropped": None if plan is None else plan["stress"]["jeonse_dropped"],
+             "from_deals": False if plan is None else plan["stress"].get("from_deals", False)}
     if need is None or immediate is None or sellable is None or burn is None:
         return {**found, "available": None, "covered": None}
     drained = max(burn, Decimal(0)) * min(months, INCOME_STOP_MONTHS)
@@ -229,3 +230,9 @@ def _verdict(months_cash: Decimal | None, burn: Decimal | None) -> str:
     if months_cash >= ROBUST_MONTHS:
         return "robust"
     return "watch" if months_cash >= WATCH_MONTHS else "fragile"
+
+
+def uses_deals(st: dict[str, Any]) -> bool:
+    """The lease result rests on the official deals: the reverse-jeonse gap (jeonse level) or a sale price
+    taken from recent trades (not the ledger value)."""
+    return bool((st.get("lease") or {}).get("from_deals"))

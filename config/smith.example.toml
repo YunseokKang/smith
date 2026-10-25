@@ -78,6 +78,10 @@ contact_reminders = "noted"
 # birth_year = 1990
 # retirement_monthly_spend = 5000000   # won, today's prices
 # retirement_age = 60                  # payout age assumed for the pension stack (default 60)
+# emergency_months = 3                 # reserve size in months of spending (default 6): lower it when a gap
+#                                      # in pay is not a near-term risk and a credit line backs the reserve
+# emergency_months_confirmed = false   # true only once the client agreed the size; until then the reports
+#                                      # call it Smith's proposal, not the client's setting
 # [targets.example]
 # label = "예시 단지"
 # lawd_cd = "11110"

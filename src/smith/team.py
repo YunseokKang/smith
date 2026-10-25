@@ -28,7 +28,7 @@ from typing import Any
 from smith import headless, narrative
 from smith.payload import check_outbound, mask_identifiers
 
-PROMPT_VERSION = "team-v4"  # v4: sector_metrics.fx (FX sensitivity) for the debt and investment areas.
+PROMPT_VERSION = "team-v5"  # v5: narrative-v22 rules (reserve without a job gap, reserve_basis, stale deals); v4: fx.
 SPECIALIST_BUDGET_USD = "2.00"
 # All specialists run at once (five minutes at most), then the editor's write and repair. The editor
 # reads more than the single writer (about 70 KB against 50 KB) and timed out at its ten minutes on real

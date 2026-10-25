@@ -275,13 +275,18 @@ def core_short(data: dict[str, Any]) -> bool:
     return any(c.key == "core" and c.status != "ok" for c in data.get("policy", []))
 
 
+RESERVE_BASIS_LABELS = {"client": "설정", "proposed": "제안", "default": "가정"}
+
+
 def _reserve(data: dict[str, Any]) -> Check:
     cash = data["sectors"]["cash"]
     # Without recorded spending the target is zero, which says nothing about the reserve.
     gap = None if not cash["reserve_target"] else cash["reserve_gap"]
     status = "unknown" if gap is None else "ok" if gap == 0 else "breach"
     current = "미상(월 지출 기록 필요)" if gap is None else "충족" if gap == 0 else f"{short_won(gap)} 부족"
-    return Check("reserve", "비상금이 먼저", f"월 지출 {cash['emergency_months_assumption']}개월분(가정)",
+    return Check("reserve", "비상금이 먼저",
+                 f"월 지출 {cash['emergency_months_assumption']}개월분"
+                 f"({RESERVE_BASIS_LABELS.get(cash.get('emergency_months_basis'), '가정')})",
                  current, status, ("MUN-INVERT", "MARKS-DEFENSIVE", "BUF-NO-LEVERAGE"))
 
 

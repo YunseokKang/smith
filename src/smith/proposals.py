@@ -56,6 +56,9 @@ class Proposal:
     # than `tolerance` (relative) from the figures the proposal was raised on.
     identity: str = ""
     watch: tuple[str, ...] = ()
+    # The form of the action when one rule has several (the reserve: sell stock, save monthly, a short top-up).
+    # A change of form renews the instance, so a decision on one form never carries over to another.
+    form: str = ""
     tolerance: Decimal = Decimal("0.2")
     times_shown: int = 0  # Delivered reports that already carried this instance.
     renewed: bool = True  # New identity or materially changed figures: a new instance when delivered.
@@ -97,6 +100,9 @@ SPENDING_FILL_MONTHS = 12  # Assumption (§16.3): an emergency-reserve gap is fi
 # Assumption (§17.1): when assets sellable within days are at least this many times the reserve gap, the gap
 # is filled by moving money between assets once, not by diverting the monthly surplus for months.
 SWAP_MULTIPLE = Decimal(3)
+# Assumption: a reserve gap the monthly surplus closes within this many months is filled from it. Selling stock
+# for a small gap costs tax and bother, and the gap is no headline (user review 2026-10-24).
+SMALL_GAP_MONTHS = 2
 # Assumption (§17.5): premiums above this share of monthly income are a cash-flow target; a premium at or
 # above the savings-type threshold whose tax-free maturity (10 years) falls after the home move is a mismatch.
 INSURANCE_SHARE_LIMIT = Decimal("0.10")
@@ -197,7 +203,10 @@ def _short_name(name: Any) -> str:
 
 def materially_changed(proposal: Proposal, anchor: dict[str, str]) -> bool:
     """True when a watched figure moved by more than the tolerance from the anchor (the figures the
-    instance was raised on). Comparing with the anchor, not the last report, adds hysteresis."""
+    instance was raised on), or the action's form differs from the anchored one. Comparing with the anchor,
+    not the last report, adds hysteresis."""
+    if proposal.form and anchor.get("form") != proposal.form:
+        return True
     for name in proposal.watch:
         if name not in proposal.figures:
             continue
@@ -215,7 +224,8 @@ def materially_changed(proposal: Proposal, anchor: dict[str, str]) -> bool:
 def snapshot(proposal: Proposal) -> dict[str, Any]:
     """What the ledger keeps about a delivered proposal."""
     return {"key": proposal.key, "identity": proposal.identity or proposal.key, "renewed": proposal.renewed,
-            "figures": {name: str(value) for name, value in proposal.figures.items()}}
+            "figures": {**{name: str(value) for name, value in proposal.figures.items()},
+                        **({"form": proposal.form} if proposal.form else {})}}
 
 
 # --- facts ------------------------------------------------------------------------------------------------
@@ -462,7 +472,40 @@ def reserve_swap(facts: dict[str, Any]) -> dict[str, Any] | None:
     plan = facts["concentration"]
     excess = Decimal(0) if plan is None or plan.get("unknown") else plan["excess_total"]
     return {"gap": gap, "sellable_within_days": days, "concentration_excess": excess,
-            "multiple": days / gap, "one_step": days >= gap * SWAP_MULTIPLE}
+            "multiple": days / gap, "one_step": days >= gap * SWAP_MULTIPLE and not small_reserve_gap(facts)}
+
+
+def small_reserve_gap(facts: dict[str, Any]) -> bool:
+    """What is left each month after the investing transfers closes the reserve gap within SMALL_GAP_MONTHS
+    (the same money the spending room sets the gap aside from)."""
+    gap, surplus = facts["sectors"]["cash"]["reserve_gap"], facts["unallocated"]
+    return bool(gap) and surplus is not None and surplus > 0 and gap <= surplus * SMALL_GAP_MONTHS
+
+
+def _reserve_purpose(cash: dict[str, Any]) -> str:
+    """Why the reserve, in terms of what can really happen to this household. A gap in pay is not named: the
+    client does not see it as a near-term risk (2026-10-24), and the client-set size already reflects that."""
+    months, whose, target = cash["emergency_months_assumption"], cash["emergency_months_basis"], short_won(cash["reserve_target"])
+    basis = (f"기준은 고객님이 정하신 월 지출 {months}개월분인 {target}입니다. " if whose == "client" else
+             f"기준은 Smith가 제안하는 월 지출 {months}개월분인 {target}이며, 아직 고객님 확인 전입니다. " if whose == "proposed"
+             else f"기준은 월 지출 {months}개월분인 {target}으로, 가정한 값입니다. ")
+    return ("비상금은 의료비·경조사·집 수리처럼 갑자기 생기는 큰 지출을 치르고, 주가가 떨어진 때 주식을 싸게 팔지 않아도 되게 "
+            "하는 완충입니다. " + basis)
+
+
+def _reserve_basis(cash: dict[str, Any]) -> str:
+    """The certainty label of the reserve size: the client's own, Smith's unconfirmed proposal, or the default."""
+    months, whose = cash["emergency_months_assumption"], cash["emergency_months_basis"]
+    return (f"기준(고객님 설정, 비상금 월 지출 {months}개월)" if whose == "client" else
+            f"가정(Smith 제안 비상금 기준 월 지출 {months}개월, 고객 확인 전)" if whose == "proposed" else
+            f"가정(비상금 기준 월 지출 {months}개월)")
+
+
+def _confirm_ask(cash: dict[str, Any]) -> str:
+    """Asks the client to confirm a size Smith proposed; nothing for the client's own or the default."""
+    if cash["emergency_months_basis"] != "proposed":
+        return ""
+    return f" 기준 {cash['emergency_months_assumption']}개월이 맞는지 알려 주시면 그 기준으로 확정하겠습니다."
 
 
 def _emergency_reserve(facts: dict[str, Any]) -> Proposal | Undetermined | None:
@@ -474,25 +517,40 @@ def _emergency_reserve(facts: dict[str, Any]) -> Proposal | Undetermined | None:
         return Undetermined("비상금", "현금이나 월 현금흐름 가운데 원화로 환산하지 못한 금액이 있습니다.")
     months_cover = facts["kpis"]["immediate_months"]
     fill_months = None if surplus <= 0 else (gap / surplus).to_integral_value(rounding=ROUND_CEILING)
-    priority = 1 if months_cover is not None and months_cover < 1 else 2
+    small = small_reserve_gap(facts)
+    priority = 1 if months_cover is not None and months_cover < 1 else 3 if small else 2
     days = cash["liquidity"].get("days")  # Hermes-managed assets are not counted (never proposed for sale).
     swap = facts["reserve_swap"]
     if swap is not None and swap["one_step"]:
         return _reserve_by_swap(facts, swap, priority, months_cover)
+    now = f"지금은 월 지출의 {'미상' if months_cover is None else f'{months_cover:.1f}개월'}분({short_won(cash['immediate'])})입니다. "
+    basis = _reserve_basis(cash)
+    if small:
+        return Proposal(
+            key="emergency-reserve", priority=priority, watch=("gap", "target"), tolerance=Decimal("0.25"),
+            form="surplus-short", headline=f"비상금 {short_won(gap)}, 두 달 여유로 채움",
+            title=(f"비상금은 기준까지 {short_won(gap)}만 남아, 주식을 팔 필요 없이 앞으로 {SMALL_GAP_MONTHS}개월 동안 "
+                   f"남는 돈에서 매월 {short_won(gap / SMALL_GAP_MONTHS)}씩 채우시면 됩니다."),
+            why=_reserve_purpose(cash) + now + "이 정도 차이는 주식을 팔아 세금과 수수료를 치를 일이 아닙니다.",
+            effect=(f"정기 적립·연금 이체를 그대로 두고도 매월 남는 {short_won(facts['unallocated'])} 가운데 "
+                    f"{short_won(gap / SMALL_GAP_MONTHS)}이면 {SMALL_GAP_MONTHS}개월 뒤 기준에 닿습니다."),
+            risks="비상금은 수시로 넣고 빼면서 이자가 붙는 계좌(CMA·파킹통장)에 두시면 손해를 줄일 수 있습니다." + _confirm_ask(cash),
+            timing="다음 월급일부터", reconsider="월 지출이 크게 바뀌면 다시 계산합니다.",
+            certainty=f"계산(기록된 현금흐름) + {basis}", figures={"gap": gap, "target": cash["reserve_target"]})
     return Proposal(
         key="emergency-reserve", priority=priority, watch=("gap", "target"), tolerance=Decimal("0.25"),
-        headline=f"비상금 {short_won(gap)} 보강",
+        form="surplus", headline=f"비상금 {short_won(gap)} 보강",
         title=f"바로 꺼내 쓸 수 있는 비상금을 {short_won(cash['reserve_target'])}까지 {short_won(gap)} 더 마련하시길 권합니다.",
-        why=(f"비상금은 실직·질병처럼 예상하지 못한 일에 대비해 손해 없이 바로 꺼낼 수 있는 돈입니다. 지금은 월 지출의 "
-             f"{'미상' if months_cover is None else f'{months_cover:.1f}개월'}분({short_won(cash['immediate'])})입니다. "
-             f"주식 등 며칠 안에 팔 수 있는 자산({short_won(days)})도 있지만, 시세가 떨어진 때 팔아야 할 수 있습니다."),
+        why=(_reserve_purpose(cash) + now
+             + f"주식 등 며칠 안에 팔 수 있는 자산({short_won(days)})도 있지만, 시세가 떨어진 때 팔아야 할 수 있습니다."),
         effect=(f"매월 여유 {short_won(surplus)}을 먼저 비상금에 넣으면 약 {fill_months}개월이면 채워집니다."
                 if fill_months else "매월 여유 자금이 없어 다른 자산을 옮겨 채워야 합니다."),
-        risks=("비상금은 수익이 낮습니다. 수시로 넣고 빼면서 이자가 붙는 계좌(CMA·파킹통장)에 두면 손해를 줄일 수 있습니다. "
-               "기준을 6개월보다 낮추면 마련할 금액도 줄어듭니다."),
+        risks=("비상금은 수익이 낮습니다. 수시로 넣고 빼면서 이자가 붙는 계좌(CMA·파킹통장)에 두면 손해를 줄일 수 있습니다."
+               + (" 소득이 안정적이라면 기준을 3개월로 낮추셔도 됩니다." if cash["emergency_months_basis"] == "default"
+                  else _confirm_ask(cash))),
         timing="다음 월급일부터",
-        reconsider="월 지출이 바뀌거나, 소득이 더 안정적이라 기준 개월 수를 낮추기로 하시면 다시 계산합니다.",
-        certainty=f"가정(비상금 기준 월 지출 {cash['emergency_months_assumption']}개월)",
+        reconsider="월 지출이 바뀌거나 기준 개월 수를 바꾸기로 하시면 다시 계산합니다.",
+        certainty=basis,
         figures={"gap": gap, "target": cash["reserve_target"]})
 
 
@@ -508,23 +566,23 @@ def _reserve_by_swap(facts: dict[str, Any], swap: dict[str, Any], priority: int,
                if excess > 0 else " 정리 의견이 있는 종목(손실 종목, 역할이 겹치는 종목)부터 정리해 채웁니다."))
     return Proposal(
         key="emergency-reserve", priority=priority, watch=("gap", "target"), tolerance=Decimal("0.25"),
-        headline=f"비상금 {short_won(gap)}, 과비중 주식으로 마련",
+        form="swap", headline=f"비상금 {short_won(gap)}, 과비중 주식으로 마련",
         title=(f"비상금 부족분 {short_won(gap)}은 월급에서 떼지 말고, 보유 주식 가운데 비중이 과한 종목이나 정리할 종목을 "
                f"{short_won(gap)}만큼 정리해 한 번에 채우시길 권합니다."),
-        why=(f"비상금은 실직·질병처럼 예상하지 못한 일에 대비해 손해 없이 바로 꺼낼 수 있는 돈입니다. 지금은 월 지출의 "
-             f"{'미상' if months_cover is None else f'{months_cover:.1f}개월'}분({short_won(cash['immediate'])})으로 기준 "
-             f"{short_won(cash['reserve_target'])}에 {short_won(gap)}이 모자랍니다. 그런데 며칠 안에 팔 수 있는 주식·펀드가 "
+        why=(_reserve_purpose(cash) + f"지금은 월 지출의 "
+             f"{'미상' if months_cover is None else f'{months_cover:.1f}개월'}분({short_won(cash['immediate'])})으로 기준에 "
+             f"{short_won(gap)}이 모자랍니다. 그런데 며칠 안에 팔 수 있는 주식·펀드가 "
              f"{short_won(swap['sellable_within_days'])}으로 부족분의 {swap['multiple']:.0f}배가 넘습니다. 통장 하나만 보고 월 여유 자금을 "
              "몇 달씩 비상금에 묶는 것은 자산 전체를 보지 않는 계산입니다." + source),
         effect=(f"비상금은 이번 달 안에 채워지고, 매월 여유 {short_won(surplus)}은 비상금에 묶이지 않은 채 정기 투자 적립과 "
                 "안심 소비 한도로 그대로 남습니다."),
         risks=("주식을 팔 때는 시세와 세금(해외 종목은 양도세와 연 기본공제, 현행 법령 확인 필요), 수수료가 따릅니다. 시세가 낮을 때 "
                "파는 것이 아깝다면 두세 번에 나눠 옮기셔도 되지만, 비상금은 수익을 내는 돈이 아니라 보험입니다. 비상금은 수시로 "
-               "넣고 빼면서 이자가 붙는 계좌(CMA·파킹통장)에 두십시오."),
+               "넣고 빼면서 이자가 붙는 계좌(CMA·파킹통장)에 두십시오." + _confirm_ask(cash)),
         timing="이번 달 안에 한 번",
         reconsider="월 지출이 바뀌거나, 팔 수 있는 자산이 크게 줄거나, 기준 개월 수를 바꾸기로 하시면 다시 계산합니다.",
-        certainty=(f"계산(현재 평가액) + 가정(비상금 기준 월 지출 {cash['emergency_months_assumption']}개월, 매도 가능 자산이 부족분의 "
-                   f"{SWAP_MULTIPLE}배 이상이면 일시 충당)"),
+        certainty=(f"계산(현재 평가액) + {_reserve_basis(cash)} + 가정(매도 가능 자산이 부족분의 {SWAP_MULTIPLE}배 이상이면 "
+                   "일시 충당)"),
         figures={"gap": gap, "target": cash["reserve_target"], "sellable_within_days": swap["sellable_within_days"],
                  "concentration_excess": excess})
 
@@ -991,7 +1049,7 @@ def spending_room(facts: dict[str, Any]) -> dict[str, Any] | None:
     """Guilt-free spending room (report design §16.3), in two figures.
 
     `room` is the committed basis: the unallocated monthly surplus minus what the emergency reserve
-    (filled within SPENDING_FILL_MONTHS) and contractual payments (the nearest lease deposit, net of a new
+    (filled within SPENDING_FILL_MONTHS, or SMALL_GAP_MONTHS for a small gap) and contractual payments (the nearest lease deposit, net of a new
     tenant's deposit at the market level and of liquid money) need every month. `room_with_goals` also
     keeps the planned dated goals at their current pace: the home goal (what the base scenario's plan
     already saves every month plus its gap spread over the months left, plus the liquid money the lease
@@ -1008,7 +1066,8 @@ def spending_room(facts: dict[str, Any]) -> dict[str, Any] | None:
     # A gap the sellable assets fill in one step (reserve_swap) takes nothing from the monthly surplus.
     swap = facts["reserve_swap"]
     one_step = swap is not None and swap["one_step"]
-    committed = [("비상금 채우기", Decimal(0) if one_step else cash["reserve_gap"] / SPENDING_FILL_MONTHS)]
+    fill_over = SMALL_GAP_MONTHS if small_reserve_gap(facts) else SPENDING_FILL_MONTHS
+    committed = [("비상금 채우기", Decimal(0) if one_step else cash["reserve_gap"] / fill_over)]
     used, near_short = Decimal(0), False
     if facts["leases"]:
         lease = min(facts["leases"], key=lambda item: item["due"])
@@ -1038,7 +1097,7 @@ def spending_room(facts: dict[str, Any]) -> dict[str, Any] | None:
         planned.append((label, goal["target"] / max(1, goal["months_left"])))
     committed_total = sum((amount for _, amount in committed), Decimal(0))
     planned_total = sum((amount for _, amount in planned), Decimal(0))
-    return {"surplus": surplus, "committed": committed, "planned": planned, "committed_total": committed_total,
+    return {"surplus": surplus, "committed": committed, "reserve_fill_months": fill_over, "planned": planned, "committed_total": committed_total,
             "planned_total": planned_total, "room": surplus - committed_total,
             "room_with_goals": surplus - committed_total - planned_total, "near_commitment_short": near_short,
             "reserve_swap": cash["reserve_gap"] if one_step else None}
@@ -1066,7 +1125,7 @@ def _spending_room(facts: dict[str, Any]) -> Proposal | Undetermined | None:
         goals_note = (f" 계획한 목표({parts(room['planned'])})까지 지금 속도로 지키려면 "
                       + (f"{short_won(with_goals)}이 남습니다." if with_goals >= 0 else
                          f"매월 {short_won(-with_goals)}이 모자라, 그 목표의 시점·금액을 조정하지 않는 한 여유가 없습니다."))
-    certainty = (f"계산(기록된 현금흐름) + 가정(비상금은 {SPENDING_FILL_MONTHS}개월 안에 채움, 주택은 기준 시나리오, 다른 목표는 "
+    certainty = (f"계산(기록된 현금흐름) + 가정(비상금은 {room['reserve_fill_months']}개월 안에 채움, 주택은 기준 시나리오, 다른 목표는 "
                  "배정된 자금 없이 전액 새로 모음)")
     figures = {"room": room["room"], "room_with_goals": with_goals, "surplus": room["surplus"],
                "needs": room["committed_total"] + room["planned_total"]}
