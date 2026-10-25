@@ -199,6 +199,16 @@ CODE|followups|import FILE|resolve ID --on --note|path`. 약-검사 해석 표�
   레터는 `fitbit.weekly_summary`(레터 주의 **전주 월~일**; 유산소 = 수준별 활동 분의 FAIRLY/VERY 합, 없으면 운동 분; 근력 일수; 걸음·
   수면·안정 심박 평균과 4주 기준선)를 `assemble(fitbit=…)`로 받는다. 저장된 날이 없으면 평소 활동 추정으로 돌아간다. 명령:
   `smith health fitbit login|sync|status|week|logout`.
+- **신호등 패널과 추가 항목(사용자 요구 2026-10-25):** '지난주 몸 상태'는 숫자 나열이 아니라 항목마다 **신호(● 좋음 / ▲ 보통 / ■ 주의 /
+  ○ 자료 없음) · 내 지난주 값 · 권고치**를 보인다. 판정은 코드(`fitbit.signals`, 기준은 `fitbit.GUIDES`에 출처와 함께): 중강도 환산
+  활동 주 150/75분, 근력 주 2/1일, 걸음 하루 8,000/5,000보(Lancet Public Health 2022), 수면 7~9시간(6~10 보통; 미국수면재단), 안정 시
+  심박은 **본인 4주 평균** 대비 +3/+7(또는 100 초과; AHA), 심박 변이도는 4주 평균의 90%/80%(본인 기준선만), 야간 산소포화도 95/90%
+  (질병관리청), 수면 중 호흡수 12~20(10~24 보통), 심폐 체력은 Fitbit 등급(GOOD 이상 좋음·AVERAGE 보통·FAIR/POOR 주의), 앉아 있는 시간
+  하루 8/10시간(Ekelund 외, Lancet 2016). 받는 항목을 늘렸다: `daily-vo2-max`(심폐 체력), `daily-oxygen-saturation`(야간 산소포화도
+  평균·최저), `daily-respiratory-rate`(수면 중 호흡수), `daily-sleep-temperature-derivations`(피부 온도의 기준선 대비 변화),
+  `sedentary-period`(앉아 있는 시간 합), 수면 단계(`summary.stagesSummary`의 DEEP·REM 분). 같은 범위 안이라 재동의는 필요 없다.
+  받지 않는 것(설계상): 심전도·불규칙 리듬(`ecg`·`irn` 범위), 운동 중 위치(`location`), 음식·수분 기록(`nutrition`; 고객이 기록하지
+  않음), 쓰기 범위 전부. 더 받을 수 있지만 아직 안 받는 것: 심박 구간별 시간(`time-in-heart-rate-zone`), 층수·거리, 혈당(기기 없음).
 
 ## 6. 외부 정보 조사
 

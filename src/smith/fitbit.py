@@ -47,11 +47,31 @@ MAX_PAGES = 20
 # leaves its old fields untouched (review 2026-10-25: a partial fetch used to wipe the day).
 SOURCE_FIELDS: dict[str, dict[str, Any]] = {
     "steps": {"steps": None}, "active-minutes": {"active_minutes_by_level": None},
-    "exercise": {"exercise_minutes": 0, "strength": False, "exercise_kinds": []}, "sleep": {"sleep_minutes": None},
+    "exercise": {"exercise_minutes": 0, "strength": False, "exercise_kinds": []},
+    "sleep": {"sleep_minutes": None, "deep_minutes": None, "rem_minutes": None},
     "daily-resting-heart-rate": {"resting_hr": None}, "daily-heart-rate-variability": {"hrv_ms": None},
     "weight": {"weight_kg": None}, "body-fat": {"body_fat_pct": None},
+    # Added 2026-10-25 (user request: more from the wearable): cardio fitness, overnight oxygen and breathing, skin
+    # temperature against the personal baseline, sitting time.
+    "daily-vo2-max": {"vo2_max": None, "cardio_fitness": None}, "daily-oxygen-saturation": {"spo2_avg": None, "spo2_low": None},
+    "daily-respiratory-rate": {"breaths_per_minute": None}, "daily-sleep-temperature-derivations": {"skin_temp_delta_c": None},
+    "sedentary-period": {"sedentary_minutes": 0},
 }
 IDENTITY_URL = "https://health.googleapis.com/v4/users/me:getIdentity"
+# Guideline figures the traffic lights use (user request 2026-10-25: "내 평균은 얼마고 권고치는 얼마"), each with its source.
+GUIDES: dict[str, dict[str, Any]] = {
+    "steps": {"good": 8000, "warn": 5000, "text": "하루 8,000보 이상", "source": "Paluch 외, Lancet Public Health 2022 메타분석(60세 미만 8,000~10,000보)"},
+    "sleep": {"good": (420, 540), "warn": (360, 600), "text": "7~9시간", "source": "미국수면재단 성인 권고(2015)"},
+    "resting_hr": {"drift_warn": 3, "drift_bad": 7, "max": 100, "text": "지난 4주 평균 ±3 안, 성인 60~100", "source": "AHA 안정 시 심박수 안내; 본인 기준선 비교"},
+    "hrv": {"warn": 0.9, "bad": 0.8, "text": "지난 4주 평균의 90% 이상", "source": "본인 기준선 비교(절대 기준 없음)"},
+    "active": {"good": 150, "warn": 75, "text": "주 150분(중강도 환산)", "source": "보건복지부·한국건강증진개발원 신체활동 지침서(2023)"},
+    "strength": {"good": 2, "warn": 1, "text": "주 2일", "source": "보건복지부·한국건강증진개발원 신체활동 지침서(2023)"},
+    "spo2": {"good": 95, "warn": 90, "text": "야간 평균 95% 이상", "source": "질병관리청 국가건강정보포털(산소포화도 정상 95~100%)"},
+    "breaths": {"good": (12, 20), "warn": (10, 24), "text": "분당 12~20회", "source": "성인 안정 시 호흡수 정상 범위"},
+    "cardio": {"text": "또래 비교 '좋음' 이상", "source": "Fitbit 심폐 체력 점수(VO2max 추정) 등급"},
+    "sedentary": {"good": 480, "warn": 600, "text": "앉아 있는 시간 하루 8시간 미만", "source": "Ekelund 외, Lancet 2016(하루 8시간 이상 좌식은 사망 위험 증가; 활동으로 상쇄 가능)"},
+}
+LEVEL_WORDS = {"good": "좋음", "warning": "보통", "serious": "주의", "none": "자료 없음"}
 
 
 class FitbitError(Exception):
@@ -104,7 +124,9 @@ def fetch_days(token: str, start: date, end: date, *, getter: gmail.Getter = gma
             if day in days:
                 days[day][field] = value
     for data_type, reader in (("exercise", _exercise), ("sleep", _sleep), ("daily-resting-heart-rate", _resting_hr),
-                              ("daily-heart-rate-variability", _hrv), ("weight", _weight), ("body-fat", _body_fat)):
+                              ("daily-heart-rate-variability", _hrv), ("weight", _weight), ("body-fat", _body_fat),
+                              ("daily-vo2-max", _vo2max), ("daily-oxygen-saturation", _spo2), ("daily-respiratory-rate", _breaths),
+                              ("daily-sleep-temperature-derivations", _skin_temp), ("sedentary-period", _sedentary)):
         try:
             points = _list(token, data_type, start, end, getter=getter)
         except FitbitError as error:
@@ -183,7 +205,11 @@ def _daily_rollup(token: str, data_type: str, start: date, end: date, *, poster:
 _FILTER_FIELDS = {"exercise": "exercise.interval.civil_start_time", "sleep": "sleep.interval.civil_end_time",
                   "daily-resting-heart-rate": "daily_resting_heart_rate.date", "daily-heart-rate-variability": "daily_heart_rate_variability.date",
                   "weight": "weight.sample_time.civil_time", "body-fat": "body_fat.sample_time.civil_time",
-                  "steps": "steps.interval.civil_start_time", "active-minutes": "active_minutes.interval.civil_start_time"}
+                  "steps": "steps.interval.civil_start_time", "active-minutes": "active_minutes.interval.civil_start_time",
+                  "daily-vo2-max": "daily_vo2_max.date", "daily-oxygen-saturation": "daily_oxygen_saturation.date",
+                  "daily-respiratory-rate": "daily_respiratory_rate.date",
+                  "daily-sleep-temperature-derivations": "daily_sleep_temperature_derivations.date",
+                  "sedentary-period": "sedentary_period.interval.civil_start_time"}
 
 
 def _list(token: str, data_type: str, start: date, end: date, *, getter: gmail.Getter, page_size: int = PAGE_SIZE) -> list[dict[str, Any]]:
@@ -320,16 +346,22 @@ def _sleep(point: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
     body = point.get("sleep") if isinstance(point.get("sleep"), dict) else point
     summary = body.get("summary") if isinstance(body.get("summary"), dict) else {}
     end_day = _point_day(point, end=True)
+    by_stage: dict[str, int] = {}
+    for entry in summary.get("stagesSummary") or []:
+        if isinstance(entry, dict):
+            by_stage[str(entry.get("type", "")).upper()] = _int(entry.get("minutes"))
+    if not by_stage:
+        for stage in body.get("stages") or []:
+            if isinstance(stage, dict):
+                kind = str(stage.get("type", stage.get("stage", ""))).upper()
+                by_stage[kind] = by_stage.get(kind, 0) + (_minutes_between(stage if "startTime" in stage else stage.get("interval")) or 0)
+    stages = {"deep_minutes": by_stage.get("DEEP"), "rem_minutes": by_stage.get("REM")}
     if summary.get("minutesAsleep") is not None:
-        return end_day, {"sleep_minutes": _int(summary["minutesAsleep"])}
+        return end_day, {"sleep_minutes": _int(summary["minutesAsleep"]), **stages}
     total = _minutes_between(body.get("interval"))
     if total is None:
         return None, {}
-    awake = 0
-    for stage in body.get("stages") or []:
-        if isinstance(stage, dict) and str(stage.get("type", stage.get("stage", ""))).upper() == "AWAKE":
-            awake += _minutes_between(stage if "startTime" in stage else stage.get("interval")) or 0
-    return end_day, {"sleep_minutes": max(0, total - awake)}
+    return end_day, {"sleep_minutes": max(0, total - by_stage.get("AWAKE", 0)), **stages}
 
 
 def _resting_hr(point: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
@@ -358,10 +390,51 @@ def _body_fat(point: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
     return _point_day(point), ({"body_fat_pct": round(float(value), 1)} if value is not None else {})
 
 
+def _vo2max(point: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
+    body = point.get("dailyVo2Max") if isinstance(point.get("dailyVo2Max"), dict) else point
+    value, level = body.get("vo2Max"), body.get("cardioFitnessLevel")
+    fields: dict[str, Any] = {}
+    if value is not None:
+        fields["vo2_max"] = round(float(value), 1)
+    if level and "UNSPECIFIED" not in str(level):
+        fields["cardio_fitness"] = str(level)
+    return _point_day(point), fields
+
+
+def _spo2(point: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
+    body = point.get("dailyOxygenSaturation") if isinstance(point.get("dailyOxygenSaturation"), dict) else point
+    fields: dict[str, Any] = {}
+    if body.get("averagePercentage") is not None:
+        fields["spo2_avg"] = round(float(body["averagePercentage"]), 1)
+    if body.get("lowerBoundPercentage") is not None:
+        fields["spo2_low"] = round(float(body["lowerBoundPercentage"]), 1)
+    return _point_day(point), fields
+
+
+def _breaths(point: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
+    body = point.get("dailyRespiratoryRate") if isinstance(point.get("dailyRespiratoryRate"), dict) else point
+    value = body.get("breathsPerMinute")
+    return _point_day(point), ({"breaths_per_minute": round(float(value), 1)} if value is not None else {})
+
+
+def _skin_temp(point: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
+    body = (point.get("dailySleepTemperatureDerivations") if isinstance(point.get("dailySleepTemperatureDerivations"), dict) else point)
+    nightly, baseline = body.get("nightlyTemperatureCelsius"), body.get("baselineTemperatureCelsius")
+    if nightly is None or baseline is None:
+        return _point_day(point), {}
+    return _point_day(point), {"skin_temp_delta_c": round(float(nightly) - float(baseline), 2)}
+
+
+def _sedentary(point: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
+    body = point.get("sedentaryPeriod") if isinstance(point.get("sedentaryPeriod"), dict) else point
+    minutes = _minutes_between(body.get("interval"))
+    return _point_day(point), ({"sedentary_minutes": minutes} if minutes else {})
+
+
 def _merge_day(day: dict[str, Any], fields: dict[str, Any]) -> None:
     for key, value in fields.items():
-        if key in ("exercise_minutes", "sleep_minutes"):
-            day[key] = (day.get(key) or 0) + value
+        if key in ("exercise_minutes", "sleep_minutes", "sedentary_minutes", "deep_minutes", "rem_minutes"):
+            day[key] = (day.get(key) or 0) + value if value is not None else day.get(key)
         elif key == "strength":
             day[key] = bool(day.get(key)) or value
         elif key == "exercise_kinds":
@@ -454,7 +527,9 @@ def weekly_summary(folder: Path, start: date, end: date) -> dict[str, Any] | Non
         return None
     aerobic = 0
     strength_days = 0
-    steps, sleeps, hrs = [], [], []
+    steps: list[int] = []
+    sleeps: list[int] = []
+    hrs: list[int] = []
     for fields in week.values():
         levels = fields.get("active_minutes_by_level") or {}
         moderate = 0
@@ -473,21 +548,104 @@ def weekly_summary(folder: Path, start: date, end: date) -> dict[str, Any] | Non
             sleeps.append(fields["sleep_minutes"])
         if fields.get("resting_hr"):
             hrs.append(fields["resting_hr"])
-    baseline_days = [days[d] for d in (x.isoformat() for x in _days(start - timedelta(days=28), start - timedelta(days=1)))
-                     if d in days and days[d].get("resting_hr")]
-    baseline = round(sum(d["resting_hr"] for d in baseline_days) / len(baseline_days), 1) if baseline_days else None
-    latest_weight = next((week[d]["weight_kg"] for d in sorted(week, reverse=True) if week[d].get("weight_kg")), None)
+    before = [days[d] for d in (x.isoformat() for x in _days(start - timedelta(days=28), start - timedelta(days=1))) if d in days]
+    baseline = _avg([d["resting_hr"] for d in before if d.get("resting_hr")], 1)
+    hrv_baseline = _avg([d["hrv_ms"] for d in before if d.get("hrv_ms")], 1)
+    latest = lambda key: next((week[d][key] for d in sorted(week, reverse=True) if week[d].get(key) is not None), None)  # noqa: E731
     state = sync_state(folder)
-    return {"source": "fitbit", "week": [start.isoformat(), end.isoformat()], "days_with_data": len(week),
-            "aerobic_minutes": aerobic, "strength_days": strength_days,
-            "steps_avg": round(sum(steps) / len(steps)) if steps else None,
-            "sleep_avg_minutes": round(sum(sleeps) / len(sleeps)) if sleeps else None,
-            "resting_hr_avg": round(sum(hrs) / len(hrs), 1) if hrs else None, "resting_hr_baseline": baseline,
-            "weight_latest_kg": latest_weight,
-            "guideline": {"aerobic_minutes": AEROBIC_MINUTES_WEEK, "strength_days": STRENGTH_DAYS_WEEK,
-                          "source": "보건복지부·한국건강증진개발원, 한국인을 위한 신체활동 지침서(2023 개정)"},
-            "meets_aerobic": aerobic >= AEROBIC_MINUTES_WEEK, "meets_strength": strength_days >= STRENGTH_DAYS_WEEK,
-            "stale": bool(state.get("last_error")), "synced_at": state.get("synced_at")}
+    summary = {"source": "fitbit", "week": [start.isoformat(), end.isoformat()], "days_with_data": len(week),
+               "aerobic_minutes": aerobic, "strength_days": strength_days,
+               "steps_avg": round(sum(steps) / len(steps)) if steps else None,
+               "sleep_avg_minutes": round(sum(sleeps) / len(sleeps)) if sleeps else None,
+               "deep_avg_minutes": _avg([f["deep_minutes"] for f in week.values() if f.get("deep_minutes")], 0),
+               "rem_avg_minutes": _avg([f["rem_minutes"] for f in week.values() if f.get("rem_minutes")], 0),
+               "resting_hr_avg": _avg(hrs, 1), "resting_hr_baseline": baseline,
+               "hrv_avg": _avg([f["hrv_ms"] for f in week.values() if f.get("hrv_ms")], 1), "hrv_baseline": hrv_baseline,
+               "spo2_avg": _avg([f["spo2_avg"] for f in week.values() if f.get("spo2_avg")], 1),
+               "spo2_low": min((f["spo2_low"] for f in week.values() if f.get("spo2_low")), default=None),
+               "breaths_avg": _avg([f["breaths_per_minute"] for f in week.values() if f.get("breaths_per_minute")], 1),
+               "skin_temp_delta_avg": _avg([f["skin_temp_delta_c"] for f in week.values() if f.get("skin_temp_delta_c") is not None], 2),
+               "sedentary_avg_minutes": _avg([f["sedentary_minutes"] for f in week.values() if f.get("sedentary_minutes")], 0),
+               "vo2_max": latest("vo2_max"), "cardio_fitness": latest("cardio_fitness"), "weight_latest_kg": latest("weight_kg"),
+               "guideline": {"aerobic_minutes": AEROBIC_MINUTES_WEEK, "strength_days": STRENGTH_DAYS_WEEK,
+                             "source": "보건복지부·한국건강증진개발원, 한국인을 위한 신체활동 지침서(2023 개정)"},
+               "meets_aerobic": aerobic >= AEROBIC_MINUTES_WEEK, "meets_strength": strength_days >= STRENGTH_DAYS_WEEK,
+               "stale": bool(state.get("last_error")), "synced_at": state.get("synced_at")}
+    summary["signals"] = signals(summary)
+    return summary
+
+
+def _avg(values: list[Any], digits: int) -> float | int | None:
+    if not values:
+        return None
+    mean = sum(float(v) for v in values) / len(values)
+    return round(mean) if digits == 0 else round(mean, digits)
+
+
+def signals(s: dict[str, Any]) -> list[dict[str, Any]]:
+    """Traffic lights for the week (user request 2026-10-25): each with the client's figure, the guideline figure and
+    its source, and a level — good / warning / serious / none — decided here, never by the model. The word and the
+    shape travel with the colour in the mail (dataviz status rule)."""
+    found: list[dict[str, Any]] = []
+
+    def add(key: str, name: str, value: Any, level: str, mine: str, guide: str) -> None:
+        found.append({"key": key, "name": name, "level": level if value is not None else "none", "level_word": LEVEL_WORDS[level if value is not None else "none"],
+                      "mine": mine if value is not None else "기록 없음", "guide": guide, "source": GUIDES[key]["source"]})
+
+    g = GUIDES["active"]
+    aerobic = s.get("aerobic_minutes")
+    add("active", "중강도 활동", aerobic, "good" if (aerobic or 0) >= g["good"] else "warning" if (aerobic or 0) >= g["warn"] else "serious",
+        f"주 {aerobic}분", g["text"])
+    g = GUIDES["strength"]
+    days = s.get("strength_days")
+    add("strength", "근력 운동", days, "good" if (days or 0) >= g["good"] else "warning" if (days or 0) >= g["warn"] else "serious",
+        f"주 {days}일", g["text"])
+    g = GUIDES["steps"]
+    steps = s.get("steps_avg")
+    add("steps", "하루 걸음", steps, "good" if (steps or 0) >= g["good"] else "warning" if (steps or 0) >= g["warn"] else "serious",
+        f"평균 {steps:,}보" if steps is not None else "", g["text"])
+    g = GUIDES["sleep"]
+    sleep = s.get("sleep_avg_minutes")
+    level = "none"
+    if sleep is not None:
+        level = "good" if g["good"][0] <= sleep <= g["good"][1] else "warning" if g["warn"][0] <= sleep <= g["warn"][1] else "serious"
+    add("sleep", "수면", sleep, level, f"평균 {sleep // 60}시간 {sleep % 60}분" if sleep is not None else "", g["text"])
+    g = GUIDES["resting_hr"]
+    hr, base = s.get("resting_hr_avg"), s.get("resting_hr_baseline")
+    level = "none"
+    if hr is not None:
+        drift = (hr - base) if base is not None else 0
+        level = "serious" if hr > g["max"] or drift > g["drift_bad"] else "warning" if drift > g["drift_warn"] else "good"
+    add("resting_hr", "안정 시 심박", hr, level, (f"평균 {hr:.0f}회/분" + (f" (4주 {base:.0f})" if base is not None else "")) if hr is not None else "", g["text"])
+    g = GUIDES["hrv"]
+    hrv, hrv_base = s.get("hrv_avg"), s.get("hrv_baseline")
+    level = "none"
+    if hrv is not None and hrv_base:
+        ratio = hrv / hrv_base
+        level = "good" if ratio >= g["warn"] else "warning" if ratio >= g["bad"] else "serious"
+    add("hrv", "심박 변이도(회복)", hrv if hrv_base else None, level,
+        (f"평균 {hrv} ms (4주 {hrv_base})" if hrv is not None and hrv_base else ""), g["text"])
+    g = GUIDES["spo2"]
+    spo2 = s.get("spo2_avg")
+    add("spo2", "야간 산소포화도", spo2, "good" if (spo2 or 0) >= g["good"] else "warning" if (spo2 or 0) >= g["warn"] else "serious",
+        (f"평균 {spo2}%" + (f" (최저 {s['spo2_low']}%)" if s.get("spo2_low") is not None else "")) if spo2 is not None else "", g["text"])
+    g = GUIDES["breaths"]
+    breaths = s.get("breaths_avg")
+    level = "none"
+    if breaths is not None:
+        level = "good" if g["good"][0] <= breaths <= g["good"][1] else "warning" if g["warn"][0] <= breaths <= g["warn"][1] else "serious"
+    add("breaths", "수면 중 호흡수", breaths, level, f"분당 {breaths}회" if breaths is not None else "", g["text"])
+    g = GUIDES["cardio"]
+    fitness = s.get("cardio_fitness")
+    level = {"EXCELLENT": "good", "VERY_GOOD": "good", "GOOD": "good", "AVERAGE": "warning", "FAIR": "serious", "POOR": "serious"}.get(str(fitness), "none")
+    words = {"EXCELLENT": "최상", "VERY_GOOD": "매우 좋음", "GOOD": "좋음", "AVERAGE": "보통", "FAIR": "낮음", "POOR": "매우 낮음"}
+    add("cardio", "심폐 체력(VO2max)", fitness, level,
+        (f"{words.get(str(fitness), str(fitness))}" + (f" · {s['vo2_max']}" if s.get("vo2_max") is not None else "")) if fitness else "", g["text"])
+    g = GUIDES["sedentary"]
+    sitting = s.get("sedentary_avg_minutes")
+    add("sedentary", "앉아 있는 시간", sitting, "good" if (sitting or 0) < g["good"] else "warning" if (sitting or 0) < g["warn"] else "serious",
+        f"하루 {sitting // 60}시간 {sitting % 60}분" if sitting is not None else "", g["text"])
+    return found
 
 
 def describe(folder: Path) -> list[str]:

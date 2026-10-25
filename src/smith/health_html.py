@@ -24,6 +24,8 @@ FLAG_WORDS = {"high": "높음", "low": "낮음", "attention": "주의", "normal"
 TREND_STYLE = {"improving": ("#2f7d4f", "▼ 좋아지는 중"), "worsening": ("#c9552d", "▲ 나빠지는 중"), "flat": ("#6b7a70", "= 그대로"),
                "single": ("#9aa89f", "한 번 측정")}
 LEVEL_STYLE = {"normal": "#2f7d4f", "edge": "#d79a1e", "out": "#c9552d", "unknown": "#9aa89f"}
+# Traffic lights for the wearable week (the daily mail's palette, validated on a card surface 2026-10-25): colour and shape.
+LIGHTS = {"good": ("#2e9e44", "●"), "warning": ("#e9a800", "▲"), "serious": ("#e3542a", "■"), "none": ("#a89a8e", "○")}
 CATEGORY_WORDS = {"food": "음식", "exercise": "운동", "life": "생활"}
 SEVERITY_WORDS = {"normal": "정상", "note": "참고", "follow_up": "추적", "see_doctor": "진료 권고"}
 SANS = "Pretendard,Inter,'Malgun Gothic','Apple SD Gothic Neo',-apple-system,'Segoe UI',Roboto,sans-serif"
@@ -280,26 +282,39 @@ def _activity(data: dict[str, Any]) -> str:
         lead = (f"Fitbit 기록({escape(str(start)[5:].replace('-', '.'))}~{escape(str(end)[5:].replace('-', '.'))}, {act['days_with_data']}일): "
                 f"중강도 환산 활동 주 {act['aerobic_minutes']}분(고강도 1분 = 중강도 2분; 지침 {guide['aerobic_minutes']}분), "
                 f"근력 운동 {act['strength_days']}일(지침 {guide['strength_days']}일).")
+    if act["source"] == "estimate":
+        marks = (f'<div style="font-size:14px;color:{BODY}">'
+                 f'{_pill("유산소 " + ("충족" if act["meets_aerobic"] else "미달"), ACCENT if act["meets_aerobic"] else FLAG_COLORS["attention"])} '
+                 f'{_pill("근력 " + ("충족" if act["meets_strength"] else "미달"), ACCENT if act["meets_strength"] else FLAG_COLORS["attention"])}'
+                 f'<div style="font-size:12px;color:{MUTED};margin-top:8px">기준: {escape(guide["source"])}</div></div>')
+        return _card("지난주 몸 상태", lead, marks)
+    # Traffic lights (user request 2026-10-25): the client's figure, the guideline figure, and a level code decided —
+    # colour, shape and word together, so nothing rests on the colour alone.
     rows = []
-    if act["source"] != "estimate":
-        if act.get("steps_avg") is not None:
-            rows.append(("하루 걸음", f"평균 {act['steps_avg']:,}보"))
-        if act.get("sleep_avg_minutes"):
-            rows.append(("수면", f"평균 {act['sleep_avg_minutes'] // 60}시간 {act['sleep_avg_minutes'] % 60}분"))
-        if act.get("resting_hr_avg") is not None:
-            base = act.get("resting_hr_baseline")
-            rows.append(("안정 시 심박", f"평균 {act['resting_hr_avg']:.0f}회/분" + (f" (지난 4주 {base:.0f})" if base else "")))
-        if act.get("weight_latest_kg") is not None:
-            rows.append(("체중(기기)", f"{act['weight_latest_kg']} kg"))
-    table = ("".join(f'<tr><td style="padding:3px 8px 3px 0;font-size:13px;color:{MUTED};white-space:nowrap">{escape(k)}</td>'
-                     f'<td style="padding:3px 0;font-size:14px;color:{INK}">{escape(v)}</td></tr>' for k, v in rows))
-    marks = (f'<div style="font-size:14px;color:{BODY}">'
-             f'{_pill("유산소 " + ("충족" if act["meets_aerobic"] else "미달"), ACCENT if act["meets_aerobic"] else FLAG_COLORS["attention"])} '
-             f'{_pill("근력 " + ("충족" if act["meets_strength"] else "미달"), ACCENT if act["meets_strength"] else FLAG_COLORS["attention"])}'
-             + (f'<table role="presentation" cellpadding="0" cellspacing="0" style="margin-top:10px">{table}</table>' if table else "")
-             + (f'<div style="font-size:12px;color:{FLAG_COLORS["attention"]};margin-top:6px">기기 기록을 새로 받지 못해 지난 동기화 값입니다 — '
-                f'`smith health fitbit login`으로 재동의가 필요할 수 있습니다.</div>' if act.get("stale") else "")
-             + f'<div style="font-size:12px;color:{MUTED};margin-top:8px">기준: {escape(guide["source"])}</div></div>')
+    for signal in act.get("signals", []):
+        color, shape = LIGHTS[signal["level"]]
+        rows.append(f'<tr><td style="padding:6px 8px 6px 0;border-bottom:1px solid {HAIRLINE};font-size:13px;color:{INK};white-space:nowrap">'
+                    f'<b>{escape(signal["name"])}</b></td>'
+                    f'<td style="padding:6px 8px 6px 0;border-bottom:1px solid {HAIRLINE};font-size:13px;color:{INK};white-space:nowrap">'
+                    f'<span style="color:{color};font-size:14px">{shape}</span> {escape(signal["level_word"])}</td>'
+                    f'<td style="padding:6px 8px 6px 0;border-bottom:1px solid {HAIRLINE};font-size:13px;color:{BODY}">{escape(signal["mine"])}</td>'
+                    f'<td style="padding:6px 0;border-bottom:1px solid {HAIRLINE};font-size:12px;color:{MUTED}">{escape(signal["guide"])}</td></tr>')
+    head = (f'<tr><td style="font-size:11px;color:{MUTED};padding-bottom:4px">항목</td><td style="font-size:11px;color:{MUTED}">신호</td>'
+            f'<td style="font-size:11px;color:{MUTED}">내 지난주</td><td style="font-size:11px;color:{MUTED}">권고</td></tr>')
+    extras = []
+    if act.get("deep_avg_minutes") or act.get("rem_avg_minutes"):
+        extras.append(f"깊은 잠 평균 {act.get('deep_avg_minutes') or 0}분 · REM {act.get('rem_avg_minutes') or 0}분")
+    if act.get("skin_temp_delta_avg") is not None:
+        extras.append(f"피부 온도 기준선 대비 {act['skin_temp_delta_avg']:+.2f}℃")
+    if act.get("weight_latest_kg") is not None:
+        extras.append(f"기기 체중 {act['weight_latest_kg']} kg")
+    sources = sorted({s["source"] for s in act.get("signals", [])})
+    marks = (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{head}{"".join(rows)}</table>'
+             + (f'<div style="font-size:12px;color:{BODY};margin-top:8px">{escape(" · ".join(extras))}</div>' if extras else "")
+             + (f'<div style="font-size:12px;color:{FLAG_COLORS["attention"]};margin-top:6px">기기 기록을 다 받지 못해 일부는 지난 동기화 값입니다.</div>'
+                if act.get("stale") else "")
+             + f'<div style="font-size:11px;line-height:1.5;color:{MUTED};margin-top:8px">기준 출처: {escape("; ".join(sources))}. '
+               f'● 좋음 · ▲ 보통 · ■ 주의 · ○ 자료 없음. 기준선 비교(심박·회복)는 본인의 지난 4주 평균입니다.</div>')
     return _card("지난주 몸 상태", lead, marks)
 
 

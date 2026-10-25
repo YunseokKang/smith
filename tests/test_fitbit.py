@@ -49,6 +49,15 @@ LISTS = {
     "weight": {"dataPoints": [{"weight": {"sampleTime": {"civilTime": civil(date(2026, 10, 27)), "physicalTime": "2026-10-27T13:10:00Z"},
                                           "weightGrams": 61400}}]},
     "body-fat": {"error": {"code": 500, "message": "boom", "status": "INTERNAL"}},
+    "daily-vo2-max": {"dataPoints": [{"dailyVo2Max": {"date": {"year": 2026, "month": 10, "day": 27}, "vo2Max": 41.2, "cardioFitnessLevel": "GOOD"}}]},
+    "daily-oxygen-saturation": {"dataPoints": [{"dailyOxygenSaturation": {"date": {"year": 2026, "month": 10, "day": 26},
+                                                                           "averagePercentage": 96.4, "lowerBoundPercentage": 93.0}}]},
+    "daily-respiratory-rate": {"dataPoints": [{"dailyRespiratoryRate": {"date": {"year": 2026, "month": 10, "day": 26}, "breathsPerMinute": 14.8}}]},
+    "daily-sleep-temperature-derivations": {"dataPoints": [{"dailySleepTemperatureDerivations": {
+        "date": {"year": 2026, "month": 10, "day": 26}, "nightlyTemperatureCelsius": 33.9, "baselineTemperatureCelsius": 34.1}}]},
+    "sedentary-period": {"dataPoints": [
+        {"sedentaryPeriod": {"interval": {"startTime": "2026-10-26T00:00:00Z", "endTime": "2026-10-26T04:00:00Z", "civilStartTime": civil(date(2026, 10, 26))}}},
+        {"sedentaryPeriod": {"interval": {"startTime": "2026-10-26T05:00:00Z", "endTime": "2026-10-26T10:30:00Z", "civilStartTime": civil(date(2026, 10, 26))}}}]},
 }
 
 
@@ -68,7 +77,7 @@ def getter(url, headers):
         return 200, EXERCISE_PAGE_2 if query.get("pageToken") == "p2" else EXERCISE_PAGE_1
     if data_type == "body-fat":
         return 500, LISTS[data_type]
-    return 200, LISTS[data_type]
+    return 200, LISTS.get(data_type, {"dataPoints": []})
 
 
 class FetchTests(unittest.TestCase):
@@ -84,6 +93,9 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(tue["sleep_minutes"], 390)                  # 7h minus a 30-minute awake stage.
         self.assertEqual((mon["resting_hr"], mon["hrv_ms"]), (58, 41.5))
         self.assertEqual(tue["weight_kg"], 61.4)
+        self.assertEqual((tue["vo2_max"], tue["cardio_fitness"]), (41.2, "GOOD"))
+        self.assertEqual((mon["spo2_avg"], mon["spo2_low"], mon["breaths_per_minute"], mon["skin_temp_delta_c"]), (96.4, 93.0, 14.8, -0.2))
+        self.assertEqual(mon["sedentary_minutes"], 240 + 330)
         self.assertEqual(days["2026-10-29"]["exercise_minutes"], 0)  # A successful source leaves its no-data value...
         self.assertNotIn("body_fat_pct", days["2026-10-29"])          # ...a failed one leaves nothing.
         self.assertEqual(failed, ["body-fat"])
@@ -142,6 +154,13 @@ class StorageTests(unittest.TestCase):
             self.assertEqual((week["steps_avg"], week["sleep_avg_minutes"], week["resting_hr_avg"]), (9600, 392, 58.0))
             self.assertEqual(week["weight_latest_kg"], 61.4)
             self.assertTrue(week["stale"])                                  # A partial sync is reported as behind.
+            lights = {s["key"]: s for s in week["signals"]}
+            self.assertEqual((lights["active"]["level"], lights["strength"]["level"], lights["steps"]["level"]), ("good", "warning", "good"))
+            self.assertEqual((lights["sleep"]["level"], lights["sleep"]["mine"]), ("warning", "평균 6시간 32분"))   # 392 min: under 7 h.
+            self.assertEqual((lights["resting_hr"]["level"], lights["hrv"]["level"]), ("good", "none"))      # No 4-week baseline for HRV.
+            self.assertEqual((lights["spo2"]["level"], lights["breaths"]["level"], lights["cardio"]["level"]), ("good", "good", "good"))
+            self.assertEqual((lights["sedentary"]["level"], lights["sedentary"]["mine"]), ("warning", "하루 9시간 30분"))
+            self.assertTrue(all(s["guide"] and s["source"] for s in week["signals"]))
             # A later sync in which only steps succeed must not wipe the sleep and heart-rate fields of the day.
             steps_only = fitbit.sync(folder, "tok", now=NOW, poster=poster,
                                      getter=lambda u, h: (500, {"error": {"status": "INTERNAL", "message": "down"}}))
