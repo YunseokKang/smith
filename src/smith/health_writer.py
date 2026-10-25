@@ -112,7 +112,7 @@ FORBIDDEN = re.compile(
     r"용량(?:을)?\s*(?:늘|줄|조정|바꾸)|처방|완치|100\s*%\s*예방|예방(?:됩니다|할\s*수\s*있습니다)|보장(?:합니다|됩니다)|"
     r"\b(?:diagnos|prescri|dosage|dose)\w*)", re.IGNORECASE)
 # Direction words a text may claim about an item; code's trend (and which way is better) decides whether they fit.
-_BETTER_WORDS = ("좋아지", "개선", "나아지", "호전", "안정되", "제자리를 찾")
+_BETTER_WORDS = ("좋아지", "개선", "나아지", "호전")   # "안정되"/"유지" describe a flat item truthfully (second letter 2026-10-25).
 _WORSE_WORDS = ("나빠지", "악화", "나빠졌")
 _UP_WORDS = ("올라가", "오르고", "올랐", "늘어", "늘고", "높아지", "상승")
 _DOWN_WORDS = ("내려가", "내려오", "내렸", "줄어", "줄고", "낮아지", "하락", "떨어지", "떨어졌")

@@ -65,6 +65,7 @@ class VerifyTests(unittest.TestCase):
             ({"verdict": "우측 안압 높음 소견은 이제 괜찮습니다."}, "mentions a resolved finding"),
             ({"verdict": "나쁜 콜레스테롤은 내려가고 있어 안심입니다. 체지방률은 그대로입니다."}, "verdict: contradicts the trend of ldl"),
             ({"verdict": "중성지방은 내려오고 있어 좋아졌습니다. 나쁜 콜레스테롤은 올라 범위 밖입니다."}, None),   # Both true.
+            ({"verdict": "체중은 정상 범위에서 안정되어 있습니다."}, None),                                  # Flat said as steady.
             ({"items": [{"code": "psa", "line": "정상입니다."}]}, "items: unknown code"),
             ({"items": [{"code": "ldl", "line": "좋아지고 있어 안심입니다."}]}, "contradicts the trend"),   # Code says worsening.
             ({"items": [{"code": "ldl", "line": "올라서 범위 밖이라 식단을 손볼 때입니다."}]}, None),         # Up is the truth.
