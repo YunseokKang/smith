@@ -103,11 +103,12 @@ def answer(db: Path, config_path: Path, *, verbose: bool = False) -> int:
     secrets = credentials.all_secrets()
     # A reply to any daily mail Smith sent gets the daily answerer, whether or not the schedule is on; it reads
     # nothing until such a question arrives.
-    from smith import daily_qa
+    from smith import daily_qa, health_qa
     daily_answerer = daily_qa.answerer(db, config, now=now, tz=tz, secrets=secrets)
+    health_answerer = health_qa.answerer(db, config, now=now, tz=tz, secrets=secrets)
     try:
         results = qa.poll(db, recipient=to, credentials=stored, now=now, build=build, secrets=secrets, tz=tz,
-                          daily=daily_answerer)
+                          daily=daily_answerer, health=health_answerer)
     except gmail.MailError as error:
         if verbose or error.code != "no-read-scope":
             print(f"Answering questions failed ({error.code}).")

@@ -231,7 +231,9 @@
             코드 계산 수준/추이 배지·모델 한 줄), 시간축 선 그래프 PNG(`health_chart.py`, cid 첨부), 2023·2025·2026 InBody와 자율신경
             검사(그림 쪽) 들이기(코드 9개 추가), 공단 구강·마음건강·전립선 설문 소견. 남은 점: 로컬 `[health] enabled` 켜기(사용자),
             수요일 중간 점검은 8d와 함께.
-      - [ ] 8c 답장 질의응답(`Question.product = "health"`)과 위험 신호 코드 게이트.
+      - [x] 8c(2026-10-25) 답장 질의응답 `health_qa.py`: `qa.find/poll`의 `product="health"` 경로, 레터 스냅샷 + 원장 + 웨어러블 2주 입력,
+            `health-answer-v1`, 문장 단위 검증(숫자·금지 표현·링크·해소 소견), 위험 신호 코드 게이트(모델 호출 없음), 건강 진술은
+            `client-notes.md`에만. 남은 점: 약·보충제 사실 확인(식약처 API, 8e).
       - [~] 8d(2026-10-25) Fitbit `fitbit.py`: `mail login --health`(읽기 범위 3개), 하루 요약 저장·일일 동기화·주간 요약, 레터 연결,
             `smith health fitbit sync|status|week`. 남은 점: 고객 재동의 뒤 첫 실제 호출로 응답 필드 확인(CivilDateTime·활동 수준 enum·
             수면 단계), 행동 점검 자동화(지난주 행동 대 Fitbit 값), 수요일 중간 점검 켜기.
