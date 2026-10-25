@@ -140,6 +140,18 @@ class LetterTests(unittest.TestCase):
         self.assertEqual((uric["latest"]["value"], uric["trend_word"], uric["level_word"], uric["measurements"]), ("7.9", "그대로", "경계", 2))
         self.assertEqual(payload["genetics_reference_only"][0]["trait"], "요산치")
 
+    def test_a_constraint_rules_a_food_out_of_every_suggestion(self):
+        raw = {**RAW, "constraints": [{"text": "생선 알레르기가 있어서 생선을 못 먹습니다", "since": "2026-10-25", "source": "메일 답장"}]}
+        data = health_letter.assemble(health.parse(raw), CONFIG, day=SUNDAY, today=SUNDAY, topic="vascular")
+        self.assertIn("고등어", data["banned_words"])
+        self.assertNotIn("생선", " ".join(a["what"] + a["amount"] for a in data["fallback_actions"]))
+        self.assertEqual(data["fallback_actions"][0]["what"], "붉은 고기·튀김·가공육 대신 두부·콩·달걀·채소")   # The alternative.
+        ldl = next(g for g in data["goals"] if g["key"] == "ldl")
+        self.assertNotIn("생선", ldl["do"])
+        self.assertIn("귀리", ldl["do"])
+        self.assertEqual(health_letter.payload(data)["client_constraints"], ["생선 알레르기가 있어서 생선을 못 먹습니다"])
+        self.assertNotIn("생선", health_html.render(data, inline=True)[1].split("이번 주 할 일")[1].split("지난주 몸 상태")[0])
+
     def test_charts_and_reference_ranges(self):
         self.assertEqual(health_chart.parse_ref("0~129"), (Decimal(0), Decimal(129)))
         self.assertEqual(health_chart.parse_ref("60~"), (Decimal(60), None))

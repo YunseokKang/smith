@@ -66,6 +66,22 @@ class QATests(unittest.TestCase):
             health_qa.answer(self.db, self.ctx, "질문", now=NOW, received_at=NOW, history=[], secrets=[], tz="Asia/Seoul",
                              caller=lambda text: {"answer": "오메가3를 1000mg씩 드세요.", "follow_up": [], "remember": []})
 
+    def test_a_stated_allergy_becomes_a_constraint_the_next_answer_obeys(self):
+        def caller(text):
+            return {"answer": "알려 주셔서 감사합니다. 앞으로 식단에서 생선을 빼겠습니다.", "follow_up": [],
+                    "remember": ["나는 생선 알레르기가 있어서 생선을 못 먹는다"]}
+        result = health_qa.answer(self.db, self.ctx, "생선 알레르기가 있어요", now=NOW, received_at=NOW, history=[], secrets=[],
+                                  tz="Asia/Seoul", caller=caller)
+        self.assertEqual(result["noted"], ["나는 생선 알레르기가 있어서 생선을 못 먹는다"])
+        self.assertEqual([c.text for c in health.load(health.path(self.db)).constraints], ["나는 생선 알레르기가 있어서 생선을 못 먹는다"])
+        ctx = health_qa.context(self.db, CONFIG, SNAPSHOT, now=NOW, tz="Asia/Seoul")
+        self.assertIn("고등어", ctx["banned_words"])
+        later = health_qa.answer(self.db, ctx, "저녁에 뭘 먹을까요?", now=NOW, received_at=NOW, history=[], secrets=[], tz="Asia/Seoul",
+                                 caller=lambda text: {"answer": "고등어 구이를 주 2회 드십시오. 두부와 채소 반찬을 매일 올리십시오.",
+                                                      "follow_up": [], "remember": []})
+        self.assertEqual(later["text"], "두부와 채소 반찬을 매일 올리십시오.")
+        self.assertTrue(any("ruled out" in p for p in later["problems"]))
+
 
 if __name__ == "__main__":
     unittest.main()

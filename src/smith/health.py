@@ -27,7 +27,7 @@ from typing import Any
 
 from smith import people
 
-FILES = ("observations", "findings", "posture", "genetics", "microbiome", "regimen", "routine")
+FILES = ("observations", "findings", "posture", "genetics", "microbiome", "regimen", "routine", "constraints")
 FLAGS = ("normal", "high", "low", "attention", "unknown")
 SEVERITIES = ("normal", "note", "follow_up", "see_doctor")
 # Lab and exam codes: code -> (Korean label, usual unit). Imports accept only these, so a batch cannot invent a column.
@@ -216,6 +216,15 @@ class Routine:
 
 
 @dataclass(frozen=True)
+class Constraint:
+    """Something the client told Smith to respect in every suggestion (a food allergy, a food they do not eat, a joint
+    that must not be loaded), as they said it. The letter and the replies filter by it in code (client mail 2026-10-25)."""
+    text: str
+    since: str | None
+    source: str | None
+
+
+@dataclass(frozen=True)
 class Ledger:
     observations: tuple[Observation, ...] = ()
     findings: tuple[Finding, ...] = ()
@@ -226,6 +235,7 @@ class Ledger:
     microbiome: Microbiome | None = None
     regimen: tuple[Regimen, ...] = ()
     routine: tuple[Routine, ...] = ()
+    constraints: tuple[Constraint, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -272,8 +282,16 @@ def parse(raw: dict[str, Any]) -> Ledger:
     microbiome = _microbiome(raw.get("microbiome"))
     regimen = tuple(_regimen(item) for item in _list(raw.get("regimen"), "regimen"))
     routine = tuple(_routine(item) for item in _list(raw.get("routine"), "routine"))
+    constraints = tuple(_constraint(item) for item in _list(raw.get("constraints"), "constraints"))
     return Ledger(tuple(sorted(observations, key=lambda o: (o.code, o.on))), tuple(sorted(findings, key=lambda f: f.on)),
-                  tuple(sorted(posture, key=lambda p: (p.code, p.on))), traits, types, genetics_on, microbiome, regimen, routine)
+                  tuple(sorted(posture, key=lambda p: (p.code, p.on))), traits, types, genetics_on, microbiome, regimen, routine,
+                  constraints)
+
+
+def add_constraint(folder: Path, text: str, *, since: str | None, source: str) -> bool:
+    """Record one constraint the client stated (idempotent on the text). Returns True when it was new."""
+    result = import_batch(folder, {"constraints": [{"text": text.strip(), "since": since, "source": source}]})
+    return result.added.get("constraints", 0) > 0
 
 
 def normalize(raw: dict[str, Any]) -> dict[str, Any]:
@@ -503,8 +521,9 @@ _KEYS = {
     "posture": lambda r: ("posture", r.get("code"), r.get("on"), r.get("device"), r.get("side")),
     "regimen": lambda r: ("regimen", r.get("name")),
     "routine": lambda r: ("routine", r.get("activity")),
+    "constraints": lambda r: ("constraints", r.get("text")),
 }
-_REPLACE = ("regimen", "routine")
+_REPLACE = ("regimen", "routine", "constraints")
 # What must agree for two records with the same key to be the same record: the measured content, not the page it was
 # read from (the same value is printed again in a later report's comparison column).
 _CONTENT = {"observations": lambda r: (str(r.get("value")).strip(), r.get("unit")),
@@ -675,6 +694,7 @@ _MICRO_KEYS = {"on", "lab", "scores", "enterotype", "probiotics_detected", "prob
                "wellness_type", "notes", "probiotics_source"}
 _REGIMEN_KEYS = {"name", "ingredient", "frequency", "since", "note"}
 _ROUTINE_KEYS = {"activity", "per_week", "minutes", "note"}
+_CONSTRAINT_KEYS = {"text", "since", "source"}
 
 
 def _observation(item: Any) -> Observation:
@@ -780,6 +800,12 @@ def _routine(item: Any) -> Routine:
     per_week = _range(item.get("per_week"), f"{name} per_week", 0, 14)
     minutes = _range(item.get("minutes"), f"{name} minutes", 1, 600)
     return Routine(name, per_week[0], per_week[1], minutes[0], minutes[1], _text(item, "note", name))
+
+
+def _constraint(item: Any) -> Constraint:
+    item = _check_keys("constraints", item, _CONSTRAINT_KEYS)
+    text = _text(item, "text", "constraints", required=True, limit=200) or ""
+    return Constraint(text, _text(item, "since", text, limit=20), _text(item, "source", text, limit=60))
 
 
 def _range(raw: Any, where: str, low: int, high: int) -> tuple[int, int]:

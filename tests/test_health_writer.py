@@ -102,6 +102,16 @@ class VerifyTests(unittest.TestCase):
         prose, problems = health_writer.verify(_output(items=[{"code": "hdl", "line": "내려가고 있어 걱정입니다."}]), data, payload)
         self.assertTrue(any("contradicts" in p for p in problems), problems)
 
+    def test_an_action_naming_a_ruled_out_food_is_dropped(self):
+        raw = {**RAW, "constraints": [{"text": "생선 알레르기", "since": None, "source": "메일"}]}
+        data = health_letter.assemble(health.parse(raw), CONFIG, day=SUNDAY, today=SUNDAY, topic="vascular")
+        output = _output(actions=[_action(what="고등어를 주 2회", amount="한 토막"), _action()],
+                         goal_lines=[{"key": "ldl", "do": "연어와 귀리", "avoid": "튀김"}])
+        prose, problems = health_writer.verify(output, data, health_letter.payload(data))
+        self.assertEqual([a["what"] for a in prose["actions"]], ["귀리 아침"])
+        self.assertNotIn("ldl", prose["goal_lines"])
+        self.assertEqual(len([p for p in problems if "ruled out" in p]), 2)
+
     def test_review_line_only_when_there_was_a_previous_letter(self):
         data = health_letter.assemble(health.parse(RAW), CONFIG, day=SUNDAY, today=SUNDAY, topic="vascular")
         prose, _ = health_writer.verify(_output(review_line="지난주 잘하셨습니다."), data, health_letter.payload(data))

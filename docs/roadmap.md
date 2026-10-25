@@ -233,7 +233,8 @@
             수요일 중간 점검은 8d와 함께.
       - [x] 8c(2026-10-25) 답장 질의응답 `health_qa.py`: `qa.find/poll`의 `product="health"` 경로, 레터 스냅샷 + 원장 + 웨어러블 2주 입력,
             `health-answer-v1`, 문장 단위 검증(숫자·금지 표현·링크·해소 소견), 위험 신호 코드 게이트(모델 호출 없음), 건강 진술은
-            `client-notes.md`에만. 남은 점: 약·보충제 사실 확인(식약처 API, 8e).
+            `client-notes.md`에만. 첫 답장(생선 알레르기, 2026-10-25)에서 **제약 기록**(`constraints.json`)을 추가: 레터 지침 권고·
+            목표 하기 줄·모델 행동·답장 문장을 코드가 거르고 대안으로 바꾼다. 남은 점: 약·보충제 사실 확인(식약처 API, 8e).
       - [~] 8d(2026-10-25) Fitbit `fitbit.py`: `mail login --health`(읽기 범위 3개), 하루 요약 저장·일일 동기화·주간 요약, 레터 연결,
             `smith health fitbit sync|status|week`. 남은 점: 고객 재동의 뒤 첫 실제 호출로 응답 필드 확인(CivilDateTime·활동 수준 enum·
             수면 단계), 행동 점검 자동화(지난주 행동 대 Fitbit 값), 수요일 중간 점검 켜기.

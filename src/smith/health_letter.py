@@ -122,6 +122,25 @@ FALLBACK_ACTIONS: dict[str, tuple[dict[str, str], ...]] = {
 }
 GUIDANCE_SOURCES = ("대한심장학회·한국지질동맥경화학회 이상지질혈증 진료지침(2022, 5판)", "대한류마티스학회 통풍 진료지침(2020)",
                     "질병관리청 국가건강정보포털 '비타민 D', '건강한 수면'", GUIDELINE_SOURCE)
+# Foods a constraint can rule out (client mail 2026-10-25: a fish allergy): the words in a constraint's text on the left,
+# the words that then may not appear in any suggestion on the right.
+FOOD_GROUPS: dict[str, tuple[str, ...]] = {
+    # Whole words only: a short syllable ("회", "게", "면") would match "주 3회", "함께", "라면" (seen 2026-10-25).
+    "생선": ("생선", "고등어", "연어", "참치", "등푸른", "어류", "생선회", "멸치", "꽁치", "조기", "삼치", "갈치"),
+    "갑각류": ("새우", "게살", "꽃게", "대게", "랍스터", "갑각류"), "조개": ("조개", "생굴", "굴을", "홍합", "전복", "패류"),
+    "우유": ("우유", "요거트", "요구르트", "치즈", "유제품"), "달걀": ("달걀", "계란"), "견과": ("견과", "호두", "아몬드", "땅콩", "잣"),
+    "밀": ("밀가루", "빵", "면류", "국수", "파스타"), "콩": ("콩류", "두부", "두유", "된장", "낫토", "콩밥", "콩 반찬", "콩을"), "복숭아": ("복숭아",),
+    "메밀": ("메밀", "막국수"), "돼지고기": ("돼지고기", "삼겹살", "돈육"), "소고기": ("소고기", "쇠고기", "소 고기"), "닭고기": ("닭", "닭고기"),
+    "술": ("술", "맥주", "소주", "와인", "반주"), "커피": ("커피", "카페인"),
+}
+# What stands in when a constraint removes a suggestion (per topic, food side only; exercise and life lines are not
+# about foods).
+FOOD_ALTERNATIVES: dict[str, dict[str, str]] = {
+    "vascular": {"category": "food", "what": "붉은 고기·튀김·가공육 대신 두부·콩·달걀·채소", "amount": "고기·튀김 식사 주 3회 이하, 콩·두부 반찬 매일",
+                 "why": "포화지방을 줄이고 식이섬유를 늘리면 LDL이 내려가는 쪽으로 움직입니다", "check": "다음 검진의 LDL·총콜레스테롤"},
+    "nutrition-gut": {"category": "food", "what": "달걀 노른자·버섯·비타민 D 강화 우유(또는 두유)", "amount": "달걀 하루 1개, 버섯 반찬 주 3회",
+                      "why": "음식으로 보탤 수 있는 비타민 D는 적어 햇빛과 함께 가야 합니다", "check": "다음 검진의 비타민 D"},
+}
 BOUNDARY = "Smith는 생활 코치입니다. 검진 보고서가 쓴 소견을 풀어 설명하고 생활 습관을 돕되, 진단·처방은 의료진의 몫입니다."
 
 
@@ -165,12 +184,15 @@ def assemble(ledger: health.Ledger, config: dict[str, Any], *, day: date, today:
     spec = TOPICS[key]
     goals = [g for g in config.get("health", {}).get("goals", []) if g in GOALS]
     items = [item for item in (item_status(ledger, code) for code in spec["codes"]) if item is not None]
+    constraints = [c.text for c in ledger.constraints]
+    banned = banned_words(constraints)
     return {
         "product": PRODUCT, "day": day, "today": today, "week_key": when.week_key, "week_start": when.week_start,
         "week_end": when.week_end, "kind": when.kind,
         "topic": {"key": key, "label": spec["label"], "axis": spec["axis"], "codes": list(spec["codes"]), "charts": list(spec["charts"])},
-        "goals": [goal_row(ledger, g) for g in goals],
+        "goals": [_respecting(goal_row(ledger, g), banned) for g in goals],
         "items": items,
+        "constraints": constraints, "banned_words": sorted(banned),
         "series": {code: series_rows(ledger, code) for code in spec["codes"] if health.series(ledger, code)},
         "posture": posture_rows(ledger) if spec.get("posture") else [],
         "findings": topic_findings(ledger, spec["tracks"]),
@@ -187,7 +209,7 @@ def assemble(ledger: health.Ledger, config: dict[str, Any], *, day: date, today:
         "activity": fitbit if fitbit is not None else activity_estimate(ledger),
         "previous_actions": list((previous or {}).get("actions") or []),
         "previous_week": (previous or {}).get("week_key"),
-        "fallback_actions": [dict(a) for a in FALLBACK_ACTIONS[key]],
+        "fallback_actions": fallback_actions(key, banned),
         "sources": list(GUIDANCE_SOURCES),
         "uncertain": sorted({plain(o.code) for o in ledger.observations if o.uncertain and o.code in spec["codes"]}),
         "prose": None, "failures": {},
@@ -196,6 +218,43 @@ def assemble(ledger: health.Ledger, config: dict[str, Any], *, day: date, today:
 
 def plain(code: str) -> str:
     return PLAIN.get(code, health.label(code))
+
+
+def banned_words(constraints: list[str]) -> set[str]:
+    """The food words no suggestion may carry, from the client's constraints ("생선 알레르기" rules out 생선·고등어·…)."""
+    found: set[str] = set()
+    for text in constraints:
+        for group, words in FOOD_GROUPS.items():
+            if group in text or any(w.strip() in text for w in words):
+                found.update(w for w in words)
+    return found
+
+
+def violates(text: str, banned: set[str]) -> bool:
+    return any(w in text for w in banned)
+
+
+def fallback_actions(topic: str, banned: set[str]) -> list[dict[str, str]]:
+    """The topic's guideline actions with any that names a ruled-out food replaced by the topic's alternative."""
+    actions = []
+    for action in FALLBACK_ACTIONS[topic]:
+        if violates(f"{action['what']} {action['amount']} {action['why']}", banned):
+            alternative = FOOD_ALTERNATIVES.get(topic)
+            if alternative and not violates(f"{alternative['what']} {alternative['amount']}", banned) and alternative not in actions:
+                actions.append(dict(alternative))
+            continue
+        actions.append(dict(action))
+    return actions
+
+
+def _respecting(goal: dict[str, Any], banned: set[str]) -> dict[str, Any]:
+    """A goal row whose public do/avoid lines never name a ruled-out food."""
+    for key in ("do", "avoid"):
+        if violates(goal[key], banned):
+            words = [w.strip() for w in re.split(r"[·,]", goal[key])]
+            kept = [w for w in words if w and not violates(w, banned)]
+            goal[key] = "·".join(kept) if kept else ("가능한 음식 안에서 단백질·채소를 늘리기" if key == "do" else goal[key])
+    return goal
 
 
 def item_status(ledger: health.Ledger, code: str, method: str | None = None) -> dict[str, Any] | None:
@@ -408,4 +467,7 @@ def payload(data: dict[str, Any]) -> dict[str, Any]:
         "previous_actions": [{k: safe_text(v) for k, v in a.items()} for a in data["previous_actions"] if isinstance(a, dict)],
         "previous_week": data["previous_week"],
         "uncertain_values": data["uncertain"],
+        # What the client told Smith to respect in every suggestion (an allergy, a food they do not eat): the model
+        # must honour it, and code checks every action and line against it (client mail 2026-10-25).
+        "client_constraints": [safe_text(c) for c in data["constraints"]],
     }

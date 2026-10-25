@@ -111,6 +111,7 @@ def context(db: Path, config: dict[str, Any], stored: dict[str, Any] | None, *, 
             "findings": payload["findings"], "follow_ups": payload["follow_ups"], "regimen": payload["regimen"],
             "regimen_notes": payload["regimen_notes"], "routine": payload["routine"], "wearable": wearable,
             "genetics_reference_only": payload["genetics_reference_only"], "resolved_findings": data["resolved_findings"],
+            "client_constraints": payload["client_constraints"], "banned_words": data["banned_words"],
             "all_items": {code: health_letter.plain(code) for code in sorted({o.code for o in ledger_data.observations})}}
 
 
@@ -123,7 +124,7 @@ def answer(db: Path, ctx: dict[str, Any], question_text: str, *, now: datetime, 
     """
     if DANGER.search(question_text):
         return {"text": EMERGENCY, "follow_up": [], "remember": [], "memos": [], "problems": [], "emergency": True, "noted": []}
-    payload = {**{k: v for k, v in ctx.items() if k != "resolved_findings"},
+    payload = {**{k: v for k, v in ctx.items() if k not in ("resolved_findings", "banned_words")},
                "client_question": mask_identifiers(question_text), "message_date": f"{local_time(received_at, tz):%Y-%m-%d}",
                "conversation": [{"client": mask_identifiers(t["client"]), "smith": None if t["smith"] is None else mask_identifiers(t["smith"])}
                                 for t in history or []]}
@@ -133,7 +134,7 @@ def answer(db: Path, ctx: dict[str, Any], question_text: str, *, now: datetime, 
     output = call(text)
     raw = str(output.get("answer", "")) if isinstance(output, dict) else ""
     allowed = health_writer.tokens(payload)
-    kept, problems = _verify(raw, allowed, ctx.get("resolved_findings") or [])
+    kept, problems = _verify(raw, allowed, ctx.get("resolved_findings") or [], set(ctx.get("banned_words") or []))
     if not kept.strip():
         raise headless.HeadlessError("empty-answer")
     follow_up = [health_writer._clean(f, 200) for f in output.get("follow_up", []) if isinstance(f, str)][:3] if isinstance(output, dict) else []
@@ -142,14 +143,22 @@ def answer(db: Path, ctx: dict[str, Any], question_text: str, *, now: datetime, 
         fact = health_writer._clean(item, 200)
         if fact and not _third_party(fact) and not health_writer._problem(fact, allowed | _digits(fact), []):
             noted.append(fact)
-    _note(db, noted[:3], on=local_time(received_at, tz).date())
+    on = local_time(received_at, tz).date()
+    _note(db, noted[:3], on=on)
+    # A constraint ("생선 알레르기", "우유를 안 먹는다") becomes a structured rule every later letter and reply obeys.
+    for fact in noted[:3]:
+        if _CONSTRAINT.search(fact):
+            try:
+                health.add_constraint(health.path(db), fact, since=on.isoformat(), source="메일 답장")
+            except health.HealthError:
+                pass   # Another write holds the lock; the note file keeps the statement and the next reply will retry.
     return {"text": kept, "follow_up": follow_up, "remember": [], "memos": [], "problems": problems, "emergency": False,
             "noted": noted[:3]}
 
 
-def _verify(raw: str, allowed: set[str], resolved: list[str]) -> tuple[str, list[str]]:
-    """Sentence by sentence: a sentence with a number not in the input, forbidden coach wording, a link or a resolved
-    finding is dropped; paragraphs are kept."""
+def _verify(raw: str, allowed: set[str], resolved: list[str], banned: set[str] | None = None) -> tuple[str, list[str]]:
+    """Sentence by sentence: a sentence with a number not in the input, forbidden coach wording, a link, a resolved
+    finding or a food the client ruled out (when it suggests eating it) is dropped; paragraphs are kept."""
     problems: list[str] = []
     paragraphs = []
     for paragraph in re.split(r"\n\s*\n|\n", health_writer._clean(raw, MAX_ANSWER_CHARS)):
@@ -158,6 +167,8 @@ def _verify(raw: str, allowed: set[str], resolved: list[str]) -> tuple[str, list
             if not sentence:
                 continue
             problem = health_writer._problem(sentence, allowed, resolved)
+            if not problem and banned and health_letter.violates(sentence, banned) and _suggests_eating(sentence):
+                problem = "names a food the client ruled out"
             if problem:
                 problems.append(f"{problem}: {sentence[:40]}")
                 continue
@@ -167,12 +178,21 @@ def _verify(raw: str, allowed: set[str], resolved: list[str]) -> tuple[str, list
     return "\n\n".join(paragraphs), problems
 
 
+_EATING = re.compile(r"드십시오|드세요|드시|챙기|섭취|올리|늘리|권합|추천|주\s*\d+\s*회|매일|하루\s*\d")
+
+
+def _suggests_eating(sentence: str) -> bool:
+    """A sentence that proposes the food (not one that says the client cannot eat it or explains an alternative)."""
+    return bool(_EATING.search(sentence)) and not re.search(r"못\s*드|안\s*드|대신|빼|제외|알레르기|알러지", sentence)
+
+
 def _digits(fact: str) -> set[str]:
     """A client's own statement may carry its own figure ("안압 16으로 정상"): its numbers are its own input."""
     return set(re.findall(r"\d+(?:\.\d+)?", fact))
 
 
 _THIRD_PARTY = re.compile(r"아내|와이프|남편|배우자|아버지|어머니|부모|아이|자녀|조카|친구|동료|선생|의사가\s*말|씨는|님은|님이")
+_CONSTRAINT = re.compile(r"알레르기|알러지|못\s*먹|안\s*먹|먹지\s*(?:않|못)|가리|금지|무릎|허리|관절|통증이\s*있어")
 
 
 def _third_party(fact: str) -> bool:
