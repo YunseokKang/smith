@@ -279,3 +279,35 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
 - 해결: 현재 한국 시간은 Python으로 만든다. `.\.venv\Scripts\python.exe -c "from datetime import datetime, timezone, timedelta;
   print(datetime.now(timezone(timedelta(hours=9))).isoformat(timespec='minutes'))"`.
 - 예방: 원장 가져오기 시각은 셸 `date`로 만들지 않는다. 가져오기 전에 시각이 지금보다 앞서고 실제 사건 시각과 맞는지 확인한다.
+
+### TS-029 건강검진 PDF에서 수치를 뽑을 때의 인코딩·레이아웃 (2026-10-25)
+
+- 증상: `pdftotext`(xpdf 4.00) 기본 출력은 한글이 Latin1로 깨지고, `-layout`은 결과지의 막대그래프와 표가 뒤섞인다. 2023·2025
+  종합검진 결과지는 쪽의 절반이 그림만 있는 쪽(판독지·공단 양식 스캔)이고, 근골격 리포트는 전부 스캔본이다. Macrogen 장내미생물
+  보고서의 텍스트 층은 숫자·영문이 전각으로 한 칸씩 밀려 있다('ＲＰＲＵ' → '2025').
+- 해결: `pdftotext -enc UTF-8 -table`(항목명과 올해 값이 같은 줄) 또는 `-raw`(행 순서가 깨끗함; 3열 결과지는 비교 열 두 값 → 항목명 →
+  올해 값 순)로 뽑고, 그림만 있는 쪽은 Read 도구로 쪽 범위를 보거나 PyMuPDF로 렌더링해 그림으로 읽는다(PyMuPDF는 저장소 `.venv`가
+  아닌 임시 폴더에만 설치). 전각 밀림은 각 문자에서 0xFEE0을 빼고 다시 0x20을 뺀다. 콘솔(cp949)에 '—' 같은 문자를 출력하면
+  `UnicodeEncodeError`가 나므로 점검 스크립트는 `PYTHONUTF8=1`로 돌린다(CLI 자체는 `sys.stdout.reconfigure(errors="replace")`).
+- 예방: 추출 결과는 `smith health import`의 검증(허용 코드·날짜·숫자/결과어)을 거치고, 불확실한 값은 `uncertain: true`로 표시한다.
+  결과지 원본의 쪽마다 이름·등록번호·생년월일이 반복되므로 추출 파일을 정규식으로 한 번 검사한 뒤 들인다.
+
+### TS-030 Bash 도구의 heredoc 안에서 역슬래시 이스케이프가 실제 줄바꿈으로 바뀜 (2026-10-25)
+
+- 증상: Bash 도구의 `python - <<'EOF'` 안에 패치 스크립트를 넣고 문자열에 `\n`을 두 번 이스케이프해 썼는데, 쓰여진 파일에는 실제 줄바꿈이
+  들어가 `SyntaxError: unterminated string literal`이 났다(건강 레터 작성기 `_clean`, HTML 단락 분리, 테스트 세 곳).
+- 원인: 도구 경로에서 heredoc 본문의 역슬래시 시퀀스가 한 번 더 해석된다(따옴표로 감싼 `'EOF'`도 막지 못함). `\s` 같은 정규식도
+  `SyntaxWarning: invalid escape sequence`로 나타난다.
+- 해결: 역슬래시가 든 스크립트는 Write 도구로 임시 폴더에 파일로 쓴 뒤 `python 파일`로 실행한다. 짧은 수정은 Edit 도구를 쓴다.
+- 예방: heredoc에는 역슬래시가 없는 내용만 넣는다. 패치 뒤에는 `python -W error -c "import 모듈"`로 바로 확인한다.
+
+### TS-031 Google Health API: 다른 범위와 섞인 토큰 거부, 요청 모양은 discovery 문서로 (2026-10-25)
+
+- 증상: `smith health fitbit sync`가 403 `PERMISSION_DENIED Request contains disallowed OAuth scope(s)`(DISALLOWED_OAUTH_SCOPES)로 멈추고,
+  하루 합계 요청은 400 `Unknown name "year" at 'range.start'`로 거부됐다.
+- 원인: ① Google Health API는 access token에 Gmail·Drive·캘린더 등 다른 API 범위가 함께 들어 있으면 거부한다(한 동의로 모든 범위를
+  받는 `smith mail login` 방식과 충돌). ② 참조 문서에 CivilDateTime의 필드가 없어 추측한 모양이 틀렸다.
+- 해결: ① Google Health 권한은 `smith health fitbit login`으로 세 읽기 범위만 따로 동의하고 refresh token을 별도 보관(`credentials.
+  load_health`). ② `https://health.googleapis.com/$discovery/rest?version=v4`(공개, 인증 불필요)를 받아 스키마를 읽었다: CivilDateTime은
+  `{date: {year, month, day}, time: {hours, minutes, seconds}}`. 오류 메시지는 코드가 `notes`에 남겨 다음부터는 바로 보인다.
+- 예방: Google API를 새로 붙일 때 참조 페이지가 모호하면 discovery 문서부터 읽는다. API마다 토큰을 따로 둘지 먼저 확인한다.

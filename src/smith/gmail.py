@@ -36,6 +36,10 @@ DAILY_SCOPES = ("https://www.googleapis.com/auth/calendar.events.readonly", "htt
 DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 # People to remember (daily design §14): every contact, read-only; Smith never asks for phone, e-mail or address fields.
 CONTACTS_SCOPE = "https://www.googleapis.com/auth/contacts.readonly"
+# Google Health API (Fitbit) read scopes for the weekly health letter (health design §5; official scopes page 2026-10-25).
+HEALTH_SCOPES = ("https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly",
+                 "https://www.googleapis.com/auth/googlehealth.sleep.readonly",
+                 "https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly")
 # Every message Smith sends carries this header, so a reply reader never mistakes Smith's own mail
 # (for example an answer whose send outcome, and so its id, is unknown) for a question.
 SMITH_HEADER = "X-Smith-Message"
@@ -101,11 +105,13 @@ Getter = Callable[[str, dict[str, str]], tuple[int, dict[str, Any]]]
 
 def login(client_id: str, client_secret: str, *, open_browser: Callable[[str], Any] = webbrowser.open,
           poster: Poster = post, read: bool = False, daily: bool = False, drive: bool = False,
-          contacts: bool = False) -> str:
+          contacts: bool = False, health_only: bool = False) -> str:
     """Run the browser consent flow on a loopback port and return a refresh token.
 
     `read` adds gmail.readonly (reply answering); `daily` adds the calendar and tasks read-only scopes; `drive` adds
-    drive.readonly (Takeout archives of Keep); `contacts` adds contacts.readonly (people to remember).
+    drive.readonly (Takeout archives of Keep); `contacts` adds contacts.readonly (people to remember). `health_only`
+    asks for the three Google Health API read scopes and nothing else: that API rejects a token carrying other
+    scopes (403 DISALLOWED_OAUTH_SCOPES, seen 2026-10-25), so the Fitbit grant is its own consent and its own token.
 
     Raises:
         MailError: consent was denied or timed out, the state did not match, or no refresh token came back.
@@ -130,8 +136,9 @@ def login(client_id: str, client_secret: str, *, open_browser: Callable[[str], A
         def log_message(self, *args: Any) -> None:  # The query holds the one-time code; never log it.
             pass
 
-    wanted = ((SCOPE,) + ((READ_SCOPE,) if read else ()) + (DAILY_SCOPES if daily else ()) + ((DRIVE_SCOPE,) if drive else ())
-              + ((CONTACTS_SCOPE,) if contacts else ()))
+    wanted = HEALTH_SCOPES if health_only else (
+        (SCOPE,) + ((READ_SCOPE,) if read else ()) + (DAILY_SCOPES if daily else ()) + ((DRIVE_SCOPE,) if drive else ())
+        + ((CONTACTS_SCOPE,) if contacts else ()))
     with http.server.HTTPServer(("127.0.0.1", 0), Handler) as server:
         server.timeout = 1
         redirect_uri = f"http://127.0.0.1:{server.server_address[1]}"
@@ -156,6 +163,10 @@ def login(client_id: str, client_secret: str, *, open_browser: Callable[[str], A
     if status != 200 or not payload.get("refresh_token"):
         raise MailError("token-exchange-failed" if status != 200 else "no-refresh-token")
     granted = str(payload.get("scope", "")).split()
+    if health_only:
+        if any(scope not in granted for scope in HEALTH_SCOPES):
+            raise MailError("health-scope-not-granted")
+        return str(payload["refresh_token"])
     if SCOPE not in granted:
         raise MailError("send-scope-not-granted")
     if read and READ_SCOPE not in granted:

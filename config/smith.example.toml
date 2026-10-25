@@ -65,6 +65,21 @@ contact_reminders = "noted"
 # warning_keywords = ["서울"]
 # label = "서울 종로구"                # shown in the mail as the weather's basis
 
+# The weekly health letter (docs/health-design.md): a coach, not a doctor. Sunday is the plan (goal dashboard, one
+# topic card, this week's 1~3 actions); the optional midweek check compares the week so far with those actions once
+# Fitbit is connected. `goals` are the client's priorities shown on the dashboard line; `topics` is the rotation.
+[health]
+enabled = false
+weekday = "sunday"
+time = "07:00"
+topics = ["vascular", "uric-weight", "nutrition-gut", "balance", "stomach-habits"]
+goals = ["posture", "body_fat", "ldl"]
+
+[health.midweek]
+enabled = false
+weekday = "wednesday"
+time = "18:00"
+
 # Optional, in the local config: a verified ledger copy after each sent report (see `smith backup`).
 # Backups hold real financial data; prefer a drive you control, never Git or a shared cloud folder.
 # [backup]

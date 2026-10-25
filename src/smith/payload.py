@@ -28,6 +28,11 @@ _PII_PATTERNS = {
     "email": re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"),
     "phone": re.compile(r"(?<!\d)01[016789]-?\d{3,4}-?\d{4}(?!\d)"),
     "labelled-name": re.compile(r"(?:성명|이름|name)\s*[:：=]\s*[^\s,;]{2,}", re.IGNORECASE),
+    # Hospital and membership numbers and a birth date written out, as they appear on a check-up report (health
+    # letter review 2026-10-25).
+    "registration-number": re.compile(r"(?:등록|수진|차트|환자|회원)\s*번호\s*[:：=]?\s*[A-Za-z0-9-]{4,}"),
+    "birth-date": re.compile(r"(?:생년월일|생일)\s*[:：=]?\s*\d{2,4}[.\-/년]\s*\d{1,2}[.\-/월]\s*\d{1,2}일?|"
+                             r"\d{4}[.\-/년]\s*\d{1,2}[.\-/월]\s*\d{1,2}일?\s*생(?![가-힣])"),
     "labelled-address": re.compile(r"(?:주소|address)\s*[:：=]\s*[^\n,;]{4,}", re.IGNORECASE),
     "korean-address": re.compile(
         r"(?:서울(?:특별시|시)?|부산(?:광역시|시)?|대구(?:광역시|시)?|인천(?:광역시|시)?|"

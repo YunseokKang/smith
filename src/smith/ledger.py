@@ -25,7 +25,7 @@ from smith.records import (
 logger = logging.getLogger(__name__)
 _END_OF_TIME = datetime.max.replace(tzinfo=timezone.utc)
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 _V1 = (
     """CREATE TABLE imports (
         import_id TEXT PRIMARY KEY,
@@ -411,8 +411,11 @@ _V20 = (
         snapshot TEXT NOT NULL
     )""",
 )
+# v21: the weekly health letter (health design §9) shares the daily-mail run table and snapshots; `product` tells the
+# two apart (a reply is routed by it), and the run key of a health letter is "health:<ISO week>".
+_V21 = ("ALTER TABLE daily_runs ADD COLUMN product TEXT NOT NULL DEFAULT 'daily'",)
 _MIGRATIONS = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8, 9: _V9, 10: _V10, 11: _V11, 12: _V12,
-               13: _V13, 14: _V14, 15: _V15, 16: _V16, 17: _V17, 18: _V18, 19: _V19, 20: _V20}
+               13: _V13, 14: _V14, 15: _V15, 16: _V16, 17: _V17, 18: _V18, 19: _V19, 20: _V20, 21: _V21}
 _COLUMNS = ("record_id, revision, kind, owner_id, source, status, change_type, corrects_revision, "
             "reason, effective_at, recorded_at, import_id, fields")
 
@@ -1433,11 +1436,11 @@ def _db_time(value: datetime) -> str:
 
 DAILY_FINAL = ("sent", "unknown", "skipped")   # Never attempted again: delivered, possibly delivered, given up.
 _DAILY_COLUMNS = ("run_key, day, run_id, trigger, status, attempts, created_at, updated_at, finished_at, subject, "
-                  "html_sha256, message_id, error_code")
+                  "html_sha256, message_id, error_code, product")
 
 
 def claim_daily_run(conn: sqlite3.Connection, *, run_key: str, day: date, run_id: str, trigger: str, now: datetime,
-                    lease: timedelta, max_attempts: int) -> tuple[str | None, str]:
+                    lease: timedelta, max_attempts: int, product: str = "daily") -> tuple[str | None, str]:
     """Atomically claim one daily-mail run for building. Returns (token, outcome): the token is the claim time every
     later transition must match (`advance_daily_run`). No token when the run is final ("already-<status>"), held by
     another run within `lease` ("in-progress"), or out of attempts ("skipped"). A `sending` run whose lease ran out
@@ -1448,7 +1451,7 @@ def claim_daily_run(conn: sqlite3.Connection, *, run_key: str, day: date, run_id
         row = conn.execute("SELECT status, attempts, created_at FROM daily_runs WHERE run_key = ?", (run_key,)).fetchone()
         if row is None:
             conn.execute(f"INSERT INTO daily_runs ({_DAILY_COLUMNS}) VALUES (?, ?, ?, ?, 'building', 1, ?, ?, NULL, NULL, "
-                         "NULL, NULL, NULL)", (run_key, day.isoformat(), run_id, trigger, token, token))
+                         "NULL, NULL, NULL, ?)", (run_key, day.isoformat(), run_id, trigger, token, token, product))
             conn.execute("COMMIT")
             return token, "claimed"
         status, attempts, created_at = row
@@ -1497,22 +1500,24 @@ def daily_run(conn: sqlite3.Connection, run_key: str) -> dict[str, Any] | None:
     return None if row is None else _daily_row(row)
 
 
-def daily_runs(conn: sqlite3.Connection, *, limit: int = 20) -> list[dict[str, Any]]:
-    """Most recent daily-mail runs first."""
-    rows = conn.execute(f"SELECT {_DAILY_COLUMNS} FROM daily_runs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+def daily_runs(conn: sqlite3.Connection, *, limit: int = 20, product: str = "daily") -> list[dict[str, Any]]:
+    """Most recent runs of one product (daily mail, health letter) first."""
+    rows = conn.execute(f"SELECT {_DAILY_COLUMNS} FROM daily_runs WHERE product = ? ORDER BY created_at DESC LIMIT ?",
+                        (product, limit)).fetchall()
     return [_daily_row(row) for row in rows]
 
 
-def daily_runs_for_day(conn: sqlite3.Connection, day: date) -> list[dict[str, Any]]:
-    """Every run (scheduled or manual) of one local day."""
-    rows = conn.execute(f"SELECT {_DAILY_COLUMNS} FROM daily_runs WHERE day = ? ORDER BY created_at", (day.isoformat(),)).fetchall()
+def daily_runs_for_day(conn: sqlite3.Connection, day: date, product: str = "daily") -> list[dict[str, Any]]:
+    """Every run (scheduled or manual) of one product on one local day."""
+    rows = conn.execute(f"SELECT {_DAILY_COLUMNS} FROM daily_runs WHERE day = ? AND product = ? ORDER BY created_at",
+                        (day.isoformat(), product)).fetchall()
     return [_daily_row(row) for row in rows]
 
 
-def sent_daily_runs(conn: sqlite3.Connection, *, since: datetime) -> list[dict[str, Any]]:
-    """Delivered daily mails with a Gmail id since `since`: the threads whose replies are daily questions."""
+def sent_daily_runs(conn: sqlite3.Connection, *, since: datetime, product: str = "daily") -> list[dict[str, Any]]:
+    """Delivered mails of one product with a Gmail id since `since`: the threads whose replies belong to it."""
     rows = conn.execute(f"SELECT {_DAILY_COLUMNS} FROM daily_runs WHERE status = 'sent' AND message_id IS NOT NULL "
-                        "AND created_at >= ? ORDER BY created_at DESC", (_db_time(since),)).fetchall()
+                        "AND created_at >= ? AND product = ? ORDER BY created_at DESC", (_db_time(since), product)).fetchall()
     return [_daily_row(row) for row in rows]
 
 
@@ -1530,8 +1535,8 @@ def record_reminders_shown(conn: sqlite3.Connection, keys: list[str], *, shown_o
 
 def _daily_row(row: tuple) -> dict[str, Any]:
     (run_key, day, run_id, trigger, status, attempts, created_at, updated_at, finished_at, subject, html_sha256,
-     message_id, error_code) = row
-    return {"run_key": run_key, "day": date.fromisoformat(day), "run_id": run_id, "trigger": trigger, "status": status,
+     message_id, error_code, product) = row
+    return {"run_key": run_key, "day": date.fromisoformat(day), "run_id": run_id, "trigger": trigger, "status": status, "product": product,
             "attempts": attempts, "created_at": datetime.fromisoformat(created_at),
             "updated_at": datetime.fromisoformat(updated_at),
             "finished_at": None if finished_at is None else datetime.fromisoformat(finished_at), "subject": subject,

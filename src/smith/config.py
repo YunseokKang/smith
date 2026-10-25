@@ -29,7 +29,13 @@ KNOWN_KEYS = {
     # The daily-routine mail (daily design §2, §3.1, §7): schedule, news topics, the district for weather and the
     # household's airway sensitivity that moves air-quality and pollen cautions one grade earlier.
     "daily": {"enabled", "time", "weekdays", "news_count", "news_topics", "airways_sensitive", "weather", "contact_reminders"},
+    # The weekly health letter (health design §3, §9): the Sunday plan, the optional midweek check, the rotation
+    # of topics and the client's priority goals shown on the dashboard line.
+    "health": {"enabled", "weekday", "time", "topics", "goals", "midweek"},
 }
+HEALTH_MIDWEEK_KEYS = {"enabled", "weekday", "time"}
+HEALTH_TOPICS = ("vascular", "uric-weight", "nutrition-gut", "balance", "stomach-habits")
+HEALTH_GOALS = ("posture", "body_fat", "ldl", "uric_acid", "vitamin_d", "weight", "blood_pressure", "glucose")
 DAILY_WEATHER_KEYS = {"lat", "lon", "air_station", "air_region", "pollen_area_no", "warning_keywords", "label"}
 DAILY_WEATHER_OPTIONAL = {"label"}   # The district name the mail shows as the weather's basis ("성남시 분당구").
 # `lease_exit`: how the client plans to return a lease deposit on this home ("relet": a new tenant, the default;
@@ -107,6 +113,7 @@ def load_config(path: Path) -> dict:
     _check_backup(config.get("backup", {}))
     _check_events(config.get("events", {}))
     _check_daily(config.get("daily", {}))
+    _check_health(config.get("health", {}))
     if "properties" in config or "targets" in config:
         from smith.realestate import RealEstateError, validate_properties, validate_targets
         try:
@@ -233,6 +240,40 @@ def _check_daily(daily: object) -> None:
     words = spot["warning_keywords"]
     if not isinstance(words, list) or not words or any(not isinstance(w, str) or not w.strip() for w in words):
         raise ValueError("daily.weather.warning_keywords must list the district's names, such as [\"경기\", \"성남\"]")
+
+
+def _check_health(health: object) -> None:
+    """Optional `[health]` (health design §9): the Sunday letter's weekday and time, the optional `[health.midweek]`
+    check, the topic rotation and the goals the dashboard line tracks."""
+    if not isinstance(health, dict):
+        raise ValueError("health must be a table")
+    _check_letter_slot("health", health, "sunday", "07:00")
+    topics = health.get("topics", list(HEALTH_TOPICS))
+    if not isinstance(topics, list) or not topics or any(t not in HEALTH_TOPICS for t in topics) or len(set(topics)) != len(topics):
+        raise ValueError(f"health.topics must list distinct topics from {', '.join(HEALTH_TOPICS)}")
+    goals = health.get("goals", [])
+    if not isinstance(goals, list) or len(goals) > 5 or any(g not in HEALTH_GOALS for g in goals):
+        raise ValueError(f"health.goals must list up to 5 of {', '.join(HEALTH_GOALS)}")
+    midweek = health.get("midweek", {})
+    if not isinstance(midweek, dict):
+        raise ValueError("health.midweek must be a table")
+    unknown = sorted(set(midweek) - HEALTH_MIDWEEK_KEYS)
+    if unknown:
+        raise ValueError(f"Unknown setting(s): {', '.join('health.midweek.' + k for k in unknown)}")
+    _check_letter_slot("health.midweek", midweek, "wednesday", "18:00")
+
+
+def _check_letter_slot(where: str, table: dict, default_day: str, default_time: str) -> None:
+    if not isinstance(table.get("enabled", False), bool):
+        raise ValueError(f"{where}.enabled must be a boolean")
+    if table.get("weekday", default_day) not in WEEKDAYS:
+        raise ValueError(f"{where}.weekday must be a weekday name")
+    clock = table.get("time", default_time)
+    try:
+        if not isinstance(clock, str) or len(clock) != 5 or time.fromisoformat(clock).tzinfo is not None:
+            raise ValueError()
+    except ValueError:
+        raise ValueError(f"{where}.time must be HH:MM") from None
 
 
 def _is_email(value: object) -> bool:

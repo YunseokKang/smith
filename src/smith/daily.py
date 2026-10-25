@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from smith import agenda, contacts, credentials, datagokr, evidence, gmail, history, holidays, keep, people, weather
+from smith import agenda, contacts, credentials, datagokr, evidence, gmail, health, history, holidays, keep, people, weather
 from smith.config import local_time
 
 WEEKDAYS_KO = "월화수목금토일"
@@ -100,6 +100,11 @@ def collect(db: Path, config: dict[str, Any], *, now: datetime, day: date | None
     if address_book:
         chosen = contacts.for_reminders(address_book, str(daily.get("contact_reminders", "noted")))
         book = contacts.merge(book if book is not None else people.parse({}), chosen)
+    # Health follow-ups join as dates (FR-39): the exam's name and D-day only, never a finding or a value.
+    try:
+        book = health.merge_dates(book if book is not None else people.parse({}), health.load(health.path(db)), day)
+    except health.HealthError:
+        failures["health"] = "invalid-file"
     today_holiday, ahead = None, None
     if key is not None:
         try:

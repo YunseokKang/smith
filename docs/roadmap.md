@@ -216,6 +216,26 @@
                   `stale`·`sync-<코드>`)·잠금. 첫 동기화 817명(2026-10-25). 가명 전달(P1·P2, 사용자 결정; `daily-writer-v3`·`daily-answer-v5`). 남은 점:
                   `people.json`과의 중복 생일 대조.
       - [ ] 후속(§9): 일정 살 붙이기, 주간 미리보기, 저녁 메일, `smith ask`와 주제 라우터(Keep 창고가 1차 자료), 메모 변경 이력.
+- [ ] 8단계: 건강 코치 주간 레터(FR-37~40, `docs/health-design.md`). 사용자 결정 2026-10-25(주 1회, 마스킹 수치 전달 동의, Fitbit).
+      - [x] 8a(2026-10-25) 건강 원장 `health.py`: 허용 코드 목록, 방식별 계열, track별 최근 소견이 정하는 추적, 해소 소견 제외, 알려진
+            track의 미래 날짜만 아침 메일 날짜 책에(`daily.collect`가 `health.merge_dates`), 멱등 가져오기(충돌은 전체 거부), 약-검사
+            해석 표(두타스테리드 → PSA 2배·최저값 기준, 라벨과 다른 빈도 메모). `smith health check|list|series|followups|import|path`,
+            `[health]`·`[health.midweek]` 설정 검증. 복용·활동은 고객 진술로 들어감. 첫 들이기 완료(관측 429·소견 82·자세 48·유전 형질 84·
+            장내미생물 31 점수; `docs/health-design.md` §4), 소견 track 부여, 안압 소견 해소(고객 진술), `smith health resolve`.
+            남은 점: 고객 확인(2026 판정 A/B, 자세 사진 날짜, 불확실 표시 값), 2023·2025 결과지의 그림만 있는 쪽(판독지) 미전사.
+      - [x] 8b(2026-10-25) 주간 레터: `health_letter.py`(결정적 주제 순환, 목표 계기판, 주제 계열·소견·추적, 유전/미생물 참고, 복용-검사
+            메모, 활동 추정 대 지침, 지난주 행동), `health_html.py`(녹색 톤, 표 막대 추이, 소견·추적·경계), `health_writer.py`
+            (`health-writer-v1`, 숫자·금지 표현·해소 소견·targets·유전 단독 근거 검증, 지침 권고 폴백), `health_send.py`(공유 실행 표
+            `product=health`, 회차 `health:<ISO 주>`, 3일 지연 창, 스냅샷), `smith health preview|send|status`, `run-due` 연결(보고서·
+            하루 일과 뒤). 사용자 검수(2026-10-25) 반영 v2: 숫자 없는 판정 제목·머리 판정문, 계기판 하기/피하기, 항목 표(쉬운 이름·
+            코드 계산 수준/추이 배지·모델 한 줄), 시간축 선 그래프 PNG(`health_chart.py`, cid 첨부), 2023·2025·2026 InBody와 자율신경
+            검사(그림 쪽) 들이기(코드 9개 추가), 공단 구강·마음건강·전립선 설문 소견. 남은 점: 로컬 `[health] enabled` 켜기(사용자),
+            수요일 중간 점검은 8d와 함께.
+      - [ ] 8c 답장 질의응답(`Question.product = "health"`)과 위험 신호 코드 게이트.
+      - [~] 8d(2026-10-25) Fitbit `fitbit.py`: `mail login --health`(읽기 범위 3개), 하루 요약 저장·일일 동기화·주간 요약, 레터 연결,
+            `smith health fitbit sync|status|week`. 남은 점: 고객 재동의 뒤 첫 실제 호출로 응답 필드 확인(CivilDateTime·활동 수준 enum·
+            수면 단계), 행동 점검 자동화(지난주 행동 대 Fitbit 값), 수요일 중간 점검 켜기.
+      - [ ] 8e 검진 해설판·준비판, 식약처 약 정보(e약은요·DUR), 최신 연구 감시.
 - [ ] 이후 Hermes 조회 API 연결 및 전용 앱.
 
 테스트는 단계별 실제 위험에 맞춘다. 첫 외부 테스트는 조회만 수행한다.

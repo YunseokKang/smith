@@ -30,6 +30,9 @@ class ConfigTests(unittest.TestCase):
             ('tuesday = "markets"', 'tuesday = "gossip"'),                  # Not an edition.
             ('saturday = "life"', 'someday = "life"'),                      # Not a weekday.
             ('enabled = false', 'enabled = "false"'),
+            ('weekday = "sunday"', 'weekday = "someday"'),                   # Health letter slot.
+            ('goals = ["posture", "body_fat", "ldl"]', 'goals = ["hair"]'),  # Not a trackable goal.
+            ('time = "18:00"', 'time = "6pm"'),                             # Midweek check.
         ]
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "test.toml"
