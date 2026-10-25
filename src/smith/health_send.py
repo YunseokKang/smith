@@ -126,8 +126,9 @@ def publish(db: Path, config: dict[str, Any], *, now: datetime, day: date, trigg
     if not held:
         return {"status": "skipped", "run_key": key, "subject": subject, "error_code": "claim-lost"}
     try:
-        # The charts travel as inline attachments the HTML references by cid (mail clients drop SVG and data URIs).
-        message_id = sender(credentials, recipient=recipient, subject=subject, html=html, text=text, images=health_html.charts(data))
+        # The charts and the action pictures travel as inline attachments the HTML references by cid (mail clients
+        # drop SVG and data URIs).
+        message_id = sender(credentials, recipient=recipient, subject=subject, html=html, text=text, images=health_html.attachments(data))
     except gmail.MailError as error:
         return _finish(db, key, token, "sending", "unknown" if error.uncertain else "failed", error_code=error.code, subject=subject)
     return _finish(db, key, token, "sending", "sent", message_id=message_id, subject=subject)

@@ -36,13 +36,23 @@ WEEKDAY_KO = "월화수목금토일"
 def render(data: dict[str, Any], *, inline: bool = False) -> tuple[str, str, str]:
     """(subject, html, text) for one letter. `inline` embeds the charts as data URIs (the preview file); a sent mail
     references them by cid and carries them as attachments (`charts`)."""
+    from smith import health_art
+
     prose = data.get("prose") or {}
     images = charts(data)
+    icons = health_art.images_for(data)
     subject = _subject(data, prose)
-    cards = [card for card in (_dashboard(data, prose), _topic(data, prose, images, inline), _actions(data, prose),
+    cards = [card for card in (_dashboard(data, prose), _topic(data, prose, images, inline), _actions(data, prose, icons, inline),
                                _activity(data), _review(data, prose), _follow_ups(data), _boundary(data)) if card]
     html = _page(_hero(data, prose) + "".join(cards))
     return subject, html, _text(data, prose, subject)
+
+
+def attachments(data: dict[str, Any]) -> dict[str, bytes]:
+    """Every inline picture of the sent mail by cid: the charts and the action pictures."""
+    from smith import health_art
+
+    return {**charts(data), **health_art.payload(health_art.images_for(data))}
 
 
 def charts(data: dict[str, Any]) -> dict[str, bytes]:
@@ -254,19 +264,28 @@ def _posture_table(rows: list[dict[str, Any]]) -> str:
             f'원장에 있습니다. 장비·방식이 다른 측정값은 서로 비교하지 않습니다.</div>')
 
 
-def _actions(data: dict[str, Any], prose: dict[str, Any]) -> str:
+def _actions(data: dict[str, Any], prose: dict[str, Any], icons: dict[str, Any] | None = None, inline: bool = False) -> str:
+    from smith import health_art
+
     actions = prose.get("actions") or data["fallback_actions"]
+    icons = icons if icons is not None else {}
     source_note = ("" if prose.get("actions") else
                    f'<div style="font-size:12px;color:{MUTED};margin-top:10px">이번 주는 공식 지침의 일반 권고입니다(개인화된 제안은 작성 모델이 '
                    f'검증을 통과했을 때 실립니다). 출처: {escape("; ".join(data["sources"]))}</div>')
     items = []
     for number, action in enumerate(actions, 1):
+        src = health_art.source(f"action-{number}", icons, inline=inline)
+        # A small picture of the food, the movement or the habit beside the action (user request 2026-10-25).
+        picture = (f'<td style="width:64px;vertical-align:top;padding:2px 12px 0 0"><img src="{src}" width="56" height="56" alt="" '
+                   f'style="display:block;width:56px;height:56px"></td>' if src else "")
+        body = (f'<div style="font-size:15px;font-weight:700;color:{INK}">{number}. {escape(action["what"])} '
+                f'{_pill(CATEGORY_WORDS.get(action.get("category", ""), action.get("category", "")), ACCENT)}</div>'
+                f'<div style="font-size:14px;color:{BODY};margin-top:4px"><b>얼마나</b> {escape(action["amount"])}</div>'
+                f'<div style="font-size:13px;color:{BODY};margin-top:2px"><b>왜</b> {escape(action["why"])}</div>'
+                f'<div style="font-size:13px;color:{MUTED};margin-top:2px"><b>확인</b> {escape(action["check"])}</div>')
         items.append(f'<div style="border:1px solid {HAIRLINE};border-radius:14px;padding:12px 14px;margin:8px 0">'
-                     f'<div style="font-size:15px;font-weight:700;color:{INK}">{number}. {escape(action["what"])} '
-                     f'{_pill(CATEGORY_WORDS.get(action.get("category", ""), action.get("category", "")), ACCENT)}</div>'
-                     f'<div style="font-size:14px;color:{BODY};margin-top:4px"><b>얼마나</b> {escape(action["amount"])}</div>'
-                     f'<div style="font-size:13px;color:{BODY};margin-top:2px"><b>왜</b> {escape(action["why"])}</div>'
-                     f'<div style="font-size:13px;color:{MUTED};margin-top:2px"><b>확인</b> {escape(action["check"])}</div></div>')
+                     f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>{picture}'
+                     f'<td style="vertical-align:top">{body}</td></tr></table></div>')
     return _card("이번 주 할 일", "", "".join(items) + source_note, accent=True)
 
 
