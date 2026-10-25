@@ -237,8 +237,11 @@ def _same_stock(view: LedgerView, items: list[Inflow]) -> list[dict[str, Any]]:
         held = None if any(v is None for v in held_values) else sum(held_values, Decimal(0))
         granted = None if any(v is None for v in grants) else sum(grants, Decimal(0))
         known = held is not None and granted is not None and total is not None
+        # The client reads the company, not the ticker; the name stays out of the model context below.
+        name = next((r.fields["instrument_name"] for r in mine if r.fields.get("symbol") == symbol
+                     and r.fields.get("market") == market and r.fields.get("instrument_name")), symbol)
         # No securities yet is a known 0%, not an unknown share: a first grant still makes a 100% position.
-        found.append({"symbol": symbol, "market": market, "held": held, "granted": granted,
+        found.append({"symbol": symbol, "name": name, "market": market, "held": held, "granted": granted,
                       "share_now": None if not known else held / total if total else Decimal(0),
                       "share_with_grants": (held + granted) / (total + granted) if known and total + granted else None})
     return found
@@ -280,7 +283,7 @@ def assumptions(items: list[Inflow]) -> list[str]:
     if not items:
         return []
     return ["예정 소득(성과급·주식 보상): 받기 전까지 순자산·월 현금흐름에 넣지 않음. 불리 시나리오는 확정분만, 기준은 확정+예상, "
-            "유리는 가능성까지 포함",
+            "유리는 불확실분(받을 수도 있는 것)까지 포함",
             "주식 보상은 같은 종목의 가장 최근 보유 평가 단가로 평가(없으면 입력한 추정액), 받을 때까지 주가가 시나리오 수익률로 움직인다고 가정",
             "성과급·주식 보상의 세금: 그해 근로소득에 더해지는 소득세·지방소득세 증가분(근로소득공제만 반영)과 건강·장기요양·"
             f"고용보험 약 {percent(tax.PAYROLL_INSURANCE_RATE, 0)}. 세전 기본 연봉을 모르면 한계세율 "

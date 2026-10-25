@@ -26,7 +26,7 @@ CATEGORY_LABELS = {
 }
 LIQUIDITY_LABELS = {"immediate": "즉시", "days": "수일 내", "months": "수개월", "restricted": "인출 제한"}
 PAY_LABELS = {"bonus": "성과급", "stock_compensation": "주식 보상"}
-CERTAINTY_LABELS = {"confirmed": "확정", "expected": "예상", "possible": "가능성"}
+CERTAINTY_LABELS = {"confirmed": "확정", "expected": "예상", "possible": "불확실"}
 HERMES_LABEL = "Hermes 운용"
 # Real changes only: a correction of a past input restates the start and is shown apart (design §6).
 COMPONENT_LABELS = {

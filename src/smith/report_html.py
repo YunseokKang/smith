@@ -1267,9 +1267,12 @@ def _future_income(data: dict[str, Any], *, overview: bool = False) -> str:
     if not items:
         return ""
     sure = found["by_certainty"]
-    lead = (f"앞으로 받을 성과급·주식 보상은 세후 추정 확정 <b>{_short(sure['confirmed'])}</b>, 예상 "
-            f"<b>{_short(sure['expected'])}</b>, 가능성 {_short(sure['possible'])}이며, 받기 전까지는 순자산에 넣지 않고 계획에만 "
-            "확실성별로 반영합니다.")
+    # A bucket with nothing in it is left out: "불확실 0원" reads as a puzzle, not a fact.
+    parts = [f"{label} <b>{_short(sure[key])}</b>" for key, label in
+             (("confirmed", "확정"), ("expected", "예상"), ("possible", "불확실(받을 수도 있는 것)")) if sure[key] != 0]
+    lead = (f"앞으로 받을 성과급·주식 보상은 세후 추정 {', '.join(parts) or '<b>0원</b>'}입니다. 받기 전까지는 순자산에 넣지 않고, "
+            "계획에서는 보수적으로 볼 때 확정분만, 기준 계획에서는 예상분까지"
+            + (", 낙관적으로 볼 때 불확실분까지" if sure["possible"] != 0 else "") + " 셉니다.")
     if found.get("overdue"):
         lead += (f" 지급 예정일이 지났는데 받았다는 기록이 없는 항목 {len(found['overdue'])}건은 계획에서 뺐습니다. 받으셨는지 "
                  "알려 주시면 실제 지급일과 과세 금액으로 기록하겠습니다.")
@@ -1295,7 +1298,7 @@ def _future_income(data: dict[str, Any], *, overview: bool = False) -> str:
         if stock["share_now"] is None or stock["share_with_grants"] is None or not stock["granted"]:
             continue
         inner += (f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin-top:10px">회사 주식 집중: 지금 보유한 '
-                  f'{escape(stock["symbol"])}은 본인 증권 자산의 <b>{_pct(stock["share_now"], 0)}</b>이고, 예정된 주식 보상과 자사주로 '
+                  f'{escape(stock.get("name") or stock["symbol"])} 주식은 본인 증권 자산의 <b>{_pct(stock["share_now"], 0)}</b>이고, 예정된 주식 보상과 자사주로 '
                   f'받는 성과급(기준, 세후)을 받으면 <b>{_pct(stock["share_with_grants"], 0)}</b>가 됩니다. 받는 대로 일부를 분산하는 '
                   "원칙을 정해 두시길 권합니다.</div>")
     return _section("앞으로 들어올 돈", lead, inner)

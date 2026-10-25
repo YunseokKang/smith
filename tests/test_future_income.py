@@ -23,7 +23,7 @@ def rec(record_id, kind, at=AT, **fields):
 def stock(record_id, quantity, price, at=AT):
     return rec(record_id, "asset", at, category="stock", account_type="brokerage", currency="KRW",
                value=str(quantity * price), valuation_method="market", liquidity="days", symbol="005930", market="KR",
-               quantity=str(quantity), unit_price=str(price))
+               quantity=str(quantity), unit_price=str(price), instrument_name="삼성전자")
 
 
 def pay(record_id, category, on, amount, certainty, basis="gross", **extra):
@@ -256,6 +256,10 @@ class FutureIncomeTests(unittest.TestCase):
         html = render(data)[1]
         self.assertIn("앞으로 들어올 돈", html)
         self.assertIn("최종 세후", html)
+        # The client reads the company and plain certainty words; the model context keeps only the ticker.
+        self.assertIn("삼성전자 주식은 본인 증권 자산의", html)
+        self.assertIn("불확실(받을 수도 있는 것)", html)
+        self.assertNotIn("name", context["expected_pay"]["same_stock"][0])
         self.assertTrue(any(i["kind"] == "inflow" for i in data["timeline"]))
 
 
