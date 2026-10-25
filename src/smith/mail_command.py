@@ -21,6 +21,8 @@ def add_parser(sub: Any) -> None:
                       help="login: also grant read-only access to the primary calendar and tasks (daily mail)")
     mail.add_argument("--drive", action="store_true",
                       help="login: also grant read-only Drive access, used only for the scheduled Takeout archives of Keep")
+    mail.add_argument("--contacts", action="store_true",
+                      help="login: also grant read-only Contacts access (names, birthdays, 중요한 날, 메모; no phone, e-mail or address)")
     mail.add_argument("--db", type=Path, default=Path("data/smith.db"))
     mail.add_argument("--config", type=Path, default=DEFAULT_LOCAL_CONFIG,
                       help="test: local config holding [mail] recipient (default: config/smith.local.toml)")
@@ -53,11 +55,12 @@ def _login(args: argparse.Namespace) -> int:
             client_id, client_secret = stored[0], stored[1]   # type: ignore[index]
             print("Reusing the stored Google client; the grant is replaced by the one you consent to now.")
         granted = (["send"] + (["Gmail read"] if args.read else []) + (["calendar read", "tasks read"] if args.daily else [])
-                   + (["Drive read (Takeout archives)"] if args.drive else []))
+                   + (["Drive read (Takeout archives)"] if args.drive else []) + (["Contacts read"] if args.contacts else []))
         print(f"Opening the browser for Google consent ({', '.join(granted)}). Waiting up to 5 minutes...")
-        if args.read or args.daily or args.drive:
+        if args.read or args.daily or args.drive or args.contacts:
             print("Google shows an 'unverified app' screen for these scopes: choose Advanced, then continue to the app.")
-        refresh_token = gmail.login(client_id, client_secret, read=args.read, daily=args.daily, drive=args.drive)
+        refresh_token = gmail.login(client_id, client_secret, read=args.read, daily=args.daily, drive=args.drive,
+                                    contacts=args.contacts)
     except gmail.MailError as error:
         print(f"Gmail login failed ({error.code}). Nothing stored.")
         return 1
@@ -69,6 +72,8 @@ def _login(args: argparse.Namespace) -> int:
         print("Check the calendar and tasks reads with `smith agenda check`, then `smith agenda events` and `smith agenda tasks`.")
     if args.drive:
         print("Check the Keep archive sync with `smith keep sync`.")
+    if args.contacts:
+        print("Check the address book sync with `smith contacts sync`, then `smith contacts list`.")
     return 0
 
 

@@ -78,6 +78,7 @@ def run_due(db: Path, config: dict[str, Any], *, now: datetime) -> list[str]:
     day = local_time(now, config["app"]["timezone"]).date()
     slot = daily_send.slot_for(config, day)
     lines += _sync_keep(db, now)
+    lines += _sync_contacts(db, now)
     if slot - PREPARE_AHEAD <= now < slot and daily_send.is_mail_day(config, day):
         daily_config = config.get("daily", {})
         try:
@@ -116,6 +117,36 @@ def _sync_keep(db: Path, now: datetime) -> list[str]:
         return [f"keep sync: {result['outcome']}" + (f" {result['imported']} notes from {result['stamp']}" if result["outcome"] == "imported" else "")
                 + (f" ({result['error_code']})" if result["error_code"] else "")]
     return []
+
+
+def _sync_contacts(db: Path, now: datetime) -> list[str]:
+    """Once a day: refresh the address book copy (daily design §14). Never raises; a failure keeps yesterday's copy."""
+    from smith import contacts, credentials, gmail
+
+    file = contacts.path(db)
+    if not contacts.sync_due(file, now):
+        return []
+    stored = credentials.load_gmail()
+    if stored is None:
+        return []
+    try:
+        token, scopes = gmail.access_token(stored)
+    except gmail.MailError as error:
+        return [f"contacts sync skipped ({error.code})"]
+    if not contacts.has_scope(scopes):
+        return []   # Not opted in (smith mail login --contacts); nothing to say every hour.
+    # `contacts.sync` turns network, response and write failures into a result; the mail that follows must go out
+    # whatever happens here, so a local failure the sync did not foresee is caught as well (review 2026-10-25).
+    try:
+        result = contacts.sync(file, token, now=now)
+    except (OSError, ValueError) as error:
+        return [f"contacts sync: error ({type(error).__name__})"]
+    if result["outcome"] == "busy":
+        return ["contacts sync skipped (another sync is running)"]
+    if result["outcome"] in ("synced", "partial"):
+        return [f"contacts sync: {result['outcome']} {result['count']} contact(s)"
+                + (f" ({result['error_code']})" if result["error_code"] else "")]
+    return [f"contacts sync: error ({result['error_code']})"]
 
 
 def _send(db: Path, config: dict[str, Any], *, now: datetime, day: date, with_model: bool, force: bool = False) -> int:

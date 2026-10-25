@@ -10,10 +10,11 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from smith import agenda, credentials, datagokr, evidence, gmail, history, holidays, keep, people, weather
+from smith import agenda, contacts, credentials, datagokr, evidence, gmail, history, holidays, keep, people, weather
 from smith.config import local_time
 
 WEEKDAYS_KO = "월화수목금토일"
+CONTACT_PREFIX = "contact-"   # Person ids of address-book entries in the merged date book (contacts.person_id).
 AHEAD_DAYS = 14
 # Statutory periods that recur every year (start month, day, end month, day, label). Dates only, no amounts; the mail
 # calls them the usual schedule because a year's notice can shift a deadline (FR-17 wording rule).
@@ -38,6 +39,8 @@ class Inputs:
     notes: list[keep.Note] | None = None                 # The client's Keep notes (imported Takeout).
     notes_used: dict[str, date] = field(default_factory=dict)   # Note id -> day it last fed a sentence.
     weather_label: str = ""                              # The district the weather is read for (user request 2026-10-25).
+    # Every synced contact (FR-36): the calendar's "이 분은" lines; their dates are already merged into `book`.
+    address_book: list[contacts.Contact] = field(default_factory=list)
 
 
 def collect(db: Path, config: dict[str, Any], *, now: datetime, day: date | None = None,
@@ -87,6 +90,16 @@ def collect(db: Path, config: dict[str, Any], *, now: datetime, day: date | None
         book = people.load(people.path(db))
     except people.PeopleError:
         failures["people"] = "invalid-file"
+    # Contacts' dates join the household's for the people the policy picks (daily design §14); a broken people.json
+    # still leaves the contacts' reminders standing. A broken, partial, failed-since or stale copy is reported, not hidden.
+    stored = contacts.read(contacts.path(db))
+    problem = contacts.health(stored, now)
+    if problem:
+        failures["contacts"] = problem
+    address_book = stored.contacts
+    if address_book:
+        chosen = contacts.for_reminders(address_book, str(daily.get("contact_reminders", "noted")))
+        book = contacts.merge(book if book is not None else people.parse({}), chosen)
     today_holiday, ahead = None, None
     if key is not None:
         try:
@@ -101,7 +114,7 @@ def collect(db: Path, config: dict[str, Any], *, now: datetime, day: date | None
         failures["history"] = str(error)[:40]
     notes = keep.load(keep.directory(db))
     return Inputs(report, events, tasks, book, today_holiday, ahead, failures, events_today, notes, keep.used(keep.directory(db)),
-                  weather_label)
+                  weather_label, address_book)
 
 
 def assemble(inputs: Inputs, *, day: date, tz: str, now: datetime, airways_sensitive: bool,
@@ -119,6 +132,8 @@ def assemble(inputs: Inputs, *, day: date, tz: str, now: datetime, airways_sensi
         "rest_day": holidays.is_rest_day(day, inputs.holiday_today),
         "weather": None if report is None else {"report": report, "advice": advice, "label": inputs.weather_label},
         "events": events, "overlaps": agenda.overlaps(events), "tight_gaps": agenda.tight_gaps(events),
+        "event_about": contacts.about_events(inputs.address_book, [e.title for e in events]),
+        "contacts": list(inputs.address_book),   # For the writer's per-person notes; never sent whole.
         "tasks": {"overdue": agenda.overdue(tasks, day), "due_today": agenda.due_today(tasks, day),
                   "overdue_total": sum(1 for t in tasks if t.due is not None and t.due < day)},
         "reminders": people.reminders(book, day),
@@ -165,24 +180,59 @@ def finance_dates(day: date, ahead: int = AHEAD_DAYS) -> list[dict[str, Any]]:
     return sorted(found, key=lambda f: f["date"])
 
 
-def payload(data: dict[str, Any]) -> dict[str, Any]:
-    """What the writer model and the reply answers receive: labels, times, rule outcomes; no ids, coordinates or links."""
+def model_people(data: dict[str, Any], *, first: tuple[str, ...] = (), limit: int = contacts.MODEL_PEOPLE) -> set[str]:
+    """The contacts (person ids) one model call may see, at most `limit` (FR-36): `first`, then today's and the nearest
+    reminders, then the people named in today's calendar, then the coming dates. Everyone else stays in the mail, which
+    code renders, and out of the model's input."""
+    chosen: list[str] = []
+    candidates = [*first, *(r.occurrence.person_id for r in sorted(data["reminders"], key=lambda r: r.days_left)),
+                  *(pid for about in data.get("event_about") or [] for pid, _, _ in about),
+                  *(o.person_id for o in data["upcoming"])]
+    for pid in candidates:
+        if pid and pid.startswith(CONTACT_PREFIX) and pid not in chosen and len(chosen) < limit:
+            chosen.append(pid)
+    return set(chosen)
+
+
+def visible(person_id: str | None, allowed: set[str]) -> bool:
+    """Whether an entry may reach a model: the household's own entries always, a contact's only when allowed."""
+    return not (person_id or "").startswith(CONTACT_PREFIX) or person_id in allowed
+
+
+def payload(data: dict[str, Any], *, people_limit: int = contacts.MODEL_PEOPLE) -> dict[str, Any]:
+    """What the writer model and the reply answers receive: labels, times, rule outcomes; no ids, coordinates or links.
+    Contacts appear for at most `people_limit` people (`model_people`), marked with `person` so a later step can tell
+    them apart from the household's own entries."""
+    allowed = model_people(data, limit=people_limit)
+    reminders = [r for r in data["reminders"] if visible(r.occurrence.person_id, allowed)]
+    upcoming = [o for o in data["upcoming"] if visible(o.person_id, allowed)]
+    names = {contacts.person_id(c): c.name for c in data.get("contacts", [])} if allowed else {}
     weather_part = None
     if data["weather"] is not None:
         weather_part = weather.for_model(data["weather"]["report"], data["weather"]["advice"])
         weather_part["location"] = data["weather"].get("label") or None
     tasks = data["tasks"]
+    agenda_part = agenda.for_model(data["events"], (tasks["overdue"] + tasks["due_today"]), data["day"])
+    for row, about in zip(agenda_part["events"], data.get("event_about") or []):
+        shown = [{"person": name, "line": line} for pid, name, line in about if pid in allowed]
+        if shown:
+            row["about"] = shown
+    reminder_rows = people.for_model(reminders)
+    for row, item in zip(reminder_rows, reminders):
+        if (item.occurrence.person_id or "").startswith(CONTACT_PREFIX):
+            row["person"] = names.get(item.occurrence.person_id or "", "")
     return {
         "date": data["day"].isoformat(), "weekday": data["weekday"], "holiday": data["holiday"], "rest_day": data["rest_day"],
         "weather": weather_part,
-        "agenda": agenda.for_model(data["events"], (tasks["overdue"] + tasks["due_today"]), data["day"]),
+        "agenda": agenda_part,
         "tasks_overdue_total": tasks["overdue_total"],
         # The counts a writer may state (its numbers are checked against the input's number tokens).
         "counts": {"events": len(data["events"]), "tasks_overdue": tasks["overdue_total"], "tasks_today": len(tasks["due_today"]),
                    "reminders": len(data["reminders"]), "news": 0 if data["news"] is None else len(data["news"])},
-        "reminders": people.for_model(data["reminders"]),
-        "upcoming": [{"label": o.label, "date": o.on.isoformat(), "days_left": (o.on - data["day"]).days,
-                      "milestone": o.milestone} for o in data["upcoming"]],
+        "reminders": reminder_rows,
+        "upcoming": [{"label": o.label, "date": o.on.isoformat(), "days_left": (o.on - data["day"]).days, "milestone": o.milestone}
+                     | ({"person": names.get(o.person_id or "", "")} if (o.person_id or "").startswith(CONTACT_PREFIX) else {})
+                     for o in upcoming],
         "holidays_ahead": [{"date": h.day.isoformat(), "name": h.name} for h in data["holidays_ahead"]],
         "long_weekends": [[a.isoformat(), b.isoformat()] for a, b in data["long_weekends"]],
         "finance_dates": [{"date": f["date"].isoformat(), "label": f["label"], "days": f["days"]} for f in data["finance_dates"]],

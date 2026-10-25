@@ -200,11 +200,15 @@ def _calendar(data: dict[str, Any], prose: dict[str, Any]) -> str:
     if not events and not due_today:
         return _card("오늘 일정", "오늘 등록된 일정이 없습니다. 여유 있는 하루 보내세요.", "")
     rows: list[list[str]] = []
-    for event in events:
+    abouts = data.get("event_about") or [[] for _ in events]
+    for event, about in zip(events, abouts):
         when = "종일" if event.all_day else f"{event.start:%H:%M}–{event.end:%H:%M}"   # type: ignore[str-format]
         title = escape(event.title) + (f" {_pill('예약', 'neutral')}" if event.event_type == "fromGmail" else "")
         if event.all_day and (event.end - event.start).days > 1:   # type: ignore[operator]
             title += f' <span style="color:{MUTED}">~{(event.end - timedelta(days=1)):%m/%d}</span>'   # type: ignore[operator]
+        # Meeting prep from the address book (daily design §14): who this is, in the client's own note.
+        title += "".join(f'<div style="font-size:12px;line-height:1.5;color:{MUTED};margin-top:3px">이 분은: '
+                         f'<b>{escape(name)}</b> · {escape(line)}</div>' for _, name, line in about)
         rows.append([when, Raw(title), event.location or ""])
     for task in due_today:
         rows.append(["할 일", Raw(escape(task.title) + f" {_pill('오늘 기한', 'warn')}"), task.list_title])
@@ -331,9 +335,10 @@ def _text(data: dict[str, Any], prose: dict[str, Any], subject: str) -> str:
         advice = data["weather"]["advice"]
         lines += [advice.headline, _plain(prose.get("weather_line") or _weather_line(advice)), advice.air_line, ""]
     lines.append(f"오늘 일정 {len(data['events'])}건")
-    for event in data["events"]:
+    for event, about in zip(data["events"], data.get("event_about") or [[] for _ in data["events"]]):
         when = "종일" if event.all_day else f"{event.start:%H:%M}"   # type: ignore[str-format]
         lines.append(f"- {when} {event.title}")
+        lines += [f"  이 분은: {name} · {line}" for _, name, line in about]
     for item in sorted(data["reminders"], key=lambda r: r.days_left):
         lines.append(f"- 기념일: {item.occurrence.label} {'오늘' if item.days_left == 0 else f'D-{item.days_left}'}")
     if data["tasks"]["overdue"]:

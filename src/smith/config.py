@@ -27,7 +27,7 @@ KNOWN_KEYS = {
     "events": {"enabled", "check_time", "portfolio_move_pct"},
     # The daily-routine mail (daily design §2, §3.1, §7): schedule, news topics, the district for weather and the
     # household's airway sensitivity that moves air-quality and pollen cautions one grade earlier.
-    "daily": {"enabled", "time", "weekdays", "news_count", "news_topics", "airways_sensitive", "weather"},
+    "daily": {"enabled", "time", "weekdays", "news_count", "news_topics", "airways_sensitive", "weather", "contact_reminders"},
 }
 DAILY_WEATHER_KEYS = {"lat", "lon", "air_station", "air_region", "pollen_area_no", "warning_keywords", "label"}
 DAILY_WEATHER_OPTIONAL = {"label"}   # The district name the mail shows as the weather's basis ("성남시 분당구").
@@ -208,6 +208,8 @@ def _check_daily(daily: object) -> None:
     topics = daily.get("news_topics", [])
     if not isinstance(topics, list) or len(topics) > 10 or any(not isinstance(t, str) or not t.strip() for t in topics):
         raise ValueError("daily.news_topics must be up to 10 short texts")
+    if daily.get("contact_reminders", "noted") not in ("starred", "noted", "all"):
+        raise ValueError("daily.contact_reminders must be starred, noted or all")
     if "weather" not in daily:
         return
     spot = daily["weather"]

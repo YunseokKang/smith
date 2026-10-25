@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from smith import daily, headless, keep, ledger, memory
+from smith import contacts, daily, headless, keep, ledger, memory
 from smith.payload import check_outbound, mask_identifiers
 
 MODEL = "fable"
@@ -91,15 +91,12 @@ def write_and_record(db: Path, data: dict[str, Any], *, now: datetime, secrets: 
     facts = memory.load(memory.directory(db))
     query = " ".join([r.occurrence.label for r in data["reminders"]] + ["선물 취향 좋아하는"])
     chosen = memory.retrieve(facts, query)
-    # The client's Keep notes that mention the people of today's reminders (daily design §13): tastes in their own words.
-    notes = keep.load(keep.directory(db))
-    family_notes = {r.occurrence.key: keep.for_model(keep.search(notes, r.occurrence.label.split()[0], limit=2))
-                    for r in data["reminders"]}
+    family_notes = notes_by_reminder(data, keep.load(keep.directory(db)))
     from smith import daily_art
 
     payload = {**daily.payload(data), "client_memory": memory.for_model(chosen),
                "family_notes": {k: v for k, v in family_notes.items() if v},
-               "reminder_keys": [r.occurrence.key for r in data["reminders"]],
+               "reminder_keys": [r.occurrence.key for r in _visible_reminders(data)],
                "news_refs": [n.get("ref") for n in (data["news"] or [])], "moods": daily_art.MOODS}
     text = json.dumps(payload, ensure_ascii=False, default=str)
     check_outbound(text, secrets)
@@ -121,6 +118,25 @@ def write_and_record(db: Path, data: dict[str, Any], *, now: datetime, secrets: 
                                      payload=text, prompt_version=PROMPT_VERSION, model=model, cost_usd=cost, outcome=outcome,
                                      error_code=error_code, advice=None if prose is None else json.dumps(prose, ensure_ascii=False))
     return {"prose": prose, "problems": problems, "error_code": error_code, "cost_usd": cost}
+
+
+def notes_by_reminder(data: dict[str, Any], notes: list[keep.Note]) -> dict[str, list[dict[str, Any]]]:
+    """The client's own words on each reminder's person the model may see: Keep notes that mention them (daily design
+    §13) and, for a contact inside the call's people limit (§14), their address-book 메모. A reminder with neither maps
+    to [] (the writer then asks for tastes); a contact beyond the limit is not in the map at all."""
+    reminders = _visible_reminders(data)
+    found = {r.occurrence.key: keep.for_model(keep.search(notes, r.occurrence.label.split()[0], limit=2)) for r in reminders}
+    by_person = {contacts.person_id(c): c for c in data.get("contacts", []) if c.note}
+    for reminder in reminders:
+        contact = by_person.get(reminder.occurrence.person_id or "")
+        if contact is not None:
+            found[reminder.occurrence.key] = [*found[reminder.occurrence.key], {"source": "주소록", **contacts.for_model([contact])[0]}]
+    return found
+
+
+def _visible_reminders(data: dict[str, Any]) -> list[Any]:
+    allowed = daily.model_people(data)
+    return [r for r in data["reminders"] if daily.visible(r.occurrence.person_id, allowed)]
 
 
 def verify(output: dict[str, Any], data: dict[str, Any], payload: Any, *,

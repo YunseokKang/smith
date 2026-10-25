@@ -49,6 +49,9 @@ time = "06:00"
 news_count = 5
 news_topics = ["정치", "경제", "문화", "기술", "AI"]
 airways_sensitive = false
+# Whose Google Contacts dates join the anniversary reminders (daily design §14): "noted" (default: starred, or a note
+# or 중요한 날 written), "starred" (즐겨찾기 only) or "all". Search, replies and the calendar's "이 분은" use every contact.
+contact_reminders = "noted"
 
 # Where the weather is read, at district precision: a district office point for the KMA grid (never a home address),
 # an AirKorea station, the regional dust-forecast name, the KMA pollen area code and the words that make a warning
