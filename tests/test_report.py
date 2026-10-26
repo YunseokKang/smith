@@ -446,6 +446,64 @@ class ReportTests(unittest.TestCase):
                              kind="monday")["change"]["parts"]
         self.assertEqual(parts["debt"], Decimal(100_000 + 1_000_000))     # Paid off: debt falls by 1M.
 
+    def test_markets_report_lists_the_holdings_whose_quantity_changed(self):
+        from smith import narrative
+        data = build_report(self.conn, as_of=T1, known_at=T1, baseline=T0, kind="markets")
+        # XYZ went from 10 to 12 shares: 2 shares x 110 USD x 1400, the change at today's price and rate.
+        self.assertEqual([(c["symbol"], c["quantity_start"], c["quantity_end"], c["change"], c["amount"])
+                          for c in data["holding_quantity_changes"]["changes"]],
+                         [("XYZ", Decimal(10), Decimal(12), "more", Decimal(308_000))])
+        html = render(data)[1]
+        self.assertIn("9월 1일 이후 수량이 바뀐 종목", html)
+        self.assertIn("10 → 12", html)
+        moved = narrative.holdings_payload(data["view"], data)["holding_quantity_changes"]
+        self.assertEqual(moved, {"from": "2026-09-01", "changes": [
+            {"symbol": "XYZ", "market": "US", "quantity_before": "10", "quantity_after": "12", "change": "more",
+             "value_change": "308000"}], "holdings_not_compared": 0})
+        # No comparison report, or a day that does not show the holdings: nothing computed or shown.
+        for kind, baseline in (("markets", None), ("property", T0)):
+            with self.subTest(kind=kind, baseline=baseline):
+                self.assertIsNone(build_report(self.conn, as_of=T1, known_at=T1, baseline=baseline,
+                                               kind=kind)["holding_quantity_changes"])
+        # Selling the last holding still shows, although no position is left to list.
+        sold = datetime(2026, 9, 28, tzinfo=timezone.utc)
+        self.apply("sold", sold, [dict(stock(3, sold, "12", "110"), status="closed")])
+        html = render(build_report(self.conn, as_of=T1, known_at=T1, baseline=T0, kind="markets"))[1]
+        self.assertIn("전량 정리", html)
+
+    def test_quantity_changes_net_lots_and_keep_unknowns_apart(self):
+        from smith.report_data import quantity_changes
+
+        def row(symbol, q0, q1, p0="100", p1="130", hermes=False, rate="1300", priced_at=T1):
+            return {"name": symbol, "symbol": symbol, "market": "US", "currency": "USD", "hermes": hermes,
+                    "priced_at_start": T0, "priced_at_end": priced_at,
+                    "quantity_start": None if q0 is None else Decimal(q0),
+                    "quantity_end": None if q1 is None else Decimal(q1),
+                    "price_start": None if q0 in (None, "0") or p0 is None else Decimal(p0),
+                    "price_end": None if q1 in (None, "0") or p1 is None else Decimal(p1),
+                    "rate_start": Decimal("1200"), "rate_end": None if rate is None else Decimal(rate)}
+        changes = quantity_changes([
+            row("MOV", "5", "0"), row("MOV", "0", "5"),                     # Moved between two own accounts.
+            row("MOV", "3", "4", hermes=True),                              # Hermes lots stay a position of their own.
+            row("NET", "10", "14"), row("NET", "5", "0"),                   # One account grew, one closed: 15 -> 14.
+            row("OLD", "2", "0"), row("NEW", "0", None),                    # Sold out; opened without a quantity.
+            row("FOG", None, None), row("ODD", "1", None),                  # Unknown whether anything changed.
+            row("NOP", "10", "13", p1=None), row("JPY", "1", "2", rate=None),  # No price, no rate: unknown.
+            row("STL", "10", "11", p1="50", priced_at=T0), row("STL", "10", "11", p1="110")])  # Newest price wins.
+        self.assertEqual(changes["uncompared"], ["FOG", "ODD"])
+        self.assertEqual([(c["symbol"], c["hermes"], c["change"], c["amount"]) for c in changes["changes"]],
+                         [("STL", False, "more", Decimal(286_000)), ("OLD", False, "closed", Decimal(-240_000)), ("MOV", True, "more", Decimal(169_000)),
+                          ("NET", False, "less", Decimal(-169_000)), ("JPY", False, "more", None),
+                          ("NEW", False, "new", None), ("NOP", False, "more", None)])
+        # Unknown is not "no change": the empty list is scoped and the uncompared holdings are named.
+        html = report_html._quantity_changes({"holding_quantity_changes": {"changes": [], "uncompared": ["FOG"]},
+                                              "baseline": T0})
+        self.assertIn("수량을 비교할 수 있는 종목 가운데", html)
+        self.assertIn("비교하지 못한 종목 1개: FOG", html)
+        for quantity, shown in (("28.582791", "28.5828"), ("1200.00", "1,200"), ("0.5", "0.5"), (None, "미상")):
+            with self.subTest(quantity=quantity):
+                self.assertEqual(report_html._qty(None if quantity is None else Decimal(quantity)), shown)
+
     def test_decomposition_is_exact_for_the_largest_importable_values(self):
         big = datetime(2026, 9, 3, tzinfo=timezone.utc)
         q, p0, p1 = "999999999999999.12345678", "999999999999999.87654321", "999999999999998.11111111"

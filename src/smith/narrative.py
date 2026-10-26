@@ -49,7 +49,8 @@ from smith.proposals import Proposal
 # v10: executive headline, rounded amounts, total-balance-sheet mindset, employer double concentration, no internal
 # vocabulary (user spec 2026-10-17); v9: stress test, spending room, peer benchmark; v8: expected pay is not wealth.
 # v23: reader_notes, the first reader's marks for a plain-language rewrite (user decision 2026-10-26).
-PROMPT_VERSION = "narrative-v23"  # v22: no job gap in the reserve, reserve_basis, stale deals; v21: retirement ages.
+# v24: holding_quantity_changes, the holdings whose share count changed since the comparison report.
+PROMPT_VERSION = "narrative-v24"  # v22: no job gap in the reserve, reserve_basis, stale deals; v21: retirement ages.
 MODEL = "fable"
 BUDGET_USD = "5.00"
 # Two calls at most: the write (the markets day with twenty-odd holdings ran past 10 minutes on 2026-10-17) and a
@@ -298,6 +299,17 @@ Input JSON:
   the brief). portfolio_facts: top-1 and top-5 shares, overseas share, the goal-money glide plan (stocks
   counted for a dated goal within three years), add_condition, and concentration_plan: for each holding
   above the limit, the excess and the quarterly trim schedule into the broad-index core computed by code.
+- holding_quantity_changes (when present): the holdings whose share count changed since `from` (the
+  comparison report), by symbol: quantity_before, quantity_after, change (new, closed, more, less)
+  and value_change (the changed quantity at today's price and rate, won; a holding sold out at its price at
+  `from`; null when the price is unknown, so never call it zero). A changed count is a ledger fact, not
+  a known decision: it may be a purchase, a sale, a share grant vesting, a split or an account entered for
+  the first time, so say "늘었습니다/줄었습니다", not "사셨습니다", unless client_memory says so. Brief the
+  changes in one or two sentences on the holdings, and connect one to its opinion when it matters (more
+  of a holding above the concentration limit or of the employer's stock runs against its trim schedule).
+  An empty list with holdings_not_compared at 0 means no count changed: say so in a few words at most.
+  holdings_not_compared counts holdings whose quantity is not recorded, so whether they changed is unknown:
+  never say "nothing changed" for them.
 - principles: the part of Smith's investment principles library this report needs: well-known investors'
   principles (Buffett, Munger, Marks, Vanguard/Bogle, Dalio, Templeton, Lynch, Graham, Lefevre) paraphrased
   from their primary sources, each with an id and how Smith applies it to a household; where two read against
@@ -411,7 +423,7 @@ def build_payload(view: Any, data: dict[str, Any], brief: dict[str, Any] | None,
         return payload
     payload["edition_focus"] = edition.focus
     if edition.key != "markets":
-        payload.update(holdings=[], principles=[], policy_checks=[], portfolio_facts=None)
+        payload.update(holdings=[], holding_quantity_changes=None, principles=[], policy_checks=[], portfolio_facts=None)
     if edition.key not in ("property", "overview"):
         payload["property_market"] = []
     if edition.key not in ("tax", "property"):
@@ -786,7 +798,15 @@ def holdings_payload(view: Any, data: dict[str, Any]) -> dict[str, Any]:
                   "add_condition": add_condition(data, p)}
                  for p in review["positions"] if not p["hermes"] and p["key"] in refs]
     plan = data["advice"].get("concentration")
-    return {"holdings": positions,
+    found, baseline = data.get("holding_quantity_changes"), data.get("baseline")
+    # By ticker and market, like the research queries: a manual name is free text and stays local.
+    quantity_changes = None if found is None or baseline is None else {
+        "from": baseline.date().isoformat(),
+        "changes": [{"symbol": c["symbol"], "market": c["market"], "quantity_before": num(c["quantity_start"]),
+                     "quantity_after": num(c["quantity_end"]), "change": c["change"], "value_change": won(c["amount"])}
+                    for c in found["changes"] if not c["hermes"]],
+        "holdings_not_compared": len(found["uncompared"])}
+    return {"holdings": positions, "holding_quantity_changes": quantity_changes,
             "principles": [{"id": p.id, "investor": p.investor, "title": p.title, "principle": p.principle,
                             "apply": p.apply} for p in principles.relevant(data)],
             "policy_checks": [{"key": c.key, "title": c.title, "standard": c.standard, "current": c.current,
@@ -1465,7 +1485,8 @@ def _known_refs(payload: dict[str, Any]) -> set[str]:
 # answers) is excluded by default, so a new payload key is not evidence until it is listed here.
 _EVIDENCE_KEYS = ("edition", "change_since_last_report", "proposals", "undetermined", "proposals_in_progress",
                   "strategy", "assumptions", "ownership_notes", "property_market", "sector_metrics",
-                  "household_profile", "holdings", "principles", "policy_checks", "portfolio_facts", "tax",
+                  "household_profile", "holdings", "holding_quantity_changes", "principles", "policy_checks",
+                  "portfolio_facts", "tax",
                   "report_date", "message_date",
                   # An e-mail answer may quote the report's own status reasons, data status and the principles it
                   # applied (code output, not the model's earlier prose).

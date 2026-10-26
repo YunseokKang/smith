@@ -111,8 +111,15 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     reviews = picks.load(conn, known_at)
     advice["proposals"] = picks.attach(advice["proposals"], reviews, view.rates)
     advice["pending_products"] = picks.pending(view, kind, reviews)  # Live, but no usable review yet: the card says so.
+    # What was bought, sold or vested since last week's report on the theme (report design §32), for the reports
+    # that show the holdings in full; the price moves are in `change`.
+    edition = editions.of(kind)
+    shows_holdings = kind == "monday" if edition is None else "holdings" in edition.sections
+    quantities = (quantity_changes(holding_changes(conn, baseline, as_of, known_at))
+                  if baseline is not None and shows_holdings else None)
     data = {"kind": kind, "as_of": as_of, "baseline": baseline, "kpis": kpis, "schedule": schedule,
             "change": change, "timeline": _timeline(view, pay), "sectors": sectors, "holdings": review,
+            "holding_quantity_changes": quantities,
             "future_income": expected, "advice": advice, "lease_plans": lease_plans,
             # One bad year with several shocks at once (report design §16.2), household-wide like the badge.
             "stress": stress.test(view, kpis, sectors, lease_plans),
@@ -243,10 +250,65 @@ def holding_changes(conn: sqlite3.Connection, t0: datetime, t1: datetime, known_
                      else Decimal(earlier.fields["value"]) * rates0[currency])
             rows.append({"record_id": record_id, "name": record.fields.get("instrument_name") or record.fields["symbol"],
                          "symbol": record.fields["symbol"], "market": record.fields.get("market"),
-                         "hermes": record.fields.get("managed_by") == "hermes", "start": start,
+                         "currency": currency, "hermes": record.fields.get("managed_by") == "hermes", "start": start,
+                         "quantity_start": _quantity(earlier), "quantity_end": _quantity(later),
+                         "price_start": _price(earlier), "price_end": _price(later),
+                         "priced_at_start": earlier and earlier.effective_at, "priced_at_end": later and later.effective_at,
+                         "rate_start": rates0.get(currency), "rate_end": rates1.get(currency),
                          "market_change": parts.get("market", Decimal(0)), "fx": parts.get("fx", Decimal(0)),
                          "trades": parts.get("trades", Decimal(0)), "unconverted": bool(unconverted)})
     return rows
+
+
+QUANTITY_CHANGES = {"new": "새로 보유", "closed": "전량 정리", "more": "늘어남", "less": "줄어듦"}
+
+
+def quantity_changes(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """The listed positions whose quantity changed, from `holding_changes` rows (report design §32): lots of one
+    instrument (market, symbol, currency, Hermes or not) add up as in `holdings.review`, so a move between two
+    of the client's accounts is not a change.
+
+    `changes[].amount` is the net quantity change at today's price and rate (a position sold out: at its price
+    and rate at the comparison time), None when that price or rate is unknown. It is not the decomposition's
+    trade part, which sums per account and can disagree in sign when one account closes as another grows
+    (review 2026-10-27). `uncompared` names the client's positions held at both times whose quantity is unknown
+    at either: whether they changed is unknown, so an empty `changes` alone does not mean nothing changed."""
+    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault((row["market"], row["symbol"], row["currency"], row["hermes"]), []).append(row)
+    changes, uncompared = [], []
+    for (market, symbol, _, hermes), lots in groups.items():
+        before, after = _total(l["quantity_start"] for l in lots), _total(l["quantity_end"] for l in lots)
+        if (before is None or after is None) and 0 not in (before, after):
+            if not hermes:
+                uncompared.append(lots[0]["name"])
+            continue
+        if before == after:
+            continue
+        change = "new" if before == 0 else "closed" if after == 0 else "more" if after > before else "less"
+        side = "start" if after == 0 else "end"
+        # The newest valuation's price, as in holdings.review: a manual lot can carry an older price (review 2026-10-27).
+        priced = [l for l in lots if l[f"price_{side}"] is not None]
+        price = max(priced, key=lambda l: l[f"priced_at_{side}"])[f"price_{side}"] if priced else None
+        rate = lots[0][f"rate_{side}"]
+        amount = None if None in (before, after, price, rate) else (after - before) * price * rate
+        changes.append({"name": lots[0]["name"], "symbol": symbol, "market": market, "hermes": hermes,
+                        "quantity_start": before, "quantity_end": after, "change": change, "amount": amount})
+    changes.sort(key=lambda c: (c["amount"] is None, -abs(c["amount"] or 0), c["symbol"]))
+    return {"changes": changes, "uncompared": sorted(uncompared)}
+
+
+def _price(record: RecordInput | None) -> Decimal | None:
+    price = None if record is None else record.fields.get("unit_price")
+    return None if price in (None, "") else Decimal(price)
+
+
+def _quantity(record: RecordInput | None) -> Decimal | None:
+    """A lot's quantity: zero when it is not held, unknown when held without a quantity."""
+    if record is None:
+        return Decimal(0)
+    quantity = record.fields.get("quantity")
+    return None if quantity in (None, "") else Decimal(quantity)
 
 
 def _active(conn: sqlite3.Connection, as_of: datetime, known_at: datetime) -> dict[str, RecordInput]:

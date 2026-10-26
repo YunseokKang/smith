@@ -19,7 +19,7 @@ before their tables, opinions and checks are colour pills, and the mail ends wit
 reasons, data status and sources moved out of the mail into `system_notes` (for the e-mail answers).
 """
 import re
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from html import escape
 from typing import Any
 
@@ -28,7 +28,8 @@ from smith import editions, picks, principles, stress
 from smith.holdings import STANCES
 from smith.proposals import Track
 from smith.realestate import MIN_BASIS
-from smith.report_data import CATEGORY_LABELS, CERTAINTY_LABELS, COMPONENT_LABELS, GROUP_LABELS, PAY_LABELS
+from smith.report_data import (CATEGORY_LABELS, CERTAINTY_LABELS, COMPONENT_LABELS, GROUP_LABELS, PAY_LABELS,
+                               QUANTITY_CHANGES)
 
 # Design tokens (docs/design-reference.md).
 CANVAS, SOFT, STRONG, DARK, DARK_RAISED = "#ffffff", "#f7f7f7", "#eef0f3", "#0a0b0d", "#16181c"
@@ -1621,7 +1622,8 @@ def _holdings(data: dict[str, Any], story: dict[str, Any], full: bool) -> str:
         return _section("보유 종목 의견", "매수·정리 의견이 있는 종목만 짧게 말씀드립니다. 근거는 월요 보고에서 자세히 드립니다.", rows,
                         note=escape(f"{len(active)}개 종목"))
     if not positions:
-        return _section("보유 종목 점검", "종목 단위 정보가 있는 증권이 없습니다.", "")
+        # Selling the last holding is still news: the quantity changes show without a current position.
+        return _section("보유 종목 점검", "종목 단위 정보가 있는 증권이 없습니다.", _quantity_changes(data))
     listed = [p for p in positions if p["value"] is not None]
     segments = [(str(p["name"])[:12], p["value"], "") for p in listed[:4]]
     if len(listed) > 4:
@@ -1632,6 +1634,7 @@ def _holdings(data: dict[str, Any], story: dict[str, Any], full: bool) -> str:
                       Raw(_pill("Hermes 운용", "neutral")) if p["hermes"] else
                       Raw(_stance(_of(opinions, p)["stance"])) if _of(opinions, p).get("stance") else "의견 없음"]
                      for p in positions])
+    inner += _quantity_changes(data)
     # The employer's stock and any holding above the limit come first: the double concentration is the
     # first investment matter (report design §17.4).
     active.sort(key=lambda p: (not p.get("must_opine"), -(p["value"] or 0)))
@@ -1651,6 +1654,48 @@ def _holdings(data: dict[str, Any], story: dict[str, Any], full: bool) -> str:
             counts[stance] = counts.get(stance, 0) + 1
     note = f"{len(positions)}개 종목 상세 점검" + "".join(f" · {STANCES[s]} {n}" for s, n in counts.items() if s != "hold")
     return _section("보유 종목 점검", _holdings_lead(review, sec, opined), inner, note=escape(note))
+
+
+def _quantity_changes(data: dict[str, Any]) -> str:
+    """The holdings whose quantity changed since the comparison report (report design §32): the client's own
+    as a table, Hermes-managed ones as a count, and the holdings that could not be compared (an unknown quantity is
+    not "no change"). Nothing without a comparison report."""
+    found, baseline = data.get("holding_quantity_changes"), data.get("baseline")
+    if found is None or baseline is None:
+        return ""
+    since = f"{baseline.month}월 {baseline.day}일"
+    mine = [c for c in found["changes"] if not c["hermes"]]
+    hermes, uncompared = len(found["changes"]) - len(mine), found["uncompared"]
+    title = f'<div style="font-size:12px;font-weight:600;color:{MUTED};margin:16px 0 4px">{since} 이후 수량이 바뀐 종목</div>'
+    if not mine:
+        scope = "수량을 비교할 수 있는 종목 가운데 " if uncompared else ""
+        body = f'<div style="font-size:13px;line-height:1.6;color:{BODY}">{scope}{since} 이후 수량이 바뀐 종목은 없습니다.</div>'
+    else:
+        body = _table(["종목", "수량", "변화", "평가액 변화분"],
+                      [[c["name"], f"{_qty(c['quantity_start'])} → {_qty(c['quantity_end'])}",
+                        QUANTITY_CHANGES[c["change"]], "미상" if c["amount"] is None else _signed_short(c["amount"])]
+                       for c in mine])
+        body += (f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-top:6px">원장에 기록된 수량 기준입니다. '
+                 "직접 사고판 것 외에 주식 보상 입고, 액면분할, 처음 등록한 계좌도 여기에 잡힙니다. 평가액 변화분은 바뀐 수량을 "
+                 "지금 가격·환율로 환산한 값입니다(전량 정리는 비교 시점 가격).</div>")
+    if hermes:
+        body += (f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-top:4px">Hermes 운용분은 {hermes}개 종목의 '
+                 "수량이 바뀌었습니다(Hermes 몫이라 따로 보지 않습니다).</div>")
+    if uncompared:
+        body += (f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-top:4px">수량 기록이 없어 비교하지 못한 종목 '
+                 f"{len(uncompared)}개: {escape(', '.join(str(n) for n in uncompared))}.</div>")
+    return title + body
+
+
+def _qty(quantity: Decimal | None) -> str:
+    """A share count without trailing zeros; fractional US shares read to four places (28.582791 -> 28.5828), which
+    is enough to see the change in the mail. Unknown reads 미상."""
+    if quantity is None:
+        return "미상"
+    places = Decimal("0.0001")
+    if quantity != quantity.quantize(places):
+        quantity = quantity.quantize(places, rounding=ROUND_HALF_UP)
+    return f"{quantity.normalize():,f}"
 
 
 def _of(opinions: dict[str, Any], position: dict[str, Any]) -> dict[str, Any]:
