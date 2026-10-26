@@ -21,11 +21,17 @@ A failing block is returned to the model once with its reasons. Blocks that pass
 kept exactly; only rejected ones are taken from the repair. What still fails is kept from the first output
 with a short caveat (자동 점검 메모) and counted; only unusable blocks (unknown proposal keys, duplicates)
 are left out.
+
+Then the first reader (6e, smith.reader: another vendor's model, prose only) marks the passages a non-expert client
+would stop at, and the writer rewrites those blocks once. A rewrite replaces its block only when it passes the same
+verification and keeps the block's identity; the reader's notes are never evidence. The pass runs only when the
+stage still has time for both calls, and its failure leaves the verified narrative as it was.
 Every call is recorded in `advice_runs` (payload, raw output, verified output, reasons), failures too.
 """
 import json
 import re
 import subprocess
+import time
 import uuid
 from collections.abc import Callable
 from contextlib import closing
@@ -35,20 +41,26 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from smith import adviser, editions, future_income, headless, holdings, ledger, memory, principles, research, stress
+from smith import adviser, editions, future_income, headless, holdings, ledger, memory, principles, reader, research, stress
 from smith.fmt import short_won
-from smith.payload import build_context, check_outbound, won
+from smith.payload import PayloadRejected, build_context, check_outbound, won
 from smith.proposals import Proposal
 
 # v10: executive headline, rounded amounts, total-balance-sheet mindset, employer double concentration, no internal
 # vocabulary (user spec 2026-10-17); v9: stress test, spending room, peer benchmark; v8: expected pay is not wealth.
-PROMPT_VERSION = "narrative-v22"  # v22: no job gap in the reserve, reserve_basis, stale deals; v21: retirement ages.
+# v23: reader_notes, the first reader's marks for a plain-language rewrite (user decision 2026-10-26).
+PROMPT_VERSION = "narrative-v23"  # v22: no job gap in the reserve, reserve_basis, stale deals; v21: retirement ages.
 MODEL = "fable"
 BUDGET_USD = "5.00"
 # Two calls at most: the write (the markets day with twenty-odd holdings ran past 10 minutes on 2026-10-17) and a
 # shorter repair, 22 minutes together, inside the 30-minute report lease with the syncs and the send.
 TIMEOUT_SECONDS = 900
 REPAIR_TIMEOUT_SECONDS = 420
+# The first reader and the rewrite of what it marked run only when both still fit in those 22 minutes (a reading took
+# 41 seconds on 2026-10-26; the rewrite writes the whole output again, like a repair).
+STAGE_SECONDS = TIMEOUT_SECONDS + REPAIR_TIMEOUT_SECONDS
+FINAL_USE_CASE = "report-narrative-final"  # An audit record of the narrative as sent, not a model call.
+READER_REWRITE_TIMEOUT_SECONDS = REPAIR_TIMEOUT_SECONDS
 BRIEF_REUSE_AGE = timedelta(days=4)  # A failed research run may fall back to a brief this recent.
 # A daily edition researches its topics once a week, so its fallback is last week's brief on the same topics
 # (marked as reused, with its date, in the report).
@@ -371,7 +383,14 @@ Hard rules (checked by code; a block that breaks one is deleted):
   of household_member_* are not the client's legal property. Assets managed by Hermes are not to be sold
   or changed directly.
 - If the input contains `rejected`, rewrite only those blocks so that they pass the rules; copy the other
-  blocks from `previous_output` unchanged."""
+  blocks from `previous_output` unchanged.
+- If the input contains `reader_notes`, a first reader who is not a finance professional marked passages of
+  `previous_output` that would stop the client (path, quote, problem, why, suggestion). Rewrite only the blocks
+  named by path so that the client gets them on one reading: explain or replace the jargon, give the size or
+  precedent the input holds, say what to do and when, or that nothing needs doing. Keep each block's meaning,
+  stance, key, symbol and refs, and every rule above. A suggestion is a colleague's idea, not evidence: never add
+  a number, fact or piece of advice the input does not hold. Copy every other block from `previous_output`
+  unchanged."""
 
 
 # --- payload ----------------------------------------------------------------------------------------------
@@ -843,10 +862,12 @@ def write(view: Any, data: dict[str, Any], brief: dict[str, Any] | None, *, secr
           runner: headless.Runner = subprocess.run, model: str = MODEL,
           audit: Audit | None = None, system_prompt: str = SYSTEM_PROMPT,
           notes: dict[str, Any] | None = None, timeout_seconds: int = TIMEOUT_SECONDS,
-          client_memory: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """Ask for the narrative, verify it, repair rejected blocks once, and return
-    {"output": verified output, "dropped": [...], "cost_usd"}. `audit(use_case, payload, outcome,
-    error_code, cost, content)` records every call and returns False if the record could not be saved.
+          client_memory: list[dict[str, Any]] | None = None, first_reader: reader.Reader | None = None,
+          clock: Callable[[], float] = time.monotonic) -> dict[str, Any]:
+    """Ask for the narrative, verify it, repair rejected blocks once, let `first_reader` mark what a client would
+    stop at and rewrite those blocks once, and return {"output": verified output, "dropped": [...], "memos",
+    "cost_usd", "reader": the reading's status}. `audit(use_case, payload, outcome, error_code, cost, content)`
+    records every call and returns False if the record could not be saved.
 
     `notes` (the team editor's specialist findings) are added to what the model reads but not to what
     verification accepts as evidence: they are other models' output, so their figures must still be
@@ -857,6 +878,7 @@ def write(view: Any, data: dict[str, Any], brief: dict[str, Any] | None, *, secr
         PayloadRejected: the outgoing payload matched an identifier or secret rule.
         AuditError: a call could not be recorded, so its output is withheld.
     """
+    started = clock()
     payload = build_payload(view, data, brief, client_memory)
     sent = payload if notes is None else {**payload, **notes}
     text = json.dumps(sent, ensure_ascii=False)
@@ -888,8 +910,98 @@ def write(view: Any, data: dict[str, Any], brief: dict[str, Any] | None, *, secr
     # repair with fewer list items would bring back the wrong block or none at all.
     verified, memos = restore(verified, dropped, output)
     verified = polish_output(verified)
+    reading: dict[str, Any] = {"outcome": "off"}
+    if first_reader is not None:
+        left = STAGE_SECONDS - (clock() - started)
+        if left < reader.TIMEOUT_SECONDS + READER_REWRITE_TIMEOUT_SECONDS:
+            reading = {"outcome": "skipped-time"}
+        else:
+            def call(text: str, use_case: str) -> tuple[Any, str | None]:
+                return _call(text, use_case, executable, model, runner, audit, system_prompt,
+                             READER_REWRITE_TIMEOUT_SECONDS)
+            verified, reading = read_and_rewrite(first_reader, verified, memos, payload, sent, secrets=secrets,
+                                                 call=call, audit=audit)
+            if "cost_usd" in reading:
+                costs.append(reading["cost_usd"])
     total = None if any(c is None for c in costs) else str(sum(Decimal(c) for c in costs))
-    return {"output": verified, "dropped": dropped, "memos": memos, "cost_usd": total}
+    return {"output": verified, "dropped": dropped, "memos": memos, "cost_usd": total, "reader": reading}
+
+
+def read_and_rewrite(first_reader: reader.Reader, output: dict[str, Any], memos: dict[str, str],
+                     payload: dict[str, Any], sent: dict[str, Any], *, secrets: list[str],
+                     call: Callable[[str, str], tuple[Any, str | None]],
+                     audit: Audit | None) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The first reader's pass over a verified narrative: (output, status). The reader sees the prose of the blocks
+    that passed; `call(text, use_case)` is the writer's rewrite of the blocks it marked. A reader or rewrite failure
+    keeps `output` as it was; only verified rewrites that keep their block's identity replace a block.
+
+    Raises:
+        AuditError: a call could not be recorded, so its output is withheld.
+    """
+    shown = reader.blocks(output, memos)
+    text = json.dumps({"blocks": shown}, ensure_ascii=False)
+    try:
+        check_outbound(text, secrets)  # The prose goes to another vendor: the same identifier and secret rules.
+        reading = first_reader(shown)
+    except PayloadRejected:
+        return output, {"outcome": "payload-rejected"}
+    except headless.HeadlessError as error:
+        _record(audit, "report-reader", text, "failure", str(error.code)[:80], None,
+                None if error.detail is None else {"detail": error.detail})
+        return output, {"outcome": "failure", "error_code": str(error.code)[:80]}
+    _record(audit, "report-reader", text, "success", None, None, {**reading, "prompt_version": reader.PROMPT_VERSION})
+    status = {"model": reading["model"], "notes": len(reading["notes"]), "overall": reading["overall"]}
+    if not reading["notes"]:
+        return output, {**status, "outcome": "clear"}
+    rewrite_text = json.dumps(dict(sent, previous_output=_without_memos(output), reader_notes=reading["notes"]),
+                              ensure_ascii=False)
+    try:
+        check_outbound(rewrite_text, secrets)
+        second, cost = call(rewrite_text, "report-narrative-reader-rewrite")
+    except PayloadRejected:
+        return output, {**status, "outcome": "payload-rejected"}
+    except headless.HeadlessError as error:
+        return output, {**status, "outcome": "rewrite-failed", "error_code": str(error.code)[:80]}
+    _, still = verify(second, payload)
+    merged, applied = apply_rewrites(output, [n["path"] for n in reading["notes"]], second, still)
+    _record(audit, "report-narrative-reader-rewrite", rewrite_text, "success", None, cost,
+            {"raw": second, "dropped": still, "applied": applied})
+    return polish_output(merged), {**status, "outcome": "rewritten", "applied": applied, "cost_usd": cost}
+
+
+def apply_rewrites(current: dict[str, Any], paths: list[str], second: dict[str, Any],
+                   still: list[str]) -> tuple[dict[str, Any], list[str]]:
+    """Each marked block takes its rewrite when the rewrite passed verification and kept its identity (the symbol
+    and stance of a holding, the key of a proposal note; an insight, watch item or experience may be retitled at
+    the same position). Other blocks stay exactly as they were. Returns (output, the paths rewritten)."""
+    bad = {entry.split(":")[0] for entry in still}
+    out = {**current, **{field: list(current.get(field) or []) for field in _LISTS}}
+    applied = []
+    for path in dict.fromkeys(paths):
+        if path in SCALAR_BLOCKS:
+            if path not in bad and second[path]["text"]:
+                out[path] = second[path]
+                applied.append(path)
+            continue
+        field, index = path.split("[")[0], int(path.split("[")[1].rstrip("]"))
+        identity, now, items = _LISTS[field], out[field][index], second.get(field) or []
+        at = next((j for j, item in enumerate(items) if item[identity] == now[identity]), None)
+        if at is None and field in ("insights", "watch", "experiences") and index < len(items):
+            at = index
+        if at is None or f"{field}[{at}]" in bad:
+            continue
+        candidate = items[at]
+        taken = {item[identity] for k, item in enumerate(out[field]) if k != index}
+        if candidate[identity] in taken or (field == "holdings" and candidate["stance"] != now["stance"]):
+            continue
+        out[field][index] = candidate
+        applied.append(path)
+    return out, applied
+
+
+def _without_memos(output: dict[str, Any]) -> dict[str, Any]:
+    return {key: [{k: v for k, v in item.items() if k != "memo"} for item in value] if key in _LISTS else value
+            for key, value in output.items()}
 
 
 _REF_LIST = re.compile(r"\s*[(\[]\s*(?:(?:[ALCGXNR]\d+|tax|(?:ecos|fred):[A-Za-z0-9._-]+)\s*[,·/]?\s*)+[)\]]")
@@ -1680,12 +1792,13 @@ def report_memory(db: Path, data: dict[str, Any]) -> tuple[list[dict[str, Any]],
 
 def narrate(db: Path, view: Any, data: dict[str, Any], *, now: datetime, secrets: list[str],
             brief_id: str | None = None, executable: Path | None = None,
-            runner: headless.Runner = subprocess.run, pipeline: str = "single") -> None:
+            runner: headless.Runner = subprocess.run, pipeline: str = "single",
+            first_reader: reader.Reader | None = None) -> None:
     """Run the narrative stage for one report and attach its result. Never raises for a model failure:
     the report then goes out with its deterministic content and says so in the data-status footer.
 
     `pipeline` "single" is one writer; "team" is specialists and an editor (smith.team) with the same
-    output, verification and attachment.
+    output, verification and attachment. `first_reader` (smith.reader) reviews the verified prose either way.
     """
     if pipeline not in PIPELINES:
         raise ValueError(f"unknown narrative pipeline: {pipeline}")
@@ -1727,16 +1840,24 @@ def narrate(db: Path, view: Any, data: dict[str, Any], *, now: datetime, secrets
     remembered, status["memory"] = report_memory(db, data)
     try:
         result = writer(view, data, brief, secrets=secrets, executable=executable or headless.find_claude(),
-                        runner=runner, audit=audit, client_memory=remembered)
+                        runner=runner, audit=audit, client_memory=remembered, first_reader=first_reader)
     except Exception as error:  # noqa: BLE001 - the report must still go out.
         code = "audit-write-failed" if isinstance(error, AuditError) else getattr(error, "code", None) or type(error).__name__
         status.update(outcome="failure", error_code=str(code)[:80])
         attach(data, None, brief, status)
         return
-    status.update(outcome="success", dropped=result["dropped"], cost_usd=result["cost_usd"])
+    status.update(outcome="success", dropped=result["dropped"], cost_usd=result["cost_usd"], reader=result["reader"])
     if "specialists" in result:
         status["specialists"] = result["specialists"]
     result["output"] = edition_trim(result["output"], data["kind"])
+    # What the client receives (repair, first reader and the edition's cut applied): mail answers read this record,
+    # not the first call's verified output, which lacks blocks taken from later calls and keeps blocks the edition
+    # cut (Codex review 2026-10-26). Like every audit, a failed record withholds the narrative.
+    if not audit(FINAL_USE_CASE, json.dumps({"final_of": "report-narrative"}), "success", None, None,
+                 {"verified": result["output"], "memos": result["memos"], "reader": result["reader"]}):
+        status.update(outcome="failure", error_code="audit-write-failed")
+        attach(data, None, brief, status)
+        return
     attach(data, result, brief, status)
 
 

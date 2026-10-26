@@ -7,7 +7,7 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from smith import gmail, ledger, memory, qa
+from smith import gmail, ledger, memory, narrative, qa
 from smith.importer import parse_import
 
 import fast_ledger
@@ -154,12 +154,17 @@ class QaTests(unittest.TestCase):
                 ledger.record_advice_run(conn, run_id=judgement, created_at=at, use_case="report-narrative",
                                          question="monday", payload="{}", prompt_version="v", model="m", cost_usd=None,
                                          outcome="success", advice=json.dumps({"verified": {"situation": judgement}}))
+            # The narrative as sent (after the repair and the first reader) wins over the first call's output.
+            ledger.record_advice_run(conn, run_id="final", created_at=AT, use_case=narrative.FINAL_USE_CASE,
+                                     question="monday", payload="{}", prompt_version="v", model="m", cost_usd=None,
+                                     outcome="success", advice=json.dumps({"verified": {"situation": "발송된 판단"}}))
         self.poll(now=later)
         with closing(ledger.connect_read_only(self.db)) as conn:
             sent = conn.execute("SELECT payload FROM advice_runs WHERE use_case = 'mail-answer'").fetchone()[0]
         self.assertIn('"10000000"', sent)                                     # Cash as the report showed it.
         self.assertNotIn("20000000", sent)
-        self.assertIn("보고서의 판단", sent)
+        self.assertIn("발송된 판단", sent)
+        self.assertNotIn("보고서의 판단", sent)
         self.assertNotIn("더 새로운 판단", sent)
         self.assertIn("보고서 시점의 원장 기준", self.sent[0]["html"])           # The ledger has moved on since.
 

@@ -302,11 +302,17 @@ def answer(db: Path, data: dict[str, Any], question: Question, *, now: datetime,
     brief, _ = narrative.pinned_brief(db, view, now=at, brief_id=(report or {}).get("brief_id"),
                                       kind=(report or {}).get("kind") or data["kind"])
     with closing(ledger.connect_read_only(db)) as conn:
+        # The narrative as sent (repair and first reader applied); reports written before it was recorded fall
+        # back to the first call's verified output.
         if report is None:
-            recent, moved = ledger.latest_advice(conn, use_case="report-narrative"), False
+            recent = (ledger.latest_advice(conn, use_case=narrative.FINAL_USE_CASE)
+                      or ledger.latest_advice(conn, use_case="report-narrative"))
+            moved = False
         else:
-            recent = ledger.get_advice(conn, report["advice_run_ids"], use_case="report-narrative",
-                                       created_at=report["created_at"])
+            recent = (ledger.get_advice(conn, report["advice_run_ids"], use_case=narrative.FINAL_USE_CASE,
+                                        created_at=report["created_at"])
+                      or ledger.get_advice(conn, report["advice_run_ids"], use_case="report-narrative",
+                                           created_at=report["created_at"]))
             moved = ledger.changed_since(conn, datetime.fromisoformat(report["known_at"] or report["as_of"]))
     stored = _stored_memory(db)
     query = " ".join([question.text] + [turn["client"] or "" for turn in history or []])

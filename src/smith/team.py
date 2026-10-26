@@ -25,10 +25,10 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from smith import headless, narrative
+from smith import headless, narrative, reader
 from smith.payload import check_outbound, mask_identifiers
 
-PROMPT_VERSION = "team-v5"  # v5: narrative-v22 rules (reserve without a job gap, reserve_basis, stale deals); v4: fx.
+PROMPT_VERSION = "team-v6"  # v6: narrative-v23 (reader_notes); v5: narrative-v22 rules (reserve without a job gap, reserve_basis, stale deals); v4: fx.
 SPECIALIST_BUDGET_USD = "2.00"
 # All specialists run at once (five minutes at most), then the editor's write and repair. The editor
 # reads more than the single writer (about 70 KB against 50 KB) and timed out at its ten minutes on real
@@ -187,8 +187,8 @@ def specialist_payload(payload: dict[str, Any], area: Area) -> dict[str, Any]:
 
 def write(view: Any, data: dict[str, Any], brief: dict[str, Any] | None, *, secrets: list[str], executable: Path,
           runner: headless.Runner = subprocess.run, model: str = narrative.MODEL,
-          audit: narrative.Audit | None = None,
-          client_memory: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+          audit: narrative.Audit | None = None, client_memory: list[dict[str, Any]] | None = None,
+          first_reader: reader.Reader | None = None) -> dict[str, Any]:
     """Run the specialists in parallel, then the editor. Same contract as `narrative.write`, plus
     "specialists": [{area, title, status, error_code, cost_usd, findings, cross_sector, data_gaps}].
 
@@ -210,7 +210,8 @@ def write(view: Any, data: dict[str, Any], brief: dict[str, Any] | None, *, secr
                                      for s in specialists]}
     result = narrative.write(view, data, brief, secrets=secrets, executable=executable, runner=runner, model=model,
                              audit=audit, system_prompt=EDITOR_PROMPT, notes=notes,
-                             timeout_seconds=EDITOR_TIMEOUT_SECONDS, client_memory=client_memory)
+                             timeout_seconds=EDITOR_TIMEOUT_SECONDS, client_memory=client_memory,
+                             first_reader=first_reader)
     costs = [result["cost_usd"]] + [s["cost_usd"] for s in specialists if s["status"] == "success"]
     total = None if any(c is None for c in costs) else str(sum(Decimal(c) for c in costs))
     return {**result, "cost_usd": total, "specialists": specialists}

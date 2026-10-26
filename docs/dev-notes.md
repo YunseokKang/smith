@@ -320,3 +320,22 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
 - 해결: `dependencies`에 `Pillow` 추가. 실패 알림은 GitHub가 실패할 때만 보내므로 CI가 통과하면 멈춘다.
 - 예방: 새 import를 넣으면 `pyproject.toml`에 선언하고, 커밋 전에 깨끗한 환경 기준으로 확인한다
   (`.\.venv\Scripts\python.exe -m pip freeze | findstr /i 이름`으로 설치 여부만 믿지 않는다).
+
+### TS-033 Codex CLI headless: 구버전 사본, 시작 안내 오류 항목, 리뷰 모드와 출력 스키마 (2026-10-26)
+
+- 증상 1: `~/.codex/.sandbox-bin/codex.exe`(0.119 알파, Codex 앱이 쓰는 사본)로 `codex exec`를 돌리자
+  "The 'gpt-5.6-sol' model requires a newer version of Codex"로 실패했다.
+  원인: PATH에 `codex`가 없었고 앱 내부 사본은 서버 모델 목록보다 오래됐다. 해결: `npm i -g @openai/codex@0.164.0`.
+  `codex.find_codex()`는 npm 런처(`codex.cmd`) 대신 `node_modules\@openai\codex\...\codex-win32-x64\...\codex.exe`를
+  실행하고, 확인한 버전(`codex.VERSION`)이 아니면 거부한다. 최신 모델 목록은 `codex debug models`(캐시 파일
+  `models_cache.json`은 다른 클라이언트가 쓴 옛 목록일 수 있다).
+- 증상 2: 도구를 끈 호출이 `tool-attempt: error`로 실패했다. 원인: `--json` 이벤트의 `error` 항목은 턴 시작 전 Codex의 안내
+  ("인식하지 못한 설정 무시", "code-mode host is disabled")였고 모델 동작이 아니었다. 해결: `turn.started` 뒤의 항목만
+  검사하고, 0.164가 모르는 설정(`include_apply_patch_tool`, `tools.view_image`)은 뺐다.
+- 증상 3: 리뷰 스크립트에서 `--ignore-user-config`를 쓰면 모든 읽기 명령이 "blocked by policy"로 거부됐다. 원인: 사용자
+  설정의 `[windows] sandbox = "elevated"`가 빠졌다. 해결: 개발용 리뷰는 사용자 설정을 유지한다(런타임 독자는 셸이 없으므로
+  무시해도 된다). 또 `codex exec review`는 `--output-schema`를 무시하고 문장으로 답하며, 대상(`--uncommitted` 등)과 맞춤
+  지시를 함께 받지 않는다. 그래서 `scripts/codex_review.py`는 일반 `codex exec`에 리뷰 지시와 대상을 넣는다.
+- 증상 4: `--json` 이벤트 속 한국어 문장이 깨졌다(콘솔 코드 페이지). 해결: 답은 `-o` 파일로 받아 UTF-8로 읽는다.
+- 예방: Codex를 올릴 때는 `codex features list`로 새로 기본 켜진 도구를 확인해 `codex._TOOL_FEATURES`에 넣고, 파일 읽기·웹
+  검색을 시키는 적대적 프롬프트로 이벤트에 도구 항목이 없는지 본 뒤 `VERSION`을 바꾼다.

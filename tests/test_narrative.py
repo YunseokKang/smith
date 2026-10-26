@@ -222,6 +222,79 @@ class NarrativeTests(unittest.TestCase):
         self.assertEqual([a[0] for a in audits], ["report-narrative", "report-narrative-repair"])
         self.assertEqual(audits[0][2]["raw"], first)                           # Raw output is audited too.
 
+    def test_first_reader_rewrites_only_the_marked_blocks_whose_rewrite_passes(self):
+        data = self.data()
+        watch = [{"item": "기준금리 결정", "why": "변동금리 대출 이자에 영향", "refs": ["R1"]}]
+        first = dict(EMPTY, situation=block("현금 여유를 먼저 채우실 때입니다."),
+                     direction=block("유동성 버퍼를 우선하십시오."), watch=watch)
+        rewrite = dict(first, situation=block("부족분은 9.99억 원입니다."),          # Ungrounded: not applied.
+                       direction=block("바로 쓸 수 있는 현금을 먼저 늘리십시오."),
+                       watch=[{"item": "다른 문장", "why": "바뀐 이유", "refs": []}])  # Not marked: not applied.
+        outputs, inputs, audits, shown = [first, rewrite], [], [], []
+
+        def run(args, **kwargs):
+            inputs.append(json.loads(kwargs["input"]))
+            return runner_returning(outputs[len(inputs) - 1])(args, **kwargs)
+
+        def first_reader(blocks):
+            shown.extend(blocks)
+            notes = [{"path": p, "quote": q, "problem": "jargon", "why": "어렵습니다.", "suggestion": "풀어 쓰기"}
+                     for p, q in (("situation", "현금 여유"), ("direction", "유동성 버퍼"))]
+            return {"notes": notes, "raw_notes": 2, "overall": "대체로 읽힙니다.", "usage": None, "model": "gpt-test"}
+
+        def audit(use_case, payload, outcome, code, cost, content):
+            audits.append(use_case)
+            return True
+        result = narrative.write(data["view"], data, self.brief(), secrets=[], executable=Path("claude.exe"),
+                                 runner=run, audit=audit, first_reader=first_reader)
+        out = result["output"]
+        self.assertEqual(out["direction"]["text"], "바로 쓸 수 있는 현금을 먼저 늘리십시오.")
+        self.assertEqual(out["situation"]["text"], "현금 여유를 먼저 채우실 때입니다.")
+        self.assertEqual(out["watch"], watch)
+        self.assertEqual(result["reader"]["outcome"], "rewritten")
+        self.assertEqual(result["reader"]["applied"], ["direction"])
+        self.assertEqual(len(inputs[1]["reader_notes"]), 2)
+        self.assertEqual(inputs[1]["previous_output"]["situation"]["text"], "현금 여유를 먼저 채우실 때입니다.")
+        self.assertTrue(all(set(b) == {"path", "section", "text"} for b in shown))  # Prose only: no refs, no data.
+        self.assertEqual(audits, ["report-narrative", "report-reader", "report-narrative-reader-rewrite"])
+        self.assertEqual(result["cost_usd"], "1.0")
+
+    def test_first_reader_failure_or_no_time_leaves_the_verified_narrative(self):
+        data = self.data()
+        first = dict(EMPTY, situation=block("현금 여유를 먼저 채우실 때입니다."))
+        audits = []
+
+        def failing(blocks):
+            raise headless.HeadlessError("tool-attempt", "command_execution")
+
+        def audit(use_case, payload, outcome, code, cost, content):
+            audits.append((use_case, outcome, code))
+            return True
+        failed = narrative.write(data["view"], data, self.brief(), secrets=[], executable=Path("claude.exe"),
+                                 runner=runner_returning(first), audit=audit, first_reader=failing)
+        self.assertEqual(failed["output"]["situation"]["text"], "현금 여유를 먼저 채우실 때입니다.")
+        self.assertEqual(failed["reader"], {"outcome": "failure", "error_code": "tool-attempt"})
+        self.assertEqual(audits[-1], ("report-reader", "failure", "tool-attempt"))
+        times = iter([0.0, narrative.STAGE_SECONDS - 60])                       # A slow first write.
+        late = narrative.write(data["view"], data, self.brief(), secrets=[], executable=Path("claude.exe"),
+                               runner=runner_returning(first), first_reader=failing, clock=lambda: next(times))
+        self.assertEqual(late["reader"], {"outcome": "skipped-time"})
+
+    def test_rewrites_keep_identity_and_stance(self):
+        hold = {"symbol": "VOO", "stance": "hold", "reason": "a", "alternative": "b", "reconsider": "c", "refs": [],
+                "principles": []}
+        insight = {"title": "금리", "body": "본문", "implication": "의미", "refs": []}
+        current = dict(EMPTY, holdings=[hold], insights=[insight, dict(insight, title="환율")])
+        second = dict(EMPTY, holdings=[dict(hold, stance="trim", reason="쉽게")],
+                      insights=[dict(insight, title="금리의 방향", body="쉽게"), dict(insight, title="금리의 방향")])
+        out, applied = narrative.apply_rewrites(current, ["holdings[0]", "insights[0]", "insights[1]"], second, [])
+        self.assertEqual(out["holdings"], [hold])                               # A new stance is not a rewording.
+        self.assertEqual(out["insights"][0]["title"], "금리의 방향")             # Retitled at the same position.
+        self.assertEqual(out["insights"][1]["title"], "환율")                    # Would duplicate a title.
+        self.assertEqual(applied, ["insights[0]"])
+        _, applied = narrative.apply_rewrites(current, ["insights[0]"], second, ["insights[0]:no-source"])
+        self.assertEqual(applied, [])
+
     def test_a_block_failing_twice_is_restored_from_the_output_its_path_indexes(self):
         # The repair returns fewer insights than the first output; the still-failing second insight must come
         # back from the first output with its memo, not vanish (or be swapped for another block).
@@ -270,7 +343,16 @@ class NarrativeTests(unittest.TestCase):
         self.assertTrue(any("직접 식별자 없이" in n for n in report_html.system_notes(data)))   # A system note (v3.0).
         with closing(ledger.connect_read_only(self.db)) as conn:
             uses = [row[0] for row in conn.execute("SELECT use_case FROM advice_runs")]
-        self.assertEqual(uses, ["report-narrative"])
+        self.assertEqual(uses, ["report-narrative", narrative.FINAL_USE_CASE])
+        # A themed day sends one insight: the record of what was sent (read by mail answers) holds that one only.
+        data = self.data()
+        data["kind"] = "rates"
+        second = dict(output["insights"][0], title="두 번째 통찰")
+        narrative.narrate(self.db, data["view"], data, now=AT, secrets=[], brief_id="same", executable=Path("claude.exe"),
+                          runner=runner_returning(dict(output, insights=output["insights"] + [second])))
+        with closing(ledger.connect_read_only(self.db)) as conn:
+            final = ledger.latest_advice(conn, use_case=narrative.FINAL_USE_CASE)["content"]["verified"]
+        self.assertEqual([i["title"] for i in final["insights"]], ["영통 토지거래허가구역"])
 
     def test_holding_opinions_are_checked_and_buying_more_carries_the_code_precondition(self):
         data = self.data()
@@ -440,7 +522,7 @@ class NarrativeTests(unittest.TestCase):
         self.assertTrue(liquidity[1]["check_failed"].startswith("ungrounded-number"))
         with closing(ledger.connect_read_only(self.db)) as conn:
             runs = dict(conn.execute("SELECT use_case, payload FROM advice_runs WHERE use_case NOT LIKE '%repair'"))
-        self.assertEqual(sorted(runs), ["report-narrative", "report-specialist-debt", "report-specialist-investment",
+        self.assertEqual(sorted(runs), ["report-narrative", narrative.FINAL_USE_CASE, "report-specialist-debt", "report-specialist-investment",
                                         "report-specialist-liquidity", "report-specialist-real_estate",
                                         "report-specialist-tax_pension"])
         sent = json.loads(runs["report-narrative"])

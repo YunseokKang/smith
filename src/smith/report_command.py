@@ -297,15 +297,23 @@ def _review_products(db: Path, config: dict[str, Any], now: datetime, kind: str 
 def _narrator(db: Path, now: datetime, brief_id: str | None = None, pipeline: str = "single") -> Any:
     """The narrative stage as a callback on report data (6c/6d), pinned to `brief_id` when research
     succeeded; failures leave deterministic content."""
-    from smith import credentials, narrative
+    from smith import credentials, narrative, reader
 
     secrets = credentials.all_secrets()
+    first_reader, missing = reader.installed()  # The verified Codex, or why the report goes without its first reader.
 
     def narrate(data: dict[str, Any]) -> None:
-        narrative.narrate(db, data["view"], data, now=now, secrets=secrets, brief_id=brief_id, pipeline=pipeline)
+        narrative.narrate(db, data["view"], data, now=now, secrets=secrets, brief_id=brief_id, pipeline=pipeline,
+                          first_reader=first_reader)
         status = data["narrative"]["status"]
         if status["outcome"] != "success":  # A report without its prose is worth a log line (BUG-2026-003).
             _say(db, f"Narrative ({data['kind']}) {status['outcome']}: {status.get('error_code') or ''}")
+            return
+        if missing is not None:
+            status["reader"] = {"outcome": "unavailable", "error_code": missing}
+        reading = status["reader"]
+        if reading["outcome"] not in ("rewritten", "clear"):
+            _say(db, f"First reader ({data['kind']}) {reading['outcome']}: {reading.get('error_code') or ''}".rstrip())
     return narrate
 
 

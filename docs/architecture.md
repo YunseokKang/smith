@@ -180,6 +180,27 @@ v3는 공급자 동기화 시도의 성공·실패를 남기는 `sync_runs` 표�
     밝히는 쪽을 택함, 2026-10-05). 메모는 사유별 문구(출처 미확인, 확정 표현, 법령 확인 필요, 원장에 없는 수치 등)이며
     판단·방향·통찰·지켜볼 것 아래와 제안 맥락에 표시하고 푸터에 메모 수를 밝힌다. 구조가 잘못되었거나 제안 키가 없거나
     중복인 블록만 버린다. 서술 호출 자체가 실패하면 결정적 내용만으로 발송한다.
+- **첫 독자**(6e, 사용자 결정 2026-10-26, `reader.py`·`codex.py`, `reader-v1`·`narrative-v23`): 검증·수정이 끝난 서술을
+  **다른 회사 모델**(OpenAI Codex `gpt-6-astra`, 추론 high)이 금융 비전문가 고객의 눈으로 읽고, 한 번에 이해되지 않을
+  문장(전문용어, 할 일 불명확, 크기 없는 막연한 표현, 우리 집 의미 없음, 두 번 읽어야 하는 문장, 블록 간 모순, 말투)을
+  최대 6개 짚는다. 독자는 **통과한 블록의 산문만** 받는다(원장·payload·refs 없음, 메모 달린 블록 제외, 보내기 전
+  `check_outbound`). 코드는 블록 경로가 있고 인용이 그 블록의 정확한 구절이고 문제 종류가 알려진 것인 메모만 남긴다.
+  메모가 있으면 작가(같은 서술 모델·프롬프트)가 `previous_output`+`reader_notes`로 짚인 블록만 한 번 다시 쓰고, 다시 쓴
+  블록은 **같은 검증을 통과하고 정체성(종목 심볼·의견, 제안 키)을 지킬 때만** 바뀐다(`apply_rewrites`). 독자 메모는 근거가
+  아니다. 단계 예산 22분(작성 15분 + 수정 7분) 안에 독자 5분 + 다시 쓰기 7분이 남을 때만 돌고(`skipped-time`), 실패·Codex
+  미설치는 서술을 그대로 둔 채 상태(`status.reader`: rewritten·clear·failure·rewrite-failed·skipped-time·unavailable)와
+  로그 한 줄로 남긴다. 감사: `report-reader`(내용에 독자 모델·프롬프트 버전), `report-narrative-reader-rewrite`, 그리고
+  모델 호출이 아닌 **발송본 기록** `report-narrative-final`(수정·다시 쓰기·요일판 편집까지 반영된, 메일에 실린 서술). 메일 답변의
+  `recent_report`는 이 발송본을 읽고, 그 기록이 없던 이전 보고서만 첫 호출의 검증 출력으로 돌아간다(Codex 2차 리뷰
+  지적 2026-10-26: 전에는 수정 호출로 바뀐 블록도 답변 입력에 없었다). Codex 경계의 파일 오류는 `io-failed`로 닫히고
+  검증된 서술은 그대로 남는다.
+  - **Codex 경계**(`codex.py`, codex-cli 0.164.0에서 확인, 다른 버전은 거부 `codex-version`): npm 런처가 아닌 네이티브
+    `codex.exe`, `codex exec -`(표준 입력), `--ephemeral`, `--ignore-user-config`·`--ignore-rules`·`project_doc_max_bytes=0`,
+    빈 임시 디렉터리 + 읽기 전용 샌드박스, 도구 기능 24개 끔 + `web_search=disabled`, 환경변수 허용 목록(API 키 없음:
+    ChatGPT 구독 로그인, 계정의 모델 학습 사용은 꺼짐), `--output-schema`(모든 속성 필수인 엄격 사본) + `-o` 파일(UTF-8).
+    Codex는 끈 도구 몇 개를 목록에 남기므로(code mode는 "fail closed") **이벤트 스트림을 검사**해 턴 시작 뒤 답·추론
+    외 항목이 하나라도 있으면 실패로 닫는다(턴 전 오류 항목은 Codex의 시작 안내). 새 버전마다 기본으로 켜지는 도구가
+    생기므로(0.164: browser_use, computer_use) 버전을 올릴 때는 `codex features list`로 다시 확인하고 `VERSION`을 바꾼다.
 - **감사**: 서술 호출마다(실패 포함, 수정 호출 포함) `advice_runs`에 보낸 입력, 원시 출력, 검증 출력, 탈락 사유를 남긴다.
   기록에 실패하면 그 서술은 쓰지 않는다.
 - **공통 입력 보강**(2026-10-07, `narrative-v4`): 서술·메일 답변 입력에 `sector_metrics`(보고서 차트용으로 이미 계산한
