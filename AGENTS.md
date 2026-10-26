@@ -210,8 +210,9 @@ existing tests missed the issue; do not require incident reports for ordinary de
 3. Briefly explain the proposed data flow and key decisions for substantial work.
 4. Implement incrementally, keeping unimplemented integrations clearly marked.
 5. Run focused verification and the applicable adversarial review. For a meaningful code change, also get
-   the second-vendor review (`.\.venv\Scripts\python.exe scripts\codex_review.py`, OpenAI Codex) and address
-   or explicitly decline each P0/P1 finding before reporting completion.
+   the second-vendor review (`.\.venv\Scripts\python.exe scripts\codex_review.py --intent "<what and why>"`,
+   OpenAI Codex) and address or explicitly decline each P0/P1 finding before reporting completion. If it exits 3
+   (Codex unavailable or out of quota), review with Claude Code's /code-review instead and say so.
 6. Report in Korean: what changed, why, verification, and remaining limitations.
    For substantial features, add requirement-to-module mapping and lifecycle details where useful.
 

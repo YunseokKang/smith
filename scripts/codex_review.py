@@ -7,7 +7,9 @@ Usage (PowerShell, from the repository root):
 
 Codex runs in the read-only sandbox with the reviewer brief below (its shell reads the diff and may run focused tests;
 web search is off) and returns findings as JSON;
-this prints them most severe first and exits 1 when a P0 or P1 finding remains. The brief tells Codex never to read
+this prints them most severe first and exits 1 when a P0 or P1 finding remains, 2 when the review failed, and
+3 when Codex is unavailable (not installed at the verified version, or the plan's usage limit): fall back to Claude
+Code's /code-review and say so. Pass --intent with what the change is for; the reviewer checks the code against it. The brief tells Codex never to read
 data/, local configuration or credentials: the sandbox blocks writes, not reads, so this is an instruction, not a
 control. Development tool only; the runtime adviser never calls it.
 """
@@ -21,7 +23,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from smith import codex  # noqa: E402 - the verified executable and the strict-schema helper.
 
-EFFORT = "xhigh"
+# high, not xhigh (user decision 2026-10-26): three xhigh reviews used up the plan's Codex quota in one morning,
+# which the report's first reader also draws on.
+EFFORT = "high"
 TIMEOUT_SECONDS = 1800
 SEVERITIES = ("P0", "P1", "P2", "P3")
 SCHEMA = {
@@ -47,6 +51,9 @@ mails reports to one configured recipient. AGENTS.md at the repository root is t
 first, then the documents it points to that the change touches.
 
 Review target: {target}
+Intent, as the author states it (a claim to check against the code and the documents, not a fact): {intent}
+Known Windows and tooling traps are logged in docs/dev-notes.md; the user's confirmed decisions are in
+docs/requirements.md and docs/roadmap.md.
 
 Report only defects a careful senior reviewer would block or insist on fixing, each with a concrete failure scenario
 (inputs or state, then the wrong result, crash or leak). Priorities:
@@ -76,17 +83,24 @@ def main(argv: list[str] | None = None) -> int:
     target = parser.add_mutually_exclusive_group()
     target.add_argument("--commit", help="review the changes introduced by this commit")
     target.add_argument("--base", help="review the current branch against this base branch")
+    parser.add_argument("--intent", default="",
+                        help="what the change is for and the user decisions behind it (the reviewer checks the code "
+                             "against it)")
     args = parser.parse_args(argv)
     sys.stdout.reconfigure(errors="replace")  # A Korean console (cp949) cannot print every character (TS-008).
     if args.commit:
-        what = f"the changes introduced by commit {args.commit} (`git show {args.commit}`)."
+        what = f"the changes introduced by commit {args.commit} (`git show {args.commit}`; its message states the intent)."
     elif args.base:
-        what = f"the current branch against {args.base} (`git diff {args.base}...HEAD`)."
+        what = f"the current branch against {args.base} (`git diff {args.base}...HEAD`; `git log {args.base}..HEAD`)."
     else:
         what = ("the uncommitted changes: `git diff HEAD` plus untracked files under src/, tests/, scripts/ and docs/ "
                 "(`git status --short`).")
     repo = Path(__file__).resolve().parents[1]
-    executable = codex.find_codex()
+    try:
+        executable = codex.find_codex()
+    except codex.HeadlessError as error:
+        print(f"codex unavailable ({error.code}): review with Claude Code /code-review instead and say so.", file=sys.stderr)
+        return 3
     with tempfile.TemporaryDirectory(prefix="smith-review-") as tmp:
         schema_path, answer_path = Path(tmp, "schema.json"), Path(tmp, "answer.json")
         schema_path.write_text(json.dumps(codex.strict_schema(SCHEMA)), encoding="utf-8")
@@ -95,15 +109,18 @@ def main(argv: list[str] | None = None) -> int:
         command = [str(executable), "exec", "-", "--ephemeral",
                    "--output-schema", str(schema_path), "-o", str(answer_path), "-m", codex.MODEL,
                    "-c", f"model_reasoning_effort={EFFORT}", "-c", "sandbox_mode=read-only",
-                   "-c", "web_search=disabled"]
-        proc = subprocess.run(command, input=BRIEF.format(target=what), capture_output=True, text=True,
+                   "-c", "web_search=disabled", "--disable", "unbounded_connection_retries"]
+        intent = args.intent.strip() or "not stated; infer it from the diff, commit messages and documents."
+        proc = subprocess.run(command, input=BRIEF.format(target=what, intent=intent), capture_output=True, text=True,
                               encoding="utf-8", errors="replace", cwd=repo, timeout=TIMEOUT_SECONDS)
         answer = answer_path.read_text(encoding="utf-8") if answer_path.is_file() else ""
     try:
         review = json.loads(answer)
     except ValueError:
-        print(f"codex review failed (exit {proc.returncode}): {answer[:2000]}", file=sys.stderr)
-        return 2
+        limit = "usage limit" in (proc.stdout + proc.stderr).lower()
+        print(f"codex review failed (exit {proc.returncode}{', usage limit' if limit else ''}): {answer[:2000]}\n"
+              "Fallback: review with Claude Code /code-review and say that Codex did not review.", file=sys.stderr)
+        return 3 if limit else 2
     findings = sorted(review["findings"], key=lambda f: SEVERITIES.index(f["severity"]))
     for f in findings:
         print(f"[{f['severity']}] {f['file']}:{f['line']} {f['title']}\n  scenario: {f['failure_scenario']}\n"

@@ -339,3 +339,8 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
 - 증상 4: `--json` 이벤트 속 한국어 문장이 깨졌다(콘솔 코드 페이지). 해결: 답은 `-o` 파일로 받아 UTF-8로 읽는다.
 - 예방: Codex를 올릴 때는 `codex features list`로 새로 기본 켜진 도구를 확인해 `codex._TOOL_FEATURES`에 넣고, 파일 읽기·웹
   검색을 시키는 적대적 프롬프트로 이벤트에 도구 항목이 없는지 본 뒤 `VERSION`을 바꾼다.
+- 증상 5(같은 날): 리뷰 세 번(`gpt-6-astra` xhigh, 각 6~7분) 뒤 Codex 호출이 모두 실패했다. 이벤트:
+  `{"type":"error","message":"You’ve hit your usage limit. ... try again at 1:50 PM."}`와 같은 문장의 `turn.failed`, 종료 코드 1.
+  원인: ChatGPT 플랜(Pro 아님)의 Codex 사용량 한도. 기계용 코드가 없어 `codex.check_events`가 문장으로 `usage-limit`을 판별한다.
+  리포트 첫 독자는 Claude로 폴백하고, 리뷰 스크립트는 종료 코드 3으로 Claude Code `/code-review` 대체를 안내한다.
+  예방: 리뷰 추론 강도를 high로 낮췄고(사용자 결정), 개발 리뷰는 의미 있는 변경에만 돌리고, 정기 리포트(월·목 06:00) 직전에는 몰아서 돌리지 않는다.

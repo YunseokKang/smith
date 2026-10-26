@@ -236,8 +236,9 @@ class NarrativeTests(unittest.TestCase):
             inputs.append(json.loads(kwargs["input"]))
             return runner_returning(outputs[len(inputs) - 1])(args, **kwargs)
 
-        def first_reader(blocks):
-            shown.extend(blocks)
+        def first_reader(letter):
+            self.assertIsNone(letter["edition"])                               # The full Monday report.
+            shown.extend(letter["blocks"])
             notes = [{"path": p, "quote": q, "problem": "jargon", "why": "어렵습니다.", "suggestion": "풀어 쓰기"}
                      for p, q in (("situation", "현금 여유"), ("direction", "유동성 버퍼"))]
             return {"notes": notes, "raw_notes": 2, "overall": "대체로 읽힙니다.", "usage": None, "model": "gpt-test"}
@@ -264,7 +265,7 @@ class NarrativeTests(unittest.TestCase):
         first = dict(EMPTY, situation=block("현금 여유를 먼저 채우실 때입니다."))
         audits = []
 
-        def failing(blocks):
+        def failing(letter):
             raise headless.HeadlessError("tool-attempt", "command_execution")
 
         def audit(use_case, payload, outcome, code, cost, content):

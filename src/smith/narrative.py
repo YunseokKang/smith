@@ -920,17 +920,16 @@ def write(view: Any, data: dict[str, Any], brief: dict[str, Any] | None, *, secr
                 return _call(text, use_case, executable, model, runner, audit, system_prompt,
                              READER_REWRITE_TIMEOUT_SECONDS)
             verified, reading = read_and_rewrite(first_reader, verified, memos, payload, sent, secrets=secrets,
-                                                 call=call, audit=audit)
+                                                 call=call, audit=audit, kind=data.get("kind"))
             if "cost_usd" in reading:
                 costs.append(reading["cost_usd"])
-    total = None if any(c is None for c in costs) else str(sum(Decimal(c) for c in costs))
-    return {"output": verified, "dropped": dropped, "memos": memos, "cost_usd": total, "reader": reading}
+    return {"output": verified, "dropped": dropped, "memos": memos, "cost_usd": _sum_costs(costs), "reader": reading}
 
 
 def read_and_rewrite(first_reader: reader.Reader, output: dict[str, Any], memos: dict[str, str],
                      payload: dict[str, Any], sent: dict[str, Any], *, secrets: list[str],
                      call: Callable[[str, str], tuple[Any, str | None]],
-                     audit: Audit | None) -> tuple[dict[str, Any], dict[str, Any]]:
+                     audit: Audit | None, kind: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
     """The first reader's pass over a verified narrative: (output, status). The reader sees the prose of the blocks
     that passed; `call(text, use_case)` is the writer's rewrite of the blocks it marked. A reader or rewrite failure
     keeps `output` as it was; only verified rewrites that keep their block's identity replace a block.
@@ -939,18 +938,24 @@ def read_and_rewrite(first_reader: reader.Reader, output: dict[str, Any], memos:
         AuditError: a call could not be recorded, so its output is withheld.
     """
     shown = reader.blocks(output, memos)
-    text = json.dumps({"blocks": shown}, ensure_ascii=False)
+    edition = editions.of(kind) if kind else None
+    letter = {"edition": None if edition is None else {"label": edition.label, "theme": edition.focus}, "blocks": shown}
+    text = json.dumps(letter, ensure_ascii=False)
     try:
         check_outbound(text, secrets)  # The prose goes to another vendor: the same identifier and secret rules.
-        reading = first_reader(shown)
+        reading = first_reader(letter)
     except PayloadRejected:
         return output, {"outcome": "payload-rejected"}
     except headless.HeadlessError as error:
         _record(audit, "report-reader", text, "failure", str(error.code)[:80], None,
                 None if error.detail is None else {"detail": error.detail})
         return output, {"outcome": "failure", "error_code": str(error.code)[:80]}
-    _record(audit, "report-reader", text, "success", None, None, {**reading, "prompt_version": reader.PROMPT_VERSION})
+    # Codex runs on the plan (no cost reported); a Claude fallback reports its cost like any headless call.
+    _record(audit, "report-reader", text, "success", None, reading.get("cost_usd"),
+            {**reading, "prompt_version": reader.PROMPT_VERSION})
     status = {"model": reading["model"], "notes": len(reading["notes"]), "overall": reading["overall"]}
+    if "fallback_from" in reading:
+        status.update(fallback_from=reading["fallback_from"], cost_usd=reading["cost_usd"])
     if not reading["notes"]:
         return output, {**status, "outcome": "clear"}
     rewrite_text = json.dumps(dict(sent, previous_output=_without_memos(output), reader_notes=reading["notes"]),
@@ -966,7 +971,12 @@ def read_and_rewrite(first_reader: reader.Reader, output: dict[str, Any], memos:
     merged, applied = apply_rewrites(output, [n["path"] for n in reading["notes"]], second, still)
     _record(audit, "report-narrative-reader-rewrite", rewrite_text, "success", None, cost,
             {"raw": second, "dropped": still, "applied": applied})
-    return polish_output(merged), {**status, "outcome": "rewritten", "applied": applied, "cost_usd": cost}
+    return polish_output(merged), {**status, "outcome": "rewritten", "applied": applied,
+                                   "cost_usd": _sum_costs([status.get("cost_usd", "0"), cost])}
+
+
+def _sum_costs(costs: list[str | None]) -> str | None:
+    return None if any(c is None for c in costs) else str(sum(Decimal(c) for c in costs))
 
 
 def apply_rewrites(current: dict[str, Any], paths: list[str], second: dict[str, Any],

@@ -51,7 +51,11 @@ class CodexTests(unittest.TestCase):
         self.assertFalse(Path(kwargs["cwd"]).exists())                        # The working directory is cleaned up.
 
     def test_failures_are_closed(self):
+        limit = json.dumps({"type": "error", "message": "You've hit your usage limit. Try again at 8:22 AM."})
         cases = {"tool": (events("command_execution"), "tool-attempt"),
+                 "usage limit": (events() + "\n" + limit, "usage-limit"),
+                 "rate limit": (events() + "\n" + json.dumps({"type": "error", "message": "Rate limit, retry."}),
+                                "rate-limited"),
                  "error after the turn started": (events("error"), "tool-attempt"),
                  "failed turn": (events(failed=True), "model-error")}
         for name, (stdout, code) in cases.items():
@@ -91,8 +95,14 @@ class CodexTests(unittest.TestCase):
                         with self.assertRaises(HeadlessError) as raised:
                             codex.find_codex(version)
                         self.assertEqual(raised.exception.code, "codex-version")
-        with mock.patch.object(codex.shutil, "which", return_value=None):
+        with mock.patch.object(codex.shutil, "which", return_value=None),                 mock.patch.object(reader.headless, "find_claude", side_effect=HeadlessError("claude-not-found")):
             self.assertEqual(reader.installed(), (None, "codex-not-found"))
+
+
+def claude_envelope(output):
+    envelope = {"type": "result", "subtype": "success", "is_error": False, "structured_output": output,
+                "total_cost_usd": 0.2}
+    return subprocess.CompletedProcess([], 0, json.dumps(envelope), "")
 
 
 class ReaderTests(unittest.TestCase):
@@ -106,6 +116,43 @@ class ReaderTests(unittest.TestCase):
         shown = reader.blocks(self.OUTPUT, {"portfolio": "memo"})
         self.assertEqual([b["path"] for b in shown], ["situation", "holdings[0]"])
         self.assertEqual(shown[1]["text"], "넓게 나눠 담은 상품입니다.\n비중이 커지면 다시 봅니다.")
+
+    def test_claude_reads_when_codex_fails_fast_and_time_remains(self):
+        letter = {"edition": None, "blocks": reader.blocks(self.OUTPUT)}
+        answer = {"notes": [{"path": "situation", "quote": "듀레이션", "problem": "jargon", "why": "w", "suggestion": "s"}],
+                  "overall": "o"}
+        calls = []
+
+        def run(args, **kwargs):
+            calls.append(Path(args[0]).name)
+            if args[0] == "codex.exe":
+                limit = json.dumps({"type": "turn.failed", "error": {"message": "Usage limit reached."}})
+                return subprocess.CompletedProcess(args, 1, events() + "\n" + limit, "")
+            self.assertEqual(json.loads(kwargs["input"]), letter)              # The same letter, no tools.
+            self.assertEqual(args[args.index("--tools") + 1], "")
+            return claude_envelope(answer)
+        read = reader.make(Path("codex.exe"), claude=Path("claude.exe"), runner=run, clock=lambda: 0.0)
+        reading = read(letter)
+        self.assertEqual(calls, ["codex.exe", "claude.exe"])
+        self.assertEqual((reading["model"], reading["fallback_from"], reading["cost_usd"]),
+                         (reader.FALLBACK_MODEL, "usage-limit", "0.2"))
+        self.assertEqual(len(reading["notes"]), 1)
+        only_claude = reader.make(None, claude=Path("claude.exe"), runner=run, unavailable="codex-version")
+        self.assertEqual(only_claude(letter)["fallback_from"], "codex-version")
+
+    def test_no_fallback_after_a_timeout_or_without_time(self):
+        letter = {"edition": None, "blocks": reader.blocks(self.OUTPUT)}
+
+        def timeout(args, **kwargs):
+            raise subprocess.TimeoutExpired(args, 1)
+
+        def failing(args, **kwargs):
+            return subprocess.CompletedProcess(args, 1, events(failed=True), "")
+        times = iter([0.0, reader.TIMEOUT_SECONDS - 30])
+        for name, runner, clock in (("timeout", timeout, lambda: 0.0), ("late", failing, lambda: next(times))):
+            with self.subTest(name), self.assertRaises(HeadlessError) as raised:
+                reader.make(Path("codex.exe"), claude=Path("claude.exe"), runner=runner, clock=clock)(letter)
+            self.assertEqual(raised.exception.code, "timeout" if name == "timeout" else "model-error")
 
     def test_only_notes_on_real_passages_are_kept(self):
         shown = reader.blocks(self.OUTPUT)

@@ -19,6 +19,7 @@ each release has turned new tools on by default — browser_use and computer_use
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -39,6 +40,13 @@ _TOOL_FEATURES = ("shell_tool", "unified_exec", "unified_exec_tty", "shell_snaps
                   "browser_use_external", "browser_use_full_cdp_access", "computer_use", "in_app_browser",
                   "in_app_local_automation", "sleep_tool", "skill_search", "skill_mcp_dependency_install",
                   "tool_suggest", "hooks", "workspace_dependencies")
+# Not a tool, but a stable default that retries a lost connection without end: the call would sit out its whole
+# timeout instead of failing fast enough for the caller's fallback.
+_OFF_FEATURES = _TOOL_FEATURES + ("unbounded_connection_retries",)
+# The plan's limit has no machine-readable code in the event stream; its wording does ("You've hit your usage
+# limit.", "Usage limit reached.", reported by several open-source wrappers of codex exec --json, 2026).
+_USAGE_LIMIT = re.compile(r"usage limit", re.IGNORECASE)
+_RATE_LIMIT = re.compile(r"rate limit|too many requests|\b429\b", re.IGNORECASE)  # Short-lived, not the plan's limit.
 _CONFIG = ("web_search=disabled", "project_doc_max_bytes=0", "history.persistence=none")
 _ANSWER_ITEMS = frozenset({"agent_message", "reasoning"})
 _NATIVE = Path("node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe")
@@ -103,7 +111,7 @@ def _exec(prompt: str, schema: dict[str, Any], executable: Path, model: str, eff
         args = [str(executable), "exec", "-", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config",
                 "--ignore-rules", "-C", workdir, "--sandbox", "read-only", "--json", "--output-schema", str(schema_path),
                 "-o", str(answer_path), "-m", model, "-c", f"model_reasoning_effort={effort}"]
-        for feature in _TOOL_FEATURES:
+        for feature in _OFF_FEATURES:
             args += ["--disable", feature]
         for setting in _CONFIG:
             args += ["-c", setting]
@@ -127,7 +135,8 @@ def _exec(prompt: str, schema: dict[str, Any], executable: Path, model: str, eff
 
 def check_events(stdout: str) -> dict[str, int] | None:
     """Fail closed on the JSONL event stream: once the turn has started, a tool item, an error item or a failed turn
-    raises. Returns the completed turn's token usage when reported."""
+    raises; a failure that names the plan's limit raises "usage-limit" so the caller can say why it fell back.
+    Returns the completed turn's token usage when reported."""
     usage, started = None, False
     for line in stdout.splitlines():
         try:
@@ -140,7 +149,10 @@ def check_events(stdout: str) -> dict[str, int] | None:
         if started and isinstance(item, dict) and item.get("type") not in _ANSWER_ITEMS:
             raise HeadlessError("tool-attempt", str(item.get("type"))[:40])
         if kind in ("turn.failed", "error"):
-            raise HeadlessError("model-error")
+            error = event.get("error") if isinstance(event.get("error"), dict) else {}
+            message = str(event.get("message") or error.get("message") or "")
+            raise HeadlessError("usage-limit" if _USAGE_LIMIT.search(message)
+                                else "rate-limited" if _RATE_LIMIT.search(message) else "model-error")
         if kind == "turn.completed" and isinstance(event.get("usage"), dict):
             usage = {k: v for k, v in event["usage"].items() if isinstance(v, int)}
     return usage

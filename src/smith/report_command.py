@@ -300,7 +300,8 @@ def _narrator(db: Path, now: datetime, brief_id: str | None = None, pipeline: st
     from smith import credentials, narrative, reader
 
     secrets = credentials.all_secrets()
-    first_reader, missing = reader.installed()  # The verified Codex, or why the report goes without its first reader.
+    # Codex with a Claude fallback; `missing` says why Codex is not used (the reader is then Claude, or none).
+    first_reader, missing = reader.installed()
 
     def narrate(data: dict[str, Any]) -> None:
         narrative.narrate(db, data["view"], data, now=now, secrets=secrets, brief_id=brief_id, pipeline=pipeline,
@@ -309,11 +310,13 @@ def _narrator(db: Path, now: datetime, brief_id: str | None = None, pipeline: st
         if status["outcome"] != "success":  # A report without its prose is worth a log line (BUG-2026-003).
             _say(db, f"Narrative ({data['kind']}) {status['outcome']}: {status.get('error_code') or ''}")
             return
-        if missing is not None:
+        if first_reader is None:
             status["reader"] = {"outcome": "unavailable", "error_code": missing}
         reading = status["reader"]
-        if reading["outcome"] not in ("rewritten", "clear"):
-            _say(db, f"First reader ({data['kind']}) {reading['outcome']}: {reading.get('error_code') or ''}".rstrip())
+        if reading["outcome"] not in ("rewritten", "clear") or "fallback_from" in reading:
+            why = reading.get("error_code") or (f"read by {reading['model']}, Codex {reading['fallback_from']}"
+                                                if "fallback_from" in reading else "")
+            _say(db, f"First reader ({data['kind']}) {reading['outcome']}: {why}".rstrip())
     return narrate
 
 
