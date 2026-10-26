@@ -29,7 +29,11 @@ from typing import Any
 from smith.headless import HEADLESS_ENV, HeadlessError, Runner, prune, validate
 
 VERSION = "0.164.0"
-MODEL = "gpt-6-astra"  # Codex's frontier model on 2026-10-26 (`codex debug models`: "Frontier intelligence").
+# Every Codex role (the report's first reader, the development review) uses gpt-6.1-sol, not gpt-6-astra (user decision
+# 2026-10-26): a few astra reviews used up the plan's five-hour quota twice in one day, and the Plus plan allows about
+# three times as many sol messages (OpenAI help: astra 5-45, sol 15-160 per five hours). Sol is the newest workhorse
+# (`codex debug models`: "Latest workhorse model for coding and everyday work").
+MODEL = "gpt-6.1-sol"
 _MAX_OUTPUT_BYTES = 2_000_000
 _ENV_KEEP = ("PATH", "PATHEXT", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "TEMP", "TMP", "USERPROFILE",
              "HOMEDRIVE", "HOMEPATH", "HOME", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES", "OS",

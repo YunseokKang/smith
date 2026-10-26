@@ -343,4 +343,4 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
   `{"type":"error","message":"You’ve hit your usage limit. ... try again at 1:50 PM."}`와 같은 문장의 `turn.failed`, 종료 코드 1.
   원인: ChatGPT 플랜(Pro 아님)의 Codex 사용량 한도. 기계용 코드가 없어 `codex.check_events`가 문장으로 `usage-limit`을 판별한다.
   리포트 첫 독자는 Claude로 폴백하고, 리뷰 스크립트는 종료 코드 3으로 Claude Code `/code-review` 대체를 안내한다.
-  예방: 리뷰 추론 강도를 high로 낮췄고(사용자 결정), 개발 리뷰는 의미 있는 변경에만 돌리고, 정기 리포트(월·목 06:00) 직전에는 몰아서 돌리지 않는다.
+  예방: Codex 전부(독자·리뷰)를 `gpt-6.1-sol` high로 바꿨고(사용자 결정, 5시간당 약 3배), 개발 리뷰는 의미 있는 변경에만 돌리고, 정기 리포트(월·목 06:00) 직전에는 몰아서 돌리지 않는다.

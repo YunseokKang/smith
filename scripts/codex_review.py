@@ -23,8 +23,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from smith import codex  # noqa: E402 - the verified executable and the strict-schema helper.
 
-# high, not xhigh (user decision 2026-10-26): three xhigh reviews used up the plan's Codex quota in one morning,
-# which the report's first reader also draws on.
+# high, not xhigh (user decision 2026-10-26): xhigh reviews used up the plan's Codex quota, which the report's first
+# reader also draws on. The model is codex.MODEL, shared by every Codex role.
 EFFORT = "high"
 TIMEOUT_SECONDS = 1800
 SEVERITIES = ("P0", "P1", "P2", "P3")
