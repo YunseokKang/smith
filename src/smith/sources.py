@@ -54,8 +54,9 @@ def resolve(host: str) -> list[str]:
     return sorted({info[4][0] for info in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)})
 
 
-def https_get(ip: str, host: str, path: str) -> tuple[int, dict[str, str], bytes]:
-    """GET https://host/path from the already-checked address `ip`, certificate verified for `host`."""
+def https_get(ip: str, host: str, path: str, *, max_bytes: int = MAX_BYTES) -> tuple[int, dict[str, str], bytes]:
+    """GET https://host/path from the already-checked address `ip`, certificate verified for `host`; at most
+    `max_bytes` of the body are read."""
     context = ssl.create_default_context()
     raw = socket.create_connection((ip, 443), timeout=TIMEOUT_SECONDS)
     try:
@@ -70,7 +71,7 @@ def https_get(ip: str, host: str, path: str) -> tuple[int, dict[str, str], bytes
                                                   "Accept": "text/html,application/xhtml+xml,*/*;q=0.5",
                                                   "Accept-Language": "ko,en;q=0.5"})
         response = conn.getresponse()
-        body = response.read(MAX_BYTES + 1)[:MAX_BYTES]
+        body = response.read(max_bytes + 1)[:max_bytes]
         return response.status, {k.lower(): v for k, v in response.getheaders()}, body
     finally:
         conn.close()

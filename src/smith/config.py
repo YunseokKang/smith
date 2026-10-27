@@ -32,6 +32,8 @@ KNOWN_KEYS = {
     # The weekly health letter (health design §3, §9): the Sunday plan, the optional midweek check, the rotation
     # of topics and the client's priority goals shown on the dashboard line.
     "health": {"enabled", "weekday", "time", "topics", "goals", "midweek"},
+    # The evening 내일 준비 mail (daily design §16): its time and days, how the reader calls his wife, the talk kinds.
+    "evening": {"enabled", "time", "weekdays", "partner", "talk_kinds", "commute_hours", "rest_hours", "netflix", "sleep"},
 }
 HEALTH_MIDWEEK_KEYS = {"enabled", "weekday", "time"}
 HEALTH_TOPICS = ("vascular", "uric-weight", "nutrition-gut", "balance", "stomach-habits")
@@ -114,6 +116,7 @@ def load_config(path: Path) -> dict:
     _check_events(config.get("events", {}))
     _check_daily(config.get("daily", {}))
     _check_health(config.get("health", {}))
+    _check_evening(config.get("evening", {}))
     if "properties" in config or "targets" in config:
         from smith.realestate import RealEstateError, validate_properties, validate_targets
         try:
@@ -193,6 +196,39 @@ def _check_events(events: object) -> None:
     pct = events.get("portfolio_move_pct", 2.0)
     if isinstance(pct, bool) or not isinstance(pct, (int, float)) or not 0.5 <= pct <= 20:
         raise ValueError("events.portfolio_move_pct must be a number from 0.5 to 20")
+
+
+def _check_evening(evening: object) -> None:
+    """Optional `[evening]` (daily design §16): whether the 내일 준비 mail goes out, its local time and days, the word
+    the mail uses for the reader's wife, and which talk kinds rotate (default all six)."""
+    from smith.talk import KINDS
+
+    if not isinstance(evening, dict):
+        raise ValueError("evening must be a table")
+    for key in ("enabled", "netflix", "sleep"):
+        if not isinstance(evening.get(key, False), bool):
+            raise ValueError(f"evening.{key} must be a boolean")
+    clock = evening.get("time", "21:00")
+    try:
+        if not isinstance(clock, str) or len(clock) != 5 or time.fromisoformat(clock).tzinfo is not None:
+            raise ValueError()
+    except ValueError:
+        raise ValueError("evening.time must be HH:MM") from None
+    days = evening.get("weekdays", sorted(WEEKDAYS))
+    if not isinstance(days, list) or not days or any(d not in WEEKDAYS for d in days):
+        raise ValueError("evening.weekdays must list weekday names")
+    partner = evening.get("partner", "아내")
+    if not isinstance(partner, str) or not partner.strip() or len(partner) > 10:
+        raise ValueError("evening.partner must be a short word such as 아내")
+    kinds = evening.get("talk_kinds", list(KINDS))
+    if not isinstance(kinds, list) or not kinds or any(k not in KINDS for k in kinds):
+        raise ValueError(f"evening.talk_kinds must list some of {', '.join(KINDS)}")
+    for key in ("commute_hours", "rest_hours"):   # Two [start, end] hour pairs: morning and evening.
+        spans = evening.get(key, [[7, 9], [18, 20]])
+        if (not isinstance(spans, list) or len(spans) != 2
+                or any(not isinstance(s, list) or len(s) != 2 or any(isinstance(h, bool) or not isinstance(h, int) for h in s)
+                       or not 0 <= s[0] <= s[1] <= 23 for s in spans)):
+            raise ValueError(f"evening.{key} must be two [start, end] hour pairs such as [[7, 9], [18, 20]]")
 
 
 def _check_daily(daily: object) -> None:

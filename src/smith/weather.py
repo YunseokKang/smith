@@ -31,6 +31,11 @@ POLLEN_URLS = {"참나무": f"{KMA}/HealthWthrIdxServiceV3/getOakPollenRiskIdxV3
                "소나무": f"{KMA}/HealthWthrIdxServiceV3/getPinePollenRiskIdxV3",
                "잡초류": f"{KMA}/HealthWthrIdxServiceV3/getWeedsPollenRiskndxV3"}   # KMA's own spelling.
 FORECAST_ROWS = 1000      # The whole 02:00 run (about 900 rows for three days), so tomorrow's TMN/TMX are included too.
+# The short-term forecast runs (KST); each is published about ten minutes after its hour. The evening mail reads the
+# newest one that is surely out, so tomorrow's figures are hours fresh rather than the 02:00 run's (daily design §16).
+FORECAST_RUNS = (2, 5, 8, 11, 14, 17, 20, 23)
+RUN_PUBLISHED_AFTER = timedelta(minutes=15)
+GRADE_WORDS = {"좋음": 1, "보통": 2, "나쁨": 3, "매우나쁨": 4}
 WAKING_HOURS = range(6, 24)
 GRADES = {1: "좋음", 2: "보통", 3: "나쁨", 4: "매우나쁨"}
 POLLEN_GRADES = {0: "낮음", 1: "보통", 2: "높음", 3: "매우높음"}
@@ -44,6 +49,7 @@ SWING = 10.0
 HOT_MAX = 30.0
 PM25_SENSITIVE = 26.0     # Upper half of '보통' (16-35) already counts for a sensitive airway.
 PM10_SENSITIVE = 51.0
+WINDY = 9.0               # m/s: the line says 바람 강함 (the same mark as the wind picture).
 Getter = datagokr.Getter
 _WARNING_LINE = re.compile(r"^o\s*(?P<kind>[가-힣]+?)(?P<level>주의보|경보)\s*:\s*(?P<areas>.+)$")
 
@@ -79,6 +85,32 @@ class Forecast:
     sky: str | None                # Around midday.
     wind_max: float | None         # m/s
     issued: str                    # "YYYYMMDD HHMM" of the forecast run.
+    hourly: tuple["Hour", ...] = ()   # Every forecast hour of the day, for the commute windows (daily design §16.2).
+
+
+@dataclass(frozen=True)
+class Hour:
+    hour: int
+    temp: float | None     # TMP, ℃
+    pop: int | None        # POP, %
+    precip: str | None     # PTY as a word ("비", "눈", ...), None when dry
+    wind: float | None     # WSD, m/s
+    humidity: float | None = None   # REH, %
+
+
+@dataclass(frozen=True)
+class Window:
+    """The forecast over a span of hours (inclusive), e.g. the morning commute 07~09시."""
+    label: str
+    start: int
+    end: int
+    tmin: float | None
+    tmax: float | None
+    pop_max: int | None
+    precip: tuple[str, ...]
+    rain_from: int | None   # First hour with precipitation forecast or POP >= RAIN_POP.
+    wind_max: float | None
+    rain_known: bool = True  # False when an hour of the span has no POP: a dry line would then be a guess.
 
 
 @dataclass(frozen=True)
@@ -107,6 +139,8 @@ class AirQuality:
     pm10_grade: int | None
     pm25_grade: int | None
     forecast_grade: str | None   # Today's regional PM2.5 forecast ("보통"), if published.
+    # True for the evening mail's outlook: the grades are the regional forecast for tomorrow, not a measurement.
+    outlook: bool = False
 
 
 @dataclass(frozen=True)
@@ -126,6 +160,12 @@ class Report:
     air: AirQuality | None
     pollen: tuple[Pollen, ...]
     failures: dict[str, str] = field(default_factory=dict)   # source -> error code
+    # "today" for the morning mail; "tomorrow" when read the evening before (`today` then holds tomorrow's forecast,
+    # `tomorrow` the day after, `air` the regional outlook and the pollen its tomorrow index), so the advice rules and
+    # the traffic lights apply unchanged to the day the mail is about.
+    horizon: str = "today"
+    # The evening mail only: what is left of tonight in the same run (hours after it), for the night outlook.
+    tonight: Forecast | None = None
 
 
 @dataclass(frozen=True)
@@ -152,8 +192,11 @@ def grid(lat: float, lon: float) -> tuple[int, int]:
     return int(ra * math.sin(theta) + xo + 0.5), int(ro - ra * math.cos(theta) + yo + 0.5)
 
 
-def fetch(key: str, location: Location, *, now: datetime, getter: Getter | None = None) -> Report:
-    """Everything the block needs, each source on its own; `failures` names the ones that did not answer."""
+def fetch(key: str, location: Location, *, now: datetime, getter: Getter | None = None, horizon: str = "today") -> Report:
+    """Everything the block needs, each source on its own; `failures` names the ones that did not answer.
+
+    `now` is household-local. With `horizon="tomorrow"` (the evening mail) the report is about the next day: the
+    newest published forecast run, tomorrow's regional dust outlook and pollen index, no current observation."""
     get = getter or datagokr.default_getter
     today = now.date()
     failures: dict[str, str] = {}
@@ -165,22 +208,44 @@ def fetch(key: str, location: Location, *, now: datetime, getter: Getter | None 
             failures[name] = error.code
             return None
 
-    rows = attempt("forecast", lambda: forecast_rows(key, location, today, get))
-    forecasts = {} if rows is None else {d: summarize(rows, d) for d in (today, today + timedelta(days=1))}
     pollen = tuple(p for p in (attempt(f"pollen-{kind}", lambda k=kind: pollen_index(key, k, location, today, get))
                                for kind in POLLEN_URLS) if p is not None)
+    if horizon == "tomorrow":
+        target = today + timedelta(days=1)
+        run = latest_run(now)
+        rows = attempt("forecast", lambda: forecast_rows(key, location, run.date(), get, base_time=run.strftime("%H%M")))
+        forecasts = {} if rows is None else {d: summarize(rows, d) for d in (target, target + timedelta(days=1))}
+        # The observation is tonight's, for the night outlook (the humidity now in the district), not tomorrow's.
+        return Report(forecasts.get(target), forecasts.get(target + timedelta(days=1)),
+                      attempt("observation", lambda: observation(key, location, now, get)),
+                      tuple(attempt("warnings", lambda: warnings(key, location, get)) or ()),
+                      attempt("air", lambda: dust_outlook(key, location, today, target, get)),
+                      tuple(Pollen(p.kind, p.tomorrow, None, p.in_season) for p in pollen), failures, "tomorrow",
+                      None if rows is None else summarize(rows, today))
+    rows = attempt("forecast", lambda: forecast_rows(key, location, today, get))
+    forecasts = {} if rows is None else {d: summarize(rows, d) for d in (today, today + timedelta(days=1))}
     return Report(forecasts.get(today), forecasts.get(today + timedelta(days=1)),
                   attempt("observation", lambda: observation(key, location, now, get)),
                   tuple(attempt("warnings", lambda: warnings(key, location, get)) or ()),
                   attempt("air", lambda: air_quality(key, location, today, get)), pollen, failures)
 
 
-def forecast_rows(key: str, location: Location, day: date, get: Getter) -> list[dict[str, Any]]:
-    """The 02:00 run of `day` (it carries today's TMN and TMX); rows are {fcstDate, fcstTime, category, fcstValue}."""
+def forecast_rows(key: str, location: Location, day: date, get: Getter, *, base_time: str = "0200") -> list[dict[str, Any]]:
+    """One forecast run of `day` (by default 02:00, which carries today's TMN and TMX); rows are {fcstDate, fcstTime,
+    category, fcstValue}."""
     nx, ny = location.grid
     body = datagokr.call(get, FORECAST_URL, key, pageNo="1", numOfRows=str(FORECAST_ROWS), dataType="JSON",
-                 base_date=day.strftime("%Y%m%d"), base_time="0200", nx=str(nx), ny=str(ny))
+                 base_date=day.strftime("%Y%m%d"), base_time=base_time, nx=str(nx), ny=str(ny))
     return datagokr.items(body)
+
+
+def latest_run(now: datetime) -> datetime:
+    """The newest forecast run surely published at household-local `now` (yesterday's 23:00 run before 02:15)."""
+    for hour in reversed(FORECAST_RUNS):
+        run = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+        if run + RUN_PUBLISHED_AFTER <= now:
+            return run
+    return (now - timedelta(days=1)).replace(hour=FORECAST_RUNS[-1], minute=0, second=0, microsecond=0)
 
 
 def summarize(rows: list[dict[str, Any]], day: date) -> Forecast | None:
@@ -206,8 +271,78 @@ def summarize(rows: list[dict[str, Any]], day: date) -> Forecast | None:
     sky = SKY.get(sky_values.get(12) or sky_values.get(15) or sky_values.get(9) or "")
     winds = [w for w in (_num(v) for v in by.get("WSD", {}).values()) if w is not None]
     issued = f"{mine[0].get('baseDate', '')} {mine[0].get('baseTime', '')}".strip()
+    hours = sorted(set().union(*(set(values) for values in by.values()))) if by else []
+    hourly = tuple(Hour(h, _num(by.get("TMP", {}).get(h)), _int(by.get("POP", {}).get(h)),
+                        PRECIP.get(by.get("PTY", {}).get(h, "0")), _num(by.get("WSD", {}).get(h)),
+                        _num(by.get("REH", {}).get(h))) for h in hours)
     return Forecast(day, tmin, tmax, int(max(pops)) if pops else None, rain_hours, precip, sky,
-                    max(winds) if winds else None, issued)
+                    max(winds) if winds else None, issued, hourly)
+
+
+def window(forecast: Forecast | None, label: str, start: int, end: int) -> Window | None:
+    """The hours `start`..`end` (inclusive) of a forecast; None when the forecast has no hour in that span."""
+    if forecast is None:
+        return None
+    hours = [h for h in forecast.hourly if start <= h.hour <= end]
+    if not hours:
+        return None
+    temps = [h.temp for h in hours if h.temp is not None]
+    pops = [h.pop for h in hours if h.pop is not None]
+    winds = [h.wind for h in hours if h.wind is not None]
+    wet = [h.hour for h in hours if h.precip or (h.pop or 0) >= RAIN_POP]
+    return Window(label, start, end, min(temps) if temps else None, max(temps) if temps else None, max(pops) if pops else None,
+                  tuple(dict.fromkeys(h.precip for h in hours if h.precip)), wet[0] if wet else None,
+                  max(winds) if winds else None, all(h.pop is not None for h in hours))
+
+
+@dataclass(frozen=True)
+class Night:
+    """Tonight from `start` o'clock to `end` o'clock tomorrow morning, from the forecast hours."""
+    hours: int              # How many forecast hours the span had.
+    t_first: float | None   # The temperature at the first hour (bedtime).
+    tmin: float | None
+    tmin_hour: int | None
+    rh_mean: float | None
+    rh_min: float | None
+    wind_max: float | None
+    precip: tuple[str, ...]
+
+
+def night(report: Report | None, *, start: int = 22, end: int = 6) -> Night | None:
+    """The night outlook of an evening report: tonight's hours from `start` and tomorrow's up to `end`; None when the
+    report is not the evening's or has no hour of the span."""
+    if report is None or report.horizon != "tomorrow":
+        return None
+    hours = [h for h in (report.tonight.hourly if report.tonight else ()) if h.hour >= start]
+    hours += [h for h in (report.today.hourly if report.today else ()) if h.hour <= end]
+    if not hours:
+        return None
+    temps = [(h.temp, h.hour) for h in hours if h.temp is not None]
+    rh = [h.humidity for h in hours if h.humidity is not None]
+    winds = [h.wind for h in hours if h.wind is not None]
+    low = min(temps) if temps else None
+    return Night(len(hours), temps[0][0] if temps else None, low[0] if low else None, low[1] if low else None,
+                 round(sum(rh) / len(rh), 1) if rh else None, min(rh) if rh else None, max(winds) if winds else None,
+                 tuple(dict.fromkeys(h.precip for h in hours if h.precip)))
+
+
+def window_line(w: Window) -> str:
+    """'출근길 07~09시 · 3~5℃ · 비 60% (08시부터) · 바람 강함', from the figures only."""
+    parts = [f"{w.label} {w.start:02d}~{w.end:02d}시"]
+    if w.tmin is not None and w.tmax is not None:
+        parts.append(f"{w.tmin:g}℃" if w.tmin == w.tmax else f"{w.tmin:g}~{w.tmax:g}℃")
+    else:
+        parts.append("기온 자료 없음")
+    if w.rain_from is None and not w.rain_known:
+        parts.append("강수 자료 없음")
+    elif w.rain_from is not None:
+        kind = "·".join(w.precip) if w.precip else "비"
+        parts.append(f"{kind} {w.pop_max}% ({w.rain_from:02d}시부터)" if w.pop_max else f"{kind} ({w.rain_from:02d}시부터)")
+    else:
+        parts.append(f"비 {w.pop_max}%" if w.pop_max and w.pop_max >= 30 else "비 없음")
+    if w.wind_max is not None and w.wind_max >= WINDY:
+        parts.append("바람 강함")
+    return " · ".join(parts)
 
 
 def observation(key: str, location: Location, now: datetime, get: Getter) -> Observation:
@@ -253,20 +388,37 @@ def air_quality(key: str, location: Location, today: date, get: Getter) -> AirQu
     if not items:
         raise WeatherError("no-data")
     row = items[0]
-    forecast_grade = None
     try:
-        rows = datagokr.items(datagokr.call(get, DUST_FORECAST_URL, key, returnType="json", searchDate=today.isoformat(),
-                            InformCode="PM25", numOfRows="20", pageNo="1"))
-        mine = sorted((r for r in rows if str(r.get("informData")) == today.isoformat()
-                       and str(r.get("informCode", "PM25")) == "PM25"), key=lambda r: str(r.get("dataTime")))
-        if mine:
-            match = re.search(re.escape(location.air_region) + r"\s*:\s*([가-힣]+)", str(mine[-1].get("informGrade", "")))
-            forecast_grade = match.group(1) if match else None
+        forecast_grade = region_grade(key, location, today, today, "PM25", get)[0]
     except WeatherError:
         forecast_grade = None   # The forecast is a bonus; the station values stand on their own.
     return AirQuality(location.air_station, str(row.get("dataTime", "")), _num(row.get("pm10Value")),
                       _num(row.get("pm25Value")), _grade(row.get("pm10Grade1h") or row.get("pm10Grade")),
                       _grade(row.get("pm25Grade1h") or row.get("pm25Grade")), forecast_grade)
+
+
+def region_grade(key: str, location: Location, searched: date, target: date, code: str, get: Getter) -> tuple[str | None, str]:
+    """(grade word, issue time) of the household's region in the newest dust forecast issued on `searched` for
+    `target`; (None, "") when no issue covers that day or the region is not named in it."""
+    rows = datagokr.items(datagokr.call(get, DUST_FORECAST_URL, key, returnType="json", searchDate=searched.isoformat(),
+                                        InformCode=code, numOfRows="20", pageNo="1"))
+    mine = sorted((r for r in rows if str(r.get("informData")) == target.isoformat()
+                   and str(r.get("informCode", code)) == code), key=lambda r: str(r.get("dataTime")))
+    if not mine:
+        return None, ""
+    match = re.search(re.escape(location.air_region) + r"\s*:\s*([가-힣]+)", str(mine[-1].get("informGrade", "")))
+    return (match.group(1) if match else None), str(mine[-1].get("dataTime", ""))
+
+
+def dust_outlook(key: str, location: Location, today: date, target: date, get: Getter) -> AirQuality:
+    """Tomorrow's regional PM10 and PM2.5 forecast grades as an outlook (no measured values). Raises WeatherError
+    ("no-data") when neither grade is published for the region yet."""
+    pm10, _ = region_grade(key, location, today, target, "PM10", get)
+    pm25, issued = region_grade(key, location, today, target, "PM25", get)
+    if pm10 is None and pm25 is None:
+        raise WeatherError("no-data")
+    return AirQuality(location.air_region, issued, None, None, GRADE_WORDS.get(pm10 or ""), GRADE_WORDS.get(pm25 or ""),
+                      pm25, outlook=True)
 
 
 def pollen_index(key: str, kind: str, location: Location, today: date, get: Getter) -> Pollen:
@@ -362,8 +514,8 @@ def signals(report: Report, advice: Advice, *, airways_sensitive: bool) -> list[
         label = GRADES.get(grade, "자료 없음")
         if airways_sensitive and grade == 2 and ((air.pm25 or 0) >= PM25_SENSITIVE or (air.pm10 or 0) >= PM10_SENSITIVE):
             label += " · 기관지 주의"
-        detail = " · ".join(p for p in (f"초미세 {air.pm25:g}" if air.pm25 is not None else "",
-                                       f"미세 {air.pm10:g}" if air.pm10 is not None else "") if p)
+        detail = "권역 예보" if air.outlook else " · ".join(p for p in (f"초미세 {air.pm25:g}" if air.pm25 is not None else "",
+                                                                    f"미세 {air.pm10:g}" if air.pm10 is not None else "") if p)
         found.append(Signal("미세먼지", level, label, detail))
     season = [p for p in report.pollen if p.in_season]
     if season:
@@ -387,16 +539,21 @@ def for_model(report: Report, advice: Advice) -> dict[str, Any]:
         return None if f is None else {"date": f.day.isoformat(), "tmin": f.tmin, "tmax": f.tmax, "pop_max": f.pop_max,
                                        "rain_hours": list(f.rain_hours), "precip": list(f.precip), "sky": f.sky,
                                        "wind_max_ms": f.wind_max}
-    return {"today": forecast(report.today), "tomorrow": forecast(report.tomorrow),
+    days = ({"tomorrow": forecast(report.today), "day_after": forecast(report.tomorrow)} if report.horizon == "tomorrow"
+            else {"today": forecast(report.today), "tomorrow": forecast(report.tomorrow)})
+    return {**days, "horizon": report.horizon,
             "now": None if report.now is None else {"temp": report.now.temp, "humidity": report.now.humidity,
                                                     "precip": report.now.precip, "at": report.now.at},
             "warnings": [{"kind": w.kind, "level": w.level, "relevant": w.relevant} for w in report.warnings if w.relevant],
             "air": None if report.air is None else {"pm10": report.air.pm10, "pm25": report.air.pm25,
                                                     "pm10_grade": GRADES.get(report.air.pm10_grade or 0),
                                                     "pm25_grade": GRADES.get(report.air.pm25_grade or 0),
-                                                    "forecast_today": report.air.forecast_grade, "at": report.air.at},
-            "pollen": [{"kind": p.kind, "today": POLLEN_GRADES.get(p.today) if p.today is not None else None,
-                        "tomorrow": POLLEN_GRADES.get(p.tomorrow) if p.tomorrow is not None else None,
+                                                    "forecast_today": None if report.air.outlook else report.air.forecast_grade,
+                                                    "outlook": report.air.outlook, "at": report.air.at},
+            "pollen": [{"kind": p.kind, ("tomorrow" if report.horizon == "tomorrow" else "today"):
+                        POLLEN_GRADES.get(p.today) if p.today is not None else None,
+                        **({} if report.horizon == "tomorrow" else
+                           {"tomorrow": POLLEN_GRADES.get(p.tomorrow) if p.tomorrow is not None else None}),
                         "in_season": p.in_season} for p in report.pollen],
             "advice": {"headline": advice.headline, "items": list(advice.items), "cautions": list(advice.cautions),
                        "severe": advice.severe, "air_line": advice.air_line},
@@ -421,7 +578,10 @@ def _headline(report: Report, severe: list[Warning], items: list[str]) -> str:
 def _air_line(report: Report, airways_sensitive: bool) -> str:
     air = report.air
     if air is None:
-        parts = ["대기질: 오늘 받지 못함"]
+        parts = ["대기질: " + ("내일 예보를 받지 못함" if report.horizon == "tomorrow" else "오늘 받지 못함")]
+    elif air.outlook:
+        parts = [f"내일 {air.station} 예보: 초미세먼지 {GRADES.get(air.pm25_grade or 0, '미발표')}, "
+                 f"미세먼지 {GRADES.get(air.pm10_grade or 0, '미발표')}"]
     else:
         parts = [f"초미세먼지 {air.pm25:g}㎍/㎥ {GRADES.get(air.pm25_grade or 0, '')}" if air.pm25 is not None else "초미세먼지 값 없음",
                  f"미세먼지 {air.pm10:g}㎍/㎥ {GRADES.get(air.pm10_grade or 0, '')}" if air.pm10 is not None else "미세먼지 값 없음"]
@@ -429,7 +589,8 @@ def _air_line(report: Report, airways_sensitive: bool) -> str:
             parts.append(f"오늘 예보 {air.forecast_grade}")
     season = [p for p in report.pollen if p.in_season]
     if season:
-        parts.append("꽃가루 " + ", ".join(f"{p.kind} {POLLEN_GRADES.get(p.today or 0)}" for p in season))
+        parts.append(("내일 " if report.horizon == "tomorrow" else "") + "꽃가루 "
+                     + ", ".join(f"{p.kind} {POLLEN_GRADES.get(p.today or 0)}" for p in season))
     elif report.pollen:
         parts.append("꽃가루: 제공 기간 아님")
     if airways_sensitive:
@@ -459,6 +620,11 @@ def _first_num(values: dict[int, str]) -> float | None:
         if number is not None:
             return number
     return None
+
+
+def _int(raw: Any) -> int | None:
+    number = _num(raw)
+    return None if number is None else int(number)
 
 
 def _grade(raw: Any) -> int | None:

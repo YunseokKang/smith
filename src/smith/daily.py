@@ -44,8 +44,12 @@ class Inputs:
 
 
 def collect(db: Path, config: dict[str, Any], *, now: datetime, day: date | None = None,
-            getter: datagokr.Getter | None = None, calendar_getter: gmail.Getter = gmail.get) -> Inputs:
-    """Read every source for `day` (default: the household's today). Nothing here raises for a source failure."""
+            getter: datagokr.Getter | None = None, calendar_getter: gmail.Getter = gmail.get,
+            horizon: str = "today") -> Inputs:
+    """Read every source for `day` (default: the household's today). Nothing here raises for a source failure.
+
+    `horizon="tomorrow"` is the evening mail (daily design §16): `day` is tomorrow, the weather is tomorrow's outlook
+    read tonight, and 역사의 오늘 is not fetched (that mail has no such corner)."""
     daily = config.get("daily", {})
     tz = config["app"]["timezone"]
     local_now = local_time(now, tz)
@@ -61,7 +65,7 @@ def collect(db: Path, config: dict[str, Any], *, now: datetime, day: date | None
     else:
         spot = dict(daily["weather"])
         spot["warning_keywords"] = tuple(spot["warning_keywords"])
-        report = weather.fetch(key, weather.Location(**spot), now=local_now, getter=getter)
+        report = weather.fetch(key, weather.Location(**spot), now=local_now, getter=getter, horizon=horizon)
         failures.update({f"weather-{k}": v for k, v in report.failures.items()})
     events = tasks = None
     stored = credentials.load_gmail()
@@ -114,7 +118,8 @@ def collect(db: Path, config: dict[str, Any], *, now: datetime, day: date | None
             failures["holidays"] = error.code
     events_today = None
     try:
-        events_today = history.events_for(day, cache=history.path(db), now=now)
+        if horizon == "today":
+            events_today = history.events_for(day, cache=history.path(db), now=now)
     except (OSError, ValueError) as error:
         failures["history"] = str(error)[:40]
     notes = keep.load(keep.directory(db))

@@ -171,6 +171,9 @@ def find(db: Path, credentials: tuple[str, str, str], recipient: str, *, now: da
                 and datetime.fromisoformat(r["created_at"]) >= now - LOOKBACK]
         # Daily-routine mails are threads of their own (daily design §6): their replies get the daily context.
         runs += [{**r, "report_id": r["run_key"], "product": "daily"} for r in ledger.sent_daily_runs(conn, since=now - LOOKBACK)]
+        # The evening 내일 준비 mail is a daily-routine thread too (daily design §16): its snapshot has the same shape.
+        runs += [{**r, "report_id": r["run_key"], "product": "daily"}
+                 for r in ledger.sent_daily_runs(conn, since=now - LOOKBACK, product="evening")]
         # Health letters likewise (health design §8): their replies get the health context and nothing else.
         runs += [{**r, "report_id": r["run_key"], "product": "health"}
                  for r in ledger.sent_daily_runs(conn, since=now - LOOKBACK, product="health")]

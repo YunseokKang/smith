@@ -65,6 +65,21 @@ contact_reminders = "noted"
 # warning_keywords = ["서울"]
 # label = "서울 종로구"                # shown in the mail as the weather's basis
 
+# The evening 내일 준비 mail (docs/daily-design.md §16): tomorrow's weather outlook, tonight's checklist, tomorrow's
+# agenda and dates, and one thing to say to or share with the reader's wife. Uses [daily.weather] for the location.
+# `talk_kinds` picks the rotation from cheer, drama, item, motivation, slang, issue (default: all six).
+[evening]
+enabled = false
+time = "21:00"
+partner = "아내"
+# Tomorrow's hour spans (inclusive) shown under the weather: the commute on working days, outings on rest days.
+# commute_hours = [[7, 9], [18, 20]]
+# rest_hours = [[10, 12], [14, 18]]
+# Three Netflix Korea picks a night (masterpieces or acclaimed works, checked playable in Korea): set false to drop.
+# netflix = true
+# Tonight's sleep corner (bedroom humidity, blanket, heating, bedtime from the recent Fitbit nights): false drops it.
+# sleep = true
+
 # The weekly health letter (docs/health-design.md): a coach, not a doctor. Sunday is the plan (goal dashboard, one
 # topic card, this week's 1~3 actions); the optional midweek check compares the week so far with those actions once
 # Fitbit is connected. `goals` are the client's priorities shown on the dashboard line; `topics` is the rotation.

@@ -48,7 +48,9 @@ MAX_PAGES = 20
 SOURCE_FIELDS: dict[str, dict[str, Any]] = {
     "steps": {"steps": None}, "active-minutes": {"active_minutes_by_level": None},
     "exercise": {"exercise_minutes": 0, "strength": False, "exercise_kinds": []},
-    "sleep": {"sleep_minutes": None, "deep_minutes": None, "rem_minutes": None},
+    "sleep": {"sleep_minutes": None, "deep_minutes": None, "rem_minutes": None,
+              # The main sleep only (review 2026-10-27): reset with the rest, so a deleted night leaves no clock behind.
+              "main_minutes": None, "bed_at": None, "wake_at": None, "latency_minutes": None, "in_bed_minutes": None},
     "daily-resting-heart-rate": {"resting_hr": None}, "daily-heart-rate-variability": {"hrv_ms": None},
     "weight": {"weight_kg": None}, "body-fat": {"body_fat_pct": None},
     # Added 2026-10-25 (user request: more from the wearable): cardio fitness, overnight oxygen and breathing, skin
@@ -287,16 +289,36 @@ def _point_day(point: dict[str, Any], *, end: bool = False) -> str | None:
             return found
         interval = holder.get("interval")
         if isinstance(interval, dict):
-            keys = ("civilEndTime", "endTime") if end else ("civilStartTime", "startTime")
-            for key in keys:
-                found = _civil_day(interval.get(key))
-                if found:
-                    return found
+            which = "end" if end else "start"
+            found = _civil_day(interval.get(f"civil{which.title()}Time"))
+            if found:
+                return found
+            # The API's intervals carry UTC instants with their own offset ("startUtcOffset": "32400s", seen
+            # 2026-10-27), not civil times: a night ending 07:20 in Seoul ends 22:20Z the day before (BUG-2026-004).
+            local = _local(interval, which)
+            if local is not None:
+                return local.date().isoformat()
+            found = _civil_day(interval.get(f"{which}Time"))
+            if found:
+                return found
         for key in ("sampleTime", "startTime"):
             found = _civil_day(holder.get(key))
             if found:
                 return found
     return None
+
+
+def _local(interval: dict[str, Any], which: str) -> datetime | None:
+    """The household-local wall time of an interval's start or end: its UTC instant plus the offset the API gives with
+    it; None when either is missing (then no offset is guessed)."""
+    stamp, offset = interval.get(f"{which}Time"), interval.get(f"{which}UtcOffset")
+    if not isinstance(stamp, str) or offset is None:
+        return None
+    try:
+        instant = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (instant + timedelta(seconds=_seconds(offset))).replace(tzinfo=None)
 
 
 def _day_of(stamp: str) -> str | None:
@@ -356,6 +378,16 @@ def _sleep(point: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
                 kind = str(stage.get("type", stage.get("stage", ""))).upper()
                 by_stage[kind] = by_stage.get(kind, 0) + (_minutes_between(stage if "startTime" in stage else stage.get("interval")) or 0)
     stages = {"deep_minutes": by_stage.get("DEEP"), "rem_minutes": by_stage.get("REM")}
+    # The main sleep's clock and quality (daily design §16.7): when it began and ended in local time, minutes to fall
+    # asleep and minutes in the sleep period. A nap carries none of these, so it never moves the night's bedtime.
+    metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+    interval = body.get("interval") if isinstance(body.get("interval"), dict) else {}
+    if metadata.get("mainSleep"):
+        bed, wake = _local(interval, "start"), _local(interval, "end")
+        stages.update({"main_minutes": _int(summary["minutesAsleep"]) if summary.get("minutesAsleep") is not None else None,
+                       "bed_at": bed.strftime("%H:%M") if bed else None, "wake_at": wake.strftime("%H:%M") if wake else None,
+                       "latency_minutes": _int(summary["minutesToFallAsleep"]) if summary.get("minutesToFallAsleep") is not None else None,
+                       "in_bed_minutes": _int(summary["minutesInSleepPeriod"]) if summary.get("minutesInSleepPeriod") is not None else None})
     if summary.get("minutesAsleep") is not None:
         return end_day, {"sleep_minutes": _int(summary["minutesAsleep"]), **stages}
     total = _minutes_between(body.get("interval"))
@@ -502,9 +534,12 @@ def sync(folder: Path, token: str, *, now: datetime, getter: gmail.Getter = gmai
     stored = {k: v for k, v in sorted(stored.items()) if k >= cutoff and any(v.get(f) not in (None, 0, False, []) for f in v)}
     outcome = "partial" if failed else "synced"
     _write(directory(folder) / DAYS_FILE, stored)
+    sources = {**(sync_state(folder).get("sources") or {}), **{t: now.isoformat() for t in SOURCE_FIELDS if t not in failed}}
     _write(directory(folder) / SYNC_FILE, {"checked_at": now.isoformat(), "synced_at": now.isoformat(),
                                             "last_error": "partial-" + ",".join(failed) if failed else None,
-                                            "last_error_at": now.isoformat() if failed else None, "notes": notes, "days": len(stored)})
+                                            "last_error_at": now.isoformat() if failed else None, "notes": notes, "days": len(stored),
+                                            # Source -> its last successful read (review 2026-10-27).
+                                            "sources": sources, "failed": failed})
     return {"outcome": outcome, "days": len(stored), "error_code": ("partial-" + ",".join(failed)) if failed else None,
             "notes": notes, "failed": failed}
 

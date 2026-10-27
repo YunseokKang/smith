@@ -139,6 +139,36 @@ class FetchTests(unittest.TestCase):
         self.assertIn("steps: rate-limited", notes)
 
 
+class LocalTimeTests(unittest.TestCase):
+    def test_a_night_is_booked_on_the_local_morning_it_ends_with_its_clock(self):
+        # The API's shape (field names seen 2026-10-27; the values here are synthetic): UTC instants plus offsets, no
+        # civil times. A night ending 07:20 in Seoul ends 22:20Z the day before (BUG-2026-004).
+        night = {"sleep": {"interval": {"startTime": "2026-11-02T15:10:00Z", "startUtcOffset": "32400s",
+                                        "endTime": "2026-11-02T22:20:00Z", "endUtcOffset": "32400s"},
+                           "metadata": {"mainSleep": True}, "type": "STAGES",
+                           "summary": {"minutesAsleep": "410", "minutesToFallAsleep": "9", "minutesInSleepPeriod": "430",
+                                       "stagesSummary": [{"type": "DEEP", "minutes": "70"}]}}}
+        day, fields = fitbit._sleep(night)
+        self.assertEqual((day, fields["sleep_minutes"], fields["main_minutes"], fields["bed_at"], fields["wake_at"],
+                          fields["latency_minutes"], fields["in_bed_minutes"]), ("2026-11-03", 410, 410, "00:10", "07:20", 9, 430))
+        nap = {"sleep": {"interval": {"startTime": "2026-11-03T04:00:00Z", "startUtcOffset": "32400s",
+                                      "endTime": "2026-11-03T04:40:00Z", "endUtcOffset": "32400s"},
+                         "metadata": {"mainSleep": False}, "summary": {"minutesAsleep": "35"}}}
+        self.assertNotIn("bed_at", fitbit._sleep(nap)[1])                 # A nap never moves the night's bedtime.
+        merged: dict = {}
+        for point in (night, nap):
+            fitbit._merge_day(merged, fitbit._sleep(point)[1])
+        self.assertEqual((merged["sleep_minutes"], merged["main_minutes"]), (445, 410))   # Efficiency uses the night only.
+        workout = {"exercise": {"interval": {"startTime": "2026-11-02T23:15:00Z", "startUtcOffset": "32400s"}}}
+        self.assertEqual(fitbit._point_day(workout), "2026-11-03")        # 08:15 in Seoul, not the UTC date.
+
+    def test_a_successful_reread_clears_the_night_s_clock(self):
+        days = {"2026-11-03": {"bed_at": "00:10", "wake_at": "07:20", "main_minutes": 410}}
+        fitbit._blank(days, "sleep")
+        self.assertEqual({k: days["2026-11-03"][k] for k in ("bed_at", "wake_at", "main_minutes")},
+                         {"bed_at": None, "wake_at": None, "main_minutes": None})
+
+
 class StorageTests(unittest.TestCase):
     def test_sync_merges_days_partial_keeps_old_values_and_the_week_is_summarised(self):
         with tempfile.TemporaryDirectory() as directory:

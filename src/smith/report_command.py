@@ -375,6 +375,7 @@ def _publish(args: argparse.Namespace) -> int:
     if args.action == "run-due":
         _run_daily(args)   # After the reports (review 2026-10-25): a due report never waits behind the daily mail.
         _run_health(args)  # And the weekly health letter after the daily mail (health design §9).
+        _run_evening(args)  # The evening 내일 준비 mail (daily design §16); its slot never meets the others'.
     return code
 
 
@@ -391,6 +392,21 @@ def _run_daily(args: argparse.Namespace) -> None:
             _say(args.db, line)
     except Exception as error:  # noqa: BLE001 - the daily mail must never block or fail the scheduled task.
         _say(args.db, f"Daily mail crashed: {type(error).__name__}")
+
+
+def _run_evening(args: argparse.Namespace) -> None:
+    """The evening 내일 준비 mail (daily design §16) on the same scheduled task; never raises."""
+    from smith import evening_command
+    from smith.config import load_config
+
+    try:
+        config = load_config(args.config)
+        if not config.get("evening", {}).get("enabled"):
+            return
+        for line in evening_command.run_due(args.db, config, now=datetime.now(timezone.utc)):
+            _say(args.db, line)
+    except Exception as error:  # noqa: BLE001 - the evening mail must never block or fail the scheduled task.
+        _say(args.db, f"Evening mail crashed: {type(error).__name__}")
 
 
 def _run_health(args: argparse.Namespace) -> None:

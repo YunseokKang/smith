@@ -215,7 +215,15 @@
                   모델 호출당 연락처 3명, 주소록 답이면 코드가 웹 조사 차단, 연락처 답장의 기억 제한, 오류 정규화·상태(`partial`·
                   `stale`·`sync-<코드>`)·잠금. 첫 동기화 817명(2026-10-25). 가명 전달(P1·P2, 사용자 결정; `daily-writer-v3`·`daily-answer-v5`). 남은 점:
                   `people.json`과의 중복 생일 대조.
-      - [ ] 후속(§9): 일정 살 붙이기, 주간 미리보기, 저녁 메일, `smith ask`와 주제 라우터(Keep 창고가 1차 자료), 메모 변경 이력.
+      - [x] 저녁 "내일 준비" 메일(FR-42, §16, 2026-10-27): 매일 21:00, `evening.py`(내일 자료·오늘 밤 체크 목록 규칙),
+            `weather.fetch(horizon="tomorrow")`(최신 발표 회차·권역 미세먼지 예보·꽃가루 내일 지수), `talk.py`(아내에게 건넬 이야기
+            여섯 갈래 순환, 유행 갈래는 개인 자료 없는 웹 조사 + 매체·날짜·도달·주제 검증, 30일 중복 회피), `evening_writer.py`
+            (`evening-writer-v1`), `evening_html.py`(남색 머리 카드, 목록형), `evening_send.py`(`product = evening`, 키 `<내일>#evening`,
+            자정 지나면 미발송), `smith evening preview|inputs|send|status`, `run-due` 연결, 답장은 하루 일과 스레드로.
+            같은 날 추가: 출퇴근 시간대 날씨(`weather.window`), 신호등 칸 크기 통일(두 메일), 오늘 밤 넷플릭스 3편(`netflix_picks.py`,
+            한국 넷플릭스 페이지로 시청 가능 확인·평가 출처 본문 대조), 오늘 밤 숙면(`sleep.py`, 밤 습도·기온·바람과 Fitbit 최근 수면,
+            수치는 모델에 보내지 않음), Fitbit 날짜 결함 수정(BUG-2026-004). Codex 리뷰 3회, 지적 모두 반영(마지막 반영 뒤 재검토는 안 함).
+      - [ ] 후속(§9): 일정 살 붙이기, 주간 미리보기, `smith ask`와 주제 라우터(Keep 창고가 1차 자료), 메모 변경 이력.
 - [ ] 8단계: 건강 코치 주간 레터(FR-37~40, `docs/health-design.md`). 사용자 결정 2026-10-25(주 1회, 마스킹 수치 전달 동의, Fitbit).
       - [x] 8a(2026-10-25) 건강 원장 `health.py`: 허용 코드 목록, 방식별 계열, track별 최근 소견이 정하는 추적, 해소 소견 제외, 알려진
             track의 미래 날짜만 아침 메일 날짜 책에(`daily.collect`가 `health.merge_dates`), 멱등 가져오기(충돌은 전체 거부), 약-검사

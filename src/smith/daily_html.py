@@ -1,4 +1,4 @@
-"""The daily-routine mail (FR-31) rendered in its own warm register (user review 2026-10-25): sand and cream surfaces,
+﻿"""The daily-routine mail (FR-31) rendered in its own warm register (user review 2026-10-25): sand and cream surfaces,
 a terracotta accent, a greeting instead of a status badge, and a traffic-light row for weather, dust and pollen. The
 finance reports keep their institutional white-and-blue look; the two mails should feel like two rooms of one house.
 
@@ -79,9 +79,9 @@ def _top_date(data: dict[str, Any]) -> str | None:
     return None
 
 
-def _page(inner: str) -> str:
+def _page(inner: str, title: str = "Smith 하루 일과") -> str:
     return (f'<!doctype html><html lang="ko"><head><meta charset="utf-8">'
-            f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>Smith 하루 일과</title></head>'
+            f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>{escape(title)}</title></head>'
             f'<body style="margin:0;padding:0;background:{PAGE};font-family:{SANS};color:{INK};word-break:keep-all;">'
             f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:{PAGE}">'
             f'<tr><td align="center" style="padding:16px 6px">'
@@ -104,13 +104,33 @@ def _pill(text: str, kind: str = "neutral") -> str:
             f'border-radius:100px;padding:3px 10px;white-space:nowrap">{escape(text)}</span>')
 
 
-def _light(signal: weather.Signal) -> str:
+LIGHT_HEIGHT = 60   # px of content in every light (name 16 + label 22 + detail 16 + gaps), so all panels match.
+
+
+def _light(signal: weather.Signal, width: str) -> str:
+    """One panel. The tint is the cell's own background (not an inner box), so the cells of a row share one height,
+    and the detail line is always there, so a panel without one is as tall as the rest (user review 2026-10-27)."""
     color, shape, tint = LIGHTS[signal.level]
-    detail = f'<div style="font-size:12px;color:{MUTED};margin-top:2px">{escape(signal.detail)}</div>' if signal.detail else ""
-    return (f'<td style="width:33%;padding:4px;vertical-align:top"><div style="background:{tint};border-radius:16px;padding:12px 14px">'
-            f'<div style="font-size:12px;font-weight:700;color:{MUTED}">{escape(signal.name)}</div>'
-            f'<div style="font-size:16px;font-weight:700;color:{INK};margin-top:4px"><span style="color:{color};font-size:15px">'
-            f'{shape}</span> {escape(signal.label)}</div>{detail}</div></td>')
+    detail = escape(signal.detail) if signal.detail else "&nbsp;"
+    return (f'<td width="{width}" style="width:{width};height:{LIGHT_HEIGHT}px;background:{tint};border-radius:16px;'
+            f'padding:12px 14px;vertical-align:top">'
+            f'<div style="font-size:12px;line-height:16px;font-weight:700;color:{MUTED}">{escape(signal.name)}</div>'
+            f'<div style="font-size:16px;line-height:22px;font-weight:700;color:{INK};margin-top:4px"><span style="color:{color};'
+            f'font-size:15px">{shape}</span> {escape(signal.label)}</div>'
+            f'<div style="font-size:12px;line-height:16px;color:{MUTED};margin-top:2px">{detail}</div></td>')
+
+
+def lights_table(lights: list[weather.Signal], per_row: int) -> str:
+    """The traffic-light panels, `per_row` equal columns; a short last row is padded with empty cells so its panels
+    keep the column width instead of stretching."""
+    width = f"{100 // per_row}%"
+    rows = []
+    for i in range(0, len(lights), per_row):
+        row = [_light(s, width) for s in lights[i:i + per_row]]
+        row += [f'<td width="{width}" style="width:{width}"></td>'] * (per_row - len(row))
+        rows.append("<tr>" + "".join(row) + "</tr>")
+    return ('<table role="presentation" width="100%" cellpadding="0" cellspacing="6" style="margin-top:10px;table-layout:fixed">'
+            + "".join(rows) + "</table>")
 
 
 def _hero(data: dict[str, Any], prose: dict[str, Any], pictures: dict[str, str | None] | None = None) -> str:
@@ -128,9 +148,7 @@ def _hero(data: dict[str, Any], prose: dict[str, Any], pictures: dict[str, str |
         headline = prose.get("headline") or advice.headline
         line = prose.get("weather_line") or _weather_line(advice)
         lights = weather.signals(report, advice, airways_sensitive=bool(data.get("airways_sensitive")))
-        rows = [lights[i:i + 3] for i in range(0, len(lights), 3)]
-        lights_html = ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:14px">'
-                       + "".join("<tr>" + "".join(_light(s) for s in row) + "</tr>" for row in rows) + "</table>")
+        lights_html = lights_table(lights, 2)   # Two a row, as in the evening mail: equal panels on a phone.
         air = advice.air_line
         if block.get("label") and report.air is not None:
             air += f" · {block['label']} {report.air.station} 측정소"
@@ -216,8 +234,9 @@ def _calendar(data: dict[str, Any], prose: dict[str, Any]) -> str:
         rows.append(["할 일", Raw(escape(task.title) + f" {_pill('오늘 기한', 'warn')}"), task.list_title])
     notes = [f"겹침: {a.title} / {b.title}" for a, b in data["overlaps"]]
     notes += [f"{gap}분 간격: {a.title} → {b.title}" for a, b, gap in data["tight_gaps"]]
-    lead = prose.get("agenda_line") or (f"일정 {len(events)}건" + (f", 오늘 기한 할 일 {len(due_today)}건" if due_today else "")
-                                         + ". 시간이 없는 일정은 등록 순서입니다.")
+    # The lead is HTML in _card; the writer's sentence is escaped like every other model text.
+    lead = escape(prose.get("agenda_line") or (f"일정 {len(events)}건" + (f", 오늘 기한 할 일 {len(due_today)}건" if due_today else "")
+                                                + ". 시간이 없는 일정은 등록 순서입니다."))
     inner = _rows(["시간", "일정", "장소"], rows)
     if notes:
         inner += f'<div style="font-size:13px;color:{INK};margin-top:8px">▲ {escape(" · ".join(notes))}</div>'
