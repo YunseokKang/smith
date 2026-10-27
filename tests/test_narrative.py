@@ -559,8 +559,23 @@ class NarrativeTests(unittest.TestCase):
             ledger.record_lineage(conn, report_id="prev", known_at=week_ago, brief_id=None, advice_run_ids=["final-1"],
                                   config_sha256=None, code_version=None, data_sha256="d")
             ledger.finish_report(conn, report_id="prev", status="sent", finished_at=week_ago, shown_proposals=[])
+            # The report before it: only its titles travel, so a title does not come back every other week.
+            older_at = AT - timedelta(days=14)
+            older = {"verified": {**final["verified"],
+                                  "insights": [{"title": "두 주 전 통찰", "body": "b", "implication": "i", "refs": ["R1"]}],
+                                  "watch": [{"item": "두 주 전 항목", "why": "w", "refs": []}]}}
+            ledger.record_advice_run(conn, run_id="final-0", created_at=older_at, use_case=narrative.FINAL_USE_CASE,
+                                     question="monday", payload="{}", prompt_version="x", model="m", cost_usd=None,
+                                     outcome="success", advice=json.dumps(older, ensure_ascii=False))
+            ledger.claim_report(conn, report_id="prev0", slot=None, kind="monday", trigger="manual", created_at=older_at,
+                                as_of=older_at, baseline=None, missed_slots=[])
+            ledger.record_lineage(conn, report_id="prev0", known_at=older_at, brief_id=None, advice_run_ids=["final-0"],
+                                  config_sha256=None, code_version=None, data_sha256="d")
+            ledger.finish_report(conn, report_id="prev0", status="sent", finished_at=older_at, shown_proposals=[])
         previous = narrative.previous_report(self.db, data)
         self.assertEqual(previous["date"], week_ago.astimezone(data["as_of"].tzinfo).date().isoformat())
+        self.assertEqual(previous["earlier"], [{"date": older_at.astimezone(data["as_of"].tzinfo).date().isoformat(),
+                                               "insights": ["두 주 전 통찰"], "watch": ["두 주 전 항목"], "experiences": []}])
         self.assertEqual((previous["situation"], [i["title"] for i in previous["insights"]], previous["watch"],
                           previous["holdings"]),
                          ("지난주 상황", ["영통 규제"], [{"item": "금통위"}],
@@ -569,12 +584,14 @@ class NarrativeTests(unittest.TestCase):
         self.assertNotIn("last_report", narrative._EVIDENCE_KEYS)                # Smith's own prose is not evidence.
         repeated = dict(EMPTY, insights=[{"title": "영통 규제", "body": "다시 지정", "implication": "영향", "refs": ["R1"]},
                                          {"title": "영통 규제 완화 논의", "body": "지정 해제 논의", "implication": "영향",
-                                          "refs": ["R1"]}],
+                                          "refs": ["R1"]},
+                                         {"title": "두 주 전 통찰", "body": "다시", "implication": "영향", "refs": ["R1"]}],
                         # A qualifier tag the polish strips does not make last week's title new (Codex review 2026-10-27).
                         watch=[{"item": "금통위", "why": "다음 달", "refs": []}, {"item": "금통위 (가정)", "why": "다음 달", "refs": []}])
         verified, dropped = narrative.verify(repeated, payload)
         self.assertEqual([d for d in dropped if "repeats" in d],
-                         ["insights[0]:repeats-last-report", "watch[0]:repeats-last-report", "watch[1]:repeats-last-report"])
+                         ["insights[0]:repeats-last-report", "insights[2]:repeats-last-report",
+                          "watch[0]:repeats-last-report", "watch[1]:repeats-last-report"])
         self.assertEqual([i["title"] for i in verified["insights"]], ["영통 규제 완화 논의"])
         # A repeat is never restored from the raw output when the repair repeats it, drops it or fails (Codex
         # review 2026-10-27): the final output simply lacks it.

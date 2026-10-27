@@ -55,7 +55,8 @@ logger = logging.getLogger(__name__)
 # v23: reader_notes, the first reader's marks for a plain-language rewrite (user decision 2026-10-26).
 # v24: holding_quantity_changes, the holdings whose share count changed since the comparison report.
 # v25: last_report, what the previous report on the theme said, so the new one does not repeat it (user review 2026-10-27).
-PROMPT_VERSION = "narrative-v25"  # v22: no job gap in the reserve, reserve_basis, stale deals; v21: retirement ages.
+# v26: last_report.earlier, the titles of the reports before it (about a month), so a title does not return fortnightly.
+PROMPT_VERSION = "narrative-v26"  # v22: no job gap in the reserve, reserve_basis, stale deals; v21: retirement ages.
 MODEL = "fable"
 BUDGET_USD = "5.00"
 # Two calls at most: the write (the markets day with twenty-odd holdings ran past 10 minutes on 2026-10-17) and a
@@ -302,6 +303,8 @@ Input JSON:
   something about it changed, and then says what changed. A holding whose stance is unchanged gets its reason
   from this week's facts, or one short clause, never last week's sentence. When little changed, one sentence
   saying so beats a restatement. Code drops an insight, watch item or experience whose title repeats it.
+  Its `earlier` lists the insight, watch and experience titles of the reports before it (about a month):
+  those count as told too, and code drops their titles as well.
 - tax: tax strategy notes and the year-end checklist computed by code. Use them to explain the after-tax
   logic of the proposals (which account, when to realize gains, marriage-registration timing).
 - holdings: the listed holdings Smith gives opinions on, computed by code: quantity, price, average cost,
@@ -1337,8 +1340,9 @@ _REASONS = {"unknown-ref": "cites a ref that is not in the input",
             "missing-opinion": "gives no opinion on a holding whose must_opine is true (above the single-company "
                                "limit or the employer's stock); write it, by its symbol",
             "ungrounded-number": "uses numbers (or signs) that are not in the input or its cited refs",
-            "repeats-last-report": "repeats, by title, an insight, watch item or experience the previous report on this "
-                                   "theme already gave (last_report); write what is new since it, or leave it out"}
+            "repeats-last-report": "repeats, by title, an insight, watch item or experience a recent report on this theme "
+                                   "already gave (last_report, or a title under its earlier); write what is new, or leave "
+                                   "it out"}
 
 
 def verify(output: dict[str, Any], payload: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
@@ -1356,9 +1360,12 @@ def verify(output: dict[str, Any], payload: dict[str, Any]) -> tuple[dict[str, A
     # What the previous report on this theme already told the client, by title (report design §33): the same
     # title again is a repeat, whatever the body says; a changed situation gets a new title.
     previous = payload.get("last_report") or {}
+    earlier = previous.get("earlier") or []
     told = {"insights": {_squash(i["title"]) for i in previous.get("insights", [])},
             "watch": {_squash(w["item"]) for w in previous.get("watch", [])},
             "experiences": {_squash(e["title"]) for e in previous.get("experiences", [])}}
+    for field in told:  # The reports before the last one, by title only (about a month).
+        told[field] |= {_squash(title) for report in earlier for title in report.get(field, [])}
 
     def fresh(path: str, field: str, title: str) -> bool:
         if _squash(title) in told[field]:
@@ -1861,32 +1868,49 @@ def report_memory(db: Path, data: dict[str, Any]) -> tuple[list[dict[str, Any]],
     return memory.for_model(chosen), {"stored": len(facts), "sent": len(chosen)}
 
 
+REPEAT_WINDOW = 4  # Sent reports on the theme whose titles count as already told: about a month of weekly reports.
+
+
 def previous_report(db: Path, data: dict[str, Any]) -> dict[str, Any] | None:
-    """What this theme's previous report told the client (report design §33): the final narrative of the last
-    sent report of the same series, the one the comparison baseline comes from. None for a first report, a report
-    sent without a narrative, or an unreadable ledger (the writer then simply has nothing to avoid)."""
+    """What this theme's previous reports told the client (report design §33): the final narrative of the last
+    sent report of the same series that had one (the comparison baseline follows the same series), and under
+    `earlier` the insight, watch and experience titles of the sent reports before it within REPEAT_WINDOW, so a
+    title does not come back every other week (user question 2026-10-27). None for a first report or an
+    unreadable ledger (the writer then simply has nothing to avoid)."""
     try:
         with closing(ledger.connect_read_only(db)) as conn:
-            report = ledger.last_sent_report(conn, kinds=editions.same_series(data["kind"]))
-            if report is None:
-                return None
-            lineage = ledger.get_report(conn, report["report_id"]) or {}  # The run list carries no lineage.
-            recent = ledger.get_advice(conn, lineage.get("advice_run_ids") or [], use_case=FINAL_USE_CASE,
-                                       created_at=report["created_at"])
+            series = editions.same_series(data["kind"])
+            sent = sorted((r for r in ledger.report_runs(conn, limit=1000) if r["status"] == "sent" and r["kind"] in series),
+                          key=lambda r: r["as_of"], reverse=True)[:REPEAT_WINDOW]
+            told = [(report, _final_narrative(conn, report)) for report in sent]
     except (sqlite3.Error, ledger.LedgerError, OSError, ValueError) as error:
-        logger.warning("Previous report unavailable to the writer: %s", type(error).__name__)
+        logger.warning("Previous reports unavailable to the writer: %s", type(error).__name__)
         return None
-    verified = (recent or {}).get("content", {}).get("verified") or {}
-    if not verified:
+    told = [(report, verified) for report, verified in told if verified]
+    if not told:
         return None
-    sent = datetime.fromisoformat(report["as_of"]).astimezone(data["as_of"].tzinfo)
-    return {"date": sent.date().isoformat(),
+    (report, verified), earlier = told[0], told[1:]
+
+    def when(run: dict[str, Any]) -> str:
+        return datetime.fromisoformat(run["as_of"]).astimezone(data["as_of"].tzinfo).date().isoformat()
+    return {"date": when(report),
             **{key: (verified.get(key) or {}).get("text", "") for key in SCALAR_BLOCKS},
             "insights": [{"title": i.get("title", ""), "body": i.get("body", "")} for i in verified.get("insights") or []],
             "watch": [{"item": w.get("item", "")} for w in verified.get("watch") or []],
             "experiences": [{"title": e.get("title", "")} for e in verified.get("experiences") or []],
             "holdings": [{"symbol": h.get("symbol", ""), "stance": h.get("stance", ""), "reason": h.get("reason", "")}
-                         for h in verified.get("holdings") or []]}
+                         for h in verified.get("holdings") or []],
+            "earlier": [{"date": when(r), "insights": [i.get("title", "") for i in v.get("insights") or []],
+                         "watch": [w.get("item", "") for w in v.get("watch") or []],
+                         "experiences": [e.get("title", "") for e in v.get("experiences") or []]} for r, v in earlier]}
+
+
+def _final_narrative(conn: sqlite3.Connection, report: dict[str, Any]) -> dict[str, Any]:
+    """A sent report's narrative as sent; {} when it went out without one."""
+    lineage = ledger.get_report(conn, report["report_id"]) or {}  # The run list carries no lineage.
+    recent = ledger.get_advice(conn, lineage.get("advice_run_ids") or [], use_case=FINAL_USE_CASE,
+                               created_at=report["created_at"])
+    return (recent or {}).get("content", {}).get("verified") or {}
 
 
 def narrate(db: Path, view: Any, data: dict[str, Any], *, now: datetime, secrets: list[str],
