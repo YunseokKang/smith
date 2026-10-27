@@ -136,12 +136,14 @@ def publish(db: Path, *, recipient: str, credentials: tuple[str, str, str], now:
             missed: list[datetime], kind: str, sender: Sender = gmail.send, tz: str = DEFAULT_TIMEZONE,
             sync_failures: list[str] | None = None, narrator: Narrator | None = None,
             household: dict[str, Any] | None = None, lineage: dict[str, str | None] | None = None,
-            schedule: dict[str, Any] | None = None) -> dict[str, Any]:
+            schedule: dict[str, Any] | None = None, since: datetime | None = None) -> dict[str, Any]:
     """Claim, build, send and record one report. Returns the final run record fields.
 
     `lineage` carries the config hash and code version; with the ledger time, brief, model runs and a
     digest of the canonical report data they are stored on the run before sending. `schedule` is the
     `[reports]` table: its editions name the themes of missed slots and the week's plan in the footer.
+    `since` is an explicit comparison point for a manual send (a same-day re-send would otherwise compare with
+    the report it replaces); a scheduled report ignores it.
 
     `narrator(data)` adds the verified narrative (6c/6d) to the report data in place; it handles its own
     failures, so a report always goes out with at least its deterministic content.
@@ -160,6 +162,8 @@ def publish(db: Path, *, recipient: str, credentials: tuple[str, str, str], now:
         same = (ledger.last_sent_report(conn, kinds=editions.same_series(kind), trigger=trigger)
                 or ledger.last_sent_report(conn, trigger=trigger) or last)
         baseline = None if same is None else datetime.fromisoformat(same["as_of"])
+        if since is not None and slot is None:
+            baseline = since
         unresolved = ledger.unresolved_runs(conn, since=None if last is None else datetime.fromisoformat(last["created_at"]))
         claimed = ledger.claim_report(conn, report_id=report_id, slot=slot, kind=kind,
                                       trigger="manual" if slot is None else "scheduled", created_at=now, as_of=now,

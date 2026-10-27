@@ -187,6 +187,12 @@ class DeliveryTests(unittest.TestCase):
         manual = delivery.publish(self.db, recipient="me@example.com", credentials=("a", "b", "c"), now=NEXT_MON + timedelta(hours=1),
                                   slot=None, missed=[], kind="monday", sender=self.sender())
         self.assertEqual(manual["status"], "sent")                               # A manual report keeps any baseline.
+        # A same-day re-send can name its comparison point: last week's report, not the one it replaces.
+        delivery.publish(self.db, recipient="me@example.com", credentials=("a", "b", "c"), now=NEXT_MON + timedelta(hours=2),
+                         slot=None, missed=[], kind="monday", sender=self.sender(), since=MON)
+        with closing(ledger.connect_read_only(self.db)) as conn:
+            resent = ledger.report_runs(conn, limit=1)[0]
+        self.assertEqual(datetime.fromisoformat(resent["baseline"]), MON.astimezone(timezone.utc))
 
     def test_missing_setup_is_recorded_for_unattended_runs(self):
         result = delivery.record_failure(self.db, now=MON, slot=MON, missed=[], kind="monday",

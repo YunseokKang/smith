@@ -28,7 +28,8 @@ def add_parser(sub: Any, default_db: Path) -> None:
                              "life (Sat), or the original full 'monday' / short 'thursday' report "
                              "(default: today's edition from [reports.editions])")
     report.add_argument("--since", type=_aware_datetime,
-                        help="Compare against the ledger as known at this time (default: first report, no comparison)")
+                        help="preview/send-now: compare against the ledger as known at this time (default: preview none, "
+                             "send-now the last report on the same theme)")
     report.add_argument("--out", type=Path, help="Output HTML path (default: reports/preview-<time>.html); "
                                                  "compare: output folder (default: reports/compare-<time>)")
     report.add_argument("--narrative", action="store_true",
@@ -393,6 +394,9 @@ def _publish_once(args: argparse.Namespace) -> int:
     now = datetime.now(timezone.utc)
     slot, missed = None, []
     kind = args.kind or editions.for_day(config, now.astimezone(ZoneInfo(tz)).date())
+    if args.since is not None and args.since >= now:
+        print("Invalid --since: it must be in the past.")
+        return 2
     if args.action == "run-due":
         if not config["reports"]["enabled"]:
             print("Scheduled reports are disabled (reports.enabled = false).")
@@ -467,7 +471,8 @@ def _publish_once(args: argparse.Namespace) -> int:
     result = delivery.publish(args.db, recipient=recipient, credentials=stored, now=publish_at,
                               slot=slot, missed=missed, kind=kind, tz=tz, sync_failures=sync_failures,
                               narrator=_narrator(args.db, publish_at, brief_id), household=profile(config),
-                              lineage=lineage(args.config), schedule=config["reports"])
+                              lineage=lineage(args.config), schedule=config["reports"],
+                              since=args.since if args.action == "send-now" else None)
     # The subject can carry an amount (net-worth change); the plain-text log gets only the run id and outcome.
     _say(args.db, f"Report {result['status']}: run {(result.get('report_id') or '-')[:8]} "
                   f"{result.get('error_code') or ''}".rstrip())
