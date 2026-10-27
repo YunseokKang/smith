@@ -362,6 +362,9 @@ class NarrativeRuleTests(Upgrade):
         self.assertEqual(narrative.polish("순자산은 27억 2,539만 5,264원이고(전망) 월 660,016원이 남습니다. 325만 7,091원과 1,662만 원."),
                          "순자산은 약 27.3억 원이고 월 약 66만 원이 남습니다. 약 326만 원과 1,662만 원.")
         self.assertEqual(narrative.polish("약 85,000원과 약 3.4억 원은 그대로입니다."), "약 85,000원과 약 3.4억 원은 그대로입니다.")
+        # Natural Korean (report design §34): a double passive and a dash are fixed in the same pass.
+        self.assertEqual(narrative.polish("월 660,016원이 남는다고 판단되어집니다 — 참고하십시오."),
+                         "월 약 66만 원이 남는다고 판단됩니다, 참고하십시오.")
 
     def test_internal_vocabulary_is_unusable_and_parentheses_are_limited(self):
         self.assertEqual(narrative.style_problem(["JSON 입력에서 owner_id를 partner로 한 레코드가 필요합니다."]), "internal-term")
@@ -399,6 +402,19 @@ class NarrativeRuleTests(Upgrade):
         restored, memos = narrative.restore(verified, dropped, output)
         self.assertEqual((restored["situation"]["text"], memos), ("", {}))            # Never shown to the client.
         self.assertIn("자동 점검 메모", narrative.INTERNAL_TERMS)
+        # Korean that reads as translated (report design §34) is checked after the numbers, rewritten once, and when
+        # it stays, put back without a memo: readable, merely not as natural as it could be.
+        output["situation"] = {"text": "현금 여유를 확보하기 위해서는 매도가 필요합니다.", "refs": []}
+        output["watch"] = [{"item": "보증금 반환 일정", "why": "이 일정에 대해 준비가 필요합니다.", "refs": []}]
+        verified, dropped = narrative.verify(output, payload)
+        self.assertEqual(dropped, ["situation:unnatural-korean:기 위해서는", "watch[0]:unnatural-korean:에 대해"])
+        self.assertEqual(narrative.describe(dropped[0].split(":", 1)[1])[:19], "reads as translated")
+        restored, memos = narrative.restore(verified, dropped, output)
+        self.assertEqual(restored["situation"]["text"], "현금 여유를 확보하기 위해서는 매도가 필요합니다.")
+        self.assertEqual(memos, {})
+        self.assertNotIn("memo", restored["watch"][0])
+        output["situation"] = {"text": "현금 여유를 확보하기 위해서는 9.99억 원이 필요합니다.", "refs": []}
+        self.assertEqual(narrative.verify(output, payload)[1][0][:36], "situation:ungrounded-number:9.99억 원"[:36])
         self.assertIn("No internal vocabulary", narrative.SYSTEM_PROMPT)
         self.assertIn("executive headline", narrative.SYSTEM_PROMPT)
         self.assertIn("reserve_swap", narrative.SYSTEM_PROMPT)

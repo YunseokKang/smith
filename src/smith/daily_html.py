@@ -10,7 +10,7 @@ from datetime import timedelta
 from html import escape
 from typing import Any
 
-from smith import agenda, people, weather
+from smith import agenda, korean, people, weather
 from smith.report_html import _plain
 
 PREFIX = "[Smith][하루 일과]"
@@ -43,6 +43,8 @@ def render(data: dict[str, Any], *, inline: bool = False) -> tuple[str, str, str
     footer_lines = [FOOTER]
     if data["failures"]:
         footer_lines.append("오늘 받지 못한 자료: " + ", ".join(f"{k}({v})" for k, v in sorted(data["failures"].items())))
+    if prose.get("korean_fixes"):  # What code corrected in the model's Korean (report design §34), when anything.
+        footer_lines.append(korean.summary({"tidied": prose["korean_fixes"]}))
     footer = ('<tr><td style="padding:4px 6px 12px">'
               + "".join(f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-bottom:6px">{escape(line)}</div>'
                         for line in footer_lines) + "</td></tr>")

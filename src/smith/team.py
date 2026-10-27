@@ -28,7 +28,7 @@ from typing import Any
 from smith import headless, narrative, reader
 from smith.payload import check_outbound, mask_identifiers
 
-PROMPT_VERSION = "team-v9"  # v9: narrative-v26 (last_report.earlier); v8: narrative-v25 (last_report); v7: narrative-v24 (holding_quantity_changes); v6: narrative-v23 (reader_notes); v5: narrative-v22 rules (reserve without a job gap, reserve_basis, stale deals); v4: fx.
+PROMPT_VERSION = "team-v10"  # v10: narrative-v27 (natural Korean); v9: narrative-v26 (last_report.earlier); v8: narrative-v25 (last_report); v7: narrative-v24 (holding_quantity_changes); v6: narrative-v23 (reader_notes); v5: narrative-v22 rules (reserve without a job gap, reserve_basis, stale deals); v4: fx.
 SPECIALIST_BUDGET_USD = "2.00"
 # All specialists run at once (five minutes at most), then the editor's write and repair. The editor
 # reads more than the single writer (about 70 KB against 50 KB) and timed out at its ten minutes on real

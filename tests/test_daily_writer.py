@@ -69,6 +69,20 @@ class WriterTests(unittest.TestCase):
         self.assertTrue(daily_writer._attributed("성공은 넘어진 횟수보다 한 번 더 일어나는 것이다 — 처칠"))
         self.assertFalse(daily_writer._attributed("오늘도 한 걸음이면 충분합니다."))
 
+    def test_prose_is_tidied_after_the_checks(self):
+        # Natural Korean (report design §34): double passives and dashes are fixed once a text has passed its checks,
+        # so an attribution dash is still seen as one.
+        data = data_for_test()
+        output = {"headline": "", "weather_line": "", "agenda_line": "일정은 없습니다 — 여유로운 하루입니다.",
+                  "sentence": "오늘도 한 걸음이면 충분합니다 — 처칠", "tasks_line": "", "anniversaries": [],
+                  "news": [{"ref": "R1", "summary": "금리가 보합이라고 보여집니다."}]}
+        prose, _ = daily_writer.verify(output, data, str(daily.payload(data)), tastes_known={})
+        self.assertEqual(prose["agenda_line"], "일정은 없습니다, 여유로운 하루입니다.")
+        self.assertNotIn("sentence", prose)
+        self.assertEqual(prose["news"][0]["summary"], "금리가 보합이라고 보입니다.")
+        self.assertEqual(prose["korean_fixes"], [{"kind": "dash", "before": "—", "after": ","},   # The record for the footer.
+                                                 {"kind": "double-passive", "before": "보여집", "after": "보입"}])
+
 
 class NewsTests(unittest.TestCase):
     def test_selection_keeps_listed_recent_verified_shapes(self):

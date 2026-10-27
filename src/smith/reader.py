@@ -22,14 +22,15 @@ from typing import Any
 from smith import codex, headless
 from smith.headless import HeadlessError, Runner
 
-PROMPT_VERSION = "reader-v2"  # v2: the edition's theme as context, Claude fallback; v1: Codex reader.
+# v3 (user instruction 2026-10-27): unnatural, Korean that reads as translated or machine-written.
+PROMPT_VERSION = "reader-v3"  # v2: the edition's theme as context, Claude fallback; v1: Codex reader.
 TIMEOUT_SECONDS = 300  # Codex and, when it fails fast, the fallback share this.
 FALLBACK_MODEL = "fable"
 FALLBACK_BUDGET_USD = "1.00"
 FALLBACK_MIN_SECONDS = 60  # Less than this left after a Codex failure: no fallback (it would only time out).
 EFFORT = "high"  # A reading task, not a search; ultra would cost the rewrite its time and the plan its quota.
 MAX_NOTES = 6
-PROBLEMS = ("jargon", "unclear_action", "vague", "missing_meaning", "hard_to_follow", "contradiction", "tone")
+PROBLEMS = ("jargon", "unclear_action", "vague", "missing_meaning", "hard_to_follow", "contradiction", "tone", "unnatural")
 _TEXT = lambda limit: {"type": "string", "maxLength": limit}  # noqa: E731 - schema shorthand
 SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False, "required": ["notes", "overall"],
@@ -63,6 +64,12 @@ What counts as a stop (the `problem` value):
 - contradiction: two blocks that seem to tell the client opposite things (one says keep, another says reduce).
 - tone: lecturing, alarmist, flattering, or treating a guideline as a law the client broke ("원칙 위반", "기준에
   위배"); a principle is one investor's view, not a rule.
+- unnatural: Korean that reads as translated or machine-written, so the client stumbles over the wording: a double
+  passive (되어진다, 보여집니다), English word order (~을 통해, ~에 대해, ~에 있어서, ~을 가지고 있습니다, ~에 의해),
+  a filler opener (요약하면, 결론적으로, 크게 세 가지로) or stock phrase (주목할 만한, 시사하는 바가 큽니다), a doubled
+  hedge (가능성이 있을 수 있습니다), a nominal ending where a verb would do (~하는 것입니다, ~라는 뜻입니다), an
+  abstract subject or a pronoun without a referent, a metaphor translated word for word. Mark it where an editor
+  would strike it, not a usage that merely could be tighter.
 
 Rules:
 - `path` is the path of the block as given in the input. `quote` is copied exactly from that block's text, one

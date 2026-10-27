@@ -225,12 +225,14 @@ class NarrativeTests(unittest.TestCase):
     def test_first_reader_rewrites_only_the_marked_blocks_whose_rewrite_passes(self):
         data = self.data()
         watch = [{"item": "기준금리 결정", "why": "변동금리 대출 이자에 영향", "refs": ["R1"]}]
+        # The direction reads as translated (를 통해): sent back once, the repair leaves it, so it goes to the reader
+        # without a memo, who marks it; the rewrite rewords it and is tidied on the way (report design §34).
         first = dict(EMPTY, situation=block("현금 여유를 먼저 채우실 때입니다."),
-                     direction=block("유동성 버퍼를 우선하십시오."), watch=watch)
+                     direction=block("유동성 버퍼 확보를 통해 안전을 지키십시오."), watch=watch)
         rewrite = dict(first, situation=block("부족분은 9.99억 원입니다."),          # Ungrounded: not applied.
-                       direction=block("바로 쓸 수 있는 현금을 먼저 늘리십시오."),
+                       direction=block("바로 쓸 수 있는 현금을 먼저 늘리는 쪽이 낫다고 보여집니다."),
                        watch=[{"item": "다른 문장", "why": "바뀐 이유", "refs": []}])  # Not marked: not applied.
-        outputs, inputs, audits, shown = [first, rewrite], [], [], []
+        outputs, inputs, audits, shown = [first, first, rewrite], [], [], []       # The repair changes nothing.
 
         def run(args, **kwargs):
             inputs.append(json.loads(kwargs["input"]))
@@ -239,8 +241,8 @@ class NarrativeTests(unittest.TestCase):
         def first_reader(letter):
             self.assertIsNone(letter["edition"])                               # The full Monday report.
             shown.extend(letter["blocks"])
-            notes = [{"path": p, "quote": q, "problem": "jargon", "why": "어렵습니다.", "suggestion": "풀어 쓰기"}
-                     for p, q in (("situation", "현금 여유"), ("direction", "유동성 버퍼"))]
+            notes = [{"path": p, "quote": q, "problem": kind, "why": "어렵습니다.", "suggestion": "풀어 쓰기"}
+                     for p, q, kind in (("situation", "현금 여유", "jargon"), ("direction", "유동성 버퍼", "unnatural"))]
             return {"notes": notes, "raw_notes": 2, "overall": "대체로 읽힙니다.", "usage": None, "model": "gpt-test"}
 
         def audit(use_case, payload, outcome, code, cost, content):
@@ -249,16 +251,37 @@ class NarrativeTests(unittest.TestCase):
         result = narrative.write(data["view"], data, self.brief(), secrets=[], executable=Path("claude.exe"),
                                  runner=run, audit=audit, first_reader=first_reader)
         out = result["output"]
-        self.assertEqual(out["direction"]["text"], "바로 쓸 수 있는 현금을 먼저 늘리십시오.")
+        self.assertEqual(out["direction"]["text"], "바로 쓸 수 있는 현금을 먼저 늘리는 쪽이 낫다고 보입니다.")
         self.assertEqual(out["situation"]["text"], "현금 여유를 먼저 채우실 때입니다.")
         self.assertEqual(out["watch"], watch)
         self.assertEqual(result["reader"]["outcome"], "rewritten")
         self.assertEqual(result["reader"]["applied"], ["direction"])
-        self.assertEqual(len(inputs[1]["reader_notes"]), 2)
-        self.assertEqual(inputs[1]["previous_output"]["situation"]["text"], "현금 여유를 먼저 채우실 때입니다.")
+        # The record of the Korean corrections (report design §34): what was tidied, flagged, left as it goes out
+        # (nothing: the reader's rewrite reworded it, Codex review 2026-10-27), and marked by the reader.
+        self.assertEqual(result["korean"], {"tidied": [{"path": "direction", "kind": "double-passive", "before": "보여집", "after": "보입"}],
+                                            "flagged": [{"path": "direction", "kind": "calque", "words": "를 통해"}],
+                                            "remaining": [],
+                                            "reader_notes": [{"path": "direction", "quote": "유동성 버퍼"}]})
+        self.assertNotIn("unnatural", result["reader"])
+        self.assertEqual(result["memos"], {})                                        # Soft: no memo on the direction.
+        self.assertIn("direction", [b["path"] for b in shown])                     # ... so the reader saw it.
+        self.assertTrue(inputs[1]["rejected"][0]["reason"].startswith("reads as translated"))
+        self.assertEqual(len(inputs[2]["reader_notes"]), 2)
+        self.assertEqual(inputs[2]["previous_output"]["situation"]["text"], "현금 여유를 먼저 채우실 때입니다.")
         self.assertTrue(all(set(b) == {"path", "section", "text"} for b in shown))  # Prose only: no refs, no data.
-        self.assertEqual(audits, ["report-narrative", "report-reader", "report-narrative-reader-rewrite"])
-        self.assertEqual(result["cost_usd"], "1.0")
+        self.assertEqual(audits, ["report-narrative", "report-narrative-repair", "report-reader",
+                                  "report-narrative-reader-rewrite"])
+        self.assertEqual(result["cost_usd"], "1.5")
+
+    def test_a_dash_before_a_figure_is_checked_as_the_client_will_read_it(self):
+        # Codex review 2026-10-27: numbers are read in the tidied form. A dash glued to the word before a figure is a
+        # separator (the positive figure passes); a dash standing before it is its sign (a negative figure the
+        # evidence does not carry fails).
+        data = self.data()
+        payload = narrative.build_payload(data["view"], data, self.brief())
+        self.assertIsNone(narrative.check_block(["영통 아파트값은 다음과 같습니다—3.4%."], ["R2"], payload, outside=True))
+        self.assertEqual(narrative.check_block(["영통 아파트값이 –3.4% 움직였습니다."], ["R2"], payload, outside=True),
+                         "ungrounded-number:-3.4%")
 
     def test_first_reader_failure_or_no_time_leaves_the_verified_narrative(self):
         data = self.data()
@@ -344,7 +367,14 @@ class NarrativeTests(unittest.TestCase):
         self.assertTrue(any("직접 식별자 없이" in n for n in report_html.system_notes(data)))   # A system note (v3.0).
         with closing(ledger.connect_read_only(self.db)) as conn:
             uses = [row[0] for row in conn.execute("SELECT use_case FROM advice_runs")]
+            final = ledger.latest_advice(conn, use_case=narrative.FINAL_USE_CASE)["content"]
         self.assertEqual(uses, ["report-narrative", narrative.FINAL_USE_CASE])
+        # The Korean corrections travel with the narrative as sent and into the footer (report design §34).
+        self.assertEqual(final["korean"], data["narrative"]["status"]["korean"])
+        self.assertEqual(set(final["korean"]), {"tidied", "flagged", "remaining", "reader_notes"})
+        self.assertTrue(any(n.startswith("한국어 교정: ") for n in report_html.system_notes(data)))
+        footer = render(data)[1].rsplit("Smith는 조회 전용 자문입니다", 1)[0][-900:]  # In the mail itself, not only the notes.
+        self.assertIn("한국어 교정: 고정 수정 0건, 재작성 요청 0건, 남은 것 0건, 첫 독자 지적 0건", footer)
         # A themed day sends one insight: the record of what was sent (read by mail answers) holds that one only.
         data = self.data()
         data["kind"] = "rates"
@@ -549,7 +579,9 @@ class NarrativeTests(unittest.TestCase):
                               "portfolio": {"text": "", "refs": []},
                               "insights": [{"title": "영통 규제", "body": "지정", "implication": "영향", "refs": ["R1"]}],
                               "watch": [{"item": "금통위", "why": "다음 달", "refs": []}], "experiences": [],
-                              "holdings": [{"symbol": "XYZ", "stance": "hold", "reason": "지난주 이유"}]}}
+                              "holdings": [{"symbol": "XYZ", "stance": "hold", "reason": "지난주 이유"}]},
+                 "korean": {"tidied": [{"path": "situation", "kind": "dash", "before": "—", "after": ","}], "flagged": [],
+                            "remaining": [], "reader_notes": []}}
         with closing(ledger.connect(self.db)) as conn:
             ledger.record_advice_run(conn, run_id="final-1", created_at=week_ago, use_case=narrative.FINAL_USE_CASE,
                                      question="monday", payload="{}", prompt_version="x", model="m", cost_usd=None,
@@ -572,6 +604,9 @@ class NarrativeTests(unittest.TestCase):
             ledger.record_lineage(conn, report_id="prev0", known_at=older_at, brief_id=None, advice_run_ids=["final-0"],
                                   config_sha256=None, code_version=None, data_sha256="d")
             ledger.finish_report(conn, report_id="prev0", status="sent", finished_at=older_at, shown_proposals=[])
+        with closing(ledger.connect_read_only(self.db)) as conn:   # `smith report korean`: newest first, None before v27.
+            history = narrative.korean_history(conn, limit=5)
+        self.assertEqual([(h["kind"], h["korean"]) for h in history], [("monday", final["korean"]), ("monday", None)])
         previous = narrative.previous_report(self.db, data)
         self.assertEqual(previous["date"], week_ago.astimezone(data["as_of"].tzinfo).date().isoformat())
         self.assertEqual(previous["earlier"], [{"date": older_at.astimezone(data["as_of"].tzinfo).date().isoformat(),

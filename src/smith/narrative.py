@@ -43,7 +43,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from smith import adviser, editions, future_income, headless, holdings, ledger, memory, principles, reader, research, stress
+from smith import (adviser, editions, future_income, headless, holdings, korean, ledger, memory, principles, reader, research,
+                   stress)
 from smith.fmt import short_won
 from smith.payload import PayloadRejected, build_context, check_outbound, won
 from smith.proposals import Proposal
@@ -56,7 +57,8 @@ logger = logging.getLogger(__name__)
 # v24: holding_quantity_changes, the holdings whose share count changed since the comparison report.
 # v25: last_report, what the previous report on the theme said, so the new one does not repeat it (user review 2026-10-27).
 # v26: last_report.earlier, the titles of the reports before it (about a month), so a title does not return fortnightly.
-PROMPT_VERSION = "narrative-v26"  # v22: no job gap in the reserve, reserve_basis, stale deals; v21: retirement ages.
+# v27: principle 9, natural Korean (user instruction 2026-10-27): no calques, fillers, double passives or dashes; code checks.
+PROMPT_VERSION = "narrative-v27"  # v22: no job gap in the reserve, reserve_basis, stale deals; v21: retirement ages.
 MODEL = "fable"
 BUDGET_USD = "5.00"
 # Two calls at most: the write (the markets day with twenty-odd holdings ran past 10 minutes on 2026-10-17) and a
@@ -129,7 +131,7 @@ Voice: formal Korean (합쇼체, "~습니다"), address the reader as "고객님
 The client is not a finance expert: big picture first, say why it matters for this household, explain a
 difficult term in a short parenthesis the first time it appears in a block, use concrete examples.
 
-Eight principles of the writing (the hard rules at the end are checked by code):
+Nine principles of the writing (the hard rules at the end are checked by code):
 1. Seamless executive flow. The first sentence of `situation` is the executive headline (shown large at the
    top of the mail): this week's one decision with its main number and its reason in the household's likely,
    everyday terms. Never open with a statistic comparison or the stress scenario. Then, in order: what changed
@@ -196,6 +198,7 @@ Eight principles of the writing (the hard rules at the end are checked by code):
    "자동 점검 메모" or any developer term in the client's prose. Ask for missing information in a private
    banker's words ("배우자분의 대략적인 월 소득과 보유 현금 규모를 알려 주시면 가계 전체의 여유를 더 정확히
    볼 수 있습니다").
+9. """ + korean.RULES + """
 
 Input JSON:
 - household: the sanitized ledger context (amounts are whole KRW strings computed by code).
@@ -398,7 +401,8 @@ Hard rules (checked by code; a block that breaks one is deleted):
   and years are fine.
 - Style: at most one parenthesis per sentence; no mechanical tags in parentheses; no internal vocabulary
   (JSON, owner_id, record_id, payload, schema, refs, "자동 점검 메모"). A block with internal vocabulary is
-  deleted outright.
+  deleted outright. No calque, filler, doubled hedge or colloquial verb of principle 9: a block with one is
+  sent back for one rewrite.
 - Every holding with must_opine true has an opinion.
 - Sources: any block that states an outside fact (policy, regulation, rates, markets, prices) cites the
   R or N refs it rests on. Laws, taxes, loan rules and regulated areas must cite at least one R item of
@@ -926,6 +930,7 @@ def write(view: Any, data: dict[str, Any], brief: dict[str, Any] | None, *, secr
     verified, dropped = verify(output, payload)
     _record(audit, "report-narrative", text, "success", None, cost,
             {"raw": output, "verified": verified, "dropped": dropped})
+    flagged = korean_flags(dropped)  # The Korean corrections asked for (report design §34): recorded with the report.
     costs = [cost]
     if dropped:
         repair = dict(sent, previous_output=output, rejected=[_rejection_reason(d) for d in dropped])
@@ -948,6 +953,7 @@ def write(view: Any, data: dict[str, Any], brief: dict[str, Any] | None, *, secr
     # `merge` returns the first output's entries, whose paths index the first output: restore from it, or a
     # repair with fewer list items would bring back the wrong block or none at all.
     verified, memos = restore(verified, dropped, output)
+    tidied = korean_fixes(verified)
     verified = polish_output(verified)
     reading: dict[str, Any] = {"outcome": "off"}
     if first_reader is not None:
@@ -962,7 +968,45 @@ def write(view: Any, data: dict[str, Any], brief: dict[str, Any] | None, *, secr
                                                  call=call, audit=audit, kind=data.get("kind"))
             if "cost_usd" in reading:
                 costs.append(reading["cost_usd"])
-    return {"output": verified, "dropped": dropped, "memos": memos, "cost_usd": _sum_costs(costs), "reader": reading}
+    # What stays is read off the text as it goes out (the repair and the reader's rewrite applied; Codex review
+    # 2026-10-27), not off the repair's verdict alone.
+    stats = {"tidied": tidied + reading.pop("tidied", []), "flagged": flagged, "remaining": korean_left(verified),
+             "reader_notes": reading.pop("unnatural", [])}
+    return {"output": verified, "dropped": dropped, "memos": memos, "cost_usd": _sum_costs(costs), "reader": reading,
+            "korean": stats}
+
+
+def korean_flags(dropped: list[str]) -> list[dict[str, str]]:
+    """The blocks among `dropped` sent back for unnatural Korean, with the rule and the words (report design §34)."""
+    flags = []
+    for entry in dropped:
+        path, reason, *detail = entry.split(":")
+        if reason == "unnatural-korean" and detail:
+            found = korean.problem(detail[0])
+            flags.append({"path": path, "kind": found[0] if found else "", "words": detail[0]})
+    return flags
+
+
+def korean_fixes(output: dict[str, Any]) -> list[dict[str, str]]:
+    """What `polish_output` tidies in a narrative (double passives, dashes), by block path: the record of the
+    mechanical corrections. Blocks already polished yield nothing."""
+    return [{"path": path, **fix} for path, text in _prose(output) for fix in korean.fixes(text)]
+
+
+def korean_left(output: dict[str, Any]) -> list[dict[str, str]]:
+    """The passages of a narrative that still read as translated Korean (`korean.problems`), by block path: what
+    the client gets despite the check, when the repair or the reader's rewrite did not reword them."""
+    return [{"path": path, "kind": kind, "words": words}
+            for path, text in _prose(output) for kind, words in korean.problems(text)]
+
+
+def _prose(output: dict[str, Any]) -> list[tuple[str, str]]:
+    """(block path, its prose) for every block of a narrative, a list item's prose fields joined."""
+    found = [(field, (output.get(field) or {}).get("text", "")) for field in SCALAR_BLOCKS]
+    for field in _LISTS:
+        for index, item in enumerate(output.get(field) or []):
+            found.append((f"{field}[{index}]", " ".join(item[name] for name in _PROSE_FIELDS if isinstance(item.get(name), str))))
+    return found
 
 
 def read_and_rewrite(first_reader: reader.Reader, output: dict[str, Any], memos: dict[str, str],
@@ -992,7 +1036,8 @@ def read_and_rewrite(first_reader: reader.Reader, output: dict[str, Any], memos:
     # Codex runs on the plan (no cost reported); a Claude fallback reports its cost like any headless call.
     _record(audit, "report-reader", text, "success", None, reading.get("cost_usd"),
             {**reading, "prompt_version": reader.PROMPT_VERSION})
-    status = {"model": reading["model"], "notes": len(reading["notes"]), "overall": reading["overall"]}
+    status = {"model": reading["model"], "notes": len(reading["notes"]), "overall": reading["overall"],
+              "unnatural": [{"path": n["path"], "quote": n["quote"]} for n in reading["notes"] if n["problem"] == "unnatural"]}
     if "fallback_from" in reading:
         status.update(fallback_from=reading["fallback_from"], cost_usd=reading["cost_usd"])
     if not reading["notes"]:
@@ -1010,7 +1055,7 @@ def read_and_rewrite(first_reader: reader.Reader, output: dict[str, Any], memos:
     merged, applied = apply_rewrites(output, [n["path"] for n in reading["notes"]], second, still)
     _record(audit, "report-narrative-reader-rewrite", rewrite_text, "success", None, cost,
             {"raw": second, "dropped": still, "applied": applied})
-    return polish_output(merged), {**status, "outcome": "rewritten", "applied": applied,
+    return polish_output(merged), {**status, "outcome": "rewritten", "applied": applied, "tidied": korean_fixes(merged),
                                    "cost_usd": _sum_costs([status.get("cost_usd", "0"), cost])}
 
 
@@ -1079,6 +1124,9 @@ MEMOS = {"no-source": "출처가 확인되지 않은 외부 사실이 들어 있
 # Never restored from the raw output when the repair fails too: a repeat of last week's title would otherwise come
 # back unchecked and unchanged (Codex review 2026-10-27).
 UNUSABLE = ("duplicate", "invalid-holding", "add-over-limit", "missing-opinion", "internal-term", "repeats-last-report")
+# Blocks dropped for these reasons come back without a memo when the repair leaves them: the wording is merely not as
+# natural as it could be, and the first reader still gets to mark them (report design §34).
+SOFT = ("unnatural-korean",)
 MISSING = "missing"  # The index of a required opinion the model did not write: holdings[missing].
 
 
@@ -1104,7 +1152,8 @@ def restore(verified: dict[str, Any], dropped: list[str], raw: dict[str, Any]) -
             if not text:
                 continue
             out[path] = {**block, "text": text, "refs": list(block["refs"])}  # Unknown refs: no link.
-            memos[path] = memo
+            if reason not in SOFT:
+                memos[path] = memo
             continue
         field, index = path.split("[")[0], int(path.split("[")[1].rstrip("]"))
         items = raw.get(field, [])
@@ -1120,7 +1169,8 @@ def restore(verified: dict[str, Any], dropped: list[str], raw: dict[str, Any]) -
                 item[name] = fix(readable(item[name]))
         if reason == "law-tone" and not any(item.get(name) for name in ("body", "reason", "context", "item", "why")):
             continue
-        item["memo"] = memo
+        if reason not in SOFT:
+            item["memo"] = memo
         out[field].append(item)
         if field == "proposal_notes":
             keys.add(item["key"])
@@ -1230,9 +1280,10 @@ PRECISE_PLAIN_WON = Decimal(100_000)  # A plain "N원" at or above this is a fig
 
 
 def polish(text: str) -> str:
-    """Prose for the client (report design §17.6): every won amount written to the won becomes its rounded
-    억/만 form ("27억 2,539만 5,264원" -> "약 27.3억 원", "660,016원" -> "약 66만 원"), and bare qualifier tags in
-    parentheses are removed. Values are preserved to the rounding, so the number check still holds."""
+    """Prose for the client (report design §17.6, §34): every won amount written to the won becomes its rounded
+    억/만 form ("27억 2,539만 5,264원" -> "약 27.3억 원", "660,016원" -> "약 66만 원"), bare qualifier tags in
+    parentheses are removed, and double passives and dashes take their one right form (`korean.tidy`). Values are
+    preserved to the rounding, so the number check still holds."""
     pieces, last = [], 0
     for start, end, value, _ in _money(text):
         written = text[start:end]
@@ -1243,7 +1294,7 @@ def polish(text: str) -> str:
         pieces.append(prefix + short_won(value))
         last = end
     pieces.append(text[last:])
-    return _TAGS.sub("", "".join(pieces))
+    return korean.tidy(_TAGS.sub("", "".join(pieces)))
 
 
 def _precise(written: str, value: Decimal) -> bool:
@@ -1287,6 +1338,14 @@ def style_problem(texts: list[str]) -> str | None:
         if len(_PAREN.findall(sentence)) >= 2:
             return "parentheses"
     return None
+
+
+def unnatural(texts: list[str]) -> str | None:
+    """"unnatural-korean:<the words>" when a block carries a passage that reads as translated Korean (`korean.problem`:
+    a calque, a filler, a doubled hedge, a colloquial verb), else None. Checked last, after the numbers, so a block
+    put back for this reason alone (no memo) has had every other check."""
+    found = korean.problem(" ".join(texts))
+    return None if found is None else f"unnatural-korean:{found[1]}"
 
 
 # --- verification (6d) ------------------------------------------------------------------------------------
@@ -1342,7 +1401,17 @@ _REASONS = {"unknown-ref": "cites a ref that is not in the input",
             "ungrounded-number": "uses numbers (or signs) that are not in the input or its cited refs",
             "repeats-last-report": "repeats, by title, an insight, watch item or experience a recent report on this theme "
                                    "already gave (last_report, or a title under its earlier); write what is new, or leave "
-                                   "it out"}
+                                   "it out",
+            "unnatural-korean": "reads as translated or machine-written Korean (a calque such as ~을 통해, ~에 대해, "
+                                "~에 있어서, ~을 가지고 있다, ~하기 위해서는, ~로부터의; a filler such as 결론적으로, 요약하면, "
+                                "주목할 만한; a doubled hedge; a colloquial verb such as 박아두다, 뒤집다): reword that "
+                                "passage in plain Korean as principle 9 says, keeping the meaning and refs"}
+
+
+def describe(problem: str) -> str:
+    """A dropped block's "reason[:detail]" as the sentence the repair brief gives the writer."""
+    reason, *detail = problem.split(":")
+    return _REASONS.get(reason, reason) + (f": {detail[0]}" if detail else "")
 
 
 def verify(output: dict[str, Any], payload: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
@@ -1384,8 +1453,11 @@ def verify(output: dict[str, Any], payload: dict[str, Any]) -> tuple[dict[str, A
                     allowed_figures |= item_numbers[ref][1]
                     allowed_amounts |= item_numbers[ref][2]
                     allowed_percents |= item_numbers[ref][3]
-            stray = _stray(texts, allowed_numbers, allowed_figures, allowed_amounts, allowed_percents)
-            reason = f"ungrounded-number:{','.join(stray[:5])}" if stray else None
+            # Numbers are read in the text's tidied form, the one the client gets (a dash before a figure is its sign
+            # only where `korean.tidy` keeps it as one; Codex review 2026-10-27).
+            stray = _stray([korean.tidy(t) for t in texts], allowed_numbers, allowed_figures, allowed_amounts,
+                           allowed_percents)
+            reason = f"ungrounded-number:{','.join(stray[:5])}" if stray else unnatural(texts)
         if reason:
             dropped.append(f"{path}:{reason}")
             return False
@@ -1476,8 +1548,8 @@ def check_block(texts: list[str], refs: list[str], payload: dict[str, Any], *, o
             figures |= _figures(_item_text(brief_items[ref]))
             amounts |= _amounts(_item_text(brief_items[ref]))
             percents |= _written_percents(_item_text(brief_items[ref]))
-    stray = _stray(texts, numbers, figures, amounts, percents)
-    return f"ungrounded-number:{','.join(stray[:5])}" if stray else None
+    stray = _stray([korean.tidy(t) for t in texts], numbers, figures, amounts, percents)  # As the client reads it.
+    return f"ungrounded-number:{','.join(stray[:5])}" if stray else unnatural(texts)
 
 
 def _problem(texts: list[str], refs: list[str], known_refs: set[str], official: set[str], outside: bool) -> str | None:
@@ -1721,9 +1793,9 @@ def _normalize(token: str) -> str:
 
 
 def _rejection_reason(dropped: str) -> dict[str, str]:
-    path, reason, *detail = dropped.split(":")
+    path, problem = dropped.split(":", 1)
     field = "holdings" if path == f"holdings[{MISSING}]" else path
-    return {"field": field, "reason": _REASONS.get(reason, reason) + (f": {detail[0]}" if detail else "")}
+    return {"field": field, "reason": describe(problem)}
 
 
 # --- attach to report data ---------------------------------------------------------------------------------
@@ -1907,10 +1979,24 @@ def previous_report(db: Path, data: dict[str, Any]) -> dict[str, Any] | None:
 
 def _final_narrative(conn: sqlite3.Connection, report: dict[str, Any]) -> dict[str, Any]:
     """A sent report's narrative as sent; {} when it went out without one."""
+    return _final_record(conn, report).get("verified") or {}
+
+
+def _final_record(conn: sqlite3.Connection, report: dict[str, Any]) -> dict[str, Any]:
+    """The audit record of what a sent report's narrative was (verified, memos, reader, korean); {} without one."""
     lineage = ledger.get_report(conn, report["report_id"]) or {}  # The run list carries no lineage.
     recent = ledger.get_advice(conn, lineage.get("advice_run_ids") or [], use_case=FINAL_USE_CASE,
                                created_at=report["created_at"])
-    return (recent or {}).get("content", {}).get("verified") or {}
+    return (recent or {}).get("content") or {}
+
+
+def korean_history(conn: sqlite3.Connection, *, limit: int = 30) -> list[dict[str, Any]]:
+    """The Korean corrections of the last `limit` sent reports, newest first (report design §34): [{"created_at",
+    "kind", "slot", "korean"}], korean being the stats recorded with the narrative or None for a report that went out
+    without one or before the corrections were recorded."""
+    sent = [r for r in ledger.report_runs(conn, limit=1000) if r["status"] == "sent"][:limit]
+    return [{"created_at": r["created_at"], "kind": r["kind"], "slot": r["slot"],
+             "korean": _final_record(conn, r).get("korean")} for r in sent]
 
 
 def narrate(db: Path, view: Any, data: dict[str, Any], *, now: datetime, secrets: list[str],
@@ -1972,15 +2058,18 @@ def narrate(db: Path, view: Any, data: dict[str, Any], *, now: datetime, secrets
         status.update(outcome="failure", error_code=str(code)[:80])
         attach(data, None, brief, status)
         return
-    status.update(outcome="success", dropped=result["dropped"], cost_usd=result["cost_usd"], reader=result["reader"])
+    status.update(outcome="success", dropped=result["dropped"], cost_usd=result["cost_usd"], reader=result["reader"],
+                  korean=result.get("korean"))
     if "specialists" in result:
         status["specialists"] = result["specialists"]
     result["output"] = edition_trim(result["output"], data["kind"])
     # What the client receives (repair, first reader and the edition's cut applied): mail answers read this record,
     # not the first call's verified output, which lacks blocks taken from later calls and keeps blocks the edition
-    # cut (Codex review 2026-10-26). Like every audit, a failed record withholds the narrative.
+    # cut (Codex review 2026-10-26). Like every audit, a failed record withholds the narrative. The Korean corrections
+    # travel with it, so `smith report korean` can set them against the report (report design §34).
     if not audit(FINAL_USE_CASE, json.dumps({"final_of": "report-narrative"}), "success", None, None,
-                 {"verified": result["output"], "memos": result["memos"], "reader": result["reader"]}):
+                 {"verified": result["output"], "memos": result["memos"], "reader": result["reader"],
+                  "korean": result.get("korean")}):
         status.update(outcome="failure", error_code="audit-write-failed")
         attach(data, None, brief, status)
         return

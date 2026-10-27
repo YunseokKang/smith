@@ -24,7 +24,7 @@ from html import escape
 from typing import Any
 
 from smith.fmt import short_won as _short
-from smith import editions, picks, principles, stress
+from smith import editions, korean, picks, principles, stress
 from smith.holdings import STANCES
 from smith.proposals import Track
 from smith.realestate import MIN_BASIS
@@ -115,7 +115,7 @@ def render(data: dict[str, Any]) -> tuple[str, str]:
         sections += [_policy(data, story, full), _holdings(data, story, full)]
     sections.append(_requests(data.get("requests") or [], full))
     bands.append(_band(CANVAS, "".join(sections), border=True))
-    bands.append(_band(SOFT, _footer(_system_warnings(data))))
+    bands.append(_band(SOFT, _footer(_system_warnings(data), corrections=_corrections_line(data))))
     return _subject(data, status), _page(bands)
 
 
@@ -311,7 +311,7 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
     sections = [renderers[name]() for name in edition.sections if name not in edition.opening]
     if any(sections):
         bands.append(_band(CANVAS, "".join(sections), border=True))
-    bands.append(_band(SOFT, _footer(_system_warnings(data), week=_week_line(data))))
+    bands.append(_band(SOFT, _footer(_system_warnings(data), week=_week_line(data), corrections=_corrections_line(data))))
     return _subject(data, status), _page(bands)
 
 
@@ -2244,16 +2244,24 @@ def _requests(requests: list[Any], full: bool, rest_where: str = "월요 보고"
     return _section("다음에 확인할 것", lead, "".join(rows))
 
 
-def _footer(warnings: list[str] | tuple[str, ...] = (), week: str = "") -> str:
+def _footer(warnings: list[str] | tuple[str, ...] = (), week: str = "", corrections: str = "") -> str:
     """One line (report design §18.1): what Smith never does, and that the reasons are a reply away. A problem
     with the report itself (stale data, no narrative) adds one warning line above it; a daily edition adds the
-    week's plan (`week`, HTML) so a reader of one day knows where the other areas are (§27)."""
+    week's plan (`week`, HTML) so a reader of one day knows where the other areas are (§27); `corrections` is the
+    Korean check's one line, printed so it can be read against the report itself (§34, user request 2026-10-27)."""
     warn = ("" if not warnings else
             f'<div style="font-size:13px;line-height:1.6;color:{INK};margin-bottom:8px">▲ 확인 필요: '
             f'{escape(" · ".join(warnings))}. 자세한 사유는 이 메일에 답장으로 물어 주십시오.</div>')
     guide = "" if not week else f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-bottom:6px">{week}</div>'
-    return (f'<tr><td>{warn}{guide}<div style="font-size:12px;line-height:1.6;color:{MUTED}">Smith는 조회 전용 자문입니다(매매·이체·대출 '
+    checked = ("" if not corrections else
+               f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-bottom:6px">{escape(corrections)}</div>')
+    return (f'<tr><td>{warn}{guide}{checked}<div style="font-size:12px;line-height:1.6;color:{MUTED}">Smith는 조회 전용 자문입니다(매매·이체·대출 '
             '실행 없음). 세금·법령은 실행 전 확인하시고, 판단 근거는 답장으로 물어 주십시오.</div></td></tr>')
+
+
+def _corrections_line(data: dict[str, Any]) -> str:
+    """The Korean check's summary for the footer, "" when the report went out without a narrative."""
+    return korean.summary(((data.get("narrative") or {}).get("status") or {}).get("korean")) or ""
 
 
 def _week_line(data: dict[str, Any]) -> str:
@@ -2316,6 +2324,9 @@ def _ai_lines(ai: dict[str, Any] | None, *, researched: bool = True) -> list[str
         flagged = len(ai.get("dropped") or [])
         lines.append("AI 해석: 계산값과 출처로 자동 점검했습니다"
                      + (f". 확인되지 않은 부분이 있는 {flagged}개 항목의 메모는 위 '자동 점검 메모' 줄에 있습니다." if flagged else "."))
+        corrections = korean.summary(ai.get("korean"))  # What the Korean check did to this report (report design §34).
+        if corrections:
+            lines.append(corrections)
     else:
         lines.append(f"AI 해석: 이번에는 실패해({ai.get('error_code', '원인 미상')}) 계산 결과만으로 작성했습니다.")
     return lines

@@ -36,7 +36,7 @@ from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import check_outbound, mask_identifiers
 from smith.report_data import build_report
 
-PROMPT_VERSION = "mail-answer-v13"  # v13: principles are consensus, not law; v12: warm service tone.
+PROMPT_VERSION = "mail-answer-v14"  # v14: narrative-v27 (natural Korean); v13: principles are consensus, not law.
 MODEL = "fable"
 BUDGET_USD = "3.00"
 TIMEOUT_SECONDS = 600
@@ -355,7 +355,7 @@ def answer(db: Path, data: dict[str, Any], question: Question, *, now: datetime,
         except headless.HeadlessError:
             pass
     memos = []
-    if problem:
+    if problem and problem.split(":")[0] not in narrative.SOFT:  # Wording left unnatural is sent without a footnote.
         reason, *detail = problem.split(":")
         memos.append(PROMISE_MEMO if reason == "promise" else narrative.MEMOS.get(reason, "확인되지 않은 부분이 있습니다.")
                      + (f"({detail[0]})." if reason == "ungrounded-number" and detail else ""))

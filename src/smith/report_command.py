@@ -19,10 +19,12 @@ from smith.report_html import render
 
 def add_parser(sub: Any, default_db: Path) -> None:
     report = sub.add_parser("report", help="Report preview (never sends) and publication (run-due, send-now)")
-    report.add_argument("action", choices=("preview", "compare", "run-due", "send-now", "status", "activate"),
+    report.add_argument("action", choices=("preview", "compare", "run-due", "send-now", "status", "activate", "korean"),
                         help="preview: save HTML only; compare: save the single and team narratives of one "
                              "snapshot side by side (never sends); run-due: send the due scheduled report (for "
-                             "the task scheduler); send-now: publish immediately; status: list recent runs")
+                             "the task scheduler); send-now: publish immediately; status: list recent runs; "
+                             "korean: the Korean corrections of the sent reports, newest first, with totals")
+    report.add_argument("--limit", type=int, default=30, help="korean: how many sent reports to list (default 30)")
     report.add_argument("--kind", choices=editions.KINDS,
                         help="Edition: overview (Mon), markets (Tue), property (Wed), rates (Thu), tax (Fri), "
                              "life (Sat), or the original full 'monday' / short 'thursday' report "
@@ -47,6 +49,8 @@ def add_parser(sub: Any, default_db: Path) -> None:
 def run(args: argparse.Namespace) -> int:
     if args.action == "status":
         return _status(args)
+    if args.action == "korean":
+        return _korean(args)
     if args.action == "activate":
         return _activate(args)
     if args.action in ("run-due", "send-now"):
@@ -206,6 +210,30 @@ def _status(args: argparse.Namespace) -> int:
     log = _log_path(args.db)
     if log.exists():
         print(f"Unattended run log: {log}")
+    return 0
+
+
+def _korean(args: argparse.Namespace) -> int:
+    """`smith report korean`: what the Korean check did to each sent report (fixed in place, sent back for a rewrite,
+    left as written, marked by the first reader) and the totals, so the corrections can be set against the reports
+    themselves (report design §34)."""
+    from smith import korean, narrative
+
+    if not args.db.exists():
+        print(f"No ledger at {args.db}.")
+        return 1
+    with closing(ledger.connect_read_only(args.db)) as conn:
+        history = narrative.korean_history(conn, limit=args.limit)
+    totals: dict[str, list[Any]] = {"tidied": [], "flagged": [], "remaining": [], "reader_notes": []}
+    counted = 0
+    for entry in history:
+        stats = entry["korean"]
+        print(f"{entry['created_at'][:16]}  {entry['kind']:<10} {korean.summary(stats) or '한국어 교정 기록 없음'}")
+        if stats:
+            counted += 1
+            for key in totals:
+                totals[key] += stats.get(key) or []
+    print(f"합계({counted}회 보고): {korean.summary(totals)}" if counted else "교정 기록이 있는 보고서가 없습니다.")
     return 0
 
 

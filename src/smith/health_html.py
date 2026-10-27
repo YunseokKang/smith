@@ -13,7 +13,7 @@ from datetime import date
 from html import escape
 from typing import Any
 
-from smith import health_chart
+from smith import health_chart, korean
 from smith.report_html import _plain
 
 PREFIX = "[Smith][건강]"
@@ -370,6 +370,9 @@ def _boundary(data: dict[str, Any]) -> str:
              "증상은 메일이 아니라 119·응급실입니다."]
     if data["failures"]:
         lines.append("이번 주 받지 못한 자료: " + ", ".join(f"{k}({v})" for k, v in sorted(data["failures"].items())))
+    fixes = (data.get("prose") or {}).get("korean_fixes")
+    if fixes:  # What code corrected in the model's Korean (report design §34), when anything.
+        lines.append(korean.summary({"tidied": fixes}))
     return ('<tr><td style="padding:4px 6px 12px">'
             + "".join(f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-bottom:6px">{escape(line)}</div>' for line in lines)
             + "</td></tr>")

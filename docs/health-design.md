@@ -237,6 +237,8 @@ CODE|followups|import FILE|resolve ID --on --note|path`. 약-검사 해석 표�
 - **코드 검증:** 두 자리 이상 숫자는 입력에 있는 것만(하루 일과의 칸별 토큰 검증 재사용), 행동 1~3개·필수 필드, `targets`는 입력 항목만,
   금지 표현(병명 단정 "~병입니다", 약 시작·중단·용량, 보충제 용량, "완치·예방 보장")이 있으면 그 칸을 버리고 코드 문장으로 대체,
   해소된 소견은 언급 금지, 유전 결과만을 근거로 한 행동 금지. 버린 사유는 시스템 노트용 `problems`로 남긴다.
+- **자연스러운 한국어**(2026-10-27, `health-writer-v3`·`health-answer-v2`, 보고서 설계 §34): 프롬프트 끝에 `korean.RULES`, 모든 칸과
+  답장 문단을 다듬는 `_clean`에 `korean.tidy`(이중 피동·대시 고정 수정). 재작성 호출이 없으므로 번역투는 지침으로만 다룬다.
 - 호출은 `advice_runs`에 감사 기록(종류 `health-writer`)하며 시간·출력 크기·재시도를 제한한다.
 - **구현(2026-10-25):** 출력 스키마는 headline·meaning·actions[1~3]{category, what, amount, why, check, targets}·review_line·question.
   `health_writer.verify`: 두 자리 이상 숫자는 입력 토큰(값·날짜·지침·평소 활동)과 코치가 세는 작은 수(1~10·15·20·30·60·100)만, 금지 표현

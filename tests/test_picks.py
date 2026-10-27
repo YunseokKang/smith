@@ -128,6 +128,14 @@ class ReviewTests(Upgrade):
         self.assertEqual(picks.selection_faults(bad, passing, [])[0]["reason"][:12], "mentions the")
         self.assertEqual(picks.style_faults({"picks": [{"symbol": "VOO", "rank": "1", "reason": "보수 0.03%로 가장 쌉니다.",
                                                          "condition": "x"}]}), [])
+        # Korean that reads as translated (report design §34) reaches the repair brief with its rule and words on the
+        # real selection path too (Codex review 2026-10-27), so the writer is told what to change.
+        translated = {"picks": [{"symbol": "VOO", "rank": "1", "reason": "낮은 보수를 통해 비용을 아낍니다.", "condition": "x"}],
+                      "rejected": []}
+        self.assertEqual(picks.clean_selection(translated, passing, [], first="VOO")[2], {"pick-style": 1, "pick-rank-1": 1})
+        faults = picks.selection_faults(translated, passing, [], first="VOO")
+        self.assertEqual([(f["symbol"], f["reason"][:19], f["reason"][-6:]) for f in faults],
+                         [("VOO", "reads as translated", ": 를 통해")])
         self.assertEqual(picks._rate_text("연 0.0062% (운용보수 0.0001%); 기타비용 미표시"), "0.0062%")
         self.assertEqual(picks._name_text("Vanguard Total Stock Market ETF (페이지 제목 표기: Vanguard Morningstar …)"),
                          "Vanguard Total Stock Market ETF")

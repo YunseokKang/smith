@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from smith import health
+from smith import health, korean
 from smith.config import load_config, local_time
 
 DEFAULT_LOCAL_CONFIG = Path("config/smith.local.toml")
@@ -260,7 +260,8 @@ def _with_model(db: Path, config: dict[str, Any], data: dict[str, Any], now: dat
     data["prose"] = written["prose"]
     print(f"Writer: {'ok' if written['prose'] is not None else 'failed'}"
           + (f" ({written['error_code']})" if written["error_code"] else "")
-          + (f"; dropped: {'; '.join(written['problems'])}" if written["problems"] else ""))
+          + (f"; dropped: {'; '.join(written['problems'])}" if written["problems"] else "")
+          + (f"; {korean.summary({'tidied': written['prose'].get('korean_fixes') or []})}" if written["prose"] else ""))
     if written["prose"] is None:
         data["failures"]["writer"] = str(written["error_code"])[:40]
 

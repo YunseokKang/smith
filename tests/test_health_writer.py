@@ -40,13 +40,15 @@ class VerifyTests(unittest.TestCase):
                          goal_lines=[{"key": "ldl", "do": "귀리 아침", "avoid": "튀김"}, {"key": "posture", "do": "턱 당기기", "avoid": "폰 숙여 보기"}],
                          actions=[_action(), _action(category="exercise", what="빠르게 걷기", amount="30분 × 주 5일", why="HDL을 올립니다",
                                                      check="주 150분", targets=["hdl"])],
-                         review_line="지난주 걷기 30분은 추정 활동 105~200분 안에 들어 있습니다.", question="테니스는 어느 요일에 하십니까?")
+                         review_line="지난주 걷기 30분은 추정 활동 105~200분 안에 들어 있다고 보여집니다.", question="테니스는 어느 요일에 하십니까?")
         prose, problems = health_writer.verify(output, data, health_letter.payload(data))
         self.assertEqual(problems, [])
         self.assertEqual(set(prose["items"]), {"ldl", "tg"})
         self.assertEqual(set(prose["goal_lines"]), {"ldl", "posture"})
         self.assertEqual(len(prose["actions"]), 2)
-        self.assertIn("review_line", prose)
+        # Kept texts are tidied and the corrections recorded with the prose (report design §34).
+        self.assertEqual(prose["review_line"], "지난주 걷기 30분은 추정 활동 105~200분 안에 들어 있다고 보입니다.")
+        self.assertEqual(prose["korean_fixes"], [{"kind": "double-passive", "before": "보여집", "after": "보입"}])
 
     def test_rules_drop_the_field_and_name_the_reason(self):
         data = _data()

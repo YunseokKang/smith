@@ -49,13 +49,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from smith import editions, headless, holdings, ledger, narrative, sources
+from smith import editions, headless, holdings, korean, ledger, narrative, sources
 from smith.fmt import short_won
 from smith.payload import LedgerView, check_outbound
 from smith.proposals import Proposal
 from smith.records import Kind
 
-PROMPT_VERSION = "product-review-v2"  # v2: code fixes rank 1, confirmed facts only, official hosts; v1: four roles.
+PROMPT_VERSION = "product-review-v3"  # v3: natural Korean (korean.RULES, checked); v2: code fixes rank 1, confirmed facts only.
 MODEL = "fable"
 BUDGET_USD = "5.00"
 SCOUT_TIMEOUT = 1200
@@ -226,7 +226,8 @@ household. Choose ranks 2 and 3 yourself, or none when nothing adds to rank 1. O
 `rejected` with why (one clause). Continuity: `previous_picks` are last review's choices; keep ranks 2 and 3
 unless a verified fact (cost, tax treatment, a listing change, a candidate that failed verification) now argues
 otherwise, and when you change one, say in its reason what changed. Write to the client: never mention the input,
-the context, notes or memos ("입력 메모", "컨텍스트"), and at most one parenthesis per sentence."""
+the context, notes or memos ("입력 메모", "컨텍스트"), and at most one parenthesis per sentence.
+""" + korean.RULES
 
 
 # --- the pipeline -----------------------------------------------------------------------------------------
@@ -531,24 +532,25 @@ def clean_reviews(raw: list[dict[str, Any]], passing: list[dict[str, Any]]) -> l
 
 def style_faults(selected: dict[str, Any]) -> list[dict[str, str]]:
     """Picks whose reason or condition breaks the client-prose rules (internal vocabulary such as 입력 메모, two
-    parentheses in a sentence): what the repair call is told."""
+    parentheses in a sentence, Korean that reads as translated): what the repair call is told."""
     faults = []
     for p in selected.get("picks", []):
         texts = [str(p.get("reason", "")), str(p.get("condition", ""))]
-        problem = narrative.style_problem(texts) or ("internal-term" if _MENTIONS_INPUT.search(" ".join(texts)) else None)
+        problem = (narrative.style_problem(texts) or ("internal-term" if _MENTIONS_INPUT.search(" ".join(texts)) else None)
+                   or narrative.unnatural(texts))
         if problem:
             faults.append({"symbol": str(p.get("symbol", "")), "field": "reason",
                            "reason": "mentions the input, context, notes or memos; speak to the client" if problem == "internal-term"
-                           else "two or more parentheses in one sentence; fold the qualifier into the sentence"})
+                           else narrative.describe(problem)})
     return faults
 
 
 _MENTIONS_INPUT = re.compile(r"입력 메모|입력에|입력값|컨텍스트|household_context|reviews?\b|메모가")
 
 
+# The repair brief's text per fault; a "style" fault carries its own text (which rule, and the words) from style_faults.
 _FAULT_TEXT = {"unknown": "not a verified candidate (only symbols in reviews)", "trimmed-stock": "the stock being trimmed",
                "duplicate": "listed twice", "ungrounded-number": "uses a figure the candidate's facts do not carry",
-               "style": "mentions the input, context, notes or memos, or puts two parentheses in one sentence; speak to the client",
                "rank-1": "picks[0] must be rank_1 (the product the fixed rule placed first); write its reason and rank the rest after it"}
 
 
@@ -575,7 +577,10 @@ def selection_faults(selected: dict[str, Any], passing: list[dict[str, Any]], tr
         fault = _pick_fault(p, facts, trimmed, seen)
         seen.add(str(p.get("symbol", "")).strip().upper())
         if fault:
-            faults.append({"symbol": str(p.get("symbol", "")), "field": "picks", "reason": _FAULT_TEXT[fault]})
+            # The style rule it broke, by name and words (Codex review 2026-10-27: a generic text sent the writer after
+            # the wrong fault, and a kept sentence cost the pick, or the whole selection when it was code's rank 1).
+            reason = style_faults({"picks": [p]})[0]["reason"] if fault == "style" else _FAULT_TEXT[fault]
+            faults.append({"symbol": str(p.get("symbol", "")), "field": "picks", "reason": reason})
     if first and (not raw or str(raw[0].get("symbol", "")).strip().upper() != first):
         faults.append({"symbol": first, "field": "picks", "reason": _FAULT_TEXT["rank-1"]})
     return faults
