@@ -29,7 +29,9 @@ stage still has time for both calls, and its failure leaves the verified narrati
 Every call is recorded in `advice_runs` (payload, raw output, verified output, reasons), failures too.
 """
 import json
+import logging
 import re
+import sqlite3
 import subprocess
 import time
 import uuid
@@ -46,11 +48,14 @@ from smith.fmt import short_won
 from smith.payload import PayloadRejected, build_context, check_outbound, won
 from smith.proposals import Proposal
 
+logger = logging.getLogger(__name__)
+
 # v10: executive headline, rounded amounts, total-balance-sheet mindset, employer double concentration, no internal
 # vocabulary (user spec 2026-10-17); v9: stress test, spending room, peer benchmark; v8: expected pay is not wealth.
 # v23: reader_notes, the first reader's marks for a plain-language rewrite (user decision 2026-10-26).
 # v24: holding_quantity_changes, the holdings whose share count changed since the comparison report.
-PROMPT_VERSION = "narrative-v24"  # v22: no job gap in the reserve, reserve_basis, stale deals; v21: retirement ages.
+# v25: last_report, what the previous report on the theme said, so the new one does not repeat it (user review 2026-10-27).
+PROMPT_VERSION = "narrative-v25"  # v22: no job gap in the reserve, reserve_basis, stale deals; v21: retirement ages.
 MODEL = "fable"
 BUDGET_USD = "5.00"
 # Two calls at most: the write (the markets day with twenty-odd holdings ran past 10 minutes on 2026-10-17) and a
@@ -289,6 +294,14 @@ Input JSON:
   of a home means, residence periods, plans, consents, preferences. They are the client's statements, not
   ledger facts, and a newer one wins over an older one. Use them to understand the household and its
   intentions; when a judgement rests on one, say so ("고객님 말씀 기준"). They never override ledger figures.
+- last_report (when present): what this theme's previous report, sent on `date`, told the client: situation,
+  direction, portfolio, insights, watch, experiences and the holding opinions. It is Smith's earlier prose, not
+  evidence: cite nothing from it. The client read it, so do not say it again. Lead with what is new since that
+  date (a figure that moved, a finding in the brief dated after it, a stance that changed) and take a different
+  angle on what is unchanged. An insight, watch item or experience it already gave comes back only when
+  something about it changed, and then says what changed. A holding whose stance is unchanged gets its reason
+  from this week's facts, or one short clause, never last week's sentence. When little changed, one sentence
+  saying so beats a restatement. Code drops an insight, watch item or experience whose title repeats it.
 - tax: tax strategy notes and the year-end checklist computed by code. Use them to explain the after-tax
   logic of the proposals (which account, when to realize gains, marriage-registration timing).
 - holdings: the listed holdings Smith gives opinions on, computed by code: quantity, price, average cost,
@@ -408,8 +421,10 @@ Hard rules (checked by code; a block that breaks one is deleted):
 # --- payload ----------------------------------------------------------------------------------------------
 
 def build_payload(view: Any, data: dict[str, Any], brief: dict[str, Any] | None,
-                  client_memory: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """The narrative's input. `client_memory` is the memory retrieved for this call (memory.for_model).
+                  client_memory: list[dict[str, Any]] | None = None,
+                  last_report: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The narrative's input. `client_memory` is the memory retrieved for this call (memory.for_model);
+    `last_report` is what this theme's previous report said (`previous_report`), for the writer not to repeat.
 
     A daily edition (smith.editions) sends its focus and leaves out what belongs to other days: the
     holdings and investment principles go only to the markets day, property figures to the property and
@@ -418,6 +433,7 @@ def build_payload(view: Any, data: dict[str, Any], brief: dict[str, Any] | None,
     advice = data["advice"]
     change = data["change"]
     payload = _full_payload(view, data, brief, client_memory, advice, change)
+    payload["last_report"] = last_report
     edition = editions.of(data["kind"])
     if edition is None:
         return payload
@@ -883,7 +899,7 @@ def write(view: Any, data: dict[str, Any], brief: dict[str, Any] | None, *, secr
           audit: Audit | None = None, system_prompt: str = SYSTEM_PROMPT,
           notes: dict[str, Any] | None = None, timeout_seconds: int = TIMEOUT_SECONDS,
           client_memory: list[dict[str, Any]] | None = None, first_reader: reader.Reader | None = None,
-          clock: Callable[[], float] = time.monotonic) -> dict[str, Any]:
+          last_report: dict[str, Any] | None = None, clock: Callable[[], float] = time.monotonic) -> dict[str, Any]:
     """Ask for the narrative, verify it, repair rejected blocks once, let `first_reader` mark what a client would
     stop at and rewrite those blocks once, and return {"output": verified output, "dropped": [...], "memos",
     "cost_usd", "reader": the reading's status}. `audit(use_case, payload, outcome, error_code, cost, content)`
@@ -899,7 +915,7 @@ def write(view: Any, data: dict[str, Any], brief: dict[str, Any] | None, *, secr
         AuditError: a call could not be recorded, so its output is withheld.
     """
     started = clock()
-    payload = build_payload(view, data, brief, client_memory)
+    payload = build_payload(view, data, brief, client_memory, last_report)
     sent = payload if notes is None else {**payload, **notes}
     text = json.dumps(sent, ensure_ascii=False)
     check_outbound(text, secrets)
@@ -1057,7 +1073,9 @@ MEMOS = {"no-source": "출처가 확인되지 않은 외부 사실이 들어 있
                      "어겼다고 쓴 문장은 뺐습니다.",
          "ungrounded-number": "원장이나 출처에서 확인되지 않은 수치가 있습니다"}
 # Blocks dropped for these reasons are never restored: they are unusable for the client.
-UNUSABLE = ("duplicate", "invalid-holding", "add-over-limit", "missing-opinion", "internal-term")
+# Never restored from the raw output when the repair fails too: a repeat of last week's title would otherwise come
+# back unchecked and unchanged (Codex review 2026-10-27).
+UNUSABLE = ("duplicate", "invalid-holding", "add-over-limit", "missing-opinion", "internal-term", "repeats-last-report")
 MISSING = "missing"  # The index of a required opinion the model did not write: holdings[missing].
 
 
@@ -1318,7 +1336,9 @@ _REASONS = {"unknown-ref": "cites a ref that is not in the input",
                           "scenario that it happened in 2022 (sector_metrics.stress.precedent)",
             "missing-opinion": "gives no opinion on a holding whose must_opine is true (above the single-company "
                                "limit or the employer's stock); write it, by its symbol",
-            "ungrounded-number": "uses numbers (or signs) that are not in the input or its cited refs"}
+            "ungrounded-number": "uses numbers (or signs) that are not in the input or its cited refs",
+            "repeats-last-report": "repeats, by title, an insight, watch item or experience the previous report on this "
+                                   "theme already gave (last_report); write what is new since it, or leave it out"}
 
 
 def verify(output: dict[str, Any], payload: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
@@ -1333,6 +1353,18 @@ def verify(output: dict[str, Any], payload: dict[str, Any]) -> tuple[dict[str, A
                           _written_percents(_item_text(item))) for ref, item in brief_items.items()}
     keys = [p["key"] for p in payload["proposals"]]
     dropped: list[str] = []
+    # What the previous report on this theme already told the client, by title (report design §33): the same
+    # title again is a repeat, whatever the body says; a changed situation gets a new title.
+    previous = payload.get("last_report") or {}
+    told = {"insights": {_squash(i["title"]) for i in previous.get("insights", [])},
+            "watch": {_squash(w["item"]) for w in previous.get("watch", [])},
+            "experiences": {_squash(e["title"]) for e in previous.get("experiences", [])}}
+
+    def fresh(path: str, field: str, title: str) -> bool:
+        if _squash(title) in told[field]:
+            dropped.append(f"{path}:repeats-last-report")
+            return False
+        return True
 
     def check(path: str, texts: list[str], refs: list[str], *, outside: bool = False) -> bool:
         reason = _problem(texts, refs, known_refs, official, outside) or style_problem(texts)
@@ -1390,13 +1422,21 @@ def verify(output: dict[str, Any], payload: dict[str, Any]) -> tuple[dict[str, A
             notes.append(note)
             seen.add(note["key"])
     result["proposal_notes"] = notes
-    result["insights"] = [n for i, n in enumerate(output["insights"])
-                          if check(f"insights[{i}]", [n["title"], n["body"], n["implication"]], n["refs"], outside=True)]
-    result["watch"] = [n for i, n in enumerate(output["watch"]) if check(f"watch[{i}]", [n["item"], n["why"]], n["refs"])]
+    result["insights"] = [n for i, n in enumerate(output["insights"]) if fresh(f"insights[{i}]", "insights", n["title"])
+                          and check(f"insights[{i}]", [n["title"], n["body"], n["implication"]], n["refs"], outside=True)]
+    result["watch"] = [n for i, n in enumerate(output["watch"]) if fresh(f"watch[{i}]", "watch", n["item"])
+                       and check(f"watch[{i}]", [n["item"], n["why"]], n["refs"])]
     # An experience is an outside fact (an exhibition, a book, a place): it needs its research refs like an insight.
     result["experiences"] = [n for i, n in enumerate(output.get("experiences") or [])
-                             if check(f"experiences[{i}]", [n["title"], n["body"], n["when"]], n["refs"], outside=True)]
+                             if fresh(f"experiences[{i}]", "experiences", n["title"])
+                             and check(f"experiences[{i}]", [n["title"], n["body"], n["when"]], n["refs"], outside=True)]
     return result, dropped
+
+
+def _squash(text: str) -> str:
+    """A title as the client would see it (polished), without spaces or punctuation, for the repeat check: a
+    qualifier the polish strips cannot make last week's title look new (Codex review 2026-10-27)."""
+    return re.sub(r"[\s\W_]+", "", polish(str(text))).casefold()
 
 
 def _holding_source(opinion: dict[str, Any], position: dict[str, Any], brief_items: dict[str, Any]) -> str | None:
@@ -1821,6 +1861,34 @@ def report_memory(db: Path, data: dict[str, Any]) -> tuple[list[dict[str, Any]],
     return memory.for_model(chosen), {"stored": len(facts), "sent": len(chosen)}
 
 
+def previous_report(db: Path, data: dict[str, Any]) -> dict[str, Any] | None:
+    """What this theme's previous report told the client (report design §33): the final narrative of the last
+    sent report of the same series, the one the comparison baseline comes from. None for a first report, a report
+    sent without a narrative, or an unreadable ledger (the writer then simply has nothing to avoid)."""
+    try:
+        with closing(ledger.connect_read_only(db)) as conn:
+            report = ledger.last_sent_report(conn, kinds=editions.same_series(data["kind"]))
+            if report is None:
+                return None
+            lineage = ledger.get_report(conn, report["report_id"]) or {}  # The run list carries no lineage.
+            recent = ledger.get_advice(conn, lineage.get("advice_run_ids") or [], use_case=FINAL_USE_CASE,
+                                       created_at=report["created_at"])
+    except (sqlite3.Error, ledger.LedgerError, OSError, ValueError) as error:
+        logger.warning("Previous report unavailable to the writer: %s", type(error).__name__)
+        return None
+    verified = (recent or {}).get("content", {}).get("verified") or {}
+    if not verified:
+        return None
+    sent = datetime.fromisoformat(report["as_of"]).astimezone(data["as_of"].tzinfo)
+    return {"date": sent.date().isoformat(),
+            **{key: (verified.get(key) or {}).get("text", "") for key in SCALAR_BLOCKS},
+            "insights": [{"title": i.get("title", ""), "body": i.get("body", "")} for i in verified.get("insights") or []],
+            "watch": [{"item": w.get("item", "")} for w in verified.get("watch") or []],
+            "experiences": [{"title": e.get("title", "")} for e in verified.get("experiences") or []],
+            "holdings": [{"symbol": h.get("symbol", ""), "stance": h.get("stance", ""), "reason": h.get("reason", "")}
+                         for h in verified.get("holdings") or []]}
+
+
 def narrate(db: Path, view: Any, data: dict[str, Any], *, now: datetime, secrets: list[str],
             brief_id: str | None = None, executable: Path | None = None,
             runner: headless.Runner = subprocess.run, pipeline: str = "single",
@@ -1869,9 +1937,12 @@ def narrate(db: Path, view: Any, data: dict[str, Any], *, now: datetime, secrets
             return False
 
     remembered, status["memory"] = report_memory(db, data)
+    previous = previous_report(db, data)
+    status["last_report"] = None if previous is None else previous["date"]
     try:
         result = writer(view, data, brief, secrets=secrets, executable=executable or headless.find_claude(),
-                        runner=runner, audit=audit, client_memory=remembered, first_reader=first_reader)
+                        runner=runner, audit=audit, client_memory=remembered, first_reader=first_reader,
+                        last_report=previous)
     except Exception as error:  # noqa: BLE001 - the report must still go out.
         code = "audit-write-failed" if isinstance(error, AuditError) else getattr(error, "code", None) or type(error).__name__
         status.update(outcome="failure", error_code=str(code)[:80])

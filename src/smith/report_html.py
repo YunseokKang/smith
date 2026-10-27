@@ -834,11 +834,11 @@ def _proposals(advice: dict[str, Any], full: bool, edition: editions.Edition | N
         if p.table:
             # The researched products the action moves money into (client request 2026-10-20).
             step = p.figures.get("per_quarter")
-            detail += (f'<div style="font-size:13px;font-weight:700;color:{INK};margin-top:12px">옮길 곳 1~{len(p.table) - 1}순위'
+            detail += (f'<div style="font-size:14px;font-weight:700;color:{INK};margin-top:14px">옮길 곳 1~{len(p.table) - 1}순위'
                        + (f" · 분기 {_short(step)}" if step is not None else "") + "</div>"
-                       + _table(list(p.table[0]), [list(row) for row in p.table[1:]]) + _sources(p.table_links)
-                       + f'<div style="font-size:12px;color:{MUTED};margin-top:4px">수량은 분기 금액을 1순위에 모두 넣을 때이고 '
-                       "2·3순위는 1순위 대신 고를 때의 대안입니다. 가격은 조사 시점 종가라 주문 전 다시 확인하십시오.</div>")
+                       + _pick_cards(p.table[1:]) + _sources(p.table_links)
+                       + f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-top:6px">수량은 분기 금액을 1순위에 모두 '
+                       "넣을 때이고 2·3순위는 1순위 대신 고를 때의 대안입니다. 가격은 조사 시점 종가라 주문 전 다시 확인하십시오.</div>")
         elif p.key in (advice.get("pending_products") or ()):
             detail += (f'<div style="font-size:12px;color:{MUTED};margin-top:10px">옮길 상품 1~3순위는 검토 팀의 확인이 끝나는 대로 '
                        "다음 보고서에 싣습니다.</div>")
@@ -862,6 +862,22 @@ def _proposals(advice: dict[str, Any], full: bool, edition: editions.Edition | N
         more += (f'<tr><td style="padding-top:12px;font-size:12px;color:{MUTED}">목요 보고는 요약입니다. 근거와 위험은 월요 '
                  '보고에서 자세히 말씀드립니다.</td></tr>')
     return head + "".join(cards) + more + pending
+
+
+def _pick_cards(rows: tuple[tuple[str, ...], ...]) -> str:
+    """The products to move money into (picks.pick_table rows), one card per rank: the product, its market, fee
+    and price date, the shares one quarterly step buys (rank 1) or the alternative's price, and the reason at
+    reading size. A phone showed the former four-column table at 12px with the reason in a narrow column (user
+    review 2026-10-27)."""
+    cards = []
+    for rank, product, reason, size, meta in rows:
+        pill = _pill(f"{rank}순위", "good" if rank == "1" else "neutral")
+        cards.append(f'<div style="border:1px solid {HAIRLINE};border-radius:16px;padding:12px 14px;margin-top:8px">'
+                     f'<div style="font-size:14px;font-weight:600;line-height:1.5;color:{INK}">{pill} {escape(product)}</div>'
+                     f'<div style="font-size:12px;color:{MUTED};margin-top:4px">{escape(meta)}</div>'
+                     f'<div style="font-size:14px;font-weight:600;font-family:{MONO};color:{INK};margin-top:8px">{escape(size)}</div>'
+                     f'<div style="font-size:13px;line-height:1.65;color:{BODY};margin-top:6px">{escape(reason)}</div></div>')
+    return "".join(cards)
 
 
 def _undetermined(advice: dict[str, Any]) -> str:
@@ -1630,7 +1646,7 @@ def _holdings(data: dict[str, Any], story: dict[str, Any], full: bool) -> str:
         segments.append((f"기타({len(listed) - 4}종)", sum((p["value"] for p in listed[4:]), Decimal(0)), ""))
     inner = _stacked(segments) + '<div style="height:8px"></div>'
     inner += _table(["종목", "평가액", "비중", "수익률", "Smith 의견"],
-                    [[_named(p), _short(p["value"]), _pct(p["share"]), _return(p["return_on_cost"]),
+                    [[_named(p), _short(p["value"]), _pct(p["share"]), _return_cell(p["return_on_cost"]),
                       Raw(_pill("Hermes 운용", "neutral")) if p["hermes"] else
                       Raw(_stance(_of(opinions, p)["stance"])) if _of(opinions, p).get("stance") else "의견 없음"]
                      for p in positions])
@@ -1794,6 +1810,14 @@ def _principle_chips(cited: list[Any]) -> str:
 def _return(ratio: Decimal | None) -> str:
     """Return on cost; unknown without an average cost (never 0%)."""
     return "미상" if ratio is None else _delta_pct(ratio)
+
+
+def _return_cell(ratio: Decimal | None) -> Raw:
+    """The return as a table cell in the chart's diverging colours (user request 2026-10-27): a gain in the
+    rising colour, a loss in the falling one, flat or unknown in grey."""
+    color = MUTED if ratio is None or ratio == 0 else UP if ratio > 0 else DOWN
+    weight = "400" if ratio is None else "600"
+    return Raw(f'<span style="font-family:{MONO};font-weight:{weight};color:{color}">{escape(_return(ratio))}</span>')
 
 
 def _stance(stance: str) -> str:

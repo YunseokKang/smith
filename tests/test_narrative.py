@@ -541,6 +541,67 @@ class NarrativeTests(unittest.TestCase):
             sent = json.loads(conn.execute("SELECT payload FROM advice_runs WHERE use_case = 'report-narrative'").fetchone()[0])
         self.assertEqual([m["fact"] for m in sent["client_memory"]], ["솔방울은 거주 중인 집을 말한다"])
 
+    def test_the_previous_report_on_the_theme_is_sent_and_its_titles_are_not_repeated(self):
+        data = self.data()
+        self.assertIsNone(narrative.previous_report(self.db, data))               # A first report: nothing to avoid.
+        week_ago = AT - timedelta(days=7)
+        final = {"verified": {"situation": {"text": "지난주 상황", "refs": []}, "direction": {"text": "", "refs": []},
+                              "portfolio": {"text": "", "refs": []},
+                              "insights": [{"title": "영통 규제", "body": "지정", "implication": "영향", "refs": ["R1"]}],
+                              "watch": [{"item": "금통위", "why": "다음 달", "refs": []}], "experiences": [],
+                              "holdings": [{"symbol": "XYZ", "stance": "hold", "reason": "지난주 이유"}]}}
+        with closing(ledger.connect(self.db)) as conn:
+            ledger.record_advice_run(conn, run_id="final-1", created_at=week_ago, use_case=narrative.FINAL_USE_CASE,
+                                     question="monday", payload="{}", prompt_version="x", model="m", cost_usd=None,
+                                     outcome="success", advice=json.dumps(final, ensure_ascii=False))
+            ledger.claim_report(conn, report_id="prev", slot=None, kind="monday", trigger="manual", created_at=week_ago,
+                                as_of=week_ago, baseline=None, missed_slots=[])
+            ledger.record_lineage(conn, report_id="prev", known_at=week_ago, brief_id=None, advice_run_ids=["final-1"],
+                                  config_sha256=None, code_version=None, data_sha256="d")
+            ledger.finish_report(conn, report_id="prev", status="sent", finished_at=week_ago, shown_proposals=[])
+        previous = narrative.previous_report(self.db, data)
+        self.assertEqual(previous["date"], week_ago.astimezone(data["as_of"].tzinfo).date().isoformat())
+        self.assertEqual((previous["situation"], [i["title"] for i in previous["insights"]], previous["watch"],
+                          previous["holdings"]),
+                         ("지난주 상황", ["영통 규제"], [{"item": "금통위"}],
+                          [{"symbol": "XYZ", "stance": "hold", "reason": "지난주 이유"}]))
+        payload = narrative.build_payload(data["view"], data, self.brief(), last_report=previous)
+        self.assertNotIn("last_report", narrative._EVIDENCE_KEYS)                # Smith's own prose is not evidence.
+        repeated = dict(EMPTY, insights=[{"title": "영통 규제", "body": "다시 지정", "implication": "영향", "refs": ["R1"]},
+                                         {"title": "영통 규제 완화 논의", "body": "지정 해제 논의", "implication": "영향",
+                                          "refs": ["R1"]}],
+                        # A qualifier tag the polish strips does not make last week's title new (Codex review 2026-10-27).
+                        watch=[{"item": "금통위", "why": "다음 달", "refs": []}, {"item": "금통위 (가정)", "why": "다음 달", "refs": []}])
+        verified, dropped = narrative.verify(repeated, payload)
+        self.assertEqual([d for d in dropped if "repeats" in d],
+                         ["insights[0]:repeats-last-report", "watch[0]:repeats-last-report", "watch[1]:repeats-last-report"])
+        self.assertEqual([i["title"] for i in verified["insights"]], ["영통 규제 완화 논의"])
+        # A repeat is never restored from the raw output when the repair repeats it, drops it or fails (Codex
+        # review 2026-10-27): the final output simply lacks it.
+        for name, second in (("repeated again", repeated), ("left out", dict(repeated, insights=[], watch=[])),
+                             ("timed out", subprocess.TimeoutExpired("claude", 1))):
+            with self.subTest(repair=name):
+                outputs = [repeated, second]
+                calls = []
+
+                def run(args, **kwargs):
+                    calls.append(1)
+                    answer = outputs[len(calls) - 1]
+                    if isinstance(answer, Exception):
+                        raise answer
+                    return runner_returning(answer)(args, **kwargs)
+                written = narrative.write(data["view"], data, self.brief(), secrets=[], executable=Path("claude.exe"),
+                                          runner=run, last_report=previous)
+                self.assertEqual(([i["title"] for i in written["output"]["insights"]], written["output"]["watch"]),
+                                 (["영통 규제 완화 논의"], []))
+        # The report's writer receives it and the status says which report it was.
+        narrative.narrate(self.db, data["view"], data, now=AT, secrets=[], executable=Path("claude.exe"),
+                          runner=runner_returning(EMPTY))
+        self.assertEqual(data["narrative"]["status"]["last_report"], previous["date"])
+        with closing(ledger.connect_read_only(self.db)) as conn:
+            sent = json.loads(conn.execute("SELECT payload FROM advice_runs WHERE use_case = 'report-narrative'").fetchone()[0])
+        self.assertEqual(sent["last_report"]["watch"], [{"item": "금통위"}])
+
     def test_compare_builds_both_reports_from_one_snapshot_without_sending(self):
         calls = []
 

@@ -247,18 +247,22 @@ class ReviewTests(Upgrade):
             data = build_report(conn, as_of=AT, known_at=AT, baseline=None, kind="markets", household=HOUSEHOLD)
         trim = next(p for p in data["advice"]["proposals"] if p.key == "concentration-trim")
         step = trim.figures["per_quarter"]
-        self.assertEqual(trim.table[0], ("순위", "종목", "선정 이유", "분기 매수 수량(가격)"))
-        self.assertIn("VOO 펀드(VOO, 미국 상장) · 보수 0.03%", trim.table[1][1])
+        self.assertEqual(trim.table[0], ("순위", "종목", "선정 이유", "분기 매수 수량(가격)", "시장·보수·가격 기준일"))
+        self.assertEqual(trim.table[1][1], "VOO 펀드 (VOO)")
+        self.assertEqual(trim.table[1][4], "미국 상장 · 보수 0.03% · 2026-10-17 종가 기준")
         self.assertEqual(trim.table[1][3], f"약 {short_won(step)}어치(환율 미상)")   # Rank 1 takes the step; no USD rate here.
-        self.assertEqual(trim.table[2][3], "대안 · 1주 21,450원, 2026-10-17 기준")   # Rank 2 is the alternative, priced only.
+        self.assertEqual(trim.table[2][3], "대안 · 1주 21,450원")   # Rank 2 is the alternative, priced only.
         with closing(ledger.connect_read_only(db)) as conn:
             stored = ledger.latest_product_review(conn, "core-etf", since=AT - timedelta(days=1))
             self.assertEqual(list(picks.load(conn, AT)), ["concentration-trim"])
             self.assertEqual(picks.load(conn, AT - timedelta(hours=1)), {})     # A rebuild as of before the review: none.
         priced = picks.pick_table(trim, stored["review"], {"KRW": Decimal(1), "USD": Decimal(1300)})
-        self.assertEqual(priced.table[1][3], f"{int(step / 650_000)}주 × $500.00(약 650,000원), 2026-10-17 기준")
+        self.assertEqual(priced.table[1][3], f"{int(step / 650_000)}주 × $500.00(약 65만 원)")
         page = render(data)[1]
         self.assertIn("옮길 곳 1~2순위", page)
+        self.assertIn("1순위</span> VOO 펀드 (VOO)", page)   # Cards, one piece per line, not a four-column table.
+        start = page.index("옮길 곳 1~2순위")
+        self.assertNotIn("<th", page[start:page.index("출처:", start)])
         self.assertIn("https://issuer.example/360750", page)
         self.assertEqual(data["advice"]["pending_products"], [])
         notes = report_html.system_notes(data)

@@ -198,14 +198,17 @@ class ReportTests(unittest.TestCase):
         with_cost = dict(stock(1, later, "8", "110"), id="us-2", average_cost="120")
         without_cost = {k: v for k, v in dict(with_cost, id="us-3").items() if k != "average_cost"}
         # (12 x 90 + 8 x 120) / 20 = 102; a lot without a cost makes the whole position's cost unknown.
-        for import_id, record, expected in (("lot-a", with_cost, (Decimal(20), Decimal(102), 2)),
-                                            ("lot-b", without_cost, (Decimal(28), None, 3))):
+        # (110 - 102) / 102 = +7.8%, shown in the rising colour; an unknown return reads 미상 in grey.
+        for import_id, record, expected, shown in (
+                ("lot-a", with_cost, (Decimal(20), Decimal(102), 2), f'color:{report_html.UP}">+7.8%'),
+                ("lot-b", without_cost, (Decimal(28), None, 3), f'color:{report_html.MUTED}">미상')):
             with self.subTest(import_id):
                 self.apply(import_id, later, [record])
                 data = build_report(self.conn, as_of=later, known_at=later, baseline=None, kind="monday")
                 (position,) = review(data["view"])["positions"]
                 self.assertEqual((position["quantity"], position["average_cost"], position["lots"]), expected)
                 self.assertEqual(position["value"], expected[0] * 110 * 1400)
+                self.assertIn(shown, render(data)[1])
 
     def test_principles_library_and_investment_policy(self):
         from smith import principles

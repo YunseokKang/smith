@@ -696,13 +696,15 @@ def attach(proposals: list[Proposal], reviews: dict[str, dict[str, Any]], rates:
 
 def pick_table(proposal: Proposal, review: dict[str, Any], rates: dict[str, Decimal]) -> Proposal:
     """Rank 1 carries the quantity (one quarterly step at its price); ranks 2 and 3 are the alternatives, shown with
-    their price only (review 2026-10-20: a split by rank was an assumption the client could not act on)."""
+    their price only (review 2026-10-20: a split by rank was an assumption the client could not act on). A row is
+    (rank, product, reason, size, meta): the report stacks them as cards, one piece per line, so the long reason
+    is not squeezed into a table column on a phone (user review 2026-10-27)."""
     step = proposal.figures.get("per_quarter")
     picks = review["picks"]
     if not picks or step is None:
         return proposal
     by_symbol = {c["symbol"]: c for c in review["candidates"]}
-    rows = [("순위", "종목", "선정 이유", "분기 매수 수량(가격)")]
+    rows = [("순위", "종목", "선정 이유", "분기 매수 수량(가격)", "시장·보수·가격 기준일")]
     links = []
     for pick in picks:
         c = by_symbol[pick["symbol"]]
@@ -710,17 +712,17 @@ def pick_table(proposal: Proposal, review: dict[str, Any], rates: dict[str, Deci
         currency = _currency(c["price"], c["market"])
         krw = None if price is None or currency not in rates else price * rates[currency]
         shares = None if krw is None else int(step / krw)
-        # Compact cells (the scout's full text stays in the stored review): the price as a figure with its date,
-        # and for a dollar price its won equivalent at the ledger's rate.
-        unit = _price_text(price, currency) + (f"(약 {krw:,.0f}원)" if currency != "KRW" and krw is not None else "")
+        # Compact cells (the scout's full text stays in the stored review): the price as a figure, and for a
+        # dollar price its rounded won equivalent at the ledger's rate; the date goes to the meta line.
+        unit = _price_text(price, currency) + (f"(약 {short_won(krw)})" if currency != "KRW" and krw is not None else "")
         if pick["rank"] != 1:
-            size = f"대안 · 1주 {unit}, {c['price_date']} 기준"
+            size = f"대안 · 1주 {unit}"
         else:
             size = (f"약 {short_won(step)}어치(환율 미상)" if krw is None else
-                    f"{shares}주 × {unit}, {c['price_date']} 기준" if shares else f"1주 미만 × {unit}, {c['price_date']} 기준")
+                    f"{shares}주 × {unit}" if shares else f"1주 미만 × {unit}")
         market = "미국 상장" if c["market"] == "US" else "국내 상장"
-        rows.append((str(pick["rank"]), f"{_name_text(c['name'])}({c['symbol']}, {market}) · 보수 {_rate_text(c['expense_ratio'])}",
-                     pick["reason"], size))
+        rows.append((str(pick["rank"]), f"{_name_text(c['name'])} ({c['symbol']})", pick["reason"], size,
+                     f"{market} · 보수 {_rate_text(c['expense_ratio'])} · {c['price_date']} 종가 기준"))
         links.append((f"{c['publisher'] or c['issuer']} {c['price_date']}".strip(), c["source_url"]))
     return replace(proposal, table=tuple(rows), table_links=tuple(dict.fromkeys(links)))
 
