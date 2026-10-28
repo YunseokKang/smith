@@ -104,7 +104,7 @@ v3는 공급자 동기화 시도의 성공·실패를 남기는 `sync_runs` 표�
   반영하며, 원금 상환 추정은 해당 주택 담보대출의 지급액과 이자만 쓴다. 가정값은 모두 결과에 남긴다.
 - headless 경계(`src/smith/adviser.py`, Claude Code 2.1.195에서 확인): 네이티브 `claude.exe`를 직접 실행
   (`.cmd` 래퍼는 cmd.exe 인자 해석 때문에 실행 거부), 질문·payload는 stdin, `--tools ""`, `--safe-mode`,
-  `--no-session-persistence`, `--system-prompt`, `--output-format json`, `--json-schema`,
+  `--no-session-persistence`, `--system-prompt-file`(작업 폴더의 파일. 인자로 넘기면 Windows 명령줄 32,767자 한도에 걸린다, BUG-2026-005), `--output-format json`, `--json-schema`,
   `--max-budget-usd`(기본 5.00, 폭주 방지용 상한), 기본 모델 `fable`(가장 강한 추론 모델, 사용자 결정 2026-10-05). "추가 과금 없음"은 운영 환경 가정이다: 현재 Claude Code가 정액 구독 로그인으로 인증되어 있다는 사실에 기대며, 코드가 보장하지 않는다. 허용 환경변수에 `ANTHROPIC_API_KEY`가 있으므로 그 키가 설정되면 API 과금이 된다. OAuth 인증에서 예산 상한의 의미는 문서화되어 있지 않다. 빈 임시 작업 디렉터리, 환경변수 허용 목록,
   `SMITH_HEADLESS=1`(이 값이 있으면 `smith advise`가 거부해 재귀 실행을 막는다), 300초 제한, 출력 1MB 제한.
 - 출력 검증: CLI에는 최소 스키마를 넘긴다(길이·최대 개수·추가 필드 제약이 있으면 실제

@@ -56,10 +56,15 @@ def runner_returning(output, calls=None):
     return run
 
 
+def system_prompt(args):
+    """The system prompt of a headless call, read from the file it travels in."""
+    return Path(args[args.index("--system-prompt-file") + 1]).read_text(encoding="utf-8")
+
+
 def by_prompt(market, holdings, calls=None):
     """Answer the market research call and the holdings research call (told apart by their prompt)."""
     def run(args, **kwargs):
-        prompt = args[args.index("--system-prompt") + 1]
+        prompt = system_prompt(args)
         output = holdings if prompt == research.HOLDINGS_PROMPT else market
         if isinstance(output, Exception):
             return subprocess.CompletedProcess(args, 1, "{}", "")
@@ -162,6 +167,20 @@ class NarrativeTests(unittest.TestCase):
         with self.assertRaises(headless.HeadlessError):
             headless.run("x", system_prompt="s", schema=research.BRIEF_SCHEMA, executable=Path("c.exe"), model=None,
                          budget_usd="1", timeout_seconds=1, tools=("Bash",), runner=runner_returning({}))
+
+    def test_the_longest_system_prompts_travel_in_a_file_within_the_windows_command_line_limit(self):
+        from smith import team
+        for prompt in (narrative.SYSTEM_PROMPT, team.EDITOR_PROMPT):   # Inline, these failed to launch (2026-10-28).
+            calls = []
+            headless.run("x", system_prompt=prompt, schema=narrative.NARRATIVE_SCHEMA, executable=Path("c.exe"),
+                         model="fable", budget_usd="5", timeout_seconds=1, runner=lambda args, **kw: (
+                             calls.append(system_prompt(args)), runner_returning(EMPTY)(args, **kw))[1])
+            self.assertEqual(calls, [prompt])
+        with self.assertRaises(headless.HeadlessError) as raised:   # A schema alone that long is refused, not launched.
+            headless.run("x", system_prompt="s", schema={"type": "string", "description": "x" * 33000},
+                         executable=Path("c.exe"), model=None, budget_usd="1", timeout_seconds=1,
+                         runner=runner_returning(""))
+        self.assertEqual(raised.exception.code, "command-too-long")
 
     def test_verification_rules(self):
         data = self.data()
@@ -525,7 +544,7 @@ class NarrativeTests(unittest.TestCase):
         editor = dict(EMPTY, situation=block("고객님은 여유 자금 9,999만 원을 투자에 쓰실 수 있습니다."))
 
         def runner(args, **kwargs):
-            prompt = args[args.index("--system-prompt") + 1]
+            prompt = system_prompt(args)
             if "Your area: " not in prompt:
                 return runner_returning(editor)(args, **kwargs)
             area = prompt.split("Your area: ")[1].split()[0].rstrip(":,")

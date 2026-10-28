@@ -7,7 +7,8 @@ Boundary (verified against Claude Code 2.1.195 `claude --help` on 2026-10-04 and
   pre-approves those two, `--permission-mode dontAsk` refuses anything else without prompting). Such a
   call never receives household data, so a hostile web page has nothing to exfiltrate.
 - `--safe-mode` skips user CLAUDE.md, hooks, plugins and MCP; `--no-session-persistence` keeps the
-  conversation off disk; `--system-prompt` replaces the default prompt.
+  conversation off disk; `--system-prompt-file` replaces the default prompt (a file in the working
+  directory, so a long prompt never meets the Windows command-line limit; verified on 2.1.302, 2026-10-28).
 - `--json-schema` asks for structured output, which is pruned and validated here as untrusted input.
 - An empty temporary working directory, an allowlisted environment, a timeout and a spend cap.
 - The native `claude.exe` is launched directly; a `.cmd` launcher would route arguments through cmd.exe.
@@ -24,8 +25,10 @@ from typing import Any
 
 HEADLESS_ENV = "SMITH_HEADLESS"
 WEB_TOOLS = ("WebSearch", "WebFetch")
+SYSTEM_PROMPT_FILE = "system-prompt.txt"
 _MAX_OUTPUT_BYTES = 2_000_000
 _MAX_TEXT = 4000
+_MAX_COMMAND_LINE = 32_000  # Windows CreateProcess accepts 32,767 characters; a margin for the executable path.
 _ENV_KEEP = ("PATH", "PATHEXT", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "TEMP", "TMP", "USERPROFILE",
              "HOMEDRIVE", "HOMEPATH", "HOME", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES", "OS",
              "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "LANG", "ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR")
@@ -79,13 +82,22 @@ def run(prompt: str, *, system_prompt: str, schema: dict[str, Any], executable: 
         args += ["--tools", ""]
     # `--tools` governs built-in tools only; MCP tools are denied explicitly as defense in depth.
     args += ["--disallowedTools", "mcp__*", "--safe-mode", "--no-session-persistence", "--output-format", "json",
-             "--json-schema", json.dumps(cli_schema(schema)), "--system-prompt", system_prompt,
-             "--max-budget-usd", budget_usd]
+             "--json-schema", json.dumps(cli_schema(schema)), "--max-budget-usd", budget_usd]
     if model:
         args += ["--model", model]
     env = {key: os.environ[key] for key in _ENV_KEEP if key in os.environ}
     env[HEADLESS_ENV] = "1"
     with tempfile.TemporaryDirectory(prefix="smith-headless-") as workdir:
+        # The system prompt goes in a file: inline it pushed the narrative command line past the Windows limit of
+        # 32,767 characters and the launch failed with WinError 206 (property report, 2026-10-28).
+        prompt_path = Path(workdir, SYSTEM_PROMPT_FILE)
+        try:
+            prompt_path.write_text(system_prompt, encoding="utf-8")
+        except OSError:
+            raise HeadlessError("io-failed") from None
+        args += ["--system-prompt-file", str(prompt_path)]
+        if len(subprocess.list2cmdline(args)) > _MAX_COMMAND_LINE:
+            raise HeadlessError("command-too-long")
         try:
             proc = runner(args, input=prompt, capture_output=True, text=True, encoding="utf-8", env=env,
                           cwd=workdir, timeout=timeout_seconds)

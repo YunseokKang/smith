@@ -344,3 +344,13 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
   원인: ChatGPT 플랜(Pro 아님)의 Codex 사용량 한도. 기계용 코드가 없어 `codex.check_events`가 문장으로 `usage-limit`을 판별한다.
   리포트 첫 독자는 Claude로 폴백하고, 리뷰 스크립트는 종료 코드 3으로 Claude Code `/code-review` 대체를 안내한다.
   예방: Codex 전부(독자·리뷰)를 `gpt-6.1-sol` high로 바꿨고(사용자 결정, 5시간당 약 3배), 개발 리뷰는 의미 있는 변경에만 돌리고, 정기 리포트(월·목 06:00) 직전에는 몰아서 돌리지 않는다.
+
+### TS-034 Claude Code headless 실행이 `launch-failed`: Windows 명령줄 32,767자 한도 (2026-10-28)
+
+- 증상: 보고 해석 단계가 1초 만에 `Narrative (...) failure: launch-failed`로 끝났다. 직접 재현하면
+  `FileNotFoundError [WinError 206] 파일 이름이나 확장명이 너무 깁니다`가 난다.
+- 원인: `--system-prompt`로 넘긴 30,071자 지시문과 스키마를 합친 명령줄이 32,996자였다. `CreateProcess` 한도는 32,767자다.
+- 해결: 지시문은 작업 폴더의 파일로 쓰고 `--system-prompt-file`로 넘긴다. 명령줄이 32,000자를 넘으면
+  `command-too-long`으로 미리 거부한다(BUG-2026-005).
+- 예방: 긴 텍스트(지시문, 데이터, 스키마)는 인자가 아니라 stdin이나 파일로 넘긴다. `launch-failed`가 보이면 먼저
+  `subprocess.list2cmdline(args)` 길이를 잰다.

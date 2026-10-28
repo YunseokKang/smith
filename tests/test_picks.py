@@ -18,6 +18,7 @@ from smith.payload import load_view
 from smith.report_data import build_report
 from smith.report_html import render
 from test_delivery import CONFIG, MON
+from test_narrative import system_prompt
 from test_v3_upgrade import AT, BASE, CD, DEALS, HOUSEHOLD, MARKET, RECORDS, Upgrade
 
 CLAUDE = Path("claude.exe")
@@ -66,7 +67,7 @@ SELECT = {"picks": [{"symbol": "360750", "rank": "1", "reason": "보수 0.07%로
 
 
 def runner(args, **kwargs):
-    prompt = args[args.index("--system-prompt") + 1]
+    prompt = system_prompt(args)
     payload = json.loads(kwargs["input"])
     if "Role: product scout" in prompt:
         assert "--tools" in args and args[args.index("--tools") + 1] == "WebSearch,WebFetch"
@@ -212,7 +213,7 @@ class ReviewTests(Upgrade):
         self.assertEqual((picked, dropped), ([], {"pick-rank-1": 1}))                       # ... nothing when absent.
 
         def ignoring(args, **kwargs):
-            if "Role: the household's private banker" in args[args.index("--system-prompt") + 1]:
+            if "Role: the household's private banker" in system_prompt(args):
                 return envelope(args, {"picks": [{"symbol": "ZZZ", "rank": "1", "reason": "x", "condition": "x"}], "rejected": []})
             return runner(args, **kwargs)
         with self.assertRaises(headless.HeadlessError) as caught:
@@ -224,7 +225,7 @@ class ReviewTests(Upgrade):
         seen = {}
 
         def recording(args, **kwargs):
-            prompt = args[args.index("--system-prompt") + 1]
+            prompt = system_prompt(args)
             if "Role: product scout" in prompt:
                 seen["must_consider"] = json.loads(kwargs["input"])["must_consider"]
             if "Role: the household's private banker" in prompt:
