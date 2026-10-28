@@ -323,6 +323,28 @@ class NarrativeTests(unittest.TestCase):
                                runner=runner_returning(first), first_reader=failing, clock=lambda: next(times))
         self.assertEqual(late["reader"], {"outcome": "skipped-time"})
 
+    def test_the_readers_rewrite_gets_the_rest_of_the_stage(self):
+        data = self.data()
+        first = dict(EMPTY, situation=block("현금 여유를 먼저 채우실 때입니다."))
+        timeouts = []
+
+        def run(args, **kwargs):
+            timeouts.append(kwargs["timeout"])
+            return runner_returning(first)(args, **kwargs)
+
+        def marking(letter):
+            note = {"path": "situation", "quote": "현금 여유", "problem": "jargon", "why": "어렵습니다.", "suggestion": "풀어 쓰기"}
+            return {"notes": [note], "raw_notes": 1, "overall": "", "usage": None, "model": "gpt-test"}
+        # (clock at the gate, clock at the rewrite, the rewrite's timeout): the 2026-10-28 property day (a 9-minute
+        # write, a 1-minute reading), then a slow reading that leaves less than the floor, which is still given.
+        for gate, at, given in ((540, 600, narrative.STAGE_SECONDS - 600),
+                                (600, 1000, narrative.READER_REWRITE_TIMEOUT_SECONDS)):
+            timeouts.clear()
+            times = iter([0.0, gate, at])
+            narrative.write(data["view"], data, self.brief(), secrets=[], executable=Path("claude.exe"), runner=run,
+                            first_reader=marking, clock=lambda: next(times))
+            self.assertEqual(timeouts, [narrative.TIMEOUT_SECONDS, given])
+
     def test_rewrites_keep_identity_and_stance(self):
         hold = {"symbol": "VOO", "stance": "hold", "reason": "a", "alternative": "b", "reconsider": "c", "refs": [],
                 "principles": []}

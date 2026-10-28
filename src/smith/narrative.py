@@ -69,7 +69,7 @@ REPAIR_TIMEOUT_SECONDS = 420
 # 41 seconds on 2026-10-26; the rewrite writes the whole output again, like a repair).
 STAGE_SECONDS = TIMEOUT_SECONDS + REPAIR_TIMEOUT_SECONDS
 FINAL_USE_CASE = "report-narrative-final"  # An audit record of the narrative as sent, not a model call.
-READER_REWRITE_TIMEOUT_SECONDS = REPAIR_TIMEOUT_SECONDS
+READER_REWRITE_TIMEOUT_SECONDS = REPAIR_TIMEOUT_SECONDS  # The floor; the rewrite gets the rest of the stage.
 BRIEF_REUSE_AGE = timedelta(days=4)  # A failed research run may fall back to a brief this recent.
 # A daily edition researches its topics once a week, so its fallback is last week's brief on the same topics
 # (marked as reused, with its date, in the report).
@@ -962,8 +962,12 @@ def write(view: Any, data: dict[str, Any], brief: dict[str, Any] | None, *, secr
             reading = {"outcome": "skipped-time"}
         else:
             def call(text: str, use_case: str) -> tuple[Any, str | None]:
+                # The rewrite reads the whole payload again, as long as the write: it gets what is left of the stage,
+                # never less than its own floor (the gate above kept that much). A fixed 420 seconds timed out
+                # twice on the property report of 2026-10-28 with 12 minutes left.
+                left_now = int(STAGE_SECONDS - (clock() - started))
                 return _call(text, use_case, executable, model, runner, audit, system_prompt,
-                             READER_REWRITE_TIMEOUT_SECONDS)
+                             max(READER_REWRITE_TIMEOUT_SECONDS, left_now))
             verified, reading = read_and_rewrite(first_reader, verified, memos, payload, sent, secrets=secrets,
                                                  call=call, audit=audit, kind=data.get("kind"))
             if "cost_usd" in reading:
