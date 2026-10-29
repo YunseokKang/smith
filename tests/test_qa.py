@@ -30,6 +30,14 @@ def message(message_id, *, sender=ME, labels=("SENT", "INBOX"), text="비상금�
                                   {"mimeType": "text/html", "body": {"data": b64("<p>x</p>")}}]}}
 
 
+NO_LOOKUP = {"needed": "no", "holding": "", "topic": "none", "subject": ""}
+
+
+def envelope(args, output):
+    body = {"subtype": "success", "is_error": False, "structured_output": output, "total_cost_usd": 0.2}
+    return subprocess.CompletedProcess(args, 0, json.dumps(body), "")
+
+
 class QaTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -68,20 +76,19 @@ class QaTests(unittest.TestCase):
         self.sent.append(kwargs)
         return f"answer-{len(self.sent)}"
 
-    def poll(self, output=None, now=AT):
+    def poll(self, output=None, now=AT, runner=None, verifier=None):
         output = output or {"answer": {"text": "비상금은 바로 꺼낼 수 있는 계좌에 두시는 것이 좋습니다.", "refs": []},
                             "follow_up": ["얼마나 모아야 하나요?"]}
-        output = {"remember": [], **output}
+        output = {"remember": [], "lookup": NO_LOOKUP, **output}
 
-        def runner(args, **kwargs):
-            envelope = {"subtype": "success", "is_error": False, "structured_output": output, "total_cost_usd": 0.2}
-            return subprocess.CompletedProcess(args, 0, json.dumps(envelope), "")
+        def answering(args, **kwargs):
+            return envelope(args, output)
 
         def build(report):
             return qa.rebuild(self.db, report, now=now)
         return qa.poll(self.db, recipient=ME, credentials=("a", "b", "c"), now=now, build=build, secrets=[],
-                       executable=Path("claude.exe"), runner=runner, sender=self.send, reader=self.reader,
-                       poster=self.poster)
+                       executable=Path("claude.exe"), runner=runner or answering, sender=self.send, reader=self.reader,
+                       poster=self.poster, verifier=verifier)
 
     def test_only_the_clients_own_reply_in_smiths_thread_is_answered_once(self):
         results = self.poll()
@@ -136,7 +143,7 @@ class QaTests(unittest.TestCase):
         with closing(ledger.connect(self.db)) as conn:
             ledger.claim_question(conn, message_id="stuck", thread_id="thread0001", report_id=None, received_at=AT, now=AT)
             ledger.start_answer(conn, message_id="stuck", now=AT)
-            later = AT.replace(hour=AT.hour + 1)
+            later = AT + ledger.QUESTION_LEASE + timedelta(minutes=1)
             self.assertEqual(ledger.recover_questions(conn, now=later)[0]["was"], "sending")
             status = conn.execute("SELECT status FROM mail_questions WHERE message_id = 'stuck'").fetchone()[0]
         self.assertEqual(status, "unknown")                                   # May have been sent: never resent.

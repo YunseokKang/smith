@@ -1098,7 +1098,9 @@ def latest_advice(conn: sqlite3.Connection, *, use_case: str) -> dict[str, Any] 
 
 
 MAX_ANSWER_ATTEMPTS = 3
-QUESTION_LEASE = timedelta(minutes=30)
+# Longer than the slowest answer: a look-up answer is two answer calls, a repair and a web call of 10 minutes each
+# (qa_lookup, FR-43), so a manual run beside the scheduled one never takes a live answer for an interrupted one.
+QUESTION_LEASE = timedelta(minutes=60)
 
 
 def claim_question(conn: sqlite3.Connection, *, message_id: str, thread_id: str, report_id: str | None,

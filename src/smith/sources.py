@@ -8,7 +8,7 @@ real official page from a dead or invented one, so before a brief is stored each
   answer cannot redirect the request to a private or loopback address.
 - Redirects are followed by hand, at most MAX_REDIRECTS, and each hop is checked like the first URL.
 - Claim-body match: the numbers in the item's headline and detail are looked up in the page text.
-- Stored per item: status, final URL, HTTP status, fetch time, SHA-256 of the body, matched numbers.
+- Stored per item: status, final URL, HTTP status, fetch time, SHA-256 of the body, matched numbers (and which).
 
 Outcomes are lenient, matching the client's choice (doubts are flagged, not deleted):
 - dropped: the page is gone (404/410), the name does not resolve, or the address is not public;
@@ -170,7 +170,7 @@ def check(item: dict[str, str], *, now: datetime, resolver: Resolver = resolve,
     seen = numbers(text)
     hits = sorted(claimed & seen)
     status = "matched" if len(hits) * 2 >= len(claimed) else ("mismatch" if not hits else "reachable")
-    return {"status": status, "matched": f"{len(hits)}/{len(claimed)}", **record}
+    return {"status": status, "matched": f"{len(hits)}/{len(claimed)}", "found": hits, **record}
 
 
 def verify(items: list[dict[str, Any]], *, now: datetime | None = None, resolver: Resolver = resolve,

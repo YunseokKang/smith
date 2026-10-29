@@ -114,7 +114,8 @@ def answer(db: Path, config_path: Path, *, verbose: bool = False) -> int:
             print(f"Answering questions failed ({error.code}).")
         return 1
     for item in results:
-        kept = f", remembered {item['remembered']}" if item.get("remembered") else ""
+        kept = (", looked up" if item.get("looked_up") else "") + (
+            f", remembered {item['remembered']}" if item.get("remembered") else "")
         failed = f", memory not saved ({item['memory_error']})" if item.get("memory_error") else ""
         print(f"Question {item['message_id'][:8]}...: {item['status']}{kept}{failed}")
     if verbose and not results:

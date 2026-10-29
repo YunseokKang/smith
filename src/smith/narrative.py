@@ -1614,6 +1614,8 @@ _EVIDENCE_KEYS = ("edition", "change_since_last_report", "proposals", "undetermi
                   # An e-mail answer may quote the report's own status reasons, data status and the principles it
                   # applied (code output, not the model's earlier prose).
                   "report_notes", "report_principles",
+                  # The dividend an e-mail answer's look-up found, computed for the household by code (qa_lookup).
+                  "dividend_estimates",
                   "client_question", "client_memory")
 
 
