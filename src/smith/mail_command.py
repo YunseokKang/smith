@@ -108,7 +108,7 @@ def answer(db: Path, config_path: Path, *, verbose: bool = False) -> int:
     health_answerer = health_qa.answerer(db, config, now=now, tz=tz, secrets=secrets)
     try:
         results = qa.poll(db, recipient=to, credentials=stored, now=now, build=build, secrets=secrets, tz=tz,
-                          daily=daily_answerer, health=health_answerer)
+                          daily=daily_answerer, health=health_answerer, dart_key=credentials.load_api_key("dart"))
     except gmail.MailError as error:
         if verbose or error.code != "no-read-scope":
             print(f"Answering questions failed ({error.code}).")

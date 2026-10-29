@@ -169,6 +169,45 @@ class LookupTests(unittest.TestCase):
         self.assertIn(URL, html)                                                          # The source is linked.
 
 
+class DartLookupTests(unittest.TestCase):
+    """The same household, with an OpenDART key: a dividend question is answered from the filing itself."""
+
+    setUp = LookupTests.setUp
+
+    def test_a_dividend_question_is_answered_from_the_filing_without_a_web_call(self):
+        from test_dart import FakeDart
+        calls, fake = [], FakeDart()
+        asking = {"answer": {"text": "공시를 찾아보겠습니다.", "refs": []}, "follow_up": [], "remember": [],
+                  "lookup": {"needed": "yes", "holding": "123450", "topic": "dividend", "subject": ""}}
+        answered = {"answer": {"text": "11월 27일에 세금을 떼고 약 12만 원이 들어올 예정입니다(현행 법령 확인 필요).",
+                               "refs": ["R1", "tax"]}, "follow_up": [], "remember": [], "lookup": NO_LOOKUP}
+
+        def runner(args, **kwargs):
+            calls.append(args[args.index("--tools") + 1])
+            return subprocess.CompletedProcess(args, 0, json.dumps({
+                "subtype": "success", "is_error": False, "total_cost_usd": 0.1,
+                "structured_output": answered if len(calls) == 2 else asking}), "")
+        question = qa.Question("q1", "t1", None, REPORT, "[Smith] 보고", "가상전자 배당 얼마 받아?", "<q1@mail>", "")
+        result = qa.answer(self.db, self.data, question, now=REPORT, secrets=["k" * 40], executable=Path("claude.exe"),
+                           runner=runner, verifier=checked, dart_key="k" * 40, dart_fetch=fake)
+        self.assertEqual(calls, ["", ""])                                    # Two answer calls, no web call.
+        self.assertEqual([path for path, _ in fake.calls], ["corpCode.xml", "list.json", "document.xml", "document.xml"])
+        self.assertTrue(all(params["crtfc_key"] == "k" * 40 for _, params in fake.calls))
+        with closing(ledger.connect_read_only(self.db)) as conn:
+            second = json.loads(conn.execute("SELECT payload FROM advice_runs WHERE use_case = 'mail-answer-looked-up'")
+                                .fetchone()[0])
+        item = next(i for i in second["brief"]["items_untrusted"] if i["ref"] == "R1")
+        self.assertEqual((item["tier"], item["publisher"]), ("official", "금융감독원 전자공시(DART)"))
+        self.assertIn("보통주 1주당 361원", item["detail"])
+        rows = {(r["symbol"], r["owner"], r["account"]): r for r in second["dividend_estimates"]["items"]}
+        self.assertEqual(rows[("123455", "self", "isa")]["gross"], "1805")      # The preferred share's 종류주식 amount.
+        self.assertTrue(all(r["source_numbers_checked"] and r["pay_date"] == "2026-11-27" for r in rows.values()))
+        self.assertEqual(result["memos"], ["배당 기준일의 보유 수량이 원장에 없어, 보고서 기준 수량으로 계산했습니다.",
+                                           "Hermes가 운용하는 계좌의 같은 종목 배당은 계산에 넣지 않았습니다."])
+        html, _ = qa.render(question, result, self.data)
+        self.assertIn("https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20261029800101", html)
+
+
 def setUpModule():  # noqa: N802 - unittest hook
     fast_ledger.install()
 

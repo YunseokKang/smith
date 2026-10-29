@@ -15,6 +15,8 @@ _HEALTH = "smith.google-health"
 EVIDENCE_PROVIDERS = ("ecos", "fred")
 # Official real-estate APIs: data.go.kr (MOLIT transaction prices) and the Korea Real Estate Board (R-ONE).
 REAL_ESTATE_PROVIDERS = ("datagokr", "rone")
+# The FSS electronic disclosure system (OpenDART): company filings such as dividend decisions (FR-43).
+DISCLOSURE_PROVIDERS = ("dart",)
 
 
 def load_toss_client() -> tuple[str, str] | None:
@@ -40,7 +42,8 @@ def all_secrets() -> list[str]:
     toss = load_toss_client() or ()
     gmail = load_gmail() or ()
     health = load_health() or ()
-    return [*toss, *gmail, *health, *(load_api_key(p) or "" for p in EVIDENCE_PROVIDERS + REAL_ESTATE_PROVIDERS)]
+    return [*toss, *gmail, *health, *(load_api_key(p) or "" for p in EVIDENCE_PROVIDERS + REAL_ESTATE_PROVIDERS
+                                                        + DISCLOSURE_PROVIDERS)]
 
 
 def load_health() -> tuple[str, str, str] | None:

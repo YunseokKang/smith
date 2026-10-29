@@ -36,7 +36,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-from smith import editions, gmail, headless, ledger, memory, narrative, principles, qa_lookup, report_html
+from smith import dart, editions, gmail, headless, ledger, memory, narrative, principles, qa_lookup, report_html
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import check_outbound, mask_identifiers
 from smith.report_data import build_report
@@ -308,7 +308,8 @@ def drift_memo(changed: list[str], at: datetime) -> str | None:
 def answer(db: Path, data: dict[str, Any], question: Question, *, now: datetime, secrets: list[str],
            executable: Path, runner: headless.Runner = subprocess.run,
            report: dict[str, Any] | None = None, history: list[dict[str, str | None]] | None = None,
-           tz: str = DEFAULT_TIMEZONE, verifier: qa_lookup.Verifier | None = None) -> dict[str, Any]:
+           tz: str = DEFAULT_TIMEZONE, verifier: qa_lookup.Verifier | None = None, dart_key: str | None = None,
+           dart_fetch: Any = None) -> dict[str, Any]:
     """Write and check an answer. Returns {"text", "refs", "follow_up", "memos", "brief", "remember", "looked_up"}.
 
     `history` is the earlier turns of the thread ({"client", "smith"}, oldest first, see
@@ -379,7 +380,8 @@ def answer(db: Path, data: dict[str, Any], question: Question, *, now: datetime,
         def web_call(text: str) -> Any:
             return _call(db, text, now, report_kind, executable, runner, "mail-lookup", web=True)[0]
         payload, brief, memos = _look_up(db, data, payload, brief, output["lookup"], now=now, tz=tz, report=report,
-                                         secrets=secrets, call=web_call, verifier=verifier)
+                                         secrets=secrets, call=web_call, verifier=verifier, dart_key=dart_key,
+                                         dart_fetch=dart_fetch)
         text = json.dumps(payload, ensure_ascii=False)
         check_outbound(text, secrets)
         output, _ = _call(db, text, now, report_kind, executable, runner, "mail-answer-looked-up")
@@ -424,8 +426,8 @@ def answer(db: Path, data: dict[str, Any], question: Question, *, now: datetime,
 
 def _look_up(db: Path, data: dict[str, Any], payload: dict[str, Any], brief: dict[str, Any] | None,
              asked: dict[str, Any], *, now: datetime, tz: str, report: dict[str, Any] | None, secrets: list[str],
-             call: Callable[[str], Any], verifier: qa_lookup.Verifier | None
-             ) -> tuple[dict[str, Any], dict[str, Any] | None, list[str]]:
+             call: Callable[[str], Any], verifier: qa_lookup.Verifier | None, dart_key: str | None = None,
+             dart_fetch: Any = None) -> tuple[dict[str, Any], dict[str, Any] | None, list[str]]:
     """(the second pass's payload, the brief widened with the new items for the reply's links, memos). The new items
     are numbered after the report's own (R<n+1>, ...), so refs stay unique and the usual checks apply to them."""
     request, refused = qa_lookup.gate(asked, data)
@@ -433,8 +435,9 @@ def _look_up(db: Path, data: dict[str, Any], payload: dict[str, Any], brief: dic
         return dict(payload, lookup={"status": "refused", "reason": refused}), brief, [refused]
     old = list(((brief or {}).get("brief") or {}).get("items", []))
     first = 1 + max((int(i["ref"][1:]) for i in old if str(i.get("ref", ""))[1:].isdigit()), default=0)
-    result = qa_lookup.run(request, today=local_time(now, tz).date(), secrets=secrets, caller=call, first_ref=first,
-                           verifier=verifier)
+    result = qa_lookup.look_up(request, today=local_time(now, tz).date(), now=now, secrets=secrets, caller=call,
+                               first_ref=first, verifier=verifier, dart_key=dart_key, cache=dart.cache_path(db),
+                               **({"fetch": dart_fetch} if dart_fetch else {}))
     known_at = now if report is None else datetime.fromisoformat(report["known_at"] or report["as_of"])
     found = qa_lookup.estimates(db, data, result["dividends"], known_at=known_at, unproven=result["unproven_dividends"])
     items = old + result["items"]
@@ -581,7 +584,7 @@ def poll(db: Path, *, recipient: str, credentials: tuple[str, str, str], now: da
          secrets: list[str], executable: Path | None = None, runner: headless.Runner = subprocess.run,
          sender: Any = gmail.send, reader: gmail.Getter = gmail.get, poster: gmail.Poster = gmail.post,
          tz: str = DEFAULT_TIMEZONE, daily: Any = None, health: Any = None,
-         verifier: qa_lookup.Verifier | None = None) -> list[dict[str, Any]]:
+         verifier: qa_lookup.Verifier | None = None, dart_key: str | None = None) -> list[dict[str, Any]]:
     """Answer new questions. `build(report)` rebuilds the data of the report a question replies to (from
     its run record and lineage; None only if the run is unknown, then current data). `daily(question, history)`
     answers a daily-thread question with the daily context and returns (html, text, result), `health` likewise for
@@ -632,7 +635,8 @@ def poll(db: Path, *, recipient: str, credentials: tuple[str, str, str], now: da
                 html, text, result = answerers[question.product](question, history)
             else:
                 result = answer(db, data, question, now=now, secrets=secrets, executable=executable or headless.find_claude(),
-                                runner=runner, report=report, history=history, tz=tz, verifier=verifier)
+                                runner=runner, report=report, history=history, tz=tz, verifier=verifier,
+                                dart_key=dart_key)
                 html, text = render(question, result, data)
         except Exception as error:  # noqa: BLE001 - nothing was sent; a clean, retryable failure.
             code = str(getattr(error, "code", None) or type(error).__name__)[:80]

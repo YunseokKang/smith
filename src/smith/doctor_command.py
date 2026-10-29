@@ -68,7 +68,8 @@ def _credentials(results: list) -> None:
     try:
         stored = {"gmail": credentials.load_gmail() is not None, "toss": credentials.load_toss_client() is not None,
                   **{p: credentials.load_api_key(p) is not None
-                     for p in credentials.EVIDENCE_PROVIDERS + credentials.REAL_ESTATE_PROVIDERS}}
+                     for p in credentials.EVIDENCE_PROVIDERS + credentials.REAL_ESTATE_PROVIDERS
+                     + credentials.DISCLOSURE_PROVIDERS}}
     except Exception as error:  # noqa: BLE001 - a broken credential store is itself the finding.
         results.append(("fail", "credentials", f"credential store unavailable ({type(error).__name__})"))
         return

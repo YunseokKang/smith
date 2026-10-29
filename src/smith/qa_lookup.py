@@ -11,6 +11,10 @@ leaves, and no text the answer model wrote ever reaches the web call (review 202
   adds the other listed share classes of that company the client holds (a KR common and preferred share).
 - A public look-up names one subject from a catalogue code holds: fixed macro and policy subjects and the report's own
   generalized research topics (T*), which already leave every week.
+- A KR holding is looked up in OpenDART first (smith.dart): a dividend question is answered from the newest dividend
+  decision filing, read by code (amounts, record and pay dates as the form states them), with no model and no web
+  call; other topics get the company's recent filing titles beside the web findings. When DART has no key, fails or
+  has no dividend decision, the web call runs as below.
 - One web-only call (WebSearch and WebFetch, no household data) returns cited findings and declared dividends; every
   URL is fetched and its numbers matched (smith.sources). A dividend counts only when its cited finding states that
   per-share amount and, when the page could be read, the page itself contains it.
@@ -24,12 +28,12 @@ import re
 from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from smith import ledger, research, sources
+from smith import dart, ledger, research, sources
 from smith.payload import check_outbound, load_view, mask_identifiers
 from smith.records import Kind
 
@@ -196,6 +200,81 @@ def run(request: Request, *, today: date, secrets: list[str], caller: ModelCall,
     proven, unproven = dividends(output.get("dividends"), items, {s["symbol"] for s in request.symbols})
     return {"status": "done" if items else "failed", "items": items, "gaps": gaps, "dividends": proven,
             "unproven_dividends": unproven, "reason": None if items else "확인할 수 있는 공개 자료를 찾지 못함"}
+
+
+def look_up(request: Request, *, today: date, now: datetime, secrets: list[str], caller: ModelCall, first_ref: int,
+            verifier: Verifier | None = None, dart_key: str | None = None, cache: Path | None = None,
+            fetch: dart.Fetcher = dart.default_fetcher) -> dict[str, Any]:
+    """DART first for a KR holding, then the web call unless DART already answered a dividend question. Returns what
+    `run` returns, with the DART items first (numbered from R<first_ref>)."""
+    found = (_from_dart(request, today=today, now=now, key=dart_key, cache=cache, fetch=fetch, first_ref=first_ref)
+             if dart_key and cache is not None and request.kind == "holding"
+             and all(_KR_CODE.fullmatch(s["symbol"]) for s in request.symbols) else None)
+    if found is not None and (found["dividends"] or found["unproven_dividends"]):   # The filing answered it.
+        return {"status": "done", "reason": None, **found}
+    web = run(request, today=today, secrets=secrets, caller=caller, verifier=verifier,
+              first_ref=first_ref + len((found or {}).get("items", [])))
+    if found is None:
+        return web
+    items = found["items"] + web["items"]
+    return {**web, "items": items, "gaps": found["gaps"] + web["gaps"], "status": "done" if items else "failed",
+            "reason": None if items else web["reason"]}
+
+
+def _from_dart(request: Request, *, today: date, now: datetime, key: str, cache: Path, fetch: dart.Fetcher,
+               first_ref: int) -> dict[str, Any]:
+    """{"items", "dividends", "unproven_dividends", "gaps"} from OpenDART; a failure is a gap, never an exception."""
+    empty: dict[str, Any] = {"items": [], "dividends": [], "unproven_dividends": [], "gaps": []}
+    try:
+        corp = dart.corp_code(request.symbols[0]["symbol"], key, cache, now=now, fetch=fetch)
+        if corp is None:
+            return empty | {"gaps": ["전자공시에서 회사를 찾지 못함"]}
+        if request.topic == "dividend":
+            decision = dart.latest_dividend(corp, key, today=today, fetch=fetch)
+            if decision is None:
+                return empty | {"gaps": [f"최근 {dart.LOOKBACK.days}일 안에 전자공시의 배당 결정이 없음"]}
+            return _dividend_from(decision, request, first_ref)
+        recent = dart.filings(corp, key, since=today - timedelta(days=30), until=today, fetch=fetch)[:5]
+    except dart.Error as error:
+        return empty | {"gaps": [f"전자공시 조회 실패({error.code})"]}
+    except (OSError, ValueError, TypeError, AttributeError) as error:   # Anything else falls back to the web call too.
+        return empty | {"gaps": [f"전자공시 조회 실패({type(error).__name__})"]}
+    return empty | {"items": [_item(f"R{n}", f.corp_name, f"{f.filed_on:%Y-%m-%d} {f.title}", f.filed_on, f.url)
+                              for n, f in enumerate(recent, first_ref)]}
+
+
+def _dividend_from(decision: dart.Dividend, request: Request, first_ref: int) -> dict[str, Any]:
+    """The filing as one official item, and a declared dividend per requested share class the form gives an amount for
+    (a KR common share's code ends in 0; any other class takes the 종류주식 amount)."""
+    f = decision.filing
+    classes = "".join(f", {'보통주' if c == 'common' else '종류주식(우선주)'} 1주당 {amount:,}원"
+                      for c, amount in decision.per_share.items())
+    dates = "".join(f", {label} {day:%Y-%m-%d}" for label, day in (("배당기준일", decision.record_date),
+                                                                   ("지급 예정일", decision.pay_date),
+                                                                   ("이사회 결의일", decision.decided_on)) if day)
+    item = _item(f"R{first_ref}", f.corp_name, f"{f.title}: {decision.kind}{classes}{dates}", f.filed_on, f.url)
+    found, unproven = [], []
+    if not decision.cash:   # In kind or mixed: the filing is a fact to report, but there is no cash amount to compute.
+        return {"items": [item], "dividends": [], "unproven_dividends": [s["symbol"] for s in request.symbols],
+                "gaps": ["현금배당이 아니어서(현물·혼합 배당) 받을 금액을 계산하지 않음"]}
+    for share in request.symbols:
+        amount = decision.per_share.get("common" if share["symbol"].endswith("0") else "preferred")
+        if amount is None:
+            unproven.append(share["symbol"])
+            continue
+        found.append({"symbol": share["symbol"], "per_share": amount, "currency": "KRW", "kind": decision.kind[:12],
+                      "record_date": decision.record_date, "pay_date": decision.pay_date, "ref": item["ref"],
+                      "checked": True})
+    return {"items": [item], "dividends": found, "unproven_dividends": unproven, "gaps": []}
+
+
+def _item(ref: str, company: str, detail: str, filed_on: date, url: str) -> dict[str, Any]:
+    """A brief item read from DART by code: official, and its numbers are the filing's own."""
+    text = _clean(f"{company} {detail}", 600)
+    return {"ref": ref, "topic": "lookup", "headline": text[:200], "detail": text, "kind": "fact", "source_url": url,
+            "source_title": _clean(f"{company} 전자공시", 300), "publisher": "금융감독원 전자공시(DART)",
+            "published_on": f"{filed_on:%Y-%m-%d}", "tier": research.tier(url), "status": "matched",
+            "page_numbers": None}
 
 
 def _clean(value: Any, limit: int) -> str:
