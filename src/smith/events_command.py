@@ -13,8 +13,10 @@ from smith.config import local_time
 def add_parser(sub: Any, default_db: Path) -> None:
     events = sub.add_parser("events", help="Same-day event notes: check now, preview (never sends), status")
     events.add_argument("action", choices=("check", "preview", "status"))
-    events.add_argument("--kind", choices=("bok", "move"), default="move",
-                        help="preview: the latest rate meeting, or the holdings' move over the last day (default)")
+    events.add_argument("--kind", choices=("bok", "move", "disclosure"), default="move",
+                        help="preview: the latest rate meeting, the holdings' move over the last day (default), or the "
+                             "material filings of the KR holdings (OpenDART)")
+    events.add_argument("--days", type=int, default=3, help="preview --kind disclosure: how many days of filings to show")
     events.add_argument("--out", type=Path, help="preview: output HTML path (default: reports/event-<kind>-<time>.html)")
     events.add_argument("--research", action="store_true", help="preview: run the web research too (a model call)")
     events.add_argument("--no-sync", action="store_true", help="check: use stored data, no Toss or evidence refresh")
@@ -55,7 +57,8 @@ def _check(args: argparse.Namespace, config: dict[str, Any], now: datetime) -> i
                 return 0
     outcomes = events.check(args.db, config, now=now, reason="manual" if args.force else "slot", sync=not args.no_sync,
                             researcher=events.research_event, recipient=config.get("mail", {}).get("recipient"),
-                            credentials=credentials.load_gmail(), secrets=credentials.all_secrets())
+                            credentials=credentials.load_gmail(), secrets=credentials.all_secrets(),
+                            dart_key=credentials.load_api_key("dart"))
     if not outcomes:
         print("No event found.")
     for outcome in outcomes:
@@ -68,7 +71,8 @@ def _preview(args: argparse.Namespace, config: dict[str, Any], now: datetime) ->
 
     researcher = events.research_event if args.research else None
     rendered = events.preview(args.db, config, args.kind, now=now, researcher=researcher,
-                              secrets=credentials.all_secrets() if args.research else [])
+                              secrets=credentials.all_secrets() if args.research else [],
+                              dart_key=credentials.load_api_key("dart"), disclosure_days=args.days)
     if rendered is None:
         print("Nothing to preview: no confirmed rate decision yet, or no valued listed holding a day ago.")
         return 1

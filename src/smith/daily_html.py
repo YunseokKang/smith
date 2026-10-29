@@ -337,11 +337,20 @@ def _holidays(data: dict[str, Any]) -> str:
                  "".join(f'<div style="font-size:14px;line-height:1.7;color:{BODY}">{line}</div>' for line in lines))
 
 
+_FILING_WORDS = {"dividend": "배당", "dilution": "증자·사채", "return": "주주환원", "earnings": "실적", "risk": "위험 신호",
+                 "corporate": "회사 변화"}
+
+
 def _finance(data: dict[str, Any]) -> str:
     dates = data["finance_dates"]
-    if not dates:
+    filings = data.get("new_filings") or []
+    if not dates and not filings:
         return ""
     lines = []
+    if filings:   # Names only: the figures are in the finance event note (daily design §3.6).
+        named = list(dict.fromkeys(f"{f['corp_name']} {_FILING_WORDS.get(f['category'], '공시')}" for f in filings))
+        lines.append(f"새 공시: {escape(' · '.join(named[:4]))}" + (f" 외 {len(named) - 4}건" if len(named) > 4 else "")
+                     + " (재무 사건 안내 메일)")
     for item in dates:
         when = "오늘" if item["days"] == 0 else f"D-{item['days']}"
         lines.append(f"{item['date']:%m/%d} {escape(item['label'])} · {when}")

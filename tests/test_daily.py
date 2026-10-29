@@ -47,6 +47,18 @@ class AssembleTests(unittest.TestCase):
         self.assertNotIn("37.", str(payload))                                  # No coordinates, no ids.
         self.assertNotIn("e1", str(payload["agenda"]))
 
+    def test_filings_the_finance_notes_carried_show_as_names_and_pay_dates_only(self):
+        carried = [(NOW, {"corp_name": "가상전자", "category": "dividend", "title": "현금ㆍ현물배당결정", "pay_date": "2026-11-27"}),
+                   (NOW, {"corp_name": "가상전자", "category": "dividend", "title": "현금ㆍ현물배당결정", "pay_date": "2026-11-27"}),
+                   (datetime(2026, 11, 1, tzinfo=timezone.utc),       # An older note: its pay date stays, its name does not.
+                    {"corp_name": "가상바이오", "category": "dilution", "title": "유상증자결정", "pay_date": None})]
+        data = build(filings=carried)
+        self.assertIn(("가상전자 배당 지급", 7), [(f["label"], f["days"]) for f in data["finance_dates"]])
+        self.assertEqual(sum(f["label"] == "가상전자 배당 지급" for f in data["finance_dates"]), 1)   # One per company.
+        _, html, _ = daily_html.render(data)
+        self.assertIn("새 공시: 가상전자 배당 (재무 사건 안내 메일)", html)
+        self.assertNotIn("가상바이오", html)
+
     def test_finance_dates_inside_an_open_tax_period(self):
         found = daily.finance_dates(date(2026, 7, 20))
         self.assertEqual([(f["label"], f["days"], f.get("open")) for f in found], [("재산세 1기분 납부 마감", 11, True)])

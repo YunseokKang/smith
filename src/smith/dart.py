@@ -262,3 +262,56 @@ def _iso(text: str | None) -> date | None:
 def cache_path(db: Path) -> Path:
     """Public corp codes, cached beside the ledger (git-ignored data folder)."""
     return db.parent / "dart" / "corp_codes.json"
+
+
+# --- material filings of a holding (event notes, FR-44) --------------------------------------------------------------
+
+# What a filing title says about the holding, by fixed words in the title (spaces removed). Anything else (periodic
+# reports, routine notices) is not an event. Order matters: the first group that matches names the filing.
+CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("dividend", ("배당결정",)),
+    ("dilution", ("유상증자결정", "전환사채권발행결정", "신주인수권부사채권발행결정", "교환사채권발행결정", "감자결정")),
+    ("return", ("자기주식취득결정", "자기주식처분결정", "주식소각결정", "무상증자결정", "자기주식취득신탁계약")),
+    ("earnings", ("잠정)실적", "매출액또는손익구조")),
+    ("risk", ("최대주주변경", "소송등의제기", "소송등의판결", "회생절차", "부도발생", "영업정지", "횡령", "배임",
+              "불성실공시법인", "관리종목", "상장폐지", "매매거래정지", "감사의견")),
+    ("corporate", ("합병결정", "분할결정", "분할합병결정", "영업양수결정", "영업양도결정", "주식교환", "장래사업")),
+)
+# The FSS structured API for a filing whose figures code reads (verified 2026-10-29 on live filings).
+_STRUCTURED = {"유상증자결정": "piicDecsn.json", "전환사채권발행결정": "cvbdIsDecsn.json", "자기주식취득결정": "tsstkAqDecsn.json"}
+
+
+def category(title: str) -> str | None:
+    plain = title.replace(" ", "")
+    return next((name for name, words in CATEGORIES if any(word in plain for word in words)), None)
+
+
+def structured(filing: Filing, corp: str, key: str, *, fetch: Fetcher = default_fetcher) -> dict[str, str] | None:
+    """The filing's own figures from the structured API (유상증자, 전환사채, 자기주식 취득), or None for other filings.
+
+    Raises:
+        Error: the call failed or the filing is not in the answer.
+    """
+    api = next((path for word, path in _STRUCTURED.items() if word in filing.title.replace(" ", "")), None)
+    if api is None:
+        return None
+    day = f"{filing.filed_on:%Y%m%d}"
+    try:
+        body = json.loads(_get(fetch, api, key, corp_code=corp, bgn_de=day, end_de=day).decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise Error("bad-response") from None
+    if not isinstance(body, dict) or str(body.get("status")) != "000":
+        raise Error(f"status-{body.get('status') if isinstance(body, dict) else 'bad'}")
+    row = next((r for r in body.get("list") or [] if isinstance(r, dict) and r.get("rcept_no") == filing.rcept_no), None)
+    if row is None:
+        raise Error("not-listed")
+    return {str(k): str(v) for k, v in row.items()} | {"api": api}
+
+
+def number(text: str | None) -> Decimal | None:
+    """A figure as the structured API writes it ("12,200,000,000", "8.12"; "-" when not applicable)."""
+    try:
+        value = Decimal(str(text or "").replace(",", "").strip())
+    except InvalidOperation:
+        return None
+    return value if value.is_finite() else None

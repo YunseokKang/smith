@@ -3,14 +3,18 @@
 `collect` does the reading (weather, calendar, tasks, holidays, the household's dates) with every source failing on its
 own, and `assemble` is the pure step from already-read pieces to the data dict, so tests cover the assembly without a
 network. The finance line (⑦) is dates only: the next Bank of Korea rate meeting from the published table and the
-statutory tax calendar below; amounts never enter this mail (FR-30).
+statutory tax calendar below, and the pay dates of the dividends the finance event notes announced, with the names
+of the filings those notes carried since the last mail (FR-44); amounts never enter this mail (FR-30).
 """
+import sqlite3
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from smith import agenda, contacts, credentials, datagokr, evidence, gmail, health, history, holidays, keep, people, weather
+from smith import (agenda, contacts, credentials, datagokr, evidence, gmail, health, history, holidays, keep, ledger, people,
+                   weather)
 from smith.config import local_time
 
 WEEKDAYS_KO = "월화수목금토일"
@@ -41,6 +45,8 @@ class Inputs:
     weather_label: str = ""                              # The district the weather is read for (user request 2026-10-25).
     # Every synced contact (FR-36): the calendar's "이 분은" lines; their dates are already merged into `book`.
     address_book: list[contacts.Contact] = field(default_factory=list)
+    # Filings the finance event notes carried (FR-44), with the time the note went out: titles and dates only.
+    filings: list[tuple[datetime, dict[str, Any]]] = field(default_factory=list)
 
 
 def collect(db: Path, config: dict[str, Any], *, now: datetime, day: date | None = None,
@@ -124,7 +130,18 @@ def collect(db: Path, config: dict[str, Any], *, now: datetime, day: date | None
         failures["history"] = str(error)[:40]
     notes = keep.load(keep.directory(db))
     return Inputs(report, events, tasks, book, today_holiday, ahead, failures, events_today, notes, keep.used(keep.directory(db)),
-                  weather_label, address_book)
+                  weather_label, address_book, _carried_filings(db))
+
+
+def _carried_filings(db: Path) -> list[tuple[datetime, dict[str, Any]]]:
+    """The filings of disclosure notes that went out (or may have), with the note's time; nothing when unreadable."""
+    try:
+        with closing(ledger.connect_read_only(db)) as conn:
+            notes = ledger.event_notes(conn, limit=100)
+    except (OSError, sqlite3.Error):
+        return []
+    return [(n["updated_at"], f) for n in notes if n["kind"] == "disclosure" and n["status"] in ("sent", "unknown")
+            for f in (n["details"] or {}).get("filings", [])]
 
 
 def assemble(inputs: Inputs, *, day: date, tz: str, now: datetime, airways_sensitive: bool,
@@ -149,7 +166,9 @@ def assemble(inputs: Inputs, *, day: date, tz: str, now: datetime, airways_sensi
         "reminders": people.reminders(book, day),
         "upcoming": people.upcoming(book, day, AHEAD_DAYS),
         "holidays_ahead": ahead, "long_weekends": holidays.long_weekends(ahead, day),
-        "finance_dates": finance_dates(day),
+        "finance_dates": sorted(finance_dates(day) + dividend_dates(inputs.filings, day), key=lambda f: f["date"]),
+        # Filings the finance event notes carried since yesterday morning: the daily mail names them, no figures.
+        "new_filings": [f for at, f in inputs.filings if at >= now - FILINGS_SHOWN],
         "history_events": list(inputs.history_events or []),
         "history_pick": history.pick(inputs.history_events or [], day),
         "thoughts": keep.thoughts(inputs.notes or [], day=day, used=inputs.notes_used,
@@ -169,6 +188,22 @@ def _context_line(day: date, inputs: Inputs, advice: weather.Advice | None, even
     parts += [e.title for e in events]
     parts += [r.occurrence.label for r in people.reminders(inputs.book or people.parse({}), day)]
     return " ".join(parts)
+
+
+FILINGS_SHOWN = timedelta(hours=26)   # Between one morning mail and the next, with a little slack.
+
+
+def dividend_dates(filings: list[tuple[datetime, dict[str, Any]]], day: date, ahead: int = AHEAD_DAYS) -> list[dict[str, Any]]:
+    """The pay dates of the cash dividends the finance event notes announced, inside the window (one per company)."""
+    found: dict[tuple[str, date], dict[str, Any]] = {}
+    for _, f in filings:
+        try:
+            pay = date.fromisoformat(f.get("pay_date") or "")
+        except ValueError:
+            continue
+        if day <= pay <= day + timedelta(days=ahead):
+            found.setdefault((f["corp_name"], pay), {"date": pay, "label": f"{f['corp_name']} 배당 지급", "days": (pay - day).days})
+    return list(found.values())
 
 
 def finance_dates(day: date, ahead: int = AHEAD_DAYS) -> list[dict[str, Any]]:

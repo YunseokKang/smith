@@ -1,0 +1,194 @@
+"""Material filings of the client's KR holdings as an event note (FR-44, report design §29).
+
+At each event check (smith.events) the client's own KR listed holdings are looked up in OpenDART (smith.dart): the
+filings of the last SCAN_DAYS days that no earlier note carried and whose title names a material matter
+(dart.CATEGORIES: a dividend, a dilution, a buyback, earnings, a risk, a corporate change). One note carries all of
+them. Everything is code: no model reads or writes a filing.
+
+- A dividend decision is read from the form (dart.latest_dividend's parser) and turned into what this household
+  receives, per owner and account, with qa_lookup.estimates (shares on the record date, 14% + 10% local withholding in
+  a general account).
+- A paid-in capital increase (유상증자) gives the new common shares and the shares before: code computes the dilution,
+  new / (before + new). A convertible bond gives the shares on conversion and the filing's own ratio to the shares
+  outstanding. A buyback gives the shares and the amount. Other filings go out with their title and link.
+- Hermes-managed holdings are left out (Smith gives no opinion on them). Only codes, names and dates travel to DART.
+"""
+import re
+from contextlib import closing
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+from smith import dart, holdings, ledger, qa_lookup
+
+SCAN_DAYS = 3            # A weekend and a missed check: older filings belong to the regular report.
+SEEN_NOTES = 200         # Notes looked back at for filings already carried.
+MAX_FILINGS = 12         # One note, a dozen lines at most.
+
+
+def held_companies(view: Any) -> dict[str, list[dict[str, Any]]]:
+    """The client's own KR listed holdings by issuer key (the first five digits of the code: common and preferred
+    shares of one company are one issuer)."""
+    found: dict[str, list[dict[str, Any]]] = {}
+    for p in holdings.review(view)["positions"]:
+        if not p["hermes"] and p["market"] == "KR" and dart._CODE.fullmatch(p["symbol"]):
+            found.setdefault(p["symbol"][:5], []).append(p)
+    return found
+
+
+def seen(conn: Any) -> set[str]:
+    """Filings (receipt numbers) an earlier disclosure note carried or is still trying to carry."""
+    return {f["rcept_no"] for row in ledger.event_notes(conn, limit=SEEN_NOTES) if row["kind"] == "disclosure"
+            for f in (row["details"] or {}).get("filings", [])}
+
+
+def scan(view: Any, *, key: str, today: date, now: datetime, cache: Path, already: set[str],
+         fetch: dart.Fetcher = dart.default_fetcher, days: int = SCAN_DAYS) -> tuple[list[dict[str, Any]], list[str]]:
+    """(new material filings of held companies, newest first, as plain data; failures by company). A company whose
+    lookup fails is named in the failures and looked at again at the next check (its filings were not marked seen)."""
+    filings, failures = [], []
+    for issuer, positions in sorted(held_companies(view).items()):
+        name = positions[0]["public_name"]
+        try:
+            corp = dart.corp_code(positions[0]["symbol"], key, cache, now=now, fetch=fetch)
+            if corp is None:
+                failures.append(f"{name}: 전자공시에서 회사를 찾지 못함")
+                continue
+            listed = dart.filings(corp, key, since=today - timedelta(days=days), until=today, fetch=fetch)
+        except dart.Error as error:
+            failures.append(f"{name}: 전자공시 조회 실패({error.code})")
+            continue
+        for f in listed:
+            kind = dart.category(f.title)
+            if kind is not None and f.rcept_no not in already:
+                filings.append({"rcept_no": f.rcept_no, "filed_on": f.filed_on.isoformat(), "title": f.title,
+                                "corp_name": f.corp_name or name, "corp_code": corp, "category": kind,
+                                "symbols": [p["symbol"] for p in positions]})
+    filings.sort(key=lambda f: f["rcept_no"], reverse=True)
+    return filings[:MAX_FILINGS], failures
+
+
+def enrich(db: Path, view: Any, as_of: datetime, filings: list[dict[str, Any]], *, key: str, known_at: datetime,
+           fetch: dart.Fetcher = dart.default_fetcher) -> list[dict[str, Any]]:
+    """Each filing with its figures read by code ("figures") and what it means for this household ("household"), or
+    "figures_failed" with the reason when the filing could not be read (the title and link still go out)."""
+    read = []
+    for raw in filings:
+        f = dart.Filing(raw["rcept_no"], date.fromisoformat(raw["filed_on"]), raw["title"], raw["corp_name"])
+        item = {**raw, "url": f.url, "figures": None, "household": None, "figures_failed": None}
+        try:
+            if raw["category"] == "dividend":
+                item.update(_dividend(db, view, as_of, f, raw["symbols"], key=key, known_at=known_at, fetch=fetch))
+            else:
+                figures = dart.structured(f, raw["corp_code"], key, fetch=fetch)
+                if figures is not None:
+                    item.update(_structured(figures))
+        except dart.Error as error:
+            item["figures_failed"] = error.code
+        read.append(item)
+    return _supersede(read)
+
+
+_CORRECTION = re.compile(r"^\[(?:기재|첨부|발행조건)?정정\]\s*")
+
+
+def _supersede(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """A correction ("[기재정정]…") replaces the nearest earlier filing of the same company and title in the note
+    (review of a real note 2026-10-29: a dividend and its correction were both counted). The replaced one is marked
+    `superseded` and loses its household figures, so no total counts it twice. Only the same matter (`_same_matter`):
+    a correction of an earlier quarter's dividend must not remove this quarter's (review 2026-10-29)."""
+    by_age = sorted(items, key=lambda i: i["rcept_no"])
+    for n, item in enumerate(by_age):
+        if not _CORRECTION.match(item["title"]):
+            continue
+        base = _CORRECTION.sub("", item["title"])
+        earlier = next((o for o in reversed(by_age[:n]) if o["corp_code"] == item["corp_code"]
+                        and _CORRECTION.sub("", o["title"]) == base and not o.get("superseded")
+                        and _same_matter(o, item)), None)
+        if earlier is not None:
+            earlier.update(superseded=item["filed_on"], household=None)
+    return items
+
+
+CORRECTION_WINDOW = timedelta(days=7)
+
+
+def _same_matter(original: dict[str, Any], correction: dict[str, Any]) -> bool:
+    """Whether a correction is of `original`: a dividend when both forms were read and give the same record date
+    (unknown is not the same), any other filing when it was filed within CORRECTION_WINDOW before the correction."""
+    if original["category"] == "dividend":
+        dates = [(i.get("figures") or {}).get("record_date") for i in (original, correction)]
+        return dates[0] is not None and dates[0] == dates[1]
+    gap = date.fromisoformat(correction["filed_on"]) - date.fromisoformat(original["filed_on"])
+    return timedelta(0) <= gap <= CORRECTION_WINDOW
+
+
+def owned(conn: Any, key: str, filings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The filings this note may carry: those no note claimed earlier also holds (review 2026-10-29: two overlapping
+    checks, a manual one beside the scheduled one, bundled the same filing under different keys and both sent it).
+    The owner is the earliest-claimed note holding the filing (ties by key), skipped notes aside, so whichever order
+    the two runs read in, exactly one keeps it."""
+    claims: dict[str, tuple[Any, str]] = {}
+    for row in ledger.event_notes(conn, limit=SEEN_NOTES):
+        if row["kind"] != "disclosure" or row["status"] == "skipped":
+            continue
+        for f in (row["details"] or {}).get("filings", []):
+            mark = (row["created_at"], row["event_key"])
+            if f["rcept_no"] not in claims or mark < claims[f["rcept_no"]]:
+                claims[f["rcept_no"]] = mark
+    return [f for f in filings if claims.get(f["rcept_no"], (None, key))[1] == key]
+
+
+def _dividend(db: Path, view: Any, as_of: datetime, filing: dart.Filing, symbols: list[str], *, key: str,
+              known_at: datetime, fetch: dart.Fetcher) -> dict[str, Any]:
+    decision = dart.parse_dividend(dart.document(filing, key, fetch=fetch), filing)
+    figures = {"kind": decision.kind, "cash": decision.cash,
+               "per_share": {k: str(v) for k, v in decision.per_share.items()},
+               "record_date": None if decision.record_date is None else decision.record_date.isoformat(),
+               "pay_date": None if decision.pay_date is None else decision.pay_date.isoformat()}
+    if not decision.cash:
+        return {"figures": figures, "household": None}
+    declared, unproven = [], []
+    for symbol in symbols:
+        amount = decision.per_share.get("common" if symbol.endswith("0") else "preferred")
+        if amount is None:
+            unproven.append(symbol)
+            continue
+        declared.append({"symbol": symbol, "per_share": amount, "currency": "KRW", "kind": decision.kind[:12],
+                         "record_date": decision.record_date, "pay_date": decision.pay_date, "ref": filing.rcept_no,
+                         "checked": True})
+    found = qa_lookup.estimates(db, {"view": view, "as_of": as_of}, declared, known_at=known_at, unproven=unproven)
+    return {"figures": figures, "household": found}
+
+
+def _structured(figures: dict[str, str]) -> dict[str, Any]:
+    """The figures that matter from a structured filing, with the dilution computed by code where the filing gives the
+    share counts: the client's stake in the company shrinks by that share (what it does to the price is not code's)."""
+    api = figures["api"]
+    if api == "piicDecsn.json":
+        new, before = dart.number(figures.get("nstk_ostk_cnt")), dart.number(figures.get("bfic_tisstk_ostk"))
+        ratio = new / (before + new) if new and before else None
+        return {"figures": {"type": "유상증자", "new_shares": figures.get("nstk_ostk_cnt"),
+                            "shares_before": figures.get("bfic_tisstk_ostk"), "method": figures.get("ic_mthn"),
+                            "dilution": None if ratio is None else str(ratio)}, "household": None}
+    if api == "cvbdIsDecsn.json":
+        ratio = dart.number(figures.get("cvisstk_tisstk_vs"))
+        return {"figures": {"type": "전환사채", "amount": figures.get("bd_fta"), "conversion_price": figures.get("cv_prc"),
+                            "shares_on_conversion": figures.get("cvisstk_cnt"),
+                            "ratio_to_shares": None if ratio is None else str(ratio / 100),
+                            "conversion_from": figures.get("cvrqpd_bgd"), "method": figures.get("bdis_mthn")},
+                "household": None}
+    return {"figures": {"type": "자기주식 취득", "shares": figures.get("aqpln_stk_ostk"),
+                        "amount": figures.get("aqpln_prc_ostk"), "from": figures.get("aqexpd_bgd"),
+                        "until": figures.get("aqexpd_edd"), "method": figures.get("aq_mth")},
+            "household": None}
+
+
+def scan_due(db: Path, view: Any, *, key: str | None, today: date, now: datetime,
+             fetch: dart.Fetcher = dart.default_fetcher) -> tuple[list[dict[str, Any]], list[str]]:
+    """`scan` with the filings already carried left out; nothing without a key."""
+    if not key:
+        return [], []
+    with closing(ledger.connect_read_only(db)) as conn:
+        already = seen(conn)
+    return scan(view, key=key, today=today, now=now, cache=dart.cache_path(db), already=already, fetch=fetch)

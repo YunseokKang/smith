@@ -124,6 +124,7 @@ def render_event(note: dict[str, Any]) -> tuple[str, str, str]:
     means for the household in one line, four tiles carry the figures, then what happened and our numbers, the
     researched why with its sources, and Smith's stance. Never a proposal: those belong to the regular reports."""
     subject, title, line, tiles, facts, stance = (_bok_event(note) if note["kind"] == "bok_decision"
+                                                  else _disclosure_event(note) if note["kind"] == "disclosure"
                                                   else _move_event(note))
     hero = (f'<tr><td>{_eyebrow("SMITH · 사건 안내", color=ON_DARK, background=DARK_RAISED)}'
             f'<div style="font-family:{SANS};font-weight:400;font-size:28px;line-height:1.15;letter-spacing:-0.8px;'
@@ -212,6 +213,101 @@ def _move_event(note: dict[str, Any]) -> tuple[str, str, str, list[tuple[str, st
               "종목별 판단은 다음 화요 투자·시장 보고에서 다시 봅니다.")
     return (subject, f"보유 종목 {pct} ({since:%m.%d} 이후)", line, tiles,
             (lead, _table(["종목", "변동", "변동률"], rows) if rows else ""), stance)
+
+
+_FILING_ORDER = ("dividend", "dilution", "risk", "return", "earnings", "corporate")
+_FILING_PILL = {"dividend": ("배당", "good"), "return": ("주주환원", "good"), "dilution": ("희석 주의", "warn"),
+                "earnings": ("실적", "neutral"), "risk": ("위험 신호", "bad"), "corporate": ("회사 변화", "neutral")}
+
+
+def _disclosure_event(note: dict[str, Any]) -> tuple[str, str, str, list[tuple[str, str, str]], tuple[str, str], str]:
+    """Material filings of the KR holdings (FR-44): one card per filing with the figures code read from it, the most
+    consequential kind first (what moves money or the stake before titles to read), newest first within a kind."""
+    filings = sorted(note["filings"], key=lambda f: (_FILING_ORDER.index(f["category"]), bool(f.get("superseded")),
+                                                     -int(f["rcept_no"])))
+    companies = list(dict.fromkeys(f["corp_name"] for f in filings))
+    # A superseded filing has no household figures (disclosures._supersede): its correction carries them.
+    # Only what is still to come: a corrected dividend of an earlier quarter may already have been paid.
+    due = note["day"].isoformat()
+    totals = [f["household"]["total"] for f in filings if f["category"] == "dividend" and (f.get("household") or {}).get("total")
+              and all(d >= due for d in f["household"]["total"]["pay_dates"])]
+    net = sum((Decimal(t["net"]) for t in totals), Decimal(0)) if totals else None
+    pay = min((d for t in totals for d in t["pay_dates"]), default=None)
+    count = {c: sum(1 for f in filings if f["category"] == c) for c in _FILING_PILL}
+    first = filings[0]
+    subject = (f"[Smith · 사건 안내] {note['day']:%m/%d} 보유 종목 공시 {len(filings)}건 · {first['corp_name']} "
+               f"{_FILING_PILL[first['category']][0]}"
+               + (f" · {'' if first['category'] == 'dividend' else '배당 '}세후 약 {_short(net)} 입금 예정" if net else ""))
+    tiles = [("새 공시", f"{len(filings)}건", " · ".join(companies)[:24]),
+             ("배당 입금 예정", "-" if net is None else _short(net), "세후" + (f" · {pay[5:7]}/{pay[8:10]}" if pay else "")),
+             ("희석 주의", f"{count['dilution']}건", "유상증자·전환사채 등"),
+             ("위험 신호", f"{count['risk']}건", "소송·최대주주 변경 등")]
+    lead = (f"보유하신 국내 종목에 새 공시가 {len(filings)}건 나왔습니다. 숫자는 전자공시 원문에서 Smith가 직접 읽었고, "
+            "배당은 우리 집 보유 수량과 계좌로 계산했습니다.")
+    cards = "".join(_filing_card(f) for f in filings)
+    stance = ("공시 한 건으로 매매하지 않습니다. 배당은 지급일에 증권 계좌로 들어오고, 희석·위험 공시가 있는 종목은 다음 화요 "
+              "투자·시장 보고에서 다시 봅니다.")
+    line = f"{' · '.join(companies)[:40]} · 공시 {len(filings)}건"
+    return subject, f"보유 종목 공시 {len(filings)}건", line, tiles, (lead, cards), stance
+
+
+def _filing_card(f: dict[str, Any]) -> str:
+    label, kind = _FILING_PILL[f["category"]]
+    return (f'<div style="margin:12px 0;padding:14px 16px;border:1px solid {HAIRLINE};border-radius:16px">'
+            f'<div style="font-size:14px;font-weight:600;line-height:1.5;color:{INK}">{_pill(label, kind)} '
+            f'<a href="{escape(f["url"])}" style="color:{INK};text-decoration:underline">{escape(f["corp_name"])} · '
+            f'{escape(f["title"])}</a></div>'
+            f'<div style="font-family:{MONO};font-size:12px;color:{MUTED};margin:2px 0 6px">{escape(f["filed_on"])} · 전자공시</div>'
+            f'<div style="font-size:14px;line-height:1.6;color:{BODY}">{escape(_filing_text(f))}</div></div>')
+
+
+def _filing_text(f: dict[str, Any]) -> str:
+    """What the filing says in figures, and what it means for this household, all from code."""
+    if f.get("superseded"):
+        day = f["superseded"]
+        return f"이 공시는 {day[5:7]}/{day[8:10]} 정정 공시로 바뀌었습니다. 정정 공시의 숫자를 보세요."
+    if f.get("figures_failed"):
+        return f"세부 숫자는 이번에 읽지 못했습니다({f['figures_failed']}). 원문 링크에서 확인해 주세요."
+    g = f.get("figures")
+    if not g:
+        return "자세한 내용은 공시 원문을 확인해 주세요."
+    if f["category"] == "dividend":
+        per = " · ".join(f"{'보통주' if k == 'common' else '우선주'} 1주당 {Decimal(v):,.0f}원" for k, v in g["per_share"].items())
+        dates = "".join(f", {label} {day[5:7]}/{day[8:10]}" for label, day in (("기준일", g["record_date"]), ("지급", g["pay_date"])) if day)
+        if not g["cash"]:
+            return f"{g['kind']} {per}{dates}. 현금배당이 아니어서(현물·혼합) 받을 금액은 계산하지 않았습니다."
+        found = f.get("household") or {}
+        total = found.get("total")
+        rows = found.get("items") or []
+        held = " · ".join(f"{'보통주' if r['symbol'].endswith('0') else '우선주'} {Decimal(r['quantity']):,.0f}주"
+                          for r in rows if r["owner"] == "self")
+        family = any(r["owner"] != "self" for r in rows)
+        basis = (" 보고서 기준 수량이라 기준일 보유량과 다르면 달라집니다." if any(r["quantity_basis"] == "report_date" for r in rows)
+                 else "")
+        ours = ("" if total is None else
+                f" 우리 집({held}{', 가족 몫 포함' if family else ''}): 세전 {_won(Decimal(total['gross']))}, "
+                f"세금 {_won(Decimal(total['withheld']))}을 떼고 약 {_short(Decimal(total['net']))} 입금 예정.{basis}")
+        return f"{g['kind']} {per}{dates}.{ours or ' 우리 집 몫은 계산하지 못했습니다.'}"
+    if g["type"] == "유상증자":
+        ratio = f" 기존 주주 지분이 약 {Decimal(g['dilution']) * 100:.1f}% 줄어듭니다." if g.get("dilution") else ""
+        return f"새 주식 {g['new_shares']}주(기존 {g['shares_before']}주), {g['method']}.{ratio}"
+    if g["type"] == "전환사채":
+        ratio = (f"(발행 주식의 {Decimal(g['ratio_to_shares']) * 100:.2f}%)" if g.get("ratio_to_shares") else "")
+        return (f"사채 {_filed_won(g['amount'])}, 전환가 {g['conversion_price']}원. 모두 주식으로 바뀌면 "
+                f"{g['shares_on_conversion']}주{ratio}가 늘어납니다. 전환 청구는 {g['conversion_from']}부터, {g['method']} 발행.")
+    return (f"자기 주식 {g['shares']}주를 {_filed_won(g['amount'])}어치 사들입니다"
+            f"({g['method']}, {g['from']}~{g['until']}).")
+
+
+def _filed_won(text: str | None) -> str:
+    """A filing's won amount the way a reader takes it in: 20조 77억 원 as 약 20조 원, 122억 원, 3,500만 원."""
+    try:
+        value = Decimal(str(text or "").replace(",", ""))
+    except ArithmeticError:
+        return f"{text}원"
+    if value >= 10 ** 12:
+        return f"약 {value / 10 ** 12:,.1f}조 원".replace(".0조", "조")
+    return _short(value).replace(".0억", "억")
 
 
 def _event_research(note: dict[str, Any]) -> tuple[str, str] | None:
