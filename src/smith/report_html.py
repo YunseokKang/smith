@@ -223,8 +223,8 @@ _FILING_PILL = {"dividend": ("배당", "good"), "return": ("주주환원", "good
 def _disclosure_event(note: dict[str, Any]) -> tuple[str, str, str, list[tuple[str, str, str]], tuple[str, str], str]:
     """Material filings of the KR holdings (FR-44): one card per filing with the figures code read from it, the most
     consequential kind first (what moves money or the stake before titles to read), newest first within a kind."""
-    filings = sorted(note["filings"], key=lambda f: (_FILING_ORDER.index(f["category"]), bool(f.get("superseded")),
-                                                     -int(f["rcept_no"])))
+    newest = sorted(note["filings"], key=lambda f: (f["filed_on"], f["rcept_no"]), reverse=True)
+    filings = sorted(newest, key=lambda f: (_FILING_ORDER.index(f["category"]), bool(f.get("superseded"))))
     companies = list(dict.fromkeys(f["corp_name"] for f in filings))
     # A superseded filing has no household figures (disclosures._supersede): its correction carries them.
     # Only what is still to come: a corrected dividend of an earlier quarter may already have been paid.
@@ -242,8 +242,8 @@ def _disclosure_event(note: dict[str, Any]) -> tuple[str, str, str, list[tuple[s
              ("배당 입금 예정", "-" if net is None else _short(net), "세후" + (f" · {pay[5:7]}/{pay[8:10]}" if pay else "")),
              ("희석 주의", f"{count['dilution']}건", "유상증자·전환사채 등"),
              ("위험 신호", f"{count['risk']}건", "소송·최대주주 변경 등")]
-    lead = (f"보유하신 국내 종목에 새 공시가 {len(filings)}건 나왔습니다. 숫자는 전자공시 원문에서 Smith가 직접 읽었고, "
-            "배당은 우리 집 보유 수량과 계좌로 계산했습니다.")
+    lead = (f"보유하신 종목에 새 공시가 {len(filings)}건 나왔습니다. 국내 공시의 숫자는 전자공시 원문에서 Smith가 직접 읽었고, "
+            "배당은 우리 집 보유 수량과 계좌로 계산했습니다. 미국 공시는 SEC 보고 항목으로 무엇에 관한 것인지 적었습니다.")
     cards = "".join(_filing_card(f) for f in filings)
     stance = ("공시 한 건으로 매매하지 않습니다. 배당은 지급일에 증권 계좌로 들어오고, 희석·위험 공시가 있는 종목은 다음 화요 "
               "투자·시장 보고에서 다시 봅니다.")
@@ -257,7 +257,8 @@ def _filing_card(f: dict[str, Any]) -> str:
             f'<div style="font-size:14px;font-weight:600;line-height:1.5;color:{INK}">{_pill(label, kind)} '
             f'<a href="{escape(f["url"])}" style="color:{INK};text-decoration:underline">{escape(f["corp_name"])} · '
             f'{escape(f["title"])}</a></div>'
-            f'<div style="font-family:{MONO};font-size:12px;color:{MUTED};margin:2px 0 6px">{escape(f["filed_on"])} · 전자공시</div>'
+            f'<div style="font-family:{MONO};font-size:12px;color:{MUTED};margin:2px 0 6px">{escape(f["filed_on"])} · '
+            f'{"SEC EDGAR" if f.get("source") == "sec" else "전자공시"}</div>'
             f'<div style="font-size:14px;line-height:1.6;color:{BODY}">{escape(_filing_text(f))}</div></div>')
 
 
@@ -268,6 +269,8 @@ def _filing_text(f: dict[str, Any]) -> str:
         return f"이 공시는 {day[5:7]}/{day[8:10]} 정정 공시로 바뀌었습니다. 정정 공시의 숫자를 보세요."
     if f.get("figures_failed"):
         return f"세부 숫자는 이번에 읽지 못했습니다({f['figures_failed']}). 원문 링크에서 확인해 주세요."
+    if f.get("source") == "sec":
+        return "미국 SEC에 낸 보고입니다. 제목은 보고 항목을 우리말로 옮긴 것이고, 원문(영문)은 링크에서 볼 수 있습니다."
     g = f.get("figures")
     if not g:
         return "자세한 내용은 공시 원문을 확인해 주세요."

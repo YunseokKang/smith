@@ -6,7 +6,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
-from smith import dart, disclosures, events, ledger
+from smith import dart, disclosures, events, ledger, sec
 from smith.importer import parse_import
 
 import fast_ledger
@@ -139,6 +139,58 @@ class DisclosureTests(unittest.TestCase):
             # Whichever reads first, the earlier claim keeps filing 1 and the later one carries only filing 2.
             self.assertEqual(disclosures.owned(conn, "disclosure:2026-11-03:1", first), first)
             self.assertEqual(disclosures.owned(conn, "disclosure:2026-11-03:2", second), [{"rcept_no": "2"}])
+
+    def test_us_holdings_are_looked_up_in_sec_edgar_by_item_codes(self):
+        from test_sec import FakeSec
+        us = {**lot("u", "GADG", 10, "brokerage"), "market": "US", "currency": "USD", "unit_price": "10", "value": "100"}
+        doc = {"schema_version": 1, "import_id": "m2", "source": "manual", "mode": "patch", "as_of": RECORDED.isoformat(),
+               "owners": [{"id": "self"}], "records": [us]}
+        with closing(ledger.connect(self.db)) as conn:
+            ledger.apply_import(conn, parse_import(json.dumps(doc)), recorded_at=RECORDED)
+        fake = FakeSec()
+        outcomes = events.check(self.db, CONFIG, now=NOW, reason="manual", sync=False, researcher=None, sender=self.sender,
+                                recipient="me@example.com", credentials=("a", "b", "c"), say=self.said.append,
+                                sec_contact="me@example.com", sec_fetch=fake)          # No DART key: the US alone.
+        self.assertEqual([o["status"] for o in outcomes], ["sent"])
+        subject, html = self.sent[0]
+        self.assertIn("보유 종목 공시 2건 · GADG 희석 주의", subject)   # The dilutive issue leads; the insider form is left out.
+        self.assertIn("8-K · 미등록 주식 발행 · 경영진·이사 변경", html)
+        self.assertIn("8-K · 실적 발표", html)
+        self.assertIn("SEC EDGAR", html)
+        # Only the public ticker map and the company's filing list are asked for: nothing of the household travels.
+        self.assertEqual({url for url, _ in fake.calls}, {sec.TICKERS, "https://data.sec.gov/submissions/CIK0001111111.json"})
+        with closing(ledger.connect_read_only(self.db)) as conn:
+            note, = [n for n in ledger.event_notes(conn) if n["kind"] == "disclosure"]
+        self.assertEqual({f["source"] for f in note["details"]["filings"]}, {"sec"})
+
+    def test_one_company_with_two_tickers_and_one_failing_source(self):
+        from test_sec import TICKERS, FakeSec
+        tickers = {**TICKERS, "2": {"cik_str": 1111111, "ticker": "GADGB", "title": "GADGET CORP"}}   # Two classes.
+        records = [{**lot(f"u{n}", t, 10, "brokerage"), "market": "US", "currency": "USD", "unit_price": "10", "value": "100"}
+                   for n, t in enumerate(("GADG", "GADGB"))]
+        doc = {"schema_version": 1, "import_id": "m2", "source": "manual", "mode": "patch", "as_of": RECORDED.isoformat(),
+               "owners": [{"id": "self"}], "records": records}
+        with closing(ledger.connect(self.db)) as conn:
+            ledger.apply_import(conn, parse_import(json.dumps(doc)), recorded_at=RECORDED)
+        fake = FakeSec()
+
+        def sec_fetch(url, contact):
+            return json.dumps(tickers).encode() if url == sec.TICKERS else fake(url, contact)
+        with closing(ledger.connect_read_only(self.db)) as conn:
+            from smith.payload import load_view
+            view = load_view(conn, as_of=NOW, known_at=NOW)
+        found, _ = disclosures.scan_due(self.db, view, key=KEY, today=NOW.date(), now=NOW, fetch=FakeDart(),
+                                        contact="me@example.com", sec_fetch=sec_fetch)
+        us = [f for f in found if f.get("source") == "sec"]
+        self.assertEqual([f["symbols"] for f in us], [["GADG", "GADGB"]] * 2)          # Each filing once, both tickers.
+        self.assertEqual(sum("submissions" in url for url, _ in fake.calls), 1)        # One lookup for the company.
+
+        def broken(url, contact):
+            raise EOFError("cut")                                                       # Not an sec.Error at all.
+        found, failures = disclosures.scan_due(self.db, view, key=KEY, today=NOW.date(), now=NOW, fetch=FakeDart(),
+                                               contact="me@example.com", sec_fetch=broken)
+        self.assertEqual(len(found), 4)                                                 # The DART filings still go out.
+        self.assertTrue(any("SEC" in f for f in failures))
 
     def test_a_failed_lookup_is_said_and_never_breaks_the_check(self):
         self.assertEqual(self.check(FakeDart(fail=True)), [])

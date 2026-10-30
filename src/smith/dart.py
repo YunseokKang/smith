@@ -13,6 +13,7 @@ Verified against the official guide (opendart.fss.or.kr/guide, DS001) and live r
 The key travels only in the query string, never in an exception, a log or a model payload; redirects are refused
 (smith.net). Responses are bounded in size, and the corp-code list is cached next to the ledger for a week.
 """
+import http.client
 import io
 import json
 import re
@@ -80,7 +81,7 @@ def default_fetcher(url: str) -> bytes:
     except urllib.error.HTTPError as error:
         error.close()
         raise Error(f"http-{error.code}") from None
-    except (OSError, ValueError):
+    except (OSError, ValueError, http.client.HTTPException):   # IncompleteRead is an HTTPException, not an OSError.
         raise Error("network-error") from None
     if len(body) > MAX_BYTES:
         raise Error("bad-response")

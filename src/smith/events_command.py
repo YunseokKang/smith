@@ -58,7 +58,7 @@ def _check(args: argparse.Namespace, config: dict[str, Any], now: datetime) -> i
     outcomes = events.check(args.db, config, now=now, reason="manual" if args.force else "slot", sync=not args.no_sync,
                             researcher=events.research_event, recipient=config.get("mail", {}).get("recipient"),
                             credentials=credentials.load_gmail(), secrets=credentials.all_secrets(),
-                            dart_key=credentials.load_api_key("dart"))
+                            dart_key=credentials.load_api_key("dart"), sec_contact=config.get("mail", {}).get("recipient"))
     if not outcomes:
         print("No event found.")
     for outcome in outcomes:
@@ -72,7 +72,8 @@ def _preview(args: argparse.Namespace, config: dict[str, Any], now: datetime) ->
     researcher = events.research_event if args.research else None
     rendered = events.preview(args.db, config, args.kind, now=now, researcher=researcher,
                               secrets=credentials.all_secrets() if args.research else [],
-                              dart_key=credentials.load_api_key("dart"), disclosure_days=args.days)
+                              dart_key=credentials.load_api_key("dart"), disclosure_days=args.days,
+                              sec_contact=config.get("mail", {}).get("recipient"))
     if rendered is None:
         print("Nothing to preview: no confirmed rate decision yet, or no valued listed holding a day ago.")
         return 1

@@ -546,7 +546,9 @@ def _check_events(db: Path, config: dict[str, Any], now: datetime, *, reason: st
         outcomes = events.check(db, config, now=now, reason=reason, sync=sync, researcher=events.research_event,
                                 recipient=config.get("mail", {}).get("recipient"), credentials=credentials.load_gmail(),
                                 secrets=credentials.all_secrets(), say=lambda message: _say(db, message),
-                                dart_key=credentials.load_api_key("dart"))
+                                dart_key=credentials.load_api_key("dart"),
+                                # The SEC asks for a contact in the User-Agent: the client's own address (user decision 2026-10-29).
+                                sec_contact=config.get("mail", {}).get("recipient"))
         for outcome in outcomes:
             # The detail can be the subject (an amount): the log gets the key and the status only.
             _say(db, f"Event {outcome['key']}: {outcome['status']}"

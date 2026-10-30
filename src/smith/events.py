@@ -5,8 +5,9 @@ that matters to this household. Three events for now:
   vote and the governor's guidance from an official source, and what it does to the month's interest;
 - the listed holdings move more than a threshold since the last check (market prices and FX together): how
   much, which holdings, and the researched why;
-- a KR holding files a material disclosure (smith.disclosures, FR-44): the filings read from OpenDART by code, with
-  the dividend this household receives or the dilution a new issue means. No model and no web research.
+- a KR or US holding files a material disclosure (smith.disclosures, FR-44): the filings read from OpenDART and
+  SEC EDGAR by code, with the dividend this household receives or the dilution a new issue means. No model, no web
+  research.
 
 Every figure is computed here. Research (one headless call with web tools, sources verified like a brief)
 supplies the why and finds the Bank's own page for the rate decision; the decision, the vote and the governor's
@@ -34,7 +35,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable
 
-from smith import dart, disclosures, evidence, gmail, headless, ledger, report_data, report_html, research, sources
+from smith import dart, disclosures, evidence, gmail, headless, ledger, report_data, report_html, research, sec, sources
 from smith.config import local_time
 from smith.holdings import STRESS_DRAWDOWN
 from smith.payload import PayloadRejected, check_outbound, load_view
@@ -130,11 +131,12 @@ def check(db: Path, config: dict[str, Any], *, now: datetime, reason: str, sync:
           researcher: Researcher | None = None, sender: Sender = gmail.send, recipient: str | None = None,
           credentials: tuple[str, str, str] | None = None, secrets: list[str] | None = None,
           say: Callable[[str], None] = print, dart_key: str | None = None,
-          dart_fetch: dart.Fetcher = dart.default_fetcher) -> list[dict[str, Any]]:
+          dart_fetch: dart.Fetcher = dart.default_fetcher, sec_contact: str | None = None,
+          sec_fetch: Any = None) -> list[dict[str, Any]]:
     """Look for events since the last check, retry the notes not delivered yet, and send what is due. Returns one
     outcome per event ({"key", "status", "detail"}). `sync` refreshes the holdings and the evidence first (after
     the morning report they are fresh already). `researcher` is None to skip the web research (previews, tests).
-    `dart_key` (OpenDART) enables the disclosure note. Nothing is raised: a failure is recorded on the note and
+    `dart_key` (OpenDART) and `sec_contact` (the e-mail the SEC requires in the User-Agent) enable the disclosure note. Nothing is raised: a failure is recorded on the note and
     retried at a later check inside its window."""
     if sync:
         _sync(db, say)
@@ -143,10 +145,12 @@ def check(db: Path, config: dict[str, Any], *, now: datetime, reason: str, sync:
         last = ledger.last_event_check(conn)
         baseline = max(last if last is not None else now - BASELINE_DEFAULT, now - BASELINE_MAX)
         found: list[tuple[Event, dict[str, Any] | None]] = list(detect(conn, config, now, baseline))
-        view = load_view(conn, as_of=local_time(now, config["app"]["timezone"]), known_at=now) if dart_key else None
+        view = (load_view(conn, as_of=local_time(now, config["app"]["timezone"]), known_at=now)
+                if dart_key or sec_contact else None)
     if view is not None:
         try:
-            filings, failures = disclosures.scan_due(db, view, key=dart_key, today=today, now=now, fetch=dart_fetch)
+            filings, failures = disclosures.scan_due(db, view, key=dart_key, today=today, now=now, fetch=dart_fetch,
+                                                     contact=sec_contact, **({"sec_fetch": sec_fetch} if sec_fetch else {}))
         except Exception as error:  # noqa: BLE001 - the other events still go out; the next check scans again.
             filings, failures = [], [f"공시 확인 실패({type(error).__name__})"]
         for failure in failures:
@@ -204,7 +208,7 @@ def build_note(db: Path, event: Event, detail: dict[str, Any], *, now: datetime,
     with closing(ledger.connect_read_only(db)) as conn:
         view = load_view(conn, as_of=local, known_at=now)
     if event.kind == "disclosure":
-        if not dart_key:
+        if not dart_key and any(f.get("source") != "sec" for f in detail["filings"]):
             return None     # Kept pending: retried once the key is back.
         filings = disclosures.enrich(db, view, local, detail["filings"], key=dart_key, known_at=now, fetch=dart_fetch)
         return {"kind": "disclosure", "key": event.key, "day": event.day, "as_of": local, "filings": filings}
@@ -222,7 +226,7 @@ def build_note(db: Path, event: Event, detail: dict[str, Any], *, now: datetime,
 
 
 def preview(db: Path, config: dict[str, Any], kind: str, *, now: datetime, researcher: Researcher | None = None,
-            secrets: list[str] | None = None, dart_key: str | None = None,
+            secrets: list[str] | None = None, dart_key: str | None = None, sec_contact: str | None = None,
             disclosure_days: int = disclosures.SCAN_DAYS) -> tuple[str, str, str] | None:
     """One note from current data, never sent or recorded: the latest rate meeting (from the statistics, or from
     research when `researcher` is given), the holdings' move over the last day whatever its size, or the material
@@ -231,12 +235,15 @@ def preview(db: Path, config: dict[str, Any], kind: str, *, now: datetime, resea
     local = local_time(now, tz)
     baseline = now - BASELINE_DEFAULT
     if kind == "disclosure":
-        if not dart_key:
+        if not dart_key and not sec_contact:
             return None
         with closing(ledger.connect_read_only(db)) as conn:
             view = load_view(conn, as_of=local, known_at=now)
-        filings, _ = disclosures.scan(view, key=dart_key, today=local.date(), now=now, cache=dart.cache_path(db),
-                                      already=set(), days=disclosure_days)
+        kr = [] if not dart_key else disclosures.scan(view, key=dart_key, today=local.date(), now=now,
+                                                      cache=dart.cache_path(db), already=set(), days=disclosure_days)[0]
+        us = [] if not sec_contact else disclosures.scan_us(view, contact=sec_contact, today=local.date(), now=now,
+                                                            cache=sec.cache_path(db), already=set(), days=disclosure_days)[0]
+        filings = disclosures.newest_first(kr + us)[:disclosures.MAX_FILINGS * 2]
         if not filings:
             return None
         note = build_note(db, Event("disclosure", local.date(), filings[0]["rcept_no"]), {"filings": filings}, now=now,
@@ -539,7 +546,8 @@ def _details(note: dict[str, Any]) -> dict[str, Any]:
     kept["research"] = note.get("research")
     if note.get("filings"):     # What was carried (smith.disclosures.seen), without the household's amounts.
         kept["filings"] = [{**{k: f[k] for k in ("rcept_no", "filed_on", "title", "corp_name", "corp_code", "category",
-                                                  "symbols")},
+                                                  "symbols", "url")},
+                            **({"source": f["source"]} if f.get("source") else {}),
                             # A cash dividend's pay date, for the daily mail's date line (a date, never an amount).
                             "pay_date": (f.get("figures") or {}).get("pay_date")
                             if f["category"] == "dividend" and (f.get("figures") or {}).get("cash") and not f.get("superseded")

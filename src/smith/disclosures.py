@@ -1,4 +1,4 @@
-"""Material filings of the client's KR holdings as an event note (FR-44, report design §29).
+"""Material filings of the client's KR and US holdings as an event note (FR-44, report design §29).
 
 At each event check (smith.events) the client's own KR listed holdings are looked up in OpenDART (smith.dart): the
 filings of the last SCAN_DAYS days that no earlier note carried and whose title names a material matter
@@ -11,7 +11,12 @@ them. Everything is code: no model reads or writes a filing.
 - A paid-in capital increase (유상증자) gives the new common shares and the shares before: code computes the dilution,
   new / (before + new). A convertible bond gives the shares on conversion and the filing's own ratio to the shares
   outstanding. A buyback gives the shares and the amount. Other filings go out with their title and link.
-- Hermes-managed holdings are left out (Smith gives no opinion on them). Only codes, names and dates travel to DART.
+- US-listed holdings are looked up in SEC EDGAR (smith.sec, user request 2026-10-29: "미국쪽 공시정보도 중요해"): an
+  8-K by its item codes (results, a material agreement, a dilutive issue, an impairment, a delisting notice, ...), a
+  foreign issuer's 6-K and a 13D. Their text is English and not read: the note names what the items mean and links the
+  filing. ETFs are funds, not SEC company filers, and are not looked up.
+- Hermes-managed holdings are left out (Smith gives no opinion on them). Only codes, names and dates travel to DART and
+  the SEC (with the contact address the SEC requires in the request header).
 """
 import re
 from contextlib import closing
@@ -19,7 +24,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from smith import dart, holdings, ledger, qa_lookup
+from smith import dart, holdings, ledger, qa_lookup, sec
 
 SCAN_DAYS = 3            # A weekend and a missed check: older filings belong to the regular report.
 SEEN_NOTES = 200         # Notes looked back at for filings already carried.
@@ -64,8 +69,48 @@ def scan(view: Any, *, key: str, today: date, now: datetime, cache: Path, alread
                 filings.append({"rcept_no": f.rcept_no, "filed_on": f.filed_on.isoformat(), "title": f.title,
                                 "corp_name": f.corp_name or name, "corp_code": corp, "category": kind,
                                 "symbols": [p["symbol"] for p in positions]})
-    filings.sort(key=lambda f: f["rcept_no"], reverse=True)
-    return filings[:MAX_FILINGS], failures
+    return newest_first(filings)[:MAX_FILINGS], failures
+
+
+def newest_first(filings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(filings, key=lambda f: (f["filed_on"], f["rcept_no"]), reverse=True)
+
+
+def held_us(view: Any) -> dict[str, dict[str, Any]]:
+    """The client's own US-listed holdings by ticker."""
+    return {p["symbol"]: p for p in holdings.review(view)["positions"] if not p["hermes"] and p["market"] == "US"}
+
+
+def scan_us(view: Any, *, contact: str, today: date, now: datetime, cache: Path, already: set[str],
+            fetch: sec.Fetcher = sec.default_fetcher, days: int = SCAN_DAYS) -> tuple[list[dict[str, Any]], list[str]]:
+    """`scan` for the US holdings in SEC EDGAR: material 8-K items, 6-K and 13D, by form and item code."""
+    filings, failures = [], []
+    companies: dict[int, list[str]] = {}    # One lookup per company: GOOG and GOOGL share a CIK (review 2026-10-29).
+    for ticker in sorted(held_us(view)):
+        try:
+            company = sec.cik(ticker, contact, cache, now=now, fetch=fetch)
+        except sec.Error as error:
+            failures.append(f"{ticker}: SEC 조회 실패({error.code})")
+            continue
+        if company is not None:             # A fund (VOO, SCHD, ...) is not a company filer.
+            companies.setdefault(company, []).append(ticker)
+    held = held_us(view)
+    for company, tickers in sorted(companies.items()):
+        p = held[tickers[0]]
+        try:
+            listed = sec.filings(company, contact, since=today - timedelta(days=days), fetch=fetch)
+        except sec.Error as error:
+            failures.append(f"{'·'.join(tickers)}: SEC 조회 실패({error.code})")
+            continue
+        for f in listed:
+            found = sec.meaning(f)
+            if found is not None and f.accession not in already:
+                kind, labels = found
+                filings.append({"rcept_no": f.accession, "filed_on": f.filed_on.isoformat(),
+                                "title": f"{f.form} · {' · '.join(labels)}", "corp_name": p["public_name"] or ticker,
+                                "corp_code": f"CIK{company}", "category": kind, "symbols": tickers, "source": "sec",
+                                "url": f.url})
+    return newest_first(filings)[:MAX_FILINGS], failures
 
 
 def enrich(db: Path, view: Any, as_of: datetime, filings: list[dict[str, Any]], *, key: str, known_at: datetime,
@@ -74,6 +119,9 @@ def enrich(db: Path, view: Any, as_of: datetime, filings: list[dict[str, Any]], 
     "figures_failed" with the reason when the filing could not be read (the title and link still go out)."""
     read = []
     for raw in filings:
+        if raw.get("source") == "sec":     # Named by its items and linked; the English text is not read.
+            read.append({**raw, "figures": None, "household": None, "figures_failed": None})
+            continue
         f = dart.Filing(raw["rcept_no"], date.fromisoformat(raw["filed_on"]), raw["title"], raw["corp_name"])
         item = {**raw, "url": f.url, "figures": None, "household": None, "figures_failed": None}
         try:
@@ -185,10 +233,25 @@ def _structured(figures: dict[str, str]) -> dict[str, Any]:
 
 
 def scan_due(db: Path, view: Any, *, key: str | None, today: date, now: datetime,
-             fetch: dart.Fetcher = dart.default_fetcher) -> tuple[list[dict[str, Any]], list[str]]:
-    """`scan` with the filings already carried left out; nothing without a key."""
-    if not key:
+             fetch: dart.Fetcher = dart.default_fetcher, contact: str | None = None,
+             sec_fetch: sec.Fetcher = sec.default_fetcher) -> tuple[list[dict[str, Any]], list[str]]:
+    """The KR (with a DART key) and US (with an SEC contact) filings not carried yet, newest first, and failures."""
+    if not key and not contact:
         return [], []
     with closing(ledger.connect_read_only(db)) as conn:
         already = seen(conn)
-    return scan(view, key=key, today=today, now=now, cache=dart.cache_path(db), already=already, fetch=fetch)
+    found: list[dict[str, Any]] = []
+    failures: list[str] = []
+    # Each source on its own: one failing never throws away what the other found (review 2026-10-29).
+    for wanted, label, run in ((key, "전자공시", lambda: scan(view, key=key, today=today, now=now, cache=dart.cache_path(db),
+                                                             already=already, fetch=fetch)),
+                               (contact, "SEC", lambda: scan_us(view, contact=contact, today=today, now=now,
+                                                                cache=sec.cache_path(db), already=already, fetch=sec_fetch))):
+        if not wanted:
+            continue
+        try:
+            got, missed = run()
+        except Exception as error:  # noqa: BLE001 - the other source's filings still go out; this one is scanned again.
+            got, missed = [], [f"{label} 확인 실패({type(error).__name__})"]
+        found, failures = found + got, failures + missed
+    return newest_first(found)[:MAX_FILINGS], failures
