@@ -284,6 +284,7 @@ def financial_income_guard(balance: Decimal | None, rate: Decimal | None, pay: D
     return {"rate": rate, "threshold": FINANCIAL_INCOME_THRESHOLD, "threshold_balance": room / rate,
             "balance": balance, "interest_now": now, "pay": pay, "interest_with_pay": with_pay,
             "dividends": paid, "dividends_unknown": [] if dividends is None else list(dividends["unknown"]),
+            "dividends_none": [] if dividends is None else list(dividends.get("none_reported", [])),
             "dividend_parts": [] if dividends is None else list(dividends["parts"]),
             "income_now": income, "income_with_pay": income_with_pay,
             "share_now": None if income is None else income / FINANCIAL_INCOME_THRESHOLD,
@@ -399,7 +400,8 @@ def _guard_text(guards: list[tuple[str, dict[str, Any]]]) -> str:
     if not any(g["dividends"] is not None for _, g in guards):
         return text + f"금리는 단기 시장 금리(연 {percent(rate)})를 예금 금리로 본 값이고, 배당은 원장에 없어 빠진 하한입니다. "
     return text + (f"금리는 단기 시장 금리(연 {percent(rate)})를 예금 금리로 본 값입니다. 배당은 최근 1년 동안 주당 받은 금액에 "
-                   "지금 보유 수량을 곱한 연간 수준으로, 국내 주식은 전자공시 배당 결정, 미국 주식·ETF는 웹 조사 추정이며, "
+                   "지금 보유 수량을 곱한 연간 수준으로, 국내 주식은 전자공시 배당 결정, 미국 주식은 SEC 공시, ETF는 웹 조사 "
+                   "추정이며, "
                    "ISA·연금계좌 배당은 따로 과세되어 뺐습니다. ")
 
 
@@ -424,6 +426,9 @@ def _person_guard(owner: str, g: dict[str, Any]) -> str:
         if g["dividends_unknown"]:
             text += (f"배당을 확인하지 못한 {len(g['dividends_unknown'])}종목({', '.join(g['dividends_unknown'][:3])})은 빠진 "
                      "하한입니다. ")
+        if g["dividends_none"]:
+            text += (f"공시에 배당 기록이 없는 {len(g['dividends_none'])}종목({', '.join(g['dividends_none'][:3])})은 0으로 "
+                     "보았습니다. ")
     elif g["interest_now"] is not None:
         text += (f"{who} 명의 현금·예금 {short_won(g['balance'])}의 이자는 연 약 {short_won(g['interest_now'])}"
                  f"(기준의 {percent(g['share_now'], 0)})입니다. ")

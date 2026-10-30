@@ -29,7 +29,7 @@ def run(args: argparse.Namespace) -> int:
     with closing(ledger.connect_read_only(args.db)) as conn:
         view = load_view(conn, as_of=local, known_at=now)
     if args.action == "sync":
-        result = sync_now(args.db, view, now=now, today=local.date())
+        result = sync_now(args.db, view, now=now, today=local.date(), contact=config.get("mail", {}).get("recipient"))
         print(f"Dividend evidence: {result['stored']} new point(s)")
         for failure in result["failures"]:
             print(f"  {failure}")
@@ -39,7 +39,7 @@ def run(args: argparse.Namespace) -> int:
     for owner, mine in sorted(found.items(), key=lambda item: (item[0] != "self", item[0])):
         print(f"{owner}: {mine['amount']:,} won a year in general accounts")
         for name, won, basis in mine["parts"]:
-            print(f"  {name}: {won:,} ({'전자공시' if basis == 'filing' else '웹 조사 추정'})")
+            print(f"  {name}: {won:,} ({ {'filing': '전자공시', 'sec': 'SEC'}.get(basis, '웹 조사 추정') })")
         if mine["unknown"]:
             print(f"  unknown: {', '.join(mine['unknown'])}")
         if mine["excluded"]:
@@ -47,7 +47,7 @@ def run(args: argparse.Namespace) -> int:
     return 0
 
 
-def sync_now(db: Path, view: Any, *, now: datetime, today: Any) -> dict[str, Any]:
-    """`dividends.sync` with the stored DART key and secrets."""
+def sync_now(db: Path, view: Any, *, now: datetime, today: Any, contact: str | None = None) -> dict[str, Any]:
+    """`dividends.sync` with the stored DART key, secrets and the SEC contact (the [mail] recipient)."""
     return dividends.sync(db, view, now=now, today=today, dart_key=credentials.load_api_key("dart"),
-                          secrets=credentials.all_secrets())
+                          secrets=credentials.all_secrets(), contact=contact)

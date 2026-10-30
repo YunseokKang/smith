@@ -393,10 +393,31 @@ def _sync_dividends(db: Path, config: dict[str, Any], now: datetime) -> None:
         local = local_time(now, config["app"]["timezone"])
         with closing(ledger.connect_read_only(db)) as conn:
             view = load_view(conn, as_of=local, known_at=now)
-        result = dividends_command.sync_now(db, view, now=now, today=local.date())
+        result = dividends_command.sync_now(db, view, now=now, today=local.date(),
+                                            contact=config.get("mail", {}).get("recipient"))
         _say(db, f"Dividend sync: {result['stored']} new point(s)" + "".join(f"; {f}" for f in result["failures"]))
     except Exception as error:  # noqa: BLE001 - the weekly refresh must never block the scheduled task.
         _say(db, f"Dividend sync crashed: {type(error).__name__}")
+
+
+def _sync_fundamentals(db: Path, config: dict[str, Any], now: datetime) -> None:
+    """The holdings' official quarterly figures and insiders' dealings once a week old (DART, SEC); never raises."""
+    from smith import credentials, fundamentals, insiders
+    from smith.config import local_time
+    from smith.payload import load_view
+
+    for module, label in ((fundamentals, "Fundamentals"), (insiders, "Insiders")):   # Each on its own cadence.
+        try:
+            if not module.stale(db, now):
+                continue
+            local = local_time(now, config["app"]["timezone"])
+            with closing(ledger.connect_read_only(db)) as conn:
+                view = load_view(conn, as_of=local, known_at=now)
+            result = module.sync(db, view, now=now, today=local.date(), dart_key=credentials.load_api_key("dart"),
+                                 contact=config.get("mail", {}).get("recipient"))
+            _say(db, f"{label} sync: {result['stored']} new point(s)" + "".join(f"; {f}" for f in result["failures"]))
+        except Exception as error:  # noqa: BLE001 - the weekly refresh must never block the scheduled task.
+            _say(db, f"{label} sync crashed: {type(error).__name__}")
 
 
 def _events_after_report(args: argparse.Namespace) -> None:
@@ -502,6 +523,7 @@ def _publish_once(args: argparse.Namespace) -> int:
             # Same-day event notes (report design §29): once a day after the check time, apart from the reports.
             _check_events(args.db, config, now, reason="slot", sync=True)
             _sync_dividends(args.db, config, now)   # Weekly, never while a report is due (FR-45).
+            _sync_fundamentals(args.db, config, now)   # The holdings' official quarters, weekly as well.
             upcoming = delivery.slots_between(config["reports"], tz, now, now + PREPARE_AHEAD)
             if upcoming:
                 # Prepare: research ahead of the scheduled time so the report itself is not delayed.

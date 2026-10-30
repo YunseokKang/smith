@@ -1346,6 +1346,14 @@ def event_note(conn: sqlite3.Connection, key: str) -> dict[str, Any] | None:
     return None if row is None else _event_row(row)
 
 
+def disclosure_claims(conn: sqlite3.Connection, *, limit: int) -> list[tuple[str, str, dict[str, Any] | None]]:
+    """(event key, status, details) of the latest disclosure notes in the order they were first claimed (the row was
+    inserted): the order a later claim cannot change, unlike the check time a run carries (review 2026-10-30)."""
+    rows = conn.execute("SELECT event_key, status, details FROM event_notes WHERE kind = 'disclosure' "
+                        "ORDER BY rowid DESC LIMIT ?", (limit,)).fetchall()
+    return [(key, status, None if details is None else json.loads(details)) for key, status, details in reversed(rows)]
+
+
 def event_notes(conn: sqlite3.Connection, *, limit: int = 20) -> list[dict[str, Any]]:
     rows = conn.execute(f"SELECT {_EVENT_COLUMNS} FROM event_notes ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
     return [_event_row(row) for row in rows]

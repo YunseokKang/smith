@@ -81,7 +81,8 @@ _ORDER = re.compile(
     r"(?:매수|매도|추가\s*매수|분할\s*매수|보유|유지|정리|처분|손절|익절|비중\s*(?:확대|축소))\s*(?:하|해|를|을)?\s*" + _ADVICE
     + r"|비중을\s*(?:늘리|줄이|높이|낮추)" + _ADVICE
     + r"|(?:파|사|사\s*두|팔아\s*두|담으|들어가|빠지|갈아타)(?:세요|십시오)|팔아야|사야\s*(?:합니다|한다|할\s*때)"
-    + r"|(?:사|파)는\s*것이\s*좋|손절|익절|목표\s*(?:주가|가격)")
+    + r"|(?:매수|매도|추가\s*매수|보유|유지|정리|처분)\s*(?:해야|하셔야)\s*(?:합니다|한다|할)"
+    + r"|비중을\s*(?:늘려|줄여|높여|낮춰)야|(?:사|파)는\s*(?:것이|게)\s*좋|손절|익절|목표\s*(?:주가|가격)")
 _FIGURE = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*(%?)")
 _RATIOS = ("dilution", "ratio_to_shares")   # Fractions in the filing's figures, written as percentages in prose.
 
@@ -164,7 +165,9 @@ def _unproven(pending: list[tuple[str, set[str], list[str]]], cited: dict[str, d
     found: dict[str, set[str]] = {}
     for item in kept:   # The page's numbers carry no unit: a figure is looked up by its number.
         found.setdefault(item["topic"], set()).update(_figures(" ".join((item.get("check") or {}).get("found") or [])))
-    return {key for key, stray, _ in pending if {f.rstrip("%") for f in stray} - found.get(key, set())}
+    # A percentage needs its own filing's ratio: a page's numbers carry no unit, and a 361 won dividend on a page is
+    # no proof of a 361% rise (review 2026-10-30), so a percentage outside the input always keeps the caveat.
+    return {key for key, stray, _ in pending if any(f.endswith("%") for f in stray) or stray - found.get(key, set())}
 
 
 def _figures(text: str) -> set[str]:

@@ -41,6 +41,7 @@ class SecTests(unittest.TestCase):
                  ("8-K/A", ("2.02",), ("earnings", ["실적 발표", "정정 보고"])),
                  ("8-K", ("7.01", "9.01"), None),                                     # Regulation FD, exhibits: routine.
                  ("6-K", (), ("corporate", ["해외 발행사 수시 보고"])),
+                 ("SCHEDULE 13D/A", (), ("corporate", ["경영 참여 목적 지분 보고의 변경"])),
                  ("10-Q", (), None), ("4", (), None)]
         for form, items, expected in cases:
             with self.subTest(form=form, items=items):
@@ -51,7 +52,11 @@ class SecTests(unittest.TestCase):
             cache, fake = Path(directory) / "sec" / "company_tickers.json", FakeSec()
             self.assertEqual(sec.cik("gadg", CONTACT, cache, now=NOW, fetch=fake), 1111111)
             self.assertIsNone(sec.cik("VOO", CONTACT, cache, now=NOW, fetch=fake))       # A fund: not a company filer.
-            self.assertEqual(sum(url == sec.TICKERS for url, _ in fake.calls), 1)          # Cached for a week.
+            TICKERS["2"] = {"cik_str": 3333333, "ticker": "BRK-B", "title": "CLASS B"}
+            cache.unlink()
+            self.assertEqual(sec.cik("BRK.B", CONTACT, cache, now=NOW, fetch=fake), 3333333)   # A broker's spelling.
+            del TICKERS["2"]
+            self.assertEqual(sum(url == sec.TICKERS for url, _ in fake.calls), 2)          # Cached; re-read once deleted.
             found = sec.filings(1111111, CONTACT, since=date(2026, 10, 31), fetch=fake)
         self.assertEqual([(f.accession, f.items) for f in found],
                          [("0001111111-26-000071", ("3.02", "5.02")), ("0001111111-26-000070", ("2.02", "9.01")),

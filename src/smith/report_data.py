@@ -10,8 +10,8 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, localcontext
 from typing import Any
 
-from smith import (cases, checklist, dividends, editions, evidence, future_income, holdings, lease, ledger, move_plan,
-                   pension, picks, principles, product_review, proposals, realestate, stress, tax)
+from smith import (cases, checklist, dividends, editions, evidence, fundamentals, future_income, holdings, insiders, lease,
+                   ledger, move_plan, pension, picks, principles, product_review, proposals, realestate, stress, tax)
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import LedgerView, base_amount, load_view, unrealized_gain
 from smith.records import TRANSFER_CATEGORIES, Kind, RecordInput, Status
@@ -123,6 +123,9 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     data = {"kind": kind, "as_of": as_of, "baseline": baseline, "kpis": kpis, "schedule": schedule,
             "change": change, "timeline": _timeline(view, pay), "sectors": sectors, "holdings": review,
             "holding_quantity_changes": quantities,
+            # The holdings' latest official quarters as known at the report (fundamentals.py).
+            "fundamentals": fundamentals.load(conn, known_at),
+            "insiders": insiders.load(conn, known_at),
             "future_income": expected, "advice": advice, "lease_plans": lease_plans,
             # One bad year with several shocks at once (report design §16.2), household-wide like the badge.
             "stress": stress.test(view, kpis, sectors, lease_plans),

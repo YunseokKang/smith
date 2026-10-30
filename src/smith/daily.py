@@ -194,9 +194,21 @@ FILINGS_SHOWN = timedelta(hours=26)   # Between one morning mail and the next, w
 
 
 def dividend_dates(filings: list[tuple[datetime, dict[str, Any]]], day: date, ahead: int = AHEAD_DAYS) -> list[dict[str, Any]]:
-    """The pay dates of the cash dividends the finance event notes announced, inside the window (one per company)."""
-    found: dict[tuple[str, date], dict[str, Any]] = {}
+    """The pay dates of the cash dividends the finance event notes announced, inside the window, one per company and
+    dividend: of the filings for one record date only the newest counts, so a correction sent in a later note
+    replaces the date it corrected (review 2026-10-30)."""
+    latest: dict[tuple[str, str], dict[str, Any]] = {}
+    dated = [f for _, f in filings if f.get("category") == "dividend" and f.get("record_date")]
     for _, f in filings:
+        if f.get("category") != "dividend":
+            continue
+        if not f.get("record_date") and any(_same_payment(f, g) for g in dated):
+            continue   # Kept before record dates were stored (2026-10-29): a later filing of that dividend replaces it.
+        dividend = (f["corp_name"], f.get("record_date") or f.get("pay_date") or "")
+        if dividend not in latest or f["rcept_no"] > latest[dividend]["rcept_no"]:
+            latest[dividend] = f
+    found: dict[tuple[str, date], dict[str, Any]] = {}
+    for f in latest.values():
         try:
             pay = date.fromisoformat(f.get("pay_date") or "")
         except ValueError:
@@ -204,6 +216,15 @@ def dividend_dates(filings: list[tuple[datetime, dict[str, Any]]], day: date, ah
         if day <= pay <= day + timedelta(days=ahead):
             found.setdefault((f["corp_name"], pay), {"date": pay, "label": f"{f['corp_name']} 배당 지급", "days": (pay - day).days})
     return list(found.values())
+
+
+def _same_payment(old: dict[str, Any], new: dict[str, Any]) -> bool:
+    """Whether a later filing of the same company pays within 45 days of an undated older one's payment."""
+    try:
+        gap = abs(date.fromisoformat(old.get("pay_date") or "") - date.fromisoformat(new.get("pay_date") or ""))
+    except ValueError:
+        return False
+    return new["corp_name"] == old["corp_name"] and new["rcept_no"] > old["rcept_no"] and gap <= timedelta(days=45)
 
 
 def finance_dates(day: date, ahead: int = AHEAD_DAYS) -> list[dict[str, Any]]:

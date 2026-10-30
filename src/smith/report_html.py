@@ -232,14 +232,19 @@ def _disclosure_event(note: dict[str, Any]) -> tuple[str, str, str, list[tuple[s
     totals = [f["household"]["total"] for f in filings if f["category"] == "dividend" and (f.get("household") or {}).get("total")
               and all(d >= due for d in f["household"]["total"]["pay_dates"])]
     net = sum((Decimal(t["net"]) for t in totals), Decimal(0)) if totals else None
+    # A cash dividend whose amount code could not compute is said, never summed as zero (review 2026-10-30).
+    uncounted = sum(1 for f in filings if f["category"] == "dividend" and not f.get("superseded")
+                    and (f.get("figures") or {}).get("cash") and not (f.get("household") or {}).get("total"))
     pay = min((d for t in totals for d in t["pay_dates"]), default=None)
     count = {c: sum(1 for f in filings if f["category"] == c) for c in _FILING_PILL}
     first = filings[0]
     subject = (f"[Smith · 사건 안내] {note['day']:%m/%d} 보유 종목 공시 {len(filings)}건 · {first['corp_name']} "
                f"{_FILING_PILL[first['category']][0]}"
-               + (f" · {'' if first['category'] == 'dividend' else '배당 '}세후 약 {_short(net)} 입금 예정" if net else ""))
+               + (f" · {'' if first['category'] == 'dividend' else '배당 '}세후 약 {_short(net)} 입금 예정"
+                  + (f"(미계산 {uncounted}건 제외)" if uncounted else "") if net else ""))
     tiles = [("새 공시", f"{len(filings)}건", " · ".join(companies)[:24]),
-             ("배당 입금 예정", "-" if net is None else _short(net), "세후" + (f" · {pay[5:7]}/{pay[8:10]}" if pay else "")),
+             ("배당 입금 예정", "-" if net is None else _short(net),
+              ("세후" + (f" · {pay[5:7]}/{pay[8:10]}" if pay else "")) + (f" · 미계산 {uncounted}건 제외" if uncounted else "")),
              ("희석 주의", f"{count['dilution']}건", "유상증자·전환사채 등"),
              ("위험 신호", f"{count['risk']}건", "소송·최대주주 변경 등")]
     # What the filings mean together first (the client reads one paragraph, user request 2026-10-30), then how it was made.

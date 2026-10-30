@@ -48,16 +48,27 @@ class AssembleTests(unittest.TestCase):
         self.assertNotIn("e1", str(payload["agenda"]))
 
     def test_filings_the_finance_notes_carried_show_as_names_and_pay_dates_only(self):
-        carried = [(NOW, {"corp_name": "가상전자", "category": "dividend", "title": "현금ㆍ현물배당결정", "pay_date": "2026-11-27"}),
-                   (NOW, {"corp_name": "가상전자", "category": "dividend", "title": "현금ㆍ현물배당결정", "pay_date": "2026-11-27"}),
+        def dividend(number, pay, record="2026-09-30"):
+            return {"rcept_no": number, "corp_name": "가상전자", "category": "dividend", "title": "현금ㆍ현물배당결정",
+                    "record_date": record, "pay_date": pay}
+        carried = [(NOW, dividend("20261102800020", "2026-11-26")),           # Corrected later, in another note...
+                   (NOW, dividend("20261103800010", "2026-11-27")),           # ...to the 27th: only that date stays.
                    (datetime(2026, 11, 1, tzinfo=timezone.utc),       # An older note: its pay date stays, its name does not.
-                    {"corp_name": "가상바이오", "category": "dilution", "title": "유상증자결정", "pay_date": None})]
+                    {"rcept_no": "1", "corp_name": "가상바이오", "category": "dilution", "title": "유상증자결정", "pay_date": None})]
         data = build(filings=carried)
         self.assertIn(("가상전자 배당 지급", 7), [(f["label"], f["days"]) for f in data["finance_dates"]])
-        self.assertEqual(sum(f["label"] == "가상전자 배당 지급" for f in data["finance_dates"]), 1)   # One per company.
+        self.assertEqual([f["date"] for f in data["finance_dates"] if f["label"] == "가상전자 배당 지급"],
+                         [date(2026, 11, 27)])                                    # The correction's date only.
         _, html, _ = daily_html.render(data)
         self.assertIn("새 공시: 가상전자 배당 (재무 사건 안내 메일)", html)
         self.assertNotIn("가상바이오", html)
+
+    def test_an_undated_older_filing_gives_way_to_a_later_correction(self):
+        old = {"rcept_no": "20261029800101", "corp_name": "가상전자", "category": "dividend", "title": "현금ㆍ현물배당결정",
+               "pay_date": "2026-11-26"}                                   # Stored before record dates were kept.
+        new = {**old, "rcept_no": "20261103800010", "record_date": "2026-09-30", "pay_date": "2026-11-27"}
+        found = daily.dividend_dates([(NOW, old), (NOW, new)], DAY)
+        self.assertEqual([f["date"] for f in found], [date(2026, 11, 27)])
 
     def test_finance_dates_inside_an_open_tax_period(self):
         found = daily.finance_dates(date(2026, 7, 20))

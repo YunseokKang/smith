@@ -100,8 +100,8 @@ Interpreter = Callable[..., dict[str, Any]]   # disclosure_insight.interpret: (f
 class Event:
     kind: str       # "bok_decision", "portfolio_move" or "disclosure"
     day: date       # The meeting day, or the local day the move or the filings were found on.
-    slot: str = ""  # "am"/"pm" for a move (the US session and the Korean one apart); the newest filing's receipt
-                    # number for disclosures, so filings found later the same day are a note of their own.
+    slot: str = ""  # "am"/"pm" for a move (the US session and the Korean one apart); a digest of the newest filing
+                    # for disclosures (disclosures.slot), so filings found later the same day are a note of their own.
 
     @property
     def key(self) -> str:
@@ -158,7 +158,7 @@ def check(db: Path, config: dict[str, Any], *, now: datetime, reason: str, sync:
         for failure in failures:
             say(f"Event check: {failure}")
         if filings:
-            found.append((Event("disclosure", today, filings[0]["rcept_no"]), {"filings": filings}))
+            found.append((Event("disclosure", today, disclosures.slot(filings)), {"filings": filings}))
     with closing(ledger.connect(db)) as conn:
         ledger.record_event_check(conn, checked_at=now, reason=reason, baseline=baseline, events=[e.key for e, _ in found])
         # The next check measures from this one, so a move whose note failed is never detected again: the ledger
@@ -263,7 +263,7 @@ def preview(db: Path, config: dict[str, Any], kind: str, *, now: datetime, resea
         filings = disclosures.newest_first(kr + us)[:disclosures.MAX_FILINGS * 2]
         if not filings:
             return None
-        note = build_note(db, Event("disclosure", local.date(), filings[0]["rcept_no"]), {"filings": filings}, now=now,
+        note = build_note(db, Event("disclosure", local.date(), disclosures.slot(filings)), {"filings": filings}, now=now,
                           baseline=baseline, tz=tz, researcher=None, secrets=secrets or [], dart_key=dart_key,
                           interpreter=interpreter)
         return None if note is None else report_html.render_event(note)
@@ -568,6 +568,7 @@ def _details(note: dict[str, Any]) -> dict[str, Any]:
                                                   "symbols", "url")},
                             **({"source": f["source"]} if f.get("source") else {}),
                             # A cash dividend's pay date, for the daily mail's date line (a date, never an amount).
+                            "record_date": (f.get("figures") or {}).get("record_date") if f["category"] == "dividend" else None,
                             "pay_date": (f.get("figures") or {}).get("pay_date")
                             if f["category"] == "dividend" and (f.get("figures") or {}).get("cash") and not f.get("superseded")
                             else None}

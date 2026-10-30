@@ -271,7 +271,7 @@ class BenchmarkAndShieldTests(unittest.TestCase):
         self.assertIn("sector_metrics.stress", narrative.SYSTEM_PROMPT)
         self.assertIn("room_with_goals", narrative.SYSTEM_PROMPT)
         self.assertEqual((adviser.PROMPT_VERSION, qa.PROMPT_VERSION, narrative.PROMPT_VERSION),
-                         ("advice-v10", "mail-answer-v15", "narrative-v27"))
+                         ("advice-v10", "mail-answer-v15", "narrative-v28"))
         self.assertIn("spending-room", proposals.RULE_KEYS)
 
 

@@ -18,6 +18,7 @@ them. Everything is code: no model reads or writes a filing.
 - Hermes-managed holdings are left out (Smith gives no opinion on them). Only codes, names and dates travel to DART and
   the SEC (with the contact address the SEC requires in the request header).
 """
+import hashlib
 import re
 from contextlib import closing
 from datetime import date, datetime, timedelta
@@ -49,19 +50,19 @@ def seen(conn: Any) -> set[str]:
 
 def scan(view: Any, *, key: str, today: date, now: datetime, cache: Path, already: set[str],
          fetch: dart.Fetcher = dart.default_fetcher, days: int = SCAN_DAYS) -> tuple[list[dict[str, Any]], list[str]]:
-    """(new material filings of held companies, newest first, as plain data; failures by company). A company whose
-    lookup fails is named in the failures and looked at again at the next check (its filings were not marked seen)."""
+    """(new material filings of held companies, newest first, as plain data; failures). A failure says what failed,
+    never which holding (the failures reach the run log); the company is looked at again at the next check."""
     filings, failures = [], []
     for issuer, positions in sorted(held_companies(view).items()):
         name = positions[0]["public_name"]
         try:
             corp = dart.corp_code(positions[0]["symbol"], key, cache, now=now, fetch=fetch)
             if corp is None:
-                failures.append(f"{name}: 전자공시에서 회사를 찾지 못함")
+                failures.append("전자공시에서 회사를 찾지 못함")
                 continue
             listed = dart.filings(corp, key, since=today - timedelta(days=days), until=today, fetch=fetch)
         except dart.Error as error:
-            failures.append(f"{name}: 전자공시 조회 실패({error.code})")
+            failures.append(f"전자공시 조회 실패({error.code})")
             continue
         for f in listed:
             kind = dart.category(f.title)
@@ -70,6 +71,12 @@ def scan(view: Any, *, key: str, today: date, now: datetime, cache: Path, alread
                                 "corp_name": f.corp_name or name, "corp_code": corp, "category": kind,
                                 "symbols": [p["symbol"] for p in positions]})
     return newest_first(filings)[:MAX_FILINGS], failures
+
+
+def slot(filings: list[dict[str, Any]]) -> str:
+    """The note's key slot: a digest of the newest filing's receipt number. The key is written to the run log, and a
+    receipt number names the company's filing (review 2026-10-30)."""
+    return hashlib.sha256(filings[0]["rcept_no"].encode("utf-8")).hexdigest()[:12]
 
 
 def newest_first(filings: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -90,7 +97,7 @@ def scan_us(view: Any, *, contact: str, today: date, now: datetime, cache: Path,
         try:
             company = sec.cik(ticker, contact, cache, now=now, fetch=fetch)
         except sec.Error as error:
-            failures.append(f"{ticker}: SEC 조회 실패({error.code})")
+            failures.append(f"SEC 조회 실패({error.code})")
             continue
         if company is not None:             # A fund (VOO, SCHD, ...) is not a company filer.
             companies.setdefault(company, []).append(ticker)
@@ -100,7 +107,7 @@ def scan_us(view: Any, *, contact: str, today: date, now: datetime, cache: Path,
         try:
             listed = sec.filings(company, contact, since=today - timedelta(days=days), fetch=fetch)
         except sec.Error as error:
-            failures.append(f"{'·'.join(tickers)}: SEC 조회 실패({error.code})")
+            failures.append(f"SEC 조회 실패({error.code})")
             continue
         for f in listed:
             found = sec.meaning(f)
@@ -165,30 +172,39 @@ def _supersede(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 CORRECTION_WINDOW = timedelta(days=7)
 
 
+DATE_FIX = timedelta(days=31)   # A corrected record date moves days, not a quarter.
+
+
 def _same_matter(original: dict[str, Any], correction: dict[str, Any]) -> bool:
-    """Whether a correction is of `original`: a dividend when both forms were read and give the same record date
-    (unknown is not the same), any other filing when it was filed within CORRECTION_WINDOW before the correction."""
-    if original["category"] == "dividend":
-        dates = [(i.get("figures") or {}).get("record_date") for i in (original, correction)]
-        return dates[0] is not None and dates[0] == dates[1]
+    """Whether a correction is of `original`. Any filing: filed within CORRECTION_WINDOW before the correction. A
+    dividend also: the record dates are equal, or close enough to be a corrected date (DATE_FIX), or the original had
+    none yet (review 2026-10-30: 9/30 corrected to 10/1 was counted twice); a quarter apart is another dividend."""
     gap = date.fromisoformat(correction["filed_on"]) - date.fromisoformat(original["filed_on"])
-    return timedelta(0) <= gap <= CORRECTION_WINDOW
+    if not timedelta(0) <= gap <= CORRECTION_WINDOW:
+        return original["category"] == "dividend" and _record(original) is not None and _record(original) == _record(correction)
+    if original["category"] != "dividend":
+        return True
+    before, after = _record(original), _record(correction)
+    return before is None or (after is not None and abs(before - after) <= DATE_FIX)
+
+
+def _record(item: dict[str, Any]) -> date | None:
+    text = (item.get("figures") or {}).get("record_date")
+    return None if not text else date.fromisoformat(text)
 
 
 def owned(conn: Any, key: str, filings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The filings this note may carry: those no note claimed earlier also holds (review 2026-10-29: two overlapping
     checks, a manual one beside the scheduled one, bundled the same filing under different keys and both sent it).
-    The owner is the earliest-claimed note holding the filing (ties by key), skipped notes aside, so whichever order
-    the two runs read in, exactly one keeps it."""
-    claims: dict[str, tuple[Any, str]] = {}
-    for row in ledger.event_notes(conn, limit=SEEN_NOTES):
-        if row["kind"] != "disclosure" or row["status"] == "skipped":
+    The owner is the note claimed first, by the order its row was inserted (a run that started earlier but claimed
+    later does not win, review 2026-10-30), skipped notes aside, so exactly one note keeps each filing."""
+    owners: dict[str, str] = {}
+    for event_key, status, details in ledger.disclosure_claims(conn, limit=SEEN_NOTES):
+        if status == "skipped":
             continue
-        for f in (row["details"] or {}).get("filings", []):
-            mark = (row["created_at"], row["event_key"])
-            if f["rcept_no"] not in claims or mark < claims[f["rcept_no"]]:
-                claims[f["rcept_no"]] = mark
-    return [f for f in filings if claims.get(f["rcept_no"], (None, key))[1] == key]
+        for f in (details or {}).get("filings", []):
+            owners.setdefault(f["rcept_no"], event_key)
+    return [f for f in filings if owners.get(f["rcept_no"], key) == key]
 
 
 def _dividend(db: Path, view: Any, as_of: datetime, filing: dart.Filing, symbols: list[str], *, key: str,

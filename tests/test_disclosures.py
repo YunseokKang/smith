@@ -6,7 +6,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
-from smith import dart, disclosures, events, ledger, sec
+from smith import dart, disclosures, events, ledger, report_html, sec
 from smith.importer import parse_import
 
 import fast_ledger
@@ -130,6 +130,39 @@ class DisclosureTests(unittest.TestCase):
         self.assertNotIn("정정 공시로 바뀌었습니다", html)          # June's correction does not touch September's decision.
         self.assertIn("약 10만 원 입금 예정", subject)              # The 300-won September decision; June's was paid in August.
 
+    def test_the_first_claim_owns_a_filing_whatever_time_its_check_started(self):
+        late, early = [{"rcept_no": "1"}, {"rcept_no": "2"}], [{"rcept_no": "1"}]
+        with closing(ledger.connect(self.db)) as conn:
+            # B (its check started at 16:21) claims first; A (started 16:20) claims after it.
+            for key, filings, at in (("disclosure:2026-11-03:2", late, NOW.replace(minute=21)),
+                                     ("disclosure:2026-11-03:1", early, NOW)):
+                ledger.claim_event_note(conn, key=key, kind="disclosure", event_date=NOW.date(), now=at,
+                                        lease=events.BUILDING, max_attempts=3, details={"filings": filings})
+            self.assertEqual(disclosures.owned(conn, "disclosure:2026-11-03:2", late), late)
+            self.assertEqual(disclosures.owned(conn, "disclosure:2026-11-03:1", early), [])
+
+    def test_a_corrected_record_date_is_the_same_dividend_and_a_quarter_apart_is_not(self):
+        def item(number, record, title="현금ㆍ현물배당결정", filed="2026-11-02"):
+            return {"rcept_no": number, "corp_code": "00999999", "title": title, "category": "dividend", "filed_on": filed,
+                    "figures": {"record_date": record}, "household": {"total": {"net": "1"}}}
+        moved = disclosures._supersede([item("1", "2026-09-30"), item("2", "2026-10-01", "[기재정정]현금ㆍ현물배당결정", "2026-11-03")])
+        self.assertEqual(moved[0]["superseded"], "2026-11-03")
+        other = disclosures._supersede([item("1", "2026-09-30"), item("2", "2026-06-30", "[기재정정]현금ㆍ현물배당결정", "2026-11-03")])
+        self.assertNotIn("superseded", other[0])
+
+    def test_a_dividend_code_could_not_compute_is_said_not_summed_as_zero(self):
+        def filing(number, name, net):
+            return {"rcept_no": number, "corp_name": name, "title": "현금ㆍ현물배당결정", "category": "dividend",
+                    "filed_on": "2026-11-03", "url": "https://dart.example/" + number,
+                    "figures": {"cash": True, "per_share": {"common": "100"}, "kind": "분기배당", "record_date": "2026-09-30",
+                                "pay_date": "2026-11-27"},
+                    "household": None if net is None else {"items": [], "total": {"gross": net, "withheld": "0", "net": net,
+                                                                                  "pay_dates": ["2026-11-27"]}}}
+        note = {"kind": "disclosure", "key": "k", "day": NOW.date(), "as_of": NOW,
+                "filings": [filing("1", "가상전자", "100000"), filing("2", "가상바이오", None)]}
+        subject, _, _ = report_html.render_event(note)
+        self.assertIn("세후 약 10만 원 입금 예정(미계산 1건 제외)", subject)
+
     def test_overlapping_checks_carry_each_filing_once(self):
         first, second = [{"rcept_no": "1"}], [{"rcept_no": "1"}, {"rcept_no": "2"}]
         with closing(ledger.connect(self.db)) as conn:
@@ -223,6 +256,8 @@ class DisclosureTests(unittest.TestCase):
     def test_a_failed_lookup_is_said_and_never_breaks_the_check(self):
         self.assertEqual(self.check(FakeDart(fail=True)), [])
         self.assertTrue(any("전자공시 조회 실패(network-error)" in line for line in self.said))
+        # The run log gets what failed, never which holding (review 2026-10-30).
+        self.assertFalse(any(word in line for line in self.said for word in ("가상", "123450", "234560")))
         later = NOW.replace(minute=NOW.minute + 5)
         self.assertEqual([o["status"] for o in self.check(FakeDart(), later)], ["sent"])   # Not marked seen: found again.
 

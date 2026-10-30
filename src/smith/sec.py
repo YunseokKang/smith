@@ -48,6 +48,8 @@ FORMS: dict[str, tuple[str, str]] = {
     "6-K": ("해외 발행사 수시 보고", "corporate"),
     "SC 13D": ("5% 이상 지분 보유자의 경영 참여 목적 보고", "corporate"),
     "SCHEDULE 13D": ("5% 이상 지분 보유자의 경영 참여 목적 보고", "corporate"),
+    "SC 13D/A": ("경영 참여 목적 지분 보고의 변경", "corporate"),
+    "SCHEDULE 13D/A": ("경영 참여 목적 지분 보고의 변경", "corporate"),
 }
 _ORDER = ("dividend", "dilution", "risk", "return", "earnings", "corporate")
 
@@ -129,7 +131,9 @@ def cik(ticker: str, contact: str, cache: Path, *, now: datetime, fetch: Fetcher
             cache.write_text(json.dumps({"saved_at": now.isoformat(), "codes": codes}), encoding="utf-8")
         except OSError:
             pass    # Public data: an unwritable cache only means downloading it again next time.
-    return codes.get(ticker.upper())
+    plain = ticker.upper()
+    # A class share is written BRK.B or BRK/B by brokers and BRK-B by the SEC (review 2026-10-30).
+    return next((codes[t] for t in (plain, plain.replace(".", "-"), plain.replace("/", "-")) if t in codes), None)
 
 
 def _cached(cache: Path, now: datetime) -> dict[str, int] | None:

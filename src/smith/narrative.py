@@ -43,8 +43,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from smith import (adviser, editions, future_income, headless, holdings, korean, ledger, memory, principles, reader, research,
-                   stress)
+from smith import (adviser, editions, fundamentals, future_income, headless, holdings, insiders, korean, ledger, memory,
+                   principles, reader, research, stress)
 from smith.fmt import short_won
 from smith.payload import PayloadRejected, build_context, check_outbound, won
 from smith.proposals import Proposal
@@ -58,7 +58,9 @@ logger = logging.getLogger(__name__)
 # v25: last_report, what the previous report on the theme said, so the new one does not repeat it (user review 2026-10-27).
 # v26: last_report.earlier, the titles of the reports before it (about a month), so a title does not return fortnightly.
 # v27: principle 9, natural Korean (user instruction 2026-10-27): no calques, fillers, double passives or dashes; code checks.
-PROMPT_VERSION = "narrative-v27"  # v22: no job gap in the reserve, reserve_basis, stale deals; v21: retirement ages.
+# v28: official quarterly figures and insiders' dealings per holding; v22: no job gap in the reserve, reserve_basis, stale deals;
+# v21: retirement ages.
+PROMPT_VERSION = "narrative-v28"
 MODEL = "fable"
 BUDGET_USD = "5.00"
 # Two calls at most: the write (the markets day with twenty-odd holdings ran past 10 minutes on 2026-10-17) and a
@@ -315,7 +317,19 @@ Input JSON:
   gains tax applies, whether the holding is above the concentration limit, employer_stock (the client's
   pay arrives in this stock: human capital and financial assets in one company), must_opine (an opinion is
   required: code rejects the output without one) and research_topic (the H ref of its company findings in
-  the brief). portfolio_facts: top-1 and top-5 shares, overseas share, the goal-money glide plan (stocks
+  the brief), and fundamentals (when present): the company's latest quarter as filed (DART or SEC, read by
+  code): period in calendar months, revenue, operating_income and net_income written as a reader writes them,
+  their change on the same period a year earlier (revenue_yoy, operating_income_yoy: decimal ratios),
+  operating_margin and debt_ratio (liabilities / equity), with the filing date. For a company's revenue, profit
+  and margins prefer these official figures to figures quoted in research items, name the period, and say when
+  the period is old (a quarter more recent than the filing may already be in the news). A block or opinion that
+  uses fundamentals or insiders cites "filing" in its refs (the company's own filings, read by code). insiders (when present):
+  executives' and major holders' dealings over window_days as filed, totals only. us-form4: open-market buys and
+  sells (count, shares, dollars) and how many sales ran under a plan set in advance (planned_sells, a weaker
+  signal). kr-ownership: reporters whose holding rose or fell and the net change in shares, any cause (a trade, a
+  share award, an inheritance), with the largest single change by role. A weak signal: mention it only when it is
+  one-sided and large next to the company, say what it can and cannot mean, never base an opinion on it alone.
+  portfolio_facts: top-1 and top-5 shares, overseas share, the goal-money glide plan (stocks
   counted for a dated goal within three years), add_condition, and concentration_plan: for each holding
   above the limit, the excess and the quarterly trim schedule into the broad-index core computed by code.
 - holding_quantity_changes (when present): the holdings whose share count changed since `from` (the
@@ -818,7 +832,13 @@ def holdings_payload(view: Any, data: dict[str, Any]) -> dict[str, Any]:
                   "kind": principles.kind(p), "overseas_capital_gains_tax": p["overseas"],
                   "above_concentration_limit": p["concentrated"], "employer_stock": p.get("employer", False),
                   "must_opine": p.get("must_opine", p["concentrated"]), "research_topic": refs.get(p["key"]),
-                  "add_condition": add_condition(data, p)}
+                  "add_condition": add_condition(data, p),
+                  # The latest official quarter (fundamentals.py), all figures computed by code.
+                  "fundamentals": fundamentals.summary((data.get("fundamentals") or {}).get(f"{p['market']}:{p['symbol']}"),
+                                                       data["as_of"].date()),
+                  # Insiders' dealings over the last 90 days (insiders.py), a weak signal, totals only.
+                  "insiders": insiders.for_report((data.get("insiders") or {}).get(f"{p['market']}:{p['symbol']}"),
+                                                  data["as_of"].date())}
                  for p in review["positions"] if not p["hermes"] and p["key"] in refs]
     plan = data["advice"].get("concentration")
     found, baseline = data.get("holding_quantity_changes"), data.get("baseline")
@@ -1530,7 +1550,9 @@ def _holding_source(opinion: dict[str, Any], position: dict[str, Any], brief_ite
     if any(t.startswith("H") and t != own for t in topics):
         return "other-holding-source"
     text = " ".join((opinion["reason"], opinion["alternative"], opinion["reconsider"]))
-    if any(word in text for word in _COMPANY) and own not in topics:
+    # The company's own filings read by code (fundamentals, insiders) are a source about this company too.
+    filed = "filing" in opinion["refs"] and bool(position.get("fundamentals") or position.get("insiders"))
+    if any(word in text for word in _COMPANY) and own not in topics and not filed:
         return "no-holding-source"
     return None
 
@@ -1563,7 +1585,7 @@ def _problem(texts: list[str], refs: list[str], known_refs: set[str], official: 
         return "unknown-ref"
     if adviser._text_refs(joined) or _RESEARCH_REF.search(joined):
         return "ref-in-prose"
-    sources = [ref for ref in refs if (ref[:1] in "RN" and ref[1:].isdigit()) or ref == "tax"]
+    sources = [ref for ref in refs if (ref[:1] in "RN" and ref[1:].isdigit()) or ref in ("tax", "filing")]
     if (outside or any(word in joined for word in _OUTSIDE)) and not sources:
         return "no-source"
     if any(word in joined for word in _LAW):
@@ -1599,6 +1621,9 @@ def _known_refs(payload: dict[str, Any]) -> set[str]:
     known |= {item["ref"] for item in household.get("cash_flow", {}).get("items", [])}
     if payload["brief"]:
         known |= {item["ref"] for item in payload["brief"]["items_untrusted"]}
+    # "filing" (a holding's official figures or insiders' dealings, read by code) only when the input carries them.
+    if any(h.get("fundamentals") or h.get("insiders") for h in payload.get("holdings") or []):
+        known.add("filing")
     return known
 
 
@@ -1660,6 +1685,8 @@ def _figures(text: str) -> set[str]:
 
 # Ratios computed by code are decimal fractions (0.0361 is 3.61%); these keys hold them.
 _RATIO_KEYS = frozenset({"share", "share_of_assets", "share_of_securities", "usd_share_of_assets", "return_on_cost",
+                         # Official quarterly figures of a holding (fundamentals.summary).
+                         "revenue_yoy", "operating_income_yoy", "operating_margin", "debt_ratio",
                          "loan_to_value", "liabilities_to_assets", "premium_to_income", "change_vs_previous_6m",
                          "annual_rate", "rate_rise", "rate_change", "top1_share", "top5_share", "overseas_share",
                          # Ratios the e-mail answer flagged as unverified (2026-10-23: "74%" was the readiness ratio).
