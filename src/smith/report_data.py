@@ -10,8 +10,8 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, localcontext
 from typing import Any
 
-from smith import (cases, checklist, editions, evidence, future_income, holdings, lease, ledger, move_plan, pension, picks,
-                   principles, product_review, proposals, realestate, stress, tax)
+from smith import (cases, checklist, dividends, editions, evidence, future_income, holdings, lease, ledger, move_plan,
+                   pension, picks, principles, product_review, proposals, realestate, stress, tax)
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import LedgerView, base_amount, load_view, unrealized_gain
 from smith.records import TRANSFER_CATEGORIES, Kind, RecordInput, Status
@@ -96,7 +96,10 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     # The pension stack by retirement age (report design §30) follows the credit split the tax proposal makes, and
     # the long-range retirement track reads the same stack, so the report states one retirement picture.
     pension_stack = pension.stack(view, household, as_of.date(), plan=tax.pension_plan(plan))
+    # Each owner's yearly dividends from the dividend evidence as known at the report (FR-45).
+    yearly_dividends = dividends.yearly(view, dividends.load(conn, known_at), as_of.date())
     advice = proposals.build(view, kpis, sectors, active=ledger.active_proposals(conn), household=household, pay=pay,
+                             dividends=yearly_dividends,
                              review=review, lease_plans=lease_plans, pension_stack=pension_stack)
     # The status badge stays household-wide: urgent proposals of every area, whatever today's theme.
     advice["household_urgent"] = [p.key for p in advice["proposals"] if p.priority == 1]

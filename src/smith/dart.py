@@ -27,6 +27,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from html import unescape
 from pathlib import Path
+from typing import Any
 
 from smith.net import open_url
 
@@ -138,10 +139,38 @@ def _download_codes(key: str, fetch: Fetcher) -> dict[str, str]:
     return codes
 
 
-def filings(corp: str, key: str, *, since: date, until: date, fetch: Fetcher = default_fetcher) -> list[Filing]:
-    """The company's filings received in [since, until], newest first (one page of 100 is plenty for 120 days)."""
-    raw = _get(fetch, "list.json", key, corp_code=corp, bgn_de=f"{since:%Y%m%d}", end_de=f"{until:%Y%m%d}",
-               page_count="100")
+MAX_PAGES = 10
+EXCHANGE = "I"   # pblntf_ty of the exchange's filings (수시공시 such as 현금ㆍ현물배당결정).
+
+
+def filings(corp: str, key: str, *, since: date, until: date, fetch: Fetcher = default_fetcher,
+            kind: str | None = None) -> list[Filing]:
+    """The company's filings received in [since, until] (of one disclosure type with `kind`), newest first, every
+    page of 100 (review 2026-10-30: a large issuer's executive ownership reports filled the first page).
+
+    Raises:
+        Error: a call failed, or there were more than MAX_PAGES pages (a partial list would undercount).
+    """
+    found: list[Filing] = []
+    page, pages = 1, 1
+    while page <= pages:
+        if page > MAX_PAGES:
+            raise Error("too-many-pages")
+        body = _page(fetch, key, corp=corp, since=since, until=until, kind=kind, page=page)
+        if body is None:
+            return []
+        found += _listed(body)
+        pages = int(body.get("total_page") or 1) if str(body.get("total_page", "1")).isdigit() else 1
+        page += 1
+    return sorted(found, key=lambda f: f.rcept_no, reverse=True)
+
+
+def _page(fetch: Fetcher, key: str, *, corp: str, since: date, until: date, kind: str | None,
+          page: int) -> dict[str, Any] | None:
+    """One page of list.json, or None when DART has no filing in the range ("013")."""
+    params = {"corp_code": corp, "bgn_de": f"{since:%Y%m%d}", "end_de": f"{until:%Y%m%d}", "page_count": "100",
+              "page_no": str(page), **({"pblntf_ty": kind} if kind else {})}
+    raw = _get(fetch, "list.json", key, **params)
     try:
         body = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
@@ -150,9 +179,13 @@ def filings(corp: str, key: str, *, since: date, until: date, fetch: Fetcher = d
         raise Error("bad-response")
     status = str(body.get("status", ""))
     if status == "013":
-        return []
+        return None
     if status != "000":
         raise Error(f"status-{status}")
+    return body
+
+
+def _listed(body: dict[str, Any]) -> list[Filing]:
     found = []
     for row in body.get("list", []) if isinstance(body.get("list"), list) else []:
         if not isinstance(row, dict):
@@ -165,7 +198,7 @@ def filings(corp: str, key: str, *, since: date, until: date, fetch: Fetcher = d
         if re.fullmatch(r"\d{14}", number):
             found.append(Filing(number, filed, " ".join(str(row.get("report_nm", "")).split()),
                                 str(row.get("corp_name", ""))))
-    return sorted(found, key=lambda f: f.rcept_no, reverse=True)
+    return found
 
 
 def document(filing: Filing, key: str, *, fetch: Fetcher = default_fetcher) -> str:
@@ -194,7 +227,7 @@ def latest_dividend(corp: str, key: str, *, today: date, fetch: Fetcher = defaul
     an earlier quarter's decision can be filed after this quarter's (review 2026-10-29), so the MAX_DECISIONS newest
     decision filings are read and the one with the latest record date wins; among filings of one dividend (same record
     date) the later filing, its correction, wins."""
-    decisions = [f for f in filings(corp, key, since=today - LOOKBACK, until=today, fetch=fetch)
+    decisions = [f for f in filings(corp, key, since=today - LOOKBACK, until=today, fetch=fetch, kind=EXCHANGE)
                  if "배당결정" in f.title.replace(" ", "")][:MAX_DECISIONS]
     read = [parse_dividend(document(f, key, fetch=fetch), f) for f in decisions]
     if not read:

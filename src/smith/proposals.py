@@ -115,7 +115,8 @@ HEADLINE_MAX = 32  # Characters of the status-line badge (proposals.fit_headline
 def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
           active: dict[str, dict[str, Any]] | None = None, household: dict[str, Any] | None = None,
           pay: list[future_income.Inflow] | None = None, review: dict[str, Any] | None = None,
-          lease_plans: list[dict[str, Any]] | None = None, pension_stack: dict[str, Any] | None = None) -> dict[str, Any]:
+          lease_plans: list[dict[str, Any]] | None = None, pension_stack: dict[str, Any] | None = None,
+          dividends: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     """Return proposals (most urgent first), the strategy tracks and the follow-up of earlier proposals.
 
     `active` maps proposal identities to their current instance (ledger.active_proposals). Unless the
@@ -131,6 +132,7 @@ def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
     facts["pension_stack"] = (pension.stack(view, household, facts["today"], plan=tax.pension_plan(facts["tax"]))
                               if pension_stack is None else pension_stack)
     facts["pay"] = pay or []  # Expected pay (future_income.inflows): shown beside the long-range tracks only.
+    facts["dividends"] = dividends   # Each owner's yearly dividend run rate (dividends.yearly), None when not loaded.
     facts["glide"] = _glide(facts)
     facts["reserve_swap"] = reserve_swap(facts)
     facts["spending_room"] = spending_room(facts)
@@ -177,10 +179,12 @@ def _income_guard(view: LedgerView, facts: dict[str, Any]) -> list[tuple[str, di
                    and r.fields.get("category") in ("cash", "deposit", "installment_savings")]
         pay = future_income.at_goal(facts["pay"], owner_id=owner, scenario="base", horizon=horizon, today=today,
                                     rate=Decimal(0))["value"]
-        if not amounts and not pay:
+        held = (facts.get("dividends") or {}).get(owner)
+        if not amounts and not pay and not (held and held["amount"]):
             continue
         balance = None if any(a is None for a in amounts) else sum(amounts, Decimal(0))
-        guard = tax.financial_income_guard(balance, rate, pay)
+        guard = tax.financial_income_guard(balance, rate, pay, None if facts.get("dividends") is None else
+                                           held or {"amount": Decimal(0), "parts": [], "unknown": [], "excluded": []})
         if guard is not None:
             found.append((owner, guard))
     return found

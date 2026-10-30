@@ -263,20 +263,31 @@ def set_aside(extra: list[tuple[date, Decimal | None]] | None, retire_year: int 
 
 # --- strategy notes and year-end checklist -----------------------------------------------------------------
 
-def financial_income_guard(balance: Decimal | None, rate: Decimal | None, pay: Decimal | None) -> dict[str, Any] | None:
+def financial_income_guard(balance: Decimal | None, rate: Decimal | None, pay: Decimal | None,
+                           dividends: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """How close deposit interest comes to the financial-income threshold (report design §20): the balance at
-    which interest alone reaches it at `rate` (a yearly fraction, the short market rate as a deposit-rate
-    proxy), the interest on today's interest-bearing `balance`, and on it plus the expected `pay` if that were
-    parked in deposits. Dividends are not in the ledger, so the interest figures are lower bounds. None
-    without a positive rate; an unknown balance or pay leaves its figures unknown."""
+    which interest reaches it at `rate` (a yearly fraction, the short market rate as a deposit-rate proxy) with
+    the dividends already counted, the interest on today's interest-bearing `balance`, and on it plus the expected `pay` if that were
+    parked in deposits. `dividends` is that owner's yearly dividend run rate in general accounts (dividends.yearly,
+    FR-45): with it the figures are interest plus dividends ("income_*"); without it, or for the holdings it lists
+    as unknown, they stay lower bounds. None without a positive rate; an unknown balance or pay leaves its figures
+    unknown."""
     if rate is None or rate <= 0:
         return None
     now = None if balance is None else balance * rate
     with_pay = None if balance is None or pay is None else (balance + pay) * rate
-    return {"rate": rate, "threshold": FINANCIAL_INCOME_THRESHOLD, "threshold_balance": FINANCIAL_INCOME_THRESHOLD / rate,
+    paid = None if dividends is None else dividends["amount"]
+    income = None if now is None else now + (paid or 0)
+    income_with_pay = None if with_pay is None else with_pay + (paid or 0)
+    # The dividends use part of the threshold: the deposit that reaches it is what interest has left (never below 0).
+    room = max(FINANCIAL_INCOME_THRESHOLD - (paid or 0), Decimal(0))
+    return {"rate": rate, "threshold": FINANCIAL_INCOME_THRESHOLD, "threshold_balance": room / rate,
             "balance": balance, "interest_now": now, "pay": pay, "interest_with_pay": with_pay,
-            "share_now": None if now is None else now / FINANCIAL_INCOME_THRESHOLD,
-            "share_with_pay": None if with_pay is None else with_pay / FINANCIAL_INCOME_THRESHOLD}
+            "dividends": paid, "dividends_unknown": [] if dividends is None else list(dividends["unknown"]),
+            "dividend_parts": [] if dividends is None else list(dividends["parts"]),
+            "income_now": income, "income_with_pay": income_with_pay,
+            "share_now": None if income is None else income / FINANCIAL_INCOME_THRESHOLD,
+            "share_with_pay": None if income_with_pay is None else income_with_pay / FINANCIAL_INCOME_THRESHOLD}
 
 
 def notes(t: dict[str, Any], guards: list[tuple[str, dict[str, Any]]] = ()) -> list[Note]:
@@ -372,7 +383,9 @@ def notes(t: dict[str, Any], guards: list[tuple[str, dict[str, Any]]] = ()) -> l
          "세액공제), 저축성 보험의 비과세 한도, 분리과세가 적용되는 채권·인프라펀드, 그리고 배당이 아니라 양도차익으로 과세돼 종합과세와 "
          "분리되는 해외주식입니다. 같은 수익이라도 어느 통로에 두느냐에 따라 세후 결과가 달라집니다."),
         "자산 배치를 바꾸거나 큰 돈이 들어올 때",
-        "세법 기준(현행 법령 확인 필요)" + (" + 계산(단기 시장 금리를 예금 금리로 가정, 배당 제외)" if guards else "")))
+        "세법 기준(현행 법령 확인 필요)" + (" + 계산(단기 시장 금리를 예금 금리로 가정"
+                                         + (", 배당은 최근 1년 기준" if any(g["dividends"] is not None for _, g in guards)
+                                            else ", 배당 제외") + ")" if guards else "")))
     return found
 
 
@@ -383,20 +396,35 @@ def _guard_text(guards: list[tuple[str, dict[str, Any]]]) -> str:
         return ""
     text = "".join(_person_guard(owner, g) for owner, g in guards)
     rate = guards[0][1]["rate"]
-    return text + f"금리는 단기 시장 금리(연 {percent(rate)})를 예금 금리로 본 값이고, 배당은 원장에 없어 빠진 하한입니다. "
+    if not any(g["dividends"] is not None for _, g in guards):
+        return text + f"금리는 단기 시장 금리(연 {percent(rate)})를 예금 금리로 본 값이고, 배당은 원장에 없어 빠진 하한입니다. "
+    return text + (f"금리는 단기 시장 금리(연 {percent(rate)})를 예금 금리로 본 값입니다. 배당은 최근 1년 동안 주당 받은 금액에 "
+                   "지금 보유 수량을 곱한 연간 수준으로, 국내 주식은 전자공시 배당 결정, 미국 주식·ETF는 웹 조사 추정이며, "
+                   "ISA·연금계좌 배당은 따로 과세되어 뺐습니다. ")
 
 
 def _person_guard(owner: str, g: dict[str, Any]) -> str:
     who = "본인" if owner == "self" else "배우자"
     if g["interest_with_pay"] is not None and g["pay"]:
-        text = (f"{who} 명의로는 3년 안에 받을 성과급·주식 보상(확정·예상, 세후) {short_won(g['pay'])}까지 예금에 두면 이자만 연 약 "
-                f"{short_won(g['interest_with_pay'])}(기준의 {percent(g['share_with_pay'], 0)})이므로, 예금에 약 "
-                f"{short_won(g['threshold_balance'])}을 넘게 두지 말고 처음부터 아래 통로에 나눠 두십시오. ")
+        income = (f"이자만 연 약 {short_won(g['interest_with_pay'])}" if g["dividends"] is None else
+                  f"이자 연 약 {short_won(g['interest_with_pay'])}에 배당까지 더해 연 약 {short_won(g['income_with_pay'])}")
+        text = (f"{who} 명의로는 3년 안에 받을 성과급·주식 보상(확정·예상, 세후) {short_won(g['pay'])}까지 예금에 두면 {income}"
+                f"(기준의 {percent(g['share_with_pay'], 0)})이므로, 예금에 약 {short_won(g['threshold_balance'])}을 넘게 두지 말고 "
+                "처음부터 아래 통로에 나눠 두십시오. ")
     elif owner == "self":
-        text = (f"{who} 명의로는 예금에 약 {short_won(g['threshold_balance'])}을 넘게 두면 이자만으로 기준을 넘습니다. ")
+        text = (f"{who} 명의로는 예금에 약 {short_won(g['threshold_balance'])}을 넘게 두면 "
+                + ("이자만으로" if g["dividends"] is None else "배당과 합쳐") + " 기준을 넘습니다. ")
     else:
         text = ""
-    if g["interest_now"] is not None:
+    if g["interest_now"] is not None and g["dividends"] is not None:
+        top = ", ".join(f"{name} {short_won(won)}" for name, won, _ in g["dividend_parts"][:3])
+        text += (f"{who} 명의 현금·예금 {short_won(g['balance'])}의 이자는 연 약 {short_won(g['interest_now'])}이고, 일반 계좌 "
+                 f"배당은 연 약 {short_won(g['dividends'])}" + (f"({top})" if top else "") + "이라 이자와 배당을 합하면 연 약 "
+                 f"{short_won(g['income_now'])}(기준의 {percent(g['share_now'], 0)})입니다. ")
+        if g["dividends_unknown"]:
+            text += (f"배당을 확인하지 못한 {len(g['dividends_unknown'])}종목({', '.join(g['dividends_unknown'][:3])})은 빠진 "
+                     "하한입니다. ")
+    elif g["interest_now"] is not None:
         text += (f"{who} 명의 현금·예금 {short_won(g['balance'])}의 이자는 연 약 {short_won(g['interest_now'])}"
                  f"(기준의 {percent(g['share_now'], 0)})입니다. ")
     elif g["balance"] is None:

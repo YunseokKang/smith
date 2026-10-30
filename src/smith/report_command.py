@@ -381,6 +381,24 @@ def _publish(args: argparse.Namespace) -> int:
     return code
 
 
+def _sync_dividends(db: Path, config: dict[str, Any], now: datetime) -> None:
+    """The holdings' dividend evidence once it is a week old (a DART read and one web call); never raises."""
+    from smith import dividends, dividends_command
+    from smith.config import local_time
+    from smith.payload import load_view
+
+    try:
+        if not dividends.stale(db, now):
+            return
+        local = local_time(now, config["app"]["timezone"])
+        with closing(ledger.connect_read_only(db)) as conn:
+            view = load_view(conn, as_of=local, known_at=now)
+        result = dividends_command.sync_now(db, view, now=now, today=local.date())
+        _say(db, f"Dividend sync: {result['stored']} new point(s)" + "".join(f"; {f}" for f in result["failures"]))
+    except Exception as error:  # noqa: BLE001 - the weekly refresh must never block the scheduled task.
+        _say(db, f"Dividend sync crashed: {type(error).__name__}")
+
+
 def _events_after_report(args: argparse.Namespace) -> None:
     """The event check that follows a sent report, run once the daily mail has gone; never raises."""
     from smith.config import load_config
@@ -483,6 +501,7 @@ def _publish_once(args: argparse.Namespace) -> int:
         if found is None:
             # Same-day event notes (report design §29): once a day after the check time, apart from the reports.
             _check_events(args.db, config, now, reason="slot", sync=True)
+            _sync_dividends(args.db, config, now)   # Weekly, never while a report is due (FR-45).
             upcoming = delivery.slots_between(config["reports"], tz, now, now + PREPARE_AHEAD)
             if upcoming:
                 # Prepare: research ahead of the scheduled time so the report itself is not delayed.
