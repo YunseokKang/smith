@@ -192,6 +192,34 @@ class DisclosureTests(unittest.TestCase):
         self.assertEqual(len(found), 4)                                                 # The DART filings still go out.
         self.assertTrue(any("SEC" in f for f in failures))
 
+    def test_the_note_reads_what_each_filing_means_and_survives_a_failed_reading(self):
+        def reading(filings, *, today, secrets):
+            return {"overview": "가상전자 배당은 유지, 가상바이오는 증자로 지분이 묽어집니다.", "sources": [],
+                    "cost_usd": "0.3", "prompt_version": "test",
+                    "by_id": {"20261103000050": {"signal": "caution", "market_message": "제3자배정 증자로 지분이 묽어집니다.",
+                                                 "investor_meaning": "단기 변동이 커질 수 있습니다.", "watch": "자금 용도 확인.",
+                                                 "sources": [], "unchecked_figures": True}}}
+        events.check(self.db, CONFIG, now=NOW, reason="manual", sync=False, researcher=None, sender=self.sender,
+                     recipient="me@example.com", credentials=("a", "b", "c"), say=self.said.append, dart_key=KEY,
+                     dart_fetch=FakeDart(), interpreter=reading)
+        _, html = self.sent[0]
+        for piece in ("가상전자 배당은 유지, 가상바이오는 증자로", "시장의 메시지", "나 같은 개인 투자자에게", "지켜볼 점",
+                      "주의", "기존 주주 지분이 약 10.0% 줄어듭니다",   # The code's figure stays beside the reading.
+                      "이 회사 비중은 약", "자동 확인되지 않았습니다"):
+            self.assertIn(piece, html)
+
+        def broken(filings, *, today, secrets):
+            raise RuntimeError("model down")
+        later = NOW.replace(minute=NOW.minute + 5)
+        self.sent.clear()
+        with closing(ledger.connect(self.db)) as conn:       # Forget the first note so the same filings go again.
+            conn.execute("DELETE FROM event_notes")
+            conn.commit()
+        events.check(self.db, CONFIG, now=later, reason="manual", sync=False, researcher=None, sender=self.sender,
+                     recipient="me@example.com", credentials=("a", "b", "c"), say=self.said.append, dart_key=KEY,
+                     dart_fetch=FakeDart(), interpreter=broken)
+        self.assertIn("공시 해석을 만들지 못해 사실만 전합니다", self.sent[0][1])
+
     def test_a_failed_lookup_is_said_and_never_breaks_the_check(self):
         self.assertEqual(self.check(FakeDart(fail=True)), [])
         self.assertTrue(any("전자공시 조회 실패(network-error)" in line for line in self.said))

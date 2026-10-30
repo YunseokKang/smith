@@ -117,13 +117,17 @@ def enrich(db: Path, view: Any, as_of: datetime, filings: list[dict[str, Any]], 
            fetch: dart.Fetcher = dart.default_fetcher) -> list[dict[str, Any]]:
     """Each filing with its figures read by code ("figures") and what it means for this household ("household"), or
     "figures_failed" with the reason when the filing could not be read (the title and link still go out)."""
+    # The client's weight in each company (share of the securities Smith opines on): code's, never the model's input.
+    weights = {p["symbol"]: p["share"] for p in holdings.review(view)["positions"] if not p["hermes"]}
     read = []
     for raw in filings:
-        if raw.get("source") == "sec":     # Named by its items and linked; the English text is not read.
-            read.append({**raw, "figures": None, "household": None, "figures_failed": None})
+        held = [weights.get(s) for s in raw.get("symbols", [])]
+        share = None if not held or None in held else str(sum(held))
+        if raw.get("source") == "sec":     # Named by its items and linked; the English text is not read by code.
+            read.append({**raw, "figures": None, "household": None, "figures_failed": None, "held_share": share})
             continue
         f = dart.Filing(raw["rcept_no"], date.fromisoformat(raw["filed_on"]), raw["title"], raw["corp_name"])
-        item = {**raw, "url": f.url, "figures": None, "household": None, "figures_failed": None}
+        item = {**raw, "url": f.url, "figures": None, "household": None, "figures_failed": None, "held_share": share}
         try:
             if raw["category"] == "dividend":
                 item.update(_dividend(db, view, as_of, f, raw["symbols"], key=key, known_at=known_at, fetch=fetch))

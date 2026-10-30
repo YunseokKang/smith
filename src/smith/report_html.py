@@ -131,7 +131,7 @@ def render_event(note: dict[str, Any]) -> tuple[str, str, str]:
             f'color:{ON_DARK};margin:4px 0 12px">{escape(title)}</div>'
             f'<div style="font-size:14px;line-height:1.5;color:{ON_DARK}">{note["as_of"]:%Y년 %m월 %d일 %H:%M} 기준 · '
             f'{escape(line)}</div></td></tr>' + _tile_grid(tiles))
-    why = _event_research(note)
+    why = None if note["kind"] == "disclosure" else _event_research(note)   # A filing's reading sits on its own card.
     body = (_opened(_section("무엇이 일어났고 우리 집에는", facts[0], facts[1], brief=None))
             + (_opened(_section("왜 그랬나 (조사)", why[0], why[1], brief=None)) if why else "")
             + _opened(_section("Smith의 입장", stance, "", brief=None)))
@@ -242,8 +242,13 @@ def _disclosure_event(note: dict[str, Any]) -> tuple[str, str, str, list[tuple[s
              ("배당 입금 예정", "-" if net is None else _short(net), "세후" + (f" · {pay[5:7]}/{pay[8:10]}" if pay else "")),
              ("희석 주의", f"{count['dilution']}건", "유상증자·전환사채 등"),
              ("위험 신호", f"{count['risk']}건", "소송·최대주주 변경 등")]
-    lead = (f"보유하신 종목에 새 공시가 {len(filings)}건 나왔습니다. 국내 공시의 숫자는 전자공시 원문에서 Smith가 직접 읽었고, "
-            "배당은 우리 집 보유 수량과 계좌로 계산했습니다. 미국 공시는 SEC 보고 항목으로 무엇에 관한 것인지 적었습니다.")
+    # What the filings mean together first (the client reads one paragraph, user request 2026-10-30), then how it was made.
+    how = ("공시마다 시장이 읽는 메시지와 개인 투자자에게 주는 의미를 Smith가 원문과 보도를 읽고 정리했습니다. "
+           if note.get("overview") else
+           "이번에는 공시 해석을 만들지 못해 사실만 전합니다. " if note.get("research_failed") else "")
+    lead = ((note.get("overview") + " " if note.get("overview") else "")
+            + ("(요약의 일부 수치는 출처 페이지에서 자동 확인되지 않았습니다.) " if note.get("overview_unchecked") else "")
+            + how + "국내 공시의 숫자와 우리 집 배당은 Smith가 전자공시 원문과 보유 수량으로 직접 계산했습니다.")
     cards = "".join(_filing_card(f) for f in filings)
     stance = ("공시 한 건으로 매매하지 않습니다. 배당은 지급일에 증권 계좌로 들어오고, 희석·위험 공시가 있는 종목은 다음 화요 "
               "투자·시장 보고에서 다시 봅니다.")
@@ -251,15 +256,40 @@ def _disclosure_event(note: dict[str, Any]) -> tuple[str, str, str, list[tuple[s
     return subject, f"보유 종목 공시 {len(filings)}건", line, tiles, (lead, cards), stance
 
 
+_SIGNAL_PILL = {"positive": ("긍정 신호", "good"), "neutral": ("중립", "neutral"), "caution": ("주의", "warn")}
+
+
 def _filing_card(f: dict[str, Any]) -> str:
     label, kind = _FILING_PILL[f["category"]]
+    insight = f.get("insight")
+    signal = "" if not insight else " " + _pill(*_SIGNAL_PILL[insight["signal"]])
+    reading = "" if not insight else "".join(
+        f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin:6px 0">'
+        f'<span style="font-weight:700;color:{INK}">{title}</span> {escape(insight[key])}</div>'
+        for title, key in (("시장의 메시지", "market_message"), ("나 같은 개인 투자자에게", "investor_meaning"),
+                           ("지켜볼 점", "watch")) if insight.get(key))
+    facts = _filing_text(f)
+    weight = (f" 고객님 증권 자산 중 이 회사 비중은 약 {Decimal(f['held_share']) * 100:.1f}%입니다."
+              if f.get("held_share") is not None and not f.get("superseded") else "")
+    if reading:   # The reading leads; the code's own facts (what we receive, our weight) follow in a quieter line.
+        main, extra = reading, ("" if facts.startswith(("미국 SEC에 낸 보고", "자세한 내용은")) else facts)
+    else:
+        main, extra = f'<div style="font-size:14px;line-height:1.6;color:{BODY}">{escape(facts)}</div>', ""
+    extra = (extra + weight).strip()
+    ours = (f'<div style="font-size:13px;line-height:1.6;color:{MUTED};margin-top:6px">{escape(extra)}</div>'
+            if extra else "")
+    notes = "해석의 일부 수치는 출처 페이지에서 자동 확인되지 않았습니다." if insight and insight.get("unchecked_figures") else ""
+    links = " · ".join(f'<a href="{escape(url)}" style="color:{MUTED}">근거 {n}</a>'
+                       for n, url in enumerate((insight or {}).get("sources") or [], 1))
+    footer = ("" if not notes and not links else
+              f'<div style="font-size:12px;color:{MUTED};margin-top:6px">{escape(notes)}{" " if notes and links else ""}'
+              f'{links}</div>')
     return (f'<div style="margin:12px 0;padding:14px 16px;border:1px solid {HAIRLINE};border-radius:16px">'
-            f'<div style="font-size:14px;font-weight:600;line-height:1.5;color:{INK}">{_pill(label, kind)} '
+            f'<div style="font-size:14px;font-weight:600;line-height:1.5;color:{INK}">{_pill(label, kind)}{signal} '
             f'<a href="{escape(f["url"])}" style="color:{INK};text-decoration:underline">{escape(f["corp_name"])} · '
             f'{escape(f["title"])}</a></div>'
             f'<div style="font-family:{MONO};font-size:12px;color:{MUTED};margin:2px 0 6px">{escape(f["filed_on"])} · '
-            f'{"SEC EDGAR" if f.get("source") == "sec" else "전자공시"}</div>'
-            f'<div style="font-size:14px;line-height:1.6;color:{BODY}">{escape(_filing_text(f))}</div></div>')
+            f'{"SEC EDGAR" if f.get("source") == "sec" else "전자공시"}</div>{main}{ours}{footer}</div>')
 
 
 def _filing_text(f: dict[str, Any]) -> str:

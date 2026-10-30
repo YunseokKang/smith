@@ -93,6 +93,7 @@ Rules:
 
 Researcher = Callable[..., dict[str, Any]]
 Sender = Callable[..., str]
+Interpreter = Callable[..., dict[str, Any]]   # disclosure_insight.interpret: (filings, *, today, secrets) -> reading.
 
 
 @dataclass(frozen=True)
@@ -132,11 +133,12 @@ def check(db: Path, config: dict[str, Any], *, now: datetime, reason: str, sync:
           credentials: tuple[str, str, str] | None = None, secrets: list[str] | None = None,
           say: Callable[[str], None] = print, dart_key: str | None = None,
           dart_fetch: dart.Fetcher = dart.default_fetcher, sec_contact: str | None = None,
-          sec_fetch: Any = None) -> list[dict[str, Any]]:
+          sec_fetch: Any = None, interpreter: Interpreter | None = None) -> list[dict[str, Any]]:
     """Look for events since the last check, retry the notes not delivered yet, and send what is due. Returns one
     outcome per event ({"key", "status", "detail"}). `sync` refreshes the holdings and the evidence first (after
     the morning report they are fresh already). `researcher` is None to skip the web research (previews, tests).
-    `dart_key` (OpenDART) and `sec_contact` (the e-mail the SEC requires in the User-Agent) enable the disclosure note. Nothing is raised: a failure is recorded on the note and
+    `dart_key` (OpenDART) and `sec_contact` (the e-mail the SEC requires in the User-Agent) enable the disclosure note;
+    `interpreter` (disclosure_insight.interpret) adds what each filing means, None to send the facts alone. Nothing is raised: a failure is recorded on the note and
     retried at a later check inside its window."""
     if sync:
         _sync(db, say)
@@ -166,7 +168,7 @@ def check(db: Path, config: dict[str, Any], *, now: datetime, reason: str, sync:
                   if row["event_key"] not in seen]
     return [_deliver(db, config, event, detail, now=now, baseline=baseline, researcher=researcher, sender=sender,
                      recipient=recipient, credentials=credentials, secrets=secrets or [], dart_key=dart_key,
-                     dart_fetch=dart_fetch) for event, detail in found]
+                     dart_fetch=dart_fetch, interpreter=interpreter) for event, detail in found]
 
 
 def detect(conn: Any, config: dict[str, Any], now: datetime, baseline: datetime) -> list[tuple[Event, dict[str, Any]]]:
@@ -201,7 +203,8 @@ def measure_move(conn: Any, t0: datetime, t1: datetime) -> dict[str, Any] | None
 
 def build_note(db: Path, event: Event, detail: dict[str, Any], *, now: datetime, baseline: datetime, tz: str,
                researcher: Researcher | None, secrets: list[str], dart_key: str | None = None,
-               dart_fetch: dart.Fetcher = dart.default_fetcher) -> dict[str, Any] | None:
+               dart_fetch: dart.Fetcher = dart.default_fetcher,
+               interpreter: Interpreter | None = None) -> dict[str, Any] | None:
     """The note's data for one event, or None when a rate decision is not confirmed yet (neither the statistics
     nor an official source have it). Research failures leave `research_failed` set; the figures still go out."""
     local = local_time(now, tz)
@@ -211,7 +214,21 @@ def build_note(db: Path, event: Event, detail: dict[str, Any], *, now: datetime,
         if not dart_key and any(f.get("source") != "sec" for f in detail["filings"]):
             return None     # Kept pending: retried once the key is back.
         filings = disclosures.enrich(db, view, local, detail["filings"], key=dart_key, known_at=now, fetch=dart_fetch)
-        return {"kind": "disclosure", "key": event.key, "day": event.day, "as_of": local, "filings": filings}
+        insight = None
+        if interpreter is not None:
+            try:
+                insight = interpreter(filings, today=local.date(), secrets=secrets)
+            except Exception as error:  # noqa: BLE001 - the facts still go out, said to be without the reading.
+                logger.warning("Disclosure reading failed for %s: %s", event.key, getattr(error, "code", type(error).__name__))
+        for f in filings:
+            f["insight"] = None if insight is None else insight["by_id"].get(f["rcept_no"])
+        return {"kind": "disclosure", "key": event.key, "day": event.day, "as_of": local, "filings": filings,
+                "overview": "" if insight is None else insight["overview"],
+                "overview_unchecked": bool(insight and insight.get("overview_unchecked")),
+                "insight_sources": [] if insight is None else insight["sources"],
+                "research_failed": interpreter is not None and insight is None,
+                "research": None if insight is None else {"items": len(insight["by_id"]), "cost_usd": insight["cost_usd"],
+                                                          "prompt_version": insight["prompt_version"]}}
     found = None
     if researcher is not None:
         question, wanted = _question(event, local.date(), local_time(baseline, tz).date())
@@ -227,7 +244,7 @@ def build_note(db: Path, event: Event, detail: dict[str, Any], *, now: datetime,
 
 def preview(db: Path, config: dict[str, Any], kind: str, *, now: datetime, researcher: Researcher | None = None,
             secrets: list[str] | None = None, dart_key: str | None = None, sec_contact: str | None = None,
-            disclosure_days: int = disclosures.SCAN_DAYS) -> tuple[str, str, str] | None:
+            disclosure_days: int = disclosures.SCAN_DAYS, interpreter: Interpreter | None = None) -> tuple[str, str, str] | None:
     """One note from current data, never sent or recorded: the latest rate meeting (from the statistics, or from
     research when `researcher` is given), the holdings' move over the last day whatever its size, or the material
     filings of the KR holdings over the last `disclosure_days` (with `dart_key`), carried before or not."""
@@ -247,7 +264,8 @@ def preview(db: Path, config: dict[str, Any], kind: str, *, now: datetime, resea
         if not filings:
             return None
         note = build_note(db, Event("disclosure", local.date(), filings[0]["rcept_no"]), {"filings": filings}, now=now,
-                          baseline=baseline, tz=tz, researcher=None, secrets=[], dart_key=dart_key)
+                          baseline=baseline, tz=tz, researcher=None, secrets=secrets or [], dart_key=dart_key,
+                          interpreter=interpreter)
         return None if note is None else report_html.render_event(note)
     if kind == "bok":
         meeting = max((m for m in evidence.BOK_RATE_MEETINGS if m <= local.date()), default=None)
@@ -468,7 +486,7 @@ def _research_summary(found: dict[str, Any] | None) -> dict[str, Any] | None:
 def _deliver(db: Path, config: dict[str, Any], event: Event, detail: dict[str, Any] | None, *, now: datetime,
              baseline: datetime, researcher: Researcher | None, sender: Sender, recipient: str | None,
              credentials: tuple[str, str, str] | None, secrets: list[str], dart_key: str | None = None,
-             dart_fetch: dart.Fetcher = dart.default_fetcher) -> dict[str, Any]:
+             dart_fetch: dart.Fetcher = dart.default_fetcher, interpreter: Interpreter | None = None) -> dict[str, Any]:
     """Claim, build, mark sending, send and record one note. `detail` is None for a note retried from the ledger."""
     window = (None if event.kind != "portfolio_move" or detail is None
               else {"from": baseline.isoformat(), "to": now.isoformat()})
@@ -504,7 +522,8 @@ def _deliver(db: Path, config: dict[str, Any], event: Event, detail: dict[str, A
         detail = {"filings": mine}
     try:
         note = build_note(db, event, detail or {}, now=at, baseline=baseline, tz=config["app"]["timezone"],
-                          researcher=researcher, secrets=secrets, dart_key=dart_key, dart_fetch=dart_fetch)
+                          researcher=researcher, secrets=secrets, dart_key=dart_key, dart_fetch=dart_fetch,
+                          interpreter=interpreter)
     except Exception as error:  # noqa: BLE001 - a failed note is recorded and retried, never raised into the scheduler.
         logger.warning("Event note %s could not be built: %s", event.key, type(error).__name__)
         advance("pending", "pending", error_code=f"build-{type(error).__name__}"[:80])

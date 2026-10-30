@@ -374,9 +374,23 @@ def _publish(args: argparse.Namespace) -> int:
         raise
     if args.action == "run-due":
         _run_daily(args)   # After the reports (review 2026-10-25): a due report never waits behind the daily mail.
+        if getattr(args, "events_after_report", False):
+            _events_after_report(args)   # After the daily mail: a filing's reading takes minutes (FR-44).
         _run_health(args)  # And the weekly health letter after the daily mail (health design §9).
         _run_evening(args)  # The evening 내일 준비 mail (daily design §16); its slot never meets the others'.
     return code
+
+
+def _events_after_report(args: argparse.Namespace) -> None:
+    """The event check that follows a sent report, run once the daily mail has gone; never raises."""
+    from smith.config import load_config
+
+    try:
+        config = load_config(args.config)
+    except (OSError, ValueError, UnicodeDecodeError) as error:
+        _say(args.db, f"Event check (after-report) skipped: config unreadable ({type(error).__name__})")
+        return
+    _check_events(args.db, config, datetime.now(timezone.utc), reason="after-report", sync=False)
 
 
 def _run_daily(args: argparse.Namespace) -> None:
@@ -524,9 +538,10 @@ def _publish_once(args: argparse.Namespace) -> int:
         print(f"Subject: {result['subject']}")
     if result["status"] == "sent" and (config.get("backup") or {}).get("dir"):
         _backup_after_send(args.db, config["backup"])
-    # The holdings and the evidence were just refreshed: look for events (the US session overnight) without syncing.
+    # The holdings and the evidence were just refreshed: look for events (the US session overnight) without syncing,
+    # once the daily mail is out (`_publish`): reading the filings takes minutes and must not delay that mail.
     if args.action == "run-due":
-        _check_events(args.db, config, datetime.now(timezone.utc), reason="after-report", sync=False)
+        args.events_after_report = True
     return 0 if result["status"] in ("sent", "skipped") else 1
 
 
@@ -534,7 +549,7 @@ def _check_events(db: Path, config: dict[str, Any], now: datetime, *, reason: st
     """The same-day event notes (smith.events, report design §29): at the daily check time (`reason` "slot", once a
     day) or right after a report ("after-report"). Research runs in the headless sandbox; a failure is logged and
     the event retried at a later check. Never blocks the reports."""
-    from smith import credentials, events
+    from smith import credentials, disclosure_insight, events
 
     if not (config.get("events") or {}).get("enabled"):
         return
@@ -548,7 +563,8 @@ def _check_events(db: Path, config: dict[str, Any], now: datetime, *, reason: st
                                 secrets=credentials.all_secrets(), say=lambda message: _say(db, message),
                                 dart_key=credentials.load_api_key("dart"),
                                 # The SEC asks for a contact in the User-Agent: the client's own address (user decision 2026-10-29).
-                                sec_contact=config.get("mail", {}).get("recipient"))
+                                sec_contact=config.get("mail", {}).get("recipient"),
+                                interpreter=disclosure_insight.interpret)
         for outcome in outcomes:
             # The detail can be the subject (an amount): the log gets the key and the status only.
             _say(db, f"Event {outcome['key']}: {outcome['status']}"
