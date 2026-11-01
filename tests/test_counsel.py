@@ -5,7 +5,7 @@ import tempfile
 import unittest
 import unittest.mock
 from contextlib import closing
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from smith import contacts, counsel, gmail, health_qa, keep, ledger, memory, qa
@@ -406,9 +406,9 @@ class CounselMailTests(unittest.TestCase):
 
     def reader(self, url, headers):
         self.reads.append(url)
-        if "messages?q=" in url:
+        if "messages?q=" in url:   # Ids starting with "old" play mails the search has not indexed yet.
             return 200, {"messages": [{"id": m["id"]} for m in self.messages if "SENT" in m["labelIds"] and not any(
-                h["name"] == gmail.SMITH_HEADER for h in m["payload"]["headers"])]}
+                h["name"] == gmail.SMITH_HEADER for h in m["payload"]["headers"]) and not m["id"].startswith("old")]}
         if "/messages/" in url:
             wanted = url.split("/messages/")[1].split("?")[0]
             found = next(m for m in self.messages if m["id"] == wanted)
@@ -457,6 +457,40 @@ class CounselMailTests(unittest.TestCase):
                           sender=send, reader=self.reader, poster=self.poster, counsel=counsel_answerer, counsel_prefix="[상담]")
         self.assertEqual([r["status"] for r in results], ["answered"])
         self.assertEqual(self.sent[1]["text"], "답(1)")
+
+    def test_the_frequent_routine_reads_counsel_threads_only(self):
+        # A report thread exists too; the full routine reads it, the counsel-only routine never touches it and
+        # re-reads only the counsel threads of the last COUNSEL_RECENT days (a reply the search has not indexed yet in
+        # an older thread waits for the full routine; one the search finds is picked up at once).
+        with closing(ledger.connect(self.db)) as conn:
+            ledger.claim_report(conn, report_id="r1", slot=None, kind="monday", trigger="manual", created_at=NOW, as_of=NOW,
+                                baseline=None, missed_slots=[])
+            ledger.finish_report(conn, report_id="r1", status="sent", finished_at=NOW, subject="[Smith][재무] 보고", message_id="reportmsg01")
+            ledger.claim_question(conn, message_id="oldcounsel01", thread_id="thread0009", report_id=None,
+                                  received_at=NOW - timedelta(days=10), now=NOW, product="counsel", question_text="옛 질문")
+            ledger.finish_question(conn, message_id="oldcounsel01", status="answered", now=NOW, answer_message_id="oldanswer01")
+        self.messages += [message("reportmsg01", "thread0001", "[Smith][재무] 보고", smith=True),
+                          message("oldcounsel01", "thread0009", "[상담] 옛 질문", at="1792638000000"),
+                          message("oldfollow01", "thread0009", "Re: [상담] 옛 질문", text="그때 그 얘기 말인데", at="1793503800000")]
+        questions, _ = qa.find(self.db, ("a", "b", "c"), ME, now=NOW, reader=self.reader, poster=self.poster, counsel_prefix="[상담]",
+                               counsel_only=True)
+        self.assertEqual([q.message_id for q in questions], ["counselmsg01"])
+        self.assertFalse(any("/messages/reportmsg01?" in url or "/threads/thread0001?" in url or "/threads/thread0009?" in url
+                             for url in self.reads))
+        self.reads.clear()
+        questions, _ = self.find()   # The full routine: the report thread and the older counsel thread are read.
+        self.assertEqual(sorted(q.message_id for q in questions), ["counselmsg01", "oldfollow01"])
+        self.assertTrue(any("/threads/thread0001?" in url for url in self.reads))
+
+    def test_mail_answer_flags_parse(self):
+        import argparse
+
+        from smith import mail_command
+        parser = argparse.ArgumentParser()
+        mail_command.add_parser(parser.add_subparsers(dest="command"))
+        args = parser.parse_args(["mail", "answer", "--counsel-only", "--log"])
+        self.assertEqual((args.action, args.counsel_only, args.log), ("answer", True, True))
+        self.assertFalse(parser.parse_args(["mail", "answer"]).counsel_only)
 
     def test_sent_mail_search_follows_later_pages_within_a_bound(self):
         pages = {"": {"messages": [{"id": "a1"}], "nextPageToken": "p2"}, "p2": {"messages": [{"id": "b2"}], "nextPageToken": "p3"},

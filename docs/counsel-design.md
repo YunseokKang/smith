@@ -18,9 +18,13 @@
 
 ## 2. 입구
 
-- **메일**: 고객이 설정된 본인 주소로 제목 `[상담] …` 메일을 보낸다. 15분 주기 작업(`run-due` → `mail_command.answer`)의 `qa.find`가
-  `[counsel] enabled`일 때만 보낸편지함을 검색한다(`gmail.sent_with_subject`: `in:sent from:me after:<30일 전> subject:상담`,
-  ID만, 본문 없음, 50개씩 최대 4쪽; Codex 리뷰 2026-11-01 P2). Gmail 검색은 대괄호를 맞추지 못하는 거친 필터이므로 코드가 각 메시지 머리글에서 **정확한 접두어**(답장 표시
+- **메일**: 고객이 설정된 본인 주소로 제목 `[상담] …` 메일을 보낸다. `qa.find`가 `[counsel] enabled`일 때만 보낸편지함을
+  검색한다(`gmail.sent_with_subject`: `in:sent from:me after:<30일 전> subject:상담`, ID만, 본문 없음, 50개씩 최대 4쪽; Codex 리뷰
+  2026-11-01 P2). **두 루틴**이 집어 간다(사용자 요청 2026-11-01: 최악 20분 대기는 길다): ① 상담 전용 작업 `Smith\CounselDue`
+  (기본 1분, `smith mail answer --counsel-only --log`)는 검색 1번과 최근 7일(`qa.COUNSEL_RECENT`) 상담 스레드만 읽어 1분에
+  Gmail 호출이 몇 번뿐이다 ② 15분 작업 `Smith\ReportDue`(`run-due`)는 모든 스레드(30일)를 읽으므로 더 오래된 상담 스레드의
+  답장도 여기서 잡는다. 질문 선점은 원장 트랜잭션이라 두 루틴이 겹쳐도 같은 메일에 두 번 답하지 않고, 답을 쓰는 몇 분 동안은
+  `IgnoreNew`로 다음 틱이 건너뛰어진다. 결과·실패는 `data/report-runs.log`에 남고 조용한 틱은 아무것도 쓰지 않는다. Gmail 검색은 대괄호를 맞추지 못하는 거친 필터이므로 코드가 각 메시지 머리글에서 **정확한 접두어**(답장 표시
   `Re:`·`답장:` 뒤)를 확인하고, 나머지 규칙은 FR-18과 같다: SENT 표지 + 설정 주소의 발신만, `X-Smith-Message` 머리글이 있으면
   Smith 자신의 메일로 건너뜀. 받는 사람(`To`)도 설정 주소여야 한다(남에게 보낸 `[상담]` 메일은 `not-to-self`). 접두어가 없는
   검색 결과("상담 예약 확인")는 `no-counsel-prefix`로 기록해 다시 보지 않는다.

@@ -2,6 +2,7 @@
 Smith's threads and, when `[counsel]` is on, the `[상담]` mails the client writes to themselves)."""
 import argparse
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,12 @@ def add_parser(sub: Any) -> None:
                       help="login: also grant read-only Drive access, used only for the scheduled Takeout archives of Keep")
     mail.add_argument("--contacts", action="store_true",
                       help="login: also grant read-only Contacts access (names, birthdays, 중요한 날, 메모; no phone, e-mail or address)")
+    mail.add_argument("--counsel-only", action="store_true",
+                      help="answer: look only for the client's [상담] mails and the replies in recent counsel threads (one "
+                           "search, a few reads): the frequent routine of docs/counsel-design.md")
+    mail.add_argument("--log", action="store_true",
+                      help="answer: also append answered and failed questions to data/report-runs.log (for the scheduler, "
+                           "which runs pythonw without a console)")
     mail.add_argument("--db", type=Path, default=Path("data/smith.db"))
     mail.add_argument("--config", type=Path, default=DEFAULT_LOCAL_CONFIG,
                       help="test: local config holding [mail] recipient (default: config/smith.local.toml)")
@@ -40,7 +47,13 @@ def run(args: argparse.Namespace) -> int:
     if args.action == "login":
         return _login(args)
     if args.action == "answer":
-        return answer(args.db, args.config, verbose=True)
+        say = print
+        if args.log:
+            from smith.report_command import _say
+
+            def say(message: str) -> None:   # noqa: F811 - the logged variant replaces print for this run.
+                _say(args.db, message)
+        return answer(args.db, args.config, verbose=not args.log, counsel_only=args.counsel_only, say=say)
     return _test(args)
 
 
@@ -78,8 +91,10 @@ def _login(args: argparse.Namespace) -> int:
     return 0
 
 
-def answer(db: Path, config_path: Path, *, verbose: bool = False) -> int:
-    """Answer new questions in Smith's report threads. Quiet when there is nothing to do."""
+def answer(db: Path, config_path: Path, *, verbose: bool = False, counsel_only: bool = False,
+           say: Callable[[str], None] = print) -> int:
+    """Answer new questions in Smith's report threads, or with `counsel_only` only the client's counsel mails (FR-49,
+    the frequent routine). Quiet when there is nothing to do; `say` receives every line (print, or the run log)."""
     from datetime import datetime, timezone
 
     from smith import qa
@@ -88,13 +103,17 @@ def answer(db: Path, config_path: Path, *, verbose: bool = False) -> int:
     try:
         config = load_config(config_path)
     except (OSError, ValueError, UnicodeDecodeError):
-        print(f"Missing setup: local config missing or invalid: {config_path}")
+        say(f"Missing setup: local config missing or invalid: {config_path}")
         return 2
     to = config.get("mail", {}).get("recipient")
     stored = credentials.load_gmail()
     if to is None or stored is None:
-        print("Missing setup: a [mail] recipient and a stored Gmail grant are required.")
+        say("Missing setup: a [mail] recipient and a stored Gmail grant are required.")
         return 2
+    if counsel_only and not (config.get("counsel") or {}).get("enabled"):
+        if verbose:
+            say("Counsel is off ([counsel] enabled = false); nothing to look for.")
+        return 0
     household, tz = profile(config), config["app"]["timezone"]
     now = datetime.now(timezone.utc)
     current = lineage(config_path)
@@ -114,19 +133,19 @@ def answer(db: Path, config_path: Path, *, verbose: bool = False) -> int:
     try:
         results = qa.poll(db, recipient=to, credentials=stored, now=now, build=build, secrets=secrets, tz=tz,
                           daily=daily_answerer, health=health_answerer, dart_key=credentials.load_api_key("dart"),
-                          counsel=counsel_answerer,
+                          counsel=counsel_answerer, counsel_only=counsel_only,
                           counsel_prefix=counsel_config.get("prefix", counsel.DEFAULT_PREFIX) if counsel_on else None)
     except gmail.MailError as error:
         if verbose or error.code != "no-read-scope":
-            print(f"Answering questions failed ({error.code}).")
+            say(f"Answering questions failed ({error.code}).")
         return 1
     for item in results:
         kept = (", looked up" if item.get("looked_up") else "") + (
             f", remembered {item['remembered']}" if item.get("remembered") else "")
         failed = f", memory not saved ({item['memory_error']})" if item.get("memory_error") else ""
-        print(f"Question {item['message_id'][:8]}...: {item['status']}{kept}{failed}")
+        say(f"Question {item['message_id'][:8]}...: {item['status']}{kept}{failed}")
     if verbose and not results:
-        print("No new questions.")
+        say("No new questions.")
     return 0
 
 

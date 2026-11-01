@@ -47,12 +47,14 @@ py -3.10 -m uv pip install --python .venv -e .
 | `research run\|show\|topics` | 개인 정보 없이 정책·시장 웹 조사 실행·결과 보기·조사 주제 보기 |
 | `proposal list` / `proposal accept\|decline\|done KEY [--note]` | 지난 제안 목록, 제안에 대한 결정 기록(다음 보고서의 후속 점검에 반영) |
 | `realestate login\|status\|logout\|sync\|show` | 공공데이터포털·R-ONE 키 저장(화면 비표시), 보유 단지 실거래가 수집과 시세·전세 요약 |
-| `mail login --client-file PATH [--read]` / `mail status` / `mail test` / `mail answer` / `mail logout` | Gmail 권한 연결·확인·시험 발송. `--read`와 `[mail] answer_replies = true`면 보고서 메일에 대한 답장 질문에 답한다. 받는 주소는 Git 제외 `config/smith.local.toml` |
+| `mail login --client-file PATH [--read]` / `mail status` / `mail test` / `mail answer [--counsel-only] [--log]` / `mail logout` | Gmail 권한 연결·확인·시험 발송. `--read`와 `[mail] answer_replies = true`면 보고서 메일에 대한 답장 질문에 답한다. `--counsel-only`는 `[상담]` 메일과 최근 상담 스레드만 본다(상담 전용 작업). 받는 주소는 Git 제외 `config/smith.local.toml` |
+| `ask "질문" [--domains finance,health,life] [--show-payload] [--json]` | 개인 상담(FR-49)을 터미널에서: 편지를 출력만 하고 보내거나 저장하지 않는다 |
 | `summary [--as-of TIME] [--known-at TIME] [--json]` | 순자산, 자산 배분, 유동성, 월 현금흐름, 목표, 데이터 신선도와 경고 |
 | `doctor` | 원장·설정·자격 증명(존재 여부만)·작업 스케줄러·최근 동기화·조사·발송·메일 답변·실행 로그를 한 번에 점검. 아무것도 보내거나 쓰지 않는다 |
 
 정기 실행(Windows): `powershell -ExecutionPolicy Bypass -File scripts\install-schedule.ps1`가 `Smith\ReportDue`
-작업(15분마다 `report run-due`)을 등록·갱신한다(`-Remove`로 삭제). 등록 뒤 `smith doctor`로 확인한다.
+작업(15분마다 `report run-due`)과 `Smith\CounselDue` 작업(기본 1분마다 `mail answer --counsel-only --log`, `[상담]` 메일 전용;
+`-CounselMinutes N`, `-NoCounsel`)을 등록·갱신한다(`-Remove`로 둘 다 삭제). 등록 뒤 `smith doctor`로 확인한다.
 
 기본 원장은 `data/smith.db`(Git 제외). 입력 형식은 `docs/data-contract.md`,
 환경 문제와 해결 기록은 `docs/dev-notes.md`를 참고한다.

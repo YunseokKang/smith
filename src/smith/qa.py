@@ -47,6 +47,7 @@ BUDGET_USD = "3.00"
 TIMEOUT_SECONDS = 600
 MAX_ANSWERS_PER_DAY = 10
 LOOKBACK = timedelta(days=30)
+COUNSEL_RECENT = timedelta(days=7)   # Counsel threads the frequent routine re-reads for replies (FR-49).
 MAX_QUESTION_CHARS = 2000
 MAX_HISTORY_TURNS = 6   # Earlier turns of the thread sent with a question (about 20,000 characters at most).
 
@@ -190,13 +191,15 @@ def counsel_subject(subject: str, prefix: str) -> bool:
 
 def find(db: Path, credentials: tuple[str, str, str], recipient: str, *, now: datetime,
          reader: gmail.Getter = gmail.get, poster: gmail.Poster = gmail.post,
-         counsel_prefix: str | None = None) -> tuple[list[Question], list[tuple[str, str, str]]]:
+         counsel_prefix: str | None = None, counsel_only: bool = False) -> tuple[list[Question], list[tuple[str, str, str]]]:
     """(questions to answer, [(message_id, thread_id, reason)] to record as skipped). Reads the headers of
     Smith's own report threads (last LOOKBACK) and the body only of messages approved as the client's.
 
     With `counsel_prefix` (FR-49), the client's own sent mails whose subject opens with it are questions too: one
     ids-only search of the sent mail, then the same header checks; the threads they open are read again for the
-    replies that continue them (`ledger.counsel_threads`).
+    replies that continue them (`ledger.counsel_threads`). With `counsel_only` nothing else is read: the frequent
+    counsel routine costs one search plus the counsel threads of the last COUNSEL_RECENT days (older counsel threads
+    and every other thread wait for the full routine).
 
     Raises:
         gmail.MailError: the grant lacks read access ("no-read-scope") or Gmail could not be reached.
@@ -205,18 +208,21 @@ def find(db: Path, credentials: tuple[str, str, str], recipient: str, *, now: da
     if gmail.READ_SCOPE not in scopes:
         raise gmail.MailError("no-read-scope")
     with closing(ledger.connect_read_only(db)) as conn:
-        runs = [r for r in ledger.report_runs(conn, limit=200) if r["status"] == "sent" and r["message_id"]
-                and datetime.fromisoformat(r["created_at"]) >= now - LOOKBACK]
-        # Daily-routine mails are threads of their own (daily design §6): their replies get the daily context.
-        runs += [{**r, "report_id": r["run_key"], "product": "daily"} for r in ledger.sent_daily_runs(conn, since=now - LOOKBACK)]
-        # The evening 내일 준비 mail is a daily-routine thread too (daily design §16): its snapshot has the same shape.
-        runs += [{**r, "report_id": r["run_key"], "product": "daily"}
-                 for r in ledger.sent_daily_runs(conn, since=now - LOOKBACK, product="evening")]
-        # Health letters likewise (health design §8): their replies get the health context and nothing else.
-        runs += [{**r, "report_id": r["run_key"], "product": "health"}
-                 for r in ledger.sent_daily_runs(conn, since=now - LOOKBACK, product="health")]
+        runs: list[dict[str, Any]] = []
+        if not counsel_only:
+            runs = [r for r in ledger.report_runs(conn, limit=200) if r["status"] == "sent" and r["message_id"]
+                    and datetime.fromisoformat(r["created_at"]) >= now - LOOKBACK]
+            # Daily-routine mails are threads of their own (daily design §6): their replies get the daily context.
+            runs += [{**r, "report_id": r["run_key"], "product": "daily"} for r in ledger.sent_daily_runs(conn, since=now - LOOKBACK)]
+            # The evening 내일 준비 mail is a daily-routine thread too (daily design §16): its snapshot has the same shape.
+            runs += [{**r, "report_id": r["run_key"], "product": "daily"}
+                     for r in ledger.sent_daily_runs(conn, since=now - LOOKBACK, product="evening")]
+            # Health letters likewise (health design §8): their replies get the health context and nothing else.
+            runs += [{**r, "report_id": r["run_key"], "product": "health"}
+                     for r in ledger.sent_daily_runs(conn, since=now - LOOKBACK, product="health")]
         known = ledger.seen_questions(conn) | ledger.answer_message_ids(conn) | {r["message_id"] for r in runs}
-        counsel_threads = ledger.counsel_threads(conn, since=now - LOOKBACK) if counsel_prefix else set()
+        counsel_since = now - (COUNSEL_RECENT if counsel_only else LOOKBACK)
+        counsel_threads = ledger.counsel_threads(conn, since=counsel_since) if counsel_prefix else set()
     threads: dict[str, dict[str, Any]] = {}
     for run in runs:
         threads.setdefault(gmail.thread_of(token, run["message_id"], getter=reader), run)
@@ -615,12 +621,13 @@ def poll(db: Path, *, recipient: str, credentials: tuple[str, str, str], now: da
          sender: Any = gmail.send, reader: gmail.Getter = gmail.get, poster: gmail.Poster = gmail.post,
          tz: str = DEFAULT_TIMEZONE, daily: Any = None, health: Any = None,
          verifier: qa_lookup.Verifier | None = None, dart_key: str | None = None,
-         counsel: Any = None, counsel_prefix: str | None = None) -> list[dict[str, Any]]:
+         counsel: Any = None, counsel_prefix: str | None = None, counsel_only: bool = False) -> list[dict[str, Any]]:
     """Answer new questions. `build(report)` rebuilds the data of the report a question replies to (from
     its run record and lineage; None only if the run is unknown, then current data). `daily(question, history)`
     answers a daily-thread question with the daily context and returns (html, text, result), `health` likewise for
     a health-letter thread and `counsel` for a thread the client opened under `counsel_prefix` (FR-49; without both
-    no such mail is looked for); without the answerer such a question is left for the next run.
+    no such mail is looked for; with `counsel_only` only those are looked for, see `find`); without the answerer
+    such a question is left for the next run.
 
     A question is claimed (answering), marked sending just before the reply, then answered, failed or
     unknown. Interrupted runs are recovered first: answering becomes a retryable failure, sending becomes
@@ -631,7 +638,7 @@ def poll(db: Path, *, recipient: str, credentials: tuple[str, str, str], now: da
         for item in ledger.recover_questions(conn, now=now):
             results.append({"message_id": item["message_id"], "status": "recovered", "was": item["was"]})
     questions, skipped = find(db, credentials, recipient, now=now, reader=reader, poster=poster,
-                              counsel_prefix=counsel_prefix if counsel is not None else None)
+                              counsel_prefix=counsel_prefix if counsel is not None else None, counsel_only=counsel_only)
     with closing(ledger.connect(db)) as conn:
         for message_id, thread_id, reason in skipped:
             ledger.skip_question(conn, message_id=message_id, thread_id=thread_id, now=now, reason=reason)

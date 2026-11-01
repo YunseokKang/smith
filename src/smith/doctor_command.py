@@ -83,21 +83,28 @@ def _scheduler(results: list, root: Path) -> None:
     if sys.platform != "win32":
         results.append(("warn", "scheduler", "not Windows: check your own scheduler runs `smith report run-due`"))
         return
+    _task(results, root, "ReportDue", "scheduler", required=True)
+    # The counsel routine (FR-49) is optional: absent means the [상담] mails wait for the 15-minute run.
+    _task(results, root, "CounselDue", "scheduler (counsel)", required=False)
+
+
+def _task(results: list, root: Path, name: str, label: str, *, required: bool) -> None:
     try:
         # schtasks prints localized field names (Korean, in cp949, when there is no console); the
         # ScheduledTasks module gives stable names as JSON.
-        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", _TASK_QUERY],
+        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", _TASK_QUERY.replace("ReportDue", name)],
                              capture_output=True, timeout=30, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except (OSError, subprocess.TimeoutExpired) as error:
-        results.append(("warn", "scheduler", f"could not query ({type(error).__name__})"))
+        results.append(("warn", label, f"could not query ({type(error).__name__})"))
         return
     if out.returncode != 0 or not out.stdout.strip():
-        results.append(("fail", "scheduler", f"{TASK} not registered: run scripts\\install-schedule.ps1"))
+        results.append(("fail" if required else "warn", label,
+                        f"Smith\\{name} not registered: run scripts\\install-schedule.ps1"))
         return
     try:
         task = json.loads(out.stdout.decode("utf-8", errors="replace"))
     except ValueError:
-        results.append(("warn", "scheduler", "unreadable task query output"))
+        results.append(("warn", label, "unreadable task query output"))
         return
     level, notes = "ok", [f"state {task.get('State')}", f"last run {task.get('Last') or 'never'} "
                                                           f"(result {task.get('Result')})", f"next {task.get('Next') or '-'}"]
@@ -108,7 +115,7 @@ def _scheduler(results: list, root: Path) -> None:
         level = "warn"
     if task.get("State") == "Disabled":
         level = "fail"
-    results.append((level, "scheduler", ", ".join(notes)))
+    results.append((level, label, ", ".join(notes)))
 
 
 _TASK_QUERY = (
