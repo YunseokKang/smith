@@ -60,13 +60,15 @@ if ($NoCounsel) {
     }
     exit 0
 }
-# The counsel routine: a question is claimed atomically in the ledger, so a run overlapping ReportDue never answers
-# the same mail twice; an answer may take many minutes, and IgnoreNew skips the ticks while one is being written.
+# The counsel routine: a question is claimed atomically in the ledger, so overlapping runs (this task's own, or
+# ReportDue's) never answer the same mail twice. Instances run in parallel on purpose: an answer takes minutes, and a
+# second question sent right after the first should not wait for it (user report 2026-11-01). A tick that finds
+# nothing new exits in seconds; the daily answer limit bounds how many answers can run at once.
 $CounselAction = New-ScheduledTaskAction -Execute $Python -WorkingDirectory $Root `
     -Argument "-m smith mail answer --counsel-only --log --db `"$Db`" --config `"$Config`""
 $CounselTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).Date -RepetitionInterval (New-TimeSpan -Minutes $CounselMinutes)
 $CounselSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-    -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 1)
+    -MultipleInstances Parallel -ExecutionTimeLimit (New-TimeSpan -Hours 1)
 Register-ScheduledTask -TaskPath $TaskPath -TaskName $CounselTaskName -Action $CounselAction -Trigger $CounselTrigger `
     -Settings $CounselSettings -Description "Smith: counsel mails ([상담]) answered within minutes (read-only adviser)" -Force | Out-Null
 Write-Output "Registered $TaskPath$CounselTaskName (every $CounselMinutes minute(s)) for $Root."

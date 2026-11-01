@@ -25,6 +25,7 @@ from typing import Any
 
 HEADLESS_ENV = "SMITH_HEADLESS"
 WEB_TOOLS = ("WebSearch", "WebFetch")
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)   # Windows only; 0 elsewhere.
 SYSTEM_PROMPT_FILE = "system-prompt.txt"
 _MAX_OUTPUT_BYTES = 2_000_000
 _MAX_TEXT = 4000
@@ -99,8 +100,10 @@ def run(prompt: str, *, system_prompt: str, schema: dict[str, Any], executable: 
         if len(subprocess.list2cmdline(args)) > _MAX_COMMAND_LINE:
             raise HeadlessError("command-too-long")
         try:
+            # No console window: the scheduler runs pythonw, and a console child of a console-less parent would open
+            # a visible terminal for every model call (user report 2026-11-01). Output is captured anyway.
             proc = runner(args, input=prompt, capture_output=True, text=True, encoding="utf-8", env=env,
-                          cwd=workdir, timeout=timeout_seconds)
+                          cwd=workdir, timeout=timeout_seconds, creationflags=NO_WINDOW)
         except subprocess.TimeoutExpired:
             raise HeadlessError("timeout") from None
         except OSError:

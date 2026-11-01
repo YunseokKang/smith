@@ -26,7 +26,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from smith.headless import HEADLESS_ENV, HeadlessError, Runner, prune, validate
+from smith.headless import HEADLESS_ENV, NO_WINDOW, HeadlessError, Runner, prune, validate
 
 VERSION = "0.164.0"
 # Every Codex role (the report's first reader, the development review) uses gpt-6.1-sol, not gpt-6-astra (user decision
@@ -71,7 +71,7 @@ def find_codex(runner: Runner = subprocess.run) -> Path:
     if not path.is_file() or (os.name == "nt" and path.suffix.lower() != ".exe"):
         raise HeadlessError("unsafe-launcher")
     try:
-        proc = runner([str(path), "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace",
+        proc = runner([str(path), "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW,
                       env=_env(), timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         raise HeadlessError("launch-failed") from None
@@ -121,7 +121,7 @@ def _exec(prompt: str, schema: dict[str, Any], executable: Path, model: str, eff
             args += ["-c", setting]
         try:
             proc = runner(args, input=prompt, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                          env={**_env(), HEADLESS_ENV: "1"}, cwd=workdir, timeout=timeout_seconds)
+                          env={**_env(), HEADLESS_ENV: "1"}, cwd=workdir, timeout=timeout_seconds, creationflags=NO_WINDOW)
         except subprocess.TimeoutExpired:
             raise HeadlessError("timeout") from None
         except OSError:
