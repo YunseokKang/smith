@@ -146,7 +146,7 @@ def answer(db: Path, ctx: dict[str, Any], question_text: str, *, now: datetime, 
         if fact and not _third_party(fact) and not health_writer._problem(fact, allowed | _digits(fact), []):
             noted.append(fact)
     on = local_time(received_at, tz).date()
-    _note(db, noted[:3], on=on)
+    note(db, noted[:3], on=on)
     # A constraint ("생선 알레르기", "우유를 안 먹는다") becomes a structured rule every later letter and reply obeys.
     for fact in noted[:3]:
         if _CONSTRAINT.search(fact):
@@ -180,7 +180,7 @@ def _verify(raw: str, allowed: set[str], resolved: list[str], banned: set[str] |
     return "\n\n".join(paragraphs), problems
 
 
-_EATING = re.compile(r"드십시오|드세요|드시|챙기|섭취|올리|늘리|권합|추천|주\s*\d+\s*회|매일|하루\s*\d")
+_EATING = re.compile(r"드십시오|드세요|드셔|드시|먹어|먹는\s*건|먹을|챙기|챙겨|섭취|곁들|올리|늘리|늘려|추가|권합|추천|주\s*\d+\s*회|매일|하루\s*\d")
 
 
 def _suggests_eating(sentence: str) -> bool:
@@ -201,8 +201,9 @@ def _third_party(fact: str) -> bool:
     return bool(_THIRD_PARTY.search(fact)) and not re.search(r"^(?:나는|내가|제가|저는|제\s|내\s)", fact)
 
 
-def _note(db: Path, facts: list[str], *, on: date) -> None:
-    """Append the client's health statements to data/health/client-notes.md (never the shared memory)."""
+def note(db: Path, facts: list[str], *, on: date) -> None:
+    """Append the client's health statements to data/health/client-notes.md (never the shared memory). Counsel
+    answers (FR-49) write theirs here too."""
     if not facts:
         return
     file = health.path(db) / "client-notes.md"

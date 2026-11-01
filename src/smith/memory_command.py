@@ -34,7 +34,7 @@ def run(args: argparse.Namespace) -> int:
         print("Already remembered or empty; nothing added." if fact is None
               else f"Remembered under {memory.TOPICS[fact.topic]}: {fact.text}")
         return 0
-    facts = memory.load(folder)
+    facts = memory.load(folder, private=True)   # The client's own listing shows the counsel topic too.
     if args.action == "search":
         facts = memory.retrieve(facts, " ".join(args.words))
     if not facts:

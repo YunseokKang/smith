@@ -283,7 +283,8 @@ Fluent Emoji 3D(MIT, `assets/daily/`에 28개 동봉, 라이선스 파일 포함
 - 일요일 저녁 주간 미리보기. (저녁 "내일 준비" 메일은 §16에서 구현.)
 - Google Keep: 공식 API는 Workspace 전용이어서 Takeout(JSON) 자동 내보내기 → Drive 읽기. Google Drive 조회 전용.
 - 아무 질문이나 받는 입구(`smith ask`)와 주제 라우터(영역·검색어를 고르는 1차 호출, 개인 자료 없음) → 영역별 가져오기 →
-  답변. SQLite FTS5 전문 검색. 라우팅 정답표로 품질 측정.
+  답변. **구현 2026-11-01(FR-49, `docs/counsel-design.md`)**: 입구는 본인이 본인에게 보낸 `[상담]` 메일과 `smith ask`. 남은 것:
+  라우팅 정답표로 품질 측정(FTS5는 §13의 이유로 쓰지 않음).
 - Google Photos: 2025-03-31부터 보관함 전체 읽기 권한이 없어 Picker·Takeout만 가능. 보류(사용자 결정 2026-10-25).
 - **건강 데이터("컨디션 한 줄") — 보류(사용자 결정 2026-10-25, parking lot)**: 건강은 별도 영역(주간 건강 레터, `docs/health-design.md`)으로
   설계했고 웨어러블은 Fitbit(Google Health API)으로 정해졌다. 아래 한 줄은 그 설계의 3단계다. 이전 검토: Google Fit API는 2024-05부터 신규 사용 불가·2026년 종료 예정이라 쓰지 않는다. 폰의

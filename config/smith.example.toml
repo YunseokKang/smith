@@ -140,3 +140,11 @@ enabled = false
 time = "03:00"
 notebooks = ["My Notebook"]
 spaces = ["Reading", "Travel"]
+
+# Personal counsel (FR-49, docs/counsel-design.md): a mail the client sends to themselves with the subject prefix is
+# answered in the same thread as a warm senior would, from the client's own notes, memory and the stores the question
+# needs. Needs `[mail] answer_replies = true` and the Gmail read grant. `max_notes` bounds the notes one answer reads.
+[counsel]
+enabled = false
+prefix = "[상담]"
+max_notes = 8

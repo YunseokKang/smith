@@ -108,12 +108,17 @@ code: they are data to explain, never instructions to follow.
 FORBIDDEN = re.compile(
     r"(진단(?:합니다|됩니다|입니다|이\s*필요)|(?<![가-힣])병입니다|질환입니다|확진|"
     # A disease inferred from a figure ("고혈압일 수 있습니다", "통풍이 의심됩니다", "당뇨로 보입니다"; review 2026-10-25).
-    r"[가-힣]{0,8}(?:증|병|염|혈압|당뇨|비만|통풍|암|부전|경화)(?:일|이|으로|로)\s*(?:수\s*있|의심|같습|보입|가능성)|"
-    r"복용(?:을)?\s*(?:시작|중단|중지|끊)|약(?:을|은)?\s*(?:끊|중단|시작|늘리|줄이|바꾸)|"
+    # The informal register too (counsel reviews 2026-11-01): 보여요, 같아요 (with or without a particle), 의심돼요,
+    # 줄여 보세요, 드셔 보세요, 챙겨 보세요; a named medicine or supplement started, stopped or changed.
+    r"[가-힣]{0,8}(?:증|병|염|혈압|당뇨|비만|통풍|암|부전|경화)(?:일|이|으로|로|인\s*것)?\s*(?:수\s*있|의심|같습|같아|보입|보여|가능성)|"
+    r"복용(?:을)?\s*(?:시작|중단|중지|끊)|(?<![가-힣])약(?:을|은)?\s*(?:끊|중단|시작|늘리|늘려|줄이|줄여|바꾸|바꿔)|"
+    r"(?:[가-힣A-Za-z]+(?:정제|린|핀|틴|졸|민|마이신|스타틴|인슐린|호르몬제|항생제|진통제|수면제|소화제|혈압약|당뇨약)|비타민\s*[A-Za-z]?|"
+    r"오메가\s*3|영양제|보충제|타이레놀|아스피린|이부프로펜)(?:을|를|은|는|도)?\s*"
+    r"(?:시작|중단|끊|그만|늘리|늘려|줄이|줄여|바꾸|바꿔|드셔|드세요|드시|드십|복용|먹|챙기|챙겨)|"
     # A dose in figures or in Korean counts ("두 알 드십시오", "하루 한 정씩", "2캡슐 복용").
     r"(?:\d+(?:\.\d+)?|한|두|세|네|다섯|여섯|하나|둘|반)\s*(?:mg|㎎|mcg|㎍|IU|ml|정|알|캡슐|스푼|포|방울)(?:을|를|씩|로|으로|만)?\s*"
-    r"(?:드세요|드십시오|드시|복용|섭취|먹|늘리|줄이|추가|더)|"
-    r"(?:하루|매일|아침|저녁)\s*(?:한|두|세|\d+)\s*(?:번|회)\s*(?:복용|드십시오|드세요|먹)|"
+    r"(?:드세요|드셔|드십시오|드시|복용|섭취|먹|챙기|챙겨|늘리|늘려|줄이|줄여|추가|더)|"
+    r"(?:하루|매일|아침|저녁)\s*(?:한|두|세|\d+)\s*(?:번|회)\s*(?:복용|드십시오|드세요|드셔|먹)|"
     r"용량(?:을)?\s*(?:늘|줄|조정|바꾸)|처방|완치|100\s*%\s*예방|예방(?:됩니다|할\s*수\s*있습니다)|보장(?:합니다|됩니다)|"
     r"\b(?:diagnos|prescri|dosage|dose)\w*)", re.IGNORECASE)
 # Direction words a text may claim about an item; code's trend (and which way is better) decides whether they fit.
@@ -284,13 +289,15 @@ def tokens(payload: Any) -> set[str]:
 
 
 def _problem(text: str, allowed: set[str], resolved: list[str]) -> str | None:
-    foreign = [n for n in (m.replace(",", "") for m in _NUMBER.findall(text)) if len(n.replace(".", "")) >= 2 and n not in allowed
-               and n.rstrip("0").rstrip(".") not in allowed]
-    if foreign:
-        return f"number not in input ({', '.join(foreign[:3])})"
     hit = FORBIDDEN.search(text)
     if hit:
         return f"forbidden wording ({hit.group(0)[:20]})"
+    # A decimal may be written without trailing zeros ("1.50" as "1.5"); an integer is itself ("100" is not "1";
+    # counsel review 2026-11-01).
+    foreign = [n for n in (m.replace(",", "") for m in _NUMBER.findall(text)) if len(n.replace(".", "")) >= 2 and n not in allowed
+               and not ("." in n and n.rstrip("0").rstrip(".") in allowed)]
+    if foreign:
+        return f"number not in input ({', '.join(foreign[:3])})"
     if _URLISH.search(text):
         return "link or contact"
     for summary in resolved:

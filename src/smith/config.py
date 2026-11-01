@@ -40,7 +40,11 @@ KNOWN_KEYS = {
                 "drift_halt_pct"},
     # Evernote through the Aside browser (daily design §13.1): the nightly read and the allowlist of sources.
     "evernote": {"enabled", "time", "notebooks", "spaces"},
+    # Personal counsel (FR-49, docs/counsel-design.md): mails the client writes to themselves under `prefix` are
+    # answered as a warm senior would; `max_notes` bounds the client's notes one answer may read.
+    "counsel": {"enabled", "prefix", "max_notes"},
 }
+COUNSEL_PREFIX = re.compile(r"^\[[0-9A-Za-z가-힣]{1,20}\]$")
 HEALTH_MIDWEEK_KEYS = {"enabled", "weekday", "time"}
 HEALTH_TOPICS = ("vascular", "uric-weight", "nutrition-gut", "balance", "stomach-habits")
 HEALTH_GOALS = ("posture", "body_fat", "ldl", "uric_acid", "vitamin_d", "weight", "blood_pressure", "glucose")
@@ -125,6 +129,7 @@ def load_config(path: Path) -> dict:
     _check_evening(config.get("evening", {}))
     _check_trading(config.get("trading", {}))
     _check_evernote(config.get("evernote", {}))
+    _check_counsel(config.get("counsel", {}))
     if "properties" in config or "targets" in config:
         from smith.realestate import RealEstateError, validate_properties, validate_targets
         try:
@@ -228,6 +233,21 @@ def _check_evernote(evernote: object) -> None:
             raise ValueError(f"evernote.{key} must list up to 20 distinct names")
     if evernote.get("enabled") and not (evernote.get("notebooks") or evernote.get("spaces")):
         raise ValueError("evernote.enabled needs at least one notebook or space")
+
+
+def _check_counsel(counsel: object) -> None:
+    """Optional `[counsel]` (FR-49): whether self-addressed mails are answered, the subject prefix that marks one
+    (one bracketed word, `[상담]` by default) and how many of the client's notes an answer may read (1~20)."""
+    if not isinstance(counsel, dict):
+        raise ValueError("counsel must be a table")
+    if not isinstance(counsel.get("enabled", False), bool):
+        raise ValueError("counsel.enabled must be a boolean")
+    prefix = counsel.get("prefix", "[상담]")
+    if not isinstance(prefix, str) or not COUNSEL_PREFIX.fullmatch(prefix):
+        raise ValueError("counsel.prefix must be one bracketed word of letters or digits, for example [상담]")
+    notes = counsel.get("max_notes", 8)
+    if isinstance(notes, bool) or not isinstance(notes, int) or not 1 <= notes <= 20:
+        raise ValueError("counsel.max_notes must be a whole number from 1 to 20")
 
 
 def _check_events(events: object) -> None:

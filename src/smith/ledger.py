@@ -25,7 +25,7 @@ from smith.records import (
 logger = logging.getLogger(__name__)
 _END_OF_TIME = datetime.max.replace(tzinfo=timezone.utc)
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 _V1 = (
     """CREATE TABLE imports (
         import_id TEXT PRIMARY KEY,
@@ -414,8 +414,11 @@ _V20 = (
 # v21: the weekly health letter (health design §9) shares the daily-mail run table and snapshots; `product` tells the
 # two apart (a reply is routed by it), and the run key of a health letter is "health:<ISO week>".
 _V21 = ("ALTER TABLE daily_runs ADD COLUMN product TEXT NOT NULL DEFAULT 'daily'",)
+# v22: a counsel thread (FR-49) starts with the client's own mail, not one Smith sent, so the question row carries its
+# product: `counsel_threads` finds those threads again for the replies that continue them.
+_V22 = ("ALTER TABLE mail_questions ADD COLUMN product TEXT NOT NULL DEFAULT 'report'",)
 _MIGRATIONS = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8, 9: _V9, 10: _V10, 11: _V11, 12: _V12,
-               13: _V13, 14: _V14, 15: _V15, 16: _V16, 17: _V17, 18: _V18, 19: _V19, 20: _V20, 21: _V21}
+               13: _V13, 14: _V14, 15: _V15, 16: _V16, 17: _V17, 18: _V18, 19: _V19, 20: _V20, 21: _V21, 22: _V22}
 _COLUMNS = ("record_id, revision, kind, owner_id, source, status, change_type, corrects_revision, "
             "reason, effective_at, recorded_at, import_id, fields")
 
@@ -1105,10 +1108,11 @@ QUESTION_LEASE = timedelta(minutes=60)
 
 def claim_question(conn: sqlite3.Connection, *, message_id: str, thread_id: str, report_id: str | None,
                    received_at: datetime, now: datetime, daily_limit: int | None = None,
-                   question_text: str | None = None) -> bool:
+                   question_text: str | None = None, product: str = "report") -> bool:
     """Atomically claim a question for answering: a new question, or a clean failure with attempts left.
     With `daily_limit`, the claim is refused once that many answers were claimed in the last 24 hours.
-    `question_text` is the question as sent to the model (identifiers masked), kept for later turns."""
+    `question_text` is the question as sent to the model (identifiers masked), kept for later turns; `product`
+    names the thread's kind (report, daily, health, counsel)."""
     conn.execute("BEGIN IMMEDIATE")
     try:
         if daily_limit is not None and _answers_since(conn, now - timedelta(days=1)) >= daily_limit:
@@ -1117,8 +1121,8 @@ def claim_question(conn: sqlite3.Connection, *, message_id: str, thread_id: str,
         row = conn.execute("SELECT status, attempts FROM mail_questions WHERE message_id = ?", (message_id,)).fetchone()
         if row is None:
             conn.execute("INSERT INTO mail_questions (message_id, thread_id, report_id, received_at, claimed_at, status, "
-                         "attempts, question_text) VALUES (?, ?, ?, ?, ?, 'answering', 1, ?)",
-                         (message_id, thread_id, report_id, _db_time(received_at), _db_time(now), question_text))
+                         "attempts, question_text, product) VALUES (?, ?, ?, ?, ?, 'answering', 1, ?, ?)",
+                         (message_id, thread_id, report_id, _db_time(received_at), _db_time(now), question_text, product))
         elif row[0] == "failed" and row[1] < MAX_ANSWER_ATTEMPTS:
             conn.execute("UPDATE mail_questions SET status = 'answering', attempts = attempts + 1, claimed_at = ?, "
                          "error_code = NULL, finished_at = NULL, sending_at = NULL, "
@@ -1183,6 +1187,12 @@ def thread_turns(conn: sqlite3.Connection, *, thread_id: str, before: datetime, 
 
 def answer_message_ids(conn: sqlite3.Connection) -> set[str]:
     return {row[0] for row in conn.execute("SELECT answer_message_id FROM mail_questions WHERE answer_message_id IS NOT NULL")}
+
+
+def counsel_threads(conn: sqlite3.Connection, *, since: datetime) -> set[str]:
+    """Threads the client opened with a counsel mail (FR-49) since `since`: replies in them continue the counsel."""
+    return {row[0] for row in conn.execute("SELECT DISTINCT thread_id FROM mail_questions WHERE product = 'counsel' "
+                                           "AND received_at >= ? AND status != 'skipped'", (_db_time(since),))}
 
 
 def _answers_since(conn: sqlite3.Connection, since: datetime) -> int:

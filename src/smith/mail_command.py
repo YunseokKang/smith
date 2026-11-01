@@ -1,4 +1,5 @@
-"""`smith mail`: connect the Gmail grant, send a test message, and answer the client's e-mail questions."""
+"""`smith mail`: connect the Gmail grant, send a test message, and answer the client's e-mail questions (replies in
+Smith's threads and, when `[counsel]` is on, the `[상담]` mails the client writes to themselves)."""
 import argparse
 import tomllib
 from pathlib import Path
@@ -103,12 +104,18 @@ def answer(db: Path, config_path: Path, *, verbose: bool = False) -> int:
     secrets = credentials.all_secrets()
     # A reply to any daily mail Smith sent gets the daily answerer, whether or not the schedule is on; it reads
     # nothing until such a question arrives.
-    from smith import daily_qa, health_qa
+    from smith import counsel, daily_qa, health_qa
     daily_answerer = daily_qa.answerer(db, config, now=now, tz=tz, secrets=secrets)
     health_answerer = health_qa.answerer(db, config, now=now, tz=tz, secrets=secrets)
+    # Counsel (FR-49): the client's own `[상담]` mails are looked for only while the section is enabled.
+    counsel_config = config.get("counsel") or {}
+    counsel_on = bool(counsel_config.get("enabled"))
+    counsel_answerer = counsel.answerer(db, config, now=now, tz=tz, secrets=secrets) if counsel_on else None
     try:
         results = qa.poll(db, recipient=to, credentials=stored, now=now, build=build, secrets=secrets, tz=tz,
-                          daily=daily_answerer, health=health_answerer, dart_key=credentials.load_api_key("dart"))
+                          daily=daily_answerer, health=health_answerer, dart_key=credentials.load_api_key("dart"),
+                          counsel=counsel_answerer,
+                          counsel_prefix=counsel_config.get("prefix", counsel.DEFAULT_PREFIX) if counsel_on else None)
     except gmail.MailError as error:
         if verbose or error.code != "no-read-scope":
             print(f"Answering questions failed ({error.code}).")

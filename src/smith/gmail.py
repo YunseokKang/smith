@@ -4,8 +4,9 @@ Verified against Google's docs on 2026-10-04: desktop OAuth uses the loopback re
 (https://developers.google.com/identity/protocols/oauth2/native-app) and sending is
 `POST gmail/v1/users/me/messages/send` with a base64url RFC 2822 message and the `gmail.send` scope.
 Answering the client's e-mail replies (FR-18, opt-in) additionally needs `gmail.readonly`, a
-restricted scope: Smith then reads only the threads of mails it sent itself, never the inbox, plus one search of the
-client's sent mail for a trade-approval code (message ids only, `sent_containing`).
+restricted scope: Smith then reads only the threads of mails it sent itself, never the inbox, plus two searches of the
+client's own sent mail (message ids only): a trade-approval code (`sent_containing`) and the counsel mails the client
+writes to themselves under a subject prefix (`sent_with_subject`, FR-49).
 
 A request that may have reached Google but returned no answer has an unknown outcome; it is
 reported as such and never retried automatically, so a report is not sent twice.
@@ -50,6 +51,7 @@ TOKEN_URL = "https://oauth2.googleapis.com/token"
 SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
 _TIMEOUT_SECONDS = 30
 _LOGIN_TIMEOUT_SECONDS = 300
+_SEARCH_PAGES = 4   # Pages of 50 ids a sent-mail search follows: 200 counsel mails in 30 days is far beyond the daily limit.
 
 # (url, form-or-json body, headers) -> (status, json payload)
 Poster = Callable[[str, bytes, dict[str, str]], tuple[int, dict[str, Any]]]
@@ -200,7 +202,7 @@ def access_token(credentials: tuple[str, str, str], *, poster: Poster = post) ->
 
 
 _ID = re.compile(r"[0-9A-Za-z]{6,40}")
-_THREAD_HEADERS = ("From", "Subject", "Message-ID", "References", SMITH_HEADER)
+_THREAD_HEADERS = ("From", "To", "Subject", "Message-ID", "References", SMITH_HEADER)   # To: a counsel mail is to oneself.
 
 
 def thread_of(token: str, message_id: str, *, getter: Getter = get) -> str:
@@ -233,6 +235,27 @@ def sent_containing(token: str, text: str, *, after: int, before: int, getter: G
     return [str(m.get("id")) for m in found.get("messages", []) or [] if isinstance(m, dict)]
 
 
+def sent_with_subject(token: str, words: str, *, after: int, getter: Getter = get) -> list[str]:
+    """Ids of the client's sent messages after an epoch second whose subject holds `words` (letters and digits only).
+
+    Counsel (FR-49) uses it to find the mails the client wrote to themselves under the `[상담]` prefix. Gmail's search is
+    a coarse filter (brackets are not matched), so the caller checks the exact prefix on each message's header; ids
+    only, no body is read here.
+    """
+    if not re.fullmatch(r"[0-9A-Za-z가-힣]{1,20}", words or ""):
+        raise MailError("invalid-query")
+    query = urllib.parse.quote(f"in:sent from:me after:{int(after)} subject:{words}")
+    ids: list[str] = []
+    page = ""
+    for _ in range(_SEARCH_PAGES):   # Later pages too (review 2026-11-01), within a bound.
+        found = _read(token, f"messages?q={query}&maxResults=50" + (f"&pageToken={urllib.parse.quote(page)}" if page else ""), getter)
+        ids += [str(m.get("id")) for m in found.get("messages", []) or [] if isinstance(m, dict)]
+        page = str(found.get("nextPageToken") or "")
+        if not page:
+            break
+    return ids
+
+
 def _checked(identifier: str) -> str:
     if not _ID.fullmatch(identifier or ""):
         raise MailError("invalid-id")
@@ -240,7 +263,7 @@ def _checked(identifier: str) -> str:
 
 
 def _read(token: str, path: str, getter: Getter) -> dict[str, Any]:
-    """The only Gmail read: messages or threads by id, and the one sent-mail search above (ids only)."""
+    """The only Gmail read: messages or threads by id, and the two sent-mail searches above (ids only)."""
     try:
         status, payload = getter(f"{API_URL}/{path}", {"Authorization": f"Bearer {token}"})
     except (OSError, http.client.HTTPException):

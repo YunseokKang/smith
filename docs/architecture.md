@@ -404,10 +404,20 @@ v3는 공급자 동기화 시도의 성공·실패를 남기는 `sync_runs` 표�
 - 질의응답 처리 실패는 보고서 발행을 막지 않는다. 정기 작업은 답변 결과와 실패 코드(예: 읽기 권한 없음, 토큰 만료)를
   `report-runs.log`에 남긴다.
 
+## 개인 상담 (FR-49, `src/smith/counsel.py`, `smith ask`, 원장 v22)
+
+고객이 먼저 묻는 입구. 설계와 규칙은 `docs/counsel-design.md`. 요점: `qa.find`가 `[counsel] prefix`로 시작하는 본인 발신
+메일을 보낸편지함 검색(ID만) → 머리글 확인(SENT·주소·접두어·Smith 머리글)으로 찾고, `mail_questions.product = 'counsel'`로
+기록해 그 스레드의 답장을 `ledger.counsel_threads`로 다시 읽는다. 답변은 `counsel.answer`: 벽(위험 증상·위기 낱말) →
+라우터 호출(질문만, `counsel-route`) → 코드 조립(`assemble`: 메모·기억 항상, 재무·건강·일정은 라우터가 고른 것만, `data_status`)
+→ 코드 검색어 거름(`web_gate`) → 웹 전용 조사 호출(`counsel-research`, `sources.verify`) → 도구 없는 답변 호출(`counsel-answer`)
+→ 문장 검사(`verify`). `qa.poll`이 `counsel` 답변기로 보내고 같은 상태 기계·하루 한도를 쓴다.
+
 ## 고객 기억 (FR-19, `src/smith/memory.py`, `smith memory`)
 
 - 저장: 원장 옆 `data/memory/<주제>.md`(Git 제외, 원장과 같은 보호 규칙). 주제는 `profile`(가구·인적 사항),
-  `property`(부동산·주거), `plan`(계획·일정), `preference`(선호·원칙), `other`. 줄 하나가 사실 하나이고
+  `property`(부동산·주거), `plan`(계획·일정), `preference`(선호·원칙), `family`, `other`, 그리고 `counsel`(상담에서 들은 것,
+  `memory.PRIVATE`: 상담 답변과 `smith memory list|search`만 읽고 다른 호출의 `memory.load`에는 빠진다, FR-49). 줄 하나가 사실 하나이고
   `- YYYY-MM-DD · 출처 · 내용` 형식이다. 사람이 직접 쓴 `- 내용` 줄도 읽으며(날짜 없음, 출처 "직접 작성"), 주제가 아닌
   파일 이름은 `other`로 본다. 들여 쓴 줄과 본문 문장은 읽지 않는다. 고치거나 지우려면 파일을 편집한다.
 - 쌓이는 경로(고객 본인만):

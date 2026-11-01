@@ -355,8 +355,10 @@ def merge(book: people.Book, found: list[Contact]) -> people.Book:
 # What may follow a name and still be about that person: particles, honorifics, titles (up to three in a row, as in
 # "김준호님과"). Anything else glued to the name makes it part of another word ("이모" in "이모티콘").
 _SUFFIXES = tuple(sorted((
-    "님", "씨", "께서", "께", "에게", "한테", "이랑", "랑", "하고", "과", "와", "이", "가", "은", "는", "을", "를", "의", "도",
-    "만", "네", "형", "누나", "오빠", "언니", "선배", "후배", "팀장", "부장", "과장", "차장", "대리", "실장", "본부장", "대표",
+    "님", "씨", "께서", "께", "에게서", "에게", "한테서", "한테", "이랑", "랑", "하고", "과", "와", "이", "가", "은", "는", "을", "를",
+    "의", "도", "만", "네", "처럼", "보다", "마저", "조차", "부터", "까지", "대로", "밖에", "으로", "로", "이라", "라", "라고", "라면",
+    "이라면", "이란", "란", "이나", "나", "이며", "며", "이든", "든",   # Compound particles too (counsel review 2026-11-01).
+    "형", "누나", "오빠", "언니", "선배", "후배", "팀장", "부장", "과장", "차장", "대리", "실장", "본부장", "대표",
     "이사", "상무", "전무", "사장", "회장", "교수", "박사", "선생", "원장", "변호사", "의원", "작가", "감독"), key=len, reverse=True))
 # A question that asks who someone is from a clue ("한빛상사 다니는 사람 누구였지?") rather than naming them.
 _REVERSE = re.compile(r"누구|누가|누군지|어떤\s*(?:사람|분)|어느\s*분")

@@ -31,8 +31,11 @@ from typing import Any
 from smith.payload import mask_identifiers
 
 TOPICS = {"profile": "가구·인적 사항", "property": "부동산·주거", "plan": "계획·일정", "preference": "선호·원칙",
-          "family": "가족·지인", "other": "기타"}   # family: tastes and facts behind gift ideas (FR-31 ②).
+          "family": "가족·지인", "other": "기타", "counsel": "상담에서 들은 것"}   # family: tastes and facts behind gift ideas (FR-31 ②).
 PINNED = ("profile", "preference")   # Always sent: they shape every answer.
+# Read only by the thread that wrote them (FR-49, review 2026-11-01): what the client says in a counsel may be about
+# anything, the body included, so it never reaches the finance, daily or health calls through the shared memory.
+PRIVATE = ("counsel",)
 MAX_FACT_CHARS = 300
 BUDGET_CHARS = 4000                  # About 25 facts; beyond this only the most relevant are sent.
 _ENTRY = re.compile(r"^- (?:(\d{4}-\d{2}-\d{2}) · ([^·]{1,20}) · )?(.+)$")
@@ -59,10 +62,13 @@ def clean(text: str) -> str:
     return text.replace("((동·호 생략))", "(동·호 생략)")[:MAX_FACT_CHARS].strip()
 
 
-def load(folder: Path) -> list[Fact]:
-    """Every bullet of every Markdown file in `folder`; a file whose name is not a topic counts as "other"."""
+def load(folder: Path, *, private: bool = False) -> list[Fact]:
+    """Every bullet of every Markdown file in `folder`; a file whose name is not a topic counts as "other". The
+    PRIVATE topics are left out unless `private` is set (the counsel thread and the client's own listing)."""
     facts = []
     for path in sorted(folder.glob("*.md")) if folder.is_dir() else []:
+        if path.stem in PRIVATE and not private:
+            continue
         topic = path.stem if path.stem in TOPICS else "other"
         for line in path.read_text(encoding="utf-8-sig").splitlines():
             match = _ENTRY.match(line.strip()) if not line.startswith((" ", "\t")) else None
@@ -90,7 +96,7 @@ def new_facts(existing: list[Fact], candidates: list[dict[str, str]]) -> list[tu
 def add(folder: Path, topic: str, text: str, *, on: date, source: str) -> Fact | None:
     """Append one fact to `<topic>.md`; None when it is empty or already remembered."""
     topic = topic if topic in TOPICS else "other"
-    fresh = new_facts(load(folder), [{"topic": topic, "fact": text}])
+    fresh = new_facts(load(folder, private=True), [{"topic": topic, "fact": text}])
     if not fresh:
         return None
     _, text = fresh[0]

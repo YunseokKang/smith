@@ -174,15 +174,29 @@ class Question:
     header_id: str          # RFC 822 Message-ID of the client's reply, for In-Reply-To.
     references: str
     product: str = "report"   # "report": a finance report thread; "daily": a daily-routine mail thread (daily_qa);
-                              # "health": a health-letter thread (health_qa).
+                              # "health": a health-letter thread (health_qa); "counsel": a thread the client opened
+                              # with a mail to themselves (counsel, FR-49).
+
+
+_REPLY_MARKS = re.compile(r"^(?:(?:re|fw|fwd|답장|전달)\s*:\s*)+", re.IGNORECASE)
+
+
+def counsel_subject(subject: str, prefix: str) -> bool:
+    """Whether a subject opens a counsel question: the exact prefix after any reply marks ("Re: [상담] …")."""
+    return _REPLY_MARKS.sub("", (subject or "").strip()).startswith(prefix)
 
 
 # --- finding questions -------------------------------------------------------------------------------------
 
 def find(db: Path, credentials: tuple[str, str, str], recipient: str, *, now: datetime,
-         reader: gmail.Getter = gmail.get, poster: gmail.Poster = gmail.post) -> tuple[list[Question], list[tuple[str, str, str]]]:
+         reader: gmail.Getter = gmail.get, poster: gmail.Poster = gmail.post,
+         counsel_prefix: str | None = None) -> tuple[list[Question], list[tuple[str, str, str]]]:
     """(questions to answer, [(message_id, thread_id, reason)] to record as skipped). Reads the headers of
     Smith's own report threads (last LOOKBACK) and the body only of messages approved as the client's.
+
+    With `counsel_prefix` (FR-49), the client's own sent mails whose subject opens with it are questions too: one
+    ids-only search of the sent mail, then the same header checks; the threads they open are read again for the
+    replies that continue them (`ledger.counsel_threads`).
 
     Raises:
         gmail.MailError: the grant lacks read access ("no-read-scope") or Gmail could not be reached.
@@ -202,9 +216,18 @@ def find(db: Path, credentials: tuple[str, str, str], recipient: str, *, now: da
         runs += [{**r, "report_id": r["run_key"], "product": "health"}
                  for r in ledger.sent_daily_runs(conn, since=now - LOOKBACK, product="health")]
         known = ledger.seen_questions(conn) | ledger.answer_message_ids(conn) | {r["message_id"] for r in runs}
+        counsel_threads = ledger.counsel_threads(conn, since=now - LOOKBACK) if counsel_prefix else set()
     threads: dict[str, dict[str, Any]] = {}
     for run in runs:
         threads.setdefault(gmail.thread_of(token, run["message_id"], getter=reader), run)
+    if counsel_prefix:
+        # New counsel mails: an ids-only search of the sent mail, a thread lookup only for ids not seen before.
+        after = int((now - LOOKBACK).timestamp())
+        for message_id in gmail.sent_with_subject(token, counsel_prefix.strip("[]"), after=after, getter=reader):
+            if message_id not in known:
+                counsel_threads.add(gmail.thread_of(token, message_id, getter=reader))
+        for thread_id in sorted(counsel_threads):
+            threads.setdefault(thread_id, {"report_id": None, "subject": None, "product": "counsel"})
     questions, skipped = [], []
     address = recipient.strip().lower()
     for thread_id, run in threads.items():
@@ -223,12 +246,19 @@ def find(db: Path, credentials: tuple[str, str, str], recipient: str, *, now: da
             if "SENT" not in message.get("labelIds", []) or sender != address:
                 skipped.append((message_id, thread_id, "not-from-client"))
                 continue
+            subject = run["subject"] or headers.get("subject", "")
+            if run.get("product") == "counsel" and not counsel_subject(subject, counsel_prefix or ""):
+                skipped.append((message_id, thread_id, "no-counsel-prefix"))   # Gmail's search is a coarse filter.
+                continue
+            if run.get("product") == "counsel" and parseaddr(headers.get("to", ""))[1].lower() != address:
+                skipped.append((message_id, thread_id, "not-to-self"))   # A counsel mail is one the client wrote to themselves.
+                continue
             text = strip_quote(body_text(gmail.message_body(token, message_id, getter=reader)))[:MAX_QUESTION_CHARS]
             if not text:
                 skipped.append((message_id, thread_id, "empty"))
                 continue
             received = datetime.fromtimestamp(int(message.get("internalDate", "0")) / 1000, tz=timezone.utc)
-            questions.append(Question(message_id, thread_id, run["report_id"], received, run["subject"] or "Smith 보고",
+            questions.append(Question(message_id, thread_id, run["report_id"], received, subject or "Smith 보고",
                                       text, headers.get("message-id", ""), headers.get("references", ""),
                                       run.get("product", "report")))
     return questions, skipped
@@ -584,11 +614,13 @@ def poll(db: Path, *, recipient: str, credentials: tuple[str, str, str], now: da
          secrets: list[str], executable: Path | None = None, runner: headless.Runner = subprocess.run,
          sender: Any = gmail.send, reader: gmail.Getter = gmail.get, poster: gmail.Poster = gmail.post,
          tz: str = DEFAULT_TIMEZONE, daily: Any = None, health: Any = None,
-         verifier: qa_lookup.Verifier | None = None, dart_key: str | None = None) -> list[dict[str, Any]]:
+         verifier: qa_lookup.Verifier | None = None, dart_key: str | None = None,
+         counsel: Any = None, counsel_prefix: str | None = None) -> list[dict[str, Any]]:
     """Answer new questions. `build(report)` rebuilds the data of the report a question replies to (from
     its run record and lineage; None only if the run is unknown, then current data). `daily(question, history)`
     answers a daily-thread question with the daily context and returns (html, text, result), `health` likewise for
-    a health-letter thread; without the answerer such a question is left for the next run.
+    a health-letter thread and `counsel` for a thread the client opened under `counsel_prefix` (FR-49; without both
+    no such mail is looked for); without the answerer such a question is left for the next run.
 
     A question is claimed (answering), marked sending just before the reply, then answered, failed or
     unknown. Interrupted runs are recovered first: answering becomes a retryable failure, sending becomes
@@ -598,7 +630,8 @@ def poll(db: Path, *, recipient: str, credentials: tuple[str, str, str], now: da
     with closing(ledger.connect(db)) as conn:
         for item in ledger.recover_questions(conn, now=now):
             results.append({"message_id": item["message_id"], "status": "recovered", "was": item["was"]})
-    questions, skipped = find(db, credentials, recipient, now=now, reader=reader, poster=poster)
+    questions, skipped = find(db, credentials, recipient, now=now, reader=reader, poster=poster,
+                              counsel_prefix=counsel_prefix if counsel is not None else None)
     with closing(ledger.connect(db)) as conn:
         for message_id, thread_id, reason in skipped:
             ledger.skip_question(conn, message_id=message_id, thread_id=thread_id, now=now, reason=reason)
@@ -606,7 +639,7 @@ def poll(db: Path, *, recipient: str, credentials: tuple[str, str, str], now: da
         return results
     questions.sort(key=lambda q: q.received_at)  # A later question in a thread sees the answer to an earlier one.
     built: dict[str | None, tuple[dict[str, Any] | None, dict[str, Any]]] = {}
-    answerers = {"daily": daily, "health": health}
+    answerers = {"daily": daily, "health": health, "counsel": counsel}
     for question in questions:
         if question.product in answerers:
             if answerers[question.product] is None:
@@ -623,7 +656,8 @@ def poll(db: Path, *, recipient: str, credentials: tuple[str, str, str], now: da
         with closing(ledger.connect(db)) as conn:
             claimed = ledger.claim_question(conn, message_id=question.message_id, thread_id=question.thread_id,
                                             report_id=question.report_id, received_at=question.received_at, now=now,
-                                            daily_limit=MAX_ANSWERS_PER_DAY, question_text=mask_identifiers(question.text))
+                                            daily_limit=MAX_ANSWERS_PER_DAY, question_text=mask_identifiers(question.text),
+                                            product=question.product)
         if not claimed:
             results.append({"message_id": question.message_id, "status": "deferred"})
             continue
