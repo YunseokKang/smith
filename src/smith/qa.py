@@ -36,12 +36,12 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-from smith import dart, editions, gmail, headless, ledger, memory, narrative, principles, qa_lookup, report_html
+from smith import dart, editions, gmail, headless, korean, ledger, memory, narrative, principles, qa_lookup, report_html
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import check_outbound, mask_identifiers
 from smith.report_data import build_report
 
-PROMPT_VERSION = "mail-answer-v15"  # v15: public look-ups (FR-43); v14: narrative-v27 (natural Korean); v13: principles are consensus, not law.
+PROMPT_VERSION = "mail-answer-v16"  # v16: korean.STYLE (client style guide 2026-11-01); v15: public look-ups (FR-43); v14: narrative-v27 (natural Korean); v13: principles are consensus, not law.
 MODEL = "fable"
 BUDGET_USD = "3.00"
 TIMEOUT_SECONDS = 600
@@ -579,8 +579,7 @@ def render(question: Question, result: dict[str, Any], data: dict[str, Any]) -> 
     """(html, text) of the reply, in the report's visual language but short."""
     links = narrative._links(data, result.get("brief"))
     sources = [links[r] for r in result["refs"] if r in links]
-    paragraphs = "".join(f'<p style="margin:0 0 12px;font-size:15px;line-height:1.65;color:#0a0b0d">{escape(p)}</p>'
-                         for p in result["text"].split("\n") if p.strip())
+    paragraphs = korean.html_blocks(result["text"], color="#0a0b0d", line_height=1.65)   # Prose and lists (style guide rule 3).
     quoted = escape(question.text[:500]).replace("\n", "<br>")
     source_html = "" if not sources else (
         '<div style="font-size:12px;color:#7c828a;margin-top:8px">출처: ' + " · ".join(

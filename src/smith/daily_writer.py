@@ -25,7 +25,7 @@ TIMEOUT_SECONDS = 600
 # v2 (user review 2026-10-25): the sentence grows out of the client's own Keep notes, a 역사의 오늘 aside, news at half length.
 # v3 (user decision 2026-10-25): address-book people travel as aliases (P1, P2, ...); the rule for writing them.
 # v4 (user instruction 2026-10-27): natural Korean (korean.RULES); code tidies double passives and dashes.
-PROMPT_VERSION = "daily-writer-v4"
+PROMPT_VERSION = "daily-writer-v5"   # v5: korean.STYLE (client style guide 2026-11-01).
 LIMITS = {"headline": 30, "weather_line": 180, "agenda_line": 140, "idea": 220, "summary": 130, "sentence": 120,
           "tasks_line": 140, "history": 170}
 ASK_TASTES = "취향을 알려 주시면 다음부터 더 맞춰 드릴게요."

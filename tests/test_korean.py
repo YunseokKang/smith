@@ -70,11 +70,30 @@ class ProblemTest(unittest.TestCase):
 
 class CarriedByWritersTest(unittest.TestCase):
     def test_every_writer_prompt_carries_the_rule_and_the_report_checks_it(self):
-        from smith import daily_qa, daily_writer, health_qa, health_writer, qa, team
-        for module in (narrative, qa, team, picks, daily_writer, daily_qa, health_writer, health_qa):
+        from smith import counsel, daily_qa, daily_writer, health_qa, health_writer, qa, team
+        for module in (narrative, qa, team, picks, daily_writer, daily_qa, health_writer, health_qa, counsel):
             with self.subTest(module=module.__name__):
                 prompt = getattr(module, "EDITOR_PROMPT", None) or getattr(module, "SELECT_PROMPT", None) or module.SYSTEM_PROMPT
                 self.assertIn(korean.RULES, prompt)
+                self.assertIn(korean.STYLE, prompt)   # The client's style guide (2026-11-01) travels with the rule.
+        self.assertIn("기회비용", korean.STYLE)
+        # The guide's translated idioms are flagged like the other calques.
+        self.assertEqual(korean.problem("팀장 제안을 받을지 고민이라는 말씀으로 들었어요."), ("calque", "말씀으로 들었"))
+        self.assertEqual(korean.problem("몸 쪽 저울이 더 무겁다고 봐요."), ("calque", "저울이 더 무겁"))
+
+    def test_lines_become_paragraphs_and_lists_for_the_mail(self):
+        text = ("운동은 A/B 교차 루틴으로 진행합니다.\n\n- A루틴: 레그프레스, 체스트프레스\n- B루틴: 고블릿 스쿼트, 랫풀다운\n\n"
+                "11월 회차별 가이드\n1. 1~2회차: 가장 가벼운 무게로 1~2세트\n2. 3~4회차: 각 2세트\n3) 5~6회차: 각 3세트\n마무리 한마디예요.")
+        self.assertEqual(korean.blocks(text), [("p", ["운동은 A/B 교차 루틴으로 진행합니다."]),
+                                               ("ul", ["A루틴: 레그프레스, 체스트프레스", "B루틴: 고블릿 스쿼트, 랫풀다운"]),
+                                               ("p", ["11월 회차별 가이드"]),
+                                               ("ol", ["1~2회차: 가장 가벼운 무게로 1~2세트", "3~4회차: 각 2세트", "5~6회차: 각 3세트"]),
+                                               ("p", ["마무리 한마디예요."])])
+        html = korean.html_blocks(text, color="#111", line_height=1.75)
+        self.assertEqual((html.count("<p "), html.count("<ul "), html.count("<ol "), html.count("<li ")), (3, 1, 1, 5))
+        self.assertIn('line-height:1.75;color:#111">운동은', html)
+        self.assertIn("<li style=\"margin:0 0 4px\">A루틴: 레그프레스, 체스트프레스</li>", html)
+        self.assertNotIn("<li", korean.html_blocks("줄글 한 문단.", color="#111"))
         self.assertEqual(narrative.unnatural(["보수가 낮다는 점에서 좋고, 분산을 통해 위험을 줄입니다."]), "unnatural-korean:을 통해")
         self.assertIsNone(narrative.unnatural(["보수가 낮아서 좋고, 분산해서 위험을 줄입니다."]))
         self.assertIn("unnatural-korean", narrative.SOFT)

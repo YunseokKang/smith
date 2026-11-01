@@ -55,7 +55,7 @@ from smith.payload import LedgerView, check_outbound
 from smith.proposals import Proposal
 from smith.records import Kind
 
-PROMPT_VERSION = "product-review-v3"  # v3: natural Korean (korean.RULES, checked); v2: code fixes rank 1, confirmed facts only.
+PROMPT_VERSION = "product-review-v4"  # v4: korean.STYLE (client style guide 2026-11-01); v3: natural Korean (korean.RULES, checked); v2: code fixes rank 1, confirmed facts only.
 MODEL = "fable"
 BUDGET_USD = "5.00"
 SCOUT_TIMEOUT = 1200

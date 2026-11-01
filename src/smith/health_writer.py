@@ -28,7 +28,7 @@ TIMEOUT_SECONDS = 600
 # v2 (user review 2026-10-25): verdict first and in plain words, no numbers in the headline, one line per item on top
 # of code's trend word, do/avoid per goal, actions shorter.
 # v3 (user instruction 2026-10-27): natural Korean (korean.RULES); code tidies double passives and dashes.
-PROMPT_VERSION = "health-writer-v3"
+PROMPT_VERSION = "health-writer-v4"   # v4: korean.STYLE (client style guide 2026-11-01).
 CATEGORIES = ("food", "exercise", "life")
 # Ceilings; `_clean` cuts at a sentence end, never mid-word.
 LIMITS = {"headline": 40, "verdict": 420, "line": 130, "do": 120, "avoid": 120, "what": 100, "amount": 140, "why": 220, "check": 160,

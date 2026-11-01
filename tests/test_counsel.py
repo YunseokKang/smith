@@ -299,6 +299,21 @@ class CounselPipelineTests(unittest.TestCase):
             with self.subTest(statement=statement, said=said):
                 self.assertEqual(counsel.said_by_client(statement, said), expected)
 
+    def test_lists_survive_the_checks_and_render_as_lists(self):
+        letter = ("득실을 따져보면 근력 운동을 해야 할 이유가 훨씬 큽니다.\n\n- A루틴: 레그프레스, 체스트프레스, 플랭크(30초)\n"
+                  "- B루틴: 고블릿 스쿼트, 랫풀다운\n- 공통 마무리(5분): 턱 당기기(10회)\n\n1. 1~2회차: 가장 가벼운 무게로 1~2세트\n"
+                  "2. 3~4회차: 각 2세트. 복용을 시작하세요.\n3. 5~6회차: 각 3세트\n\n단, 한 가지 예외 조건은 회복 지표입니다.")
+        text, problems = counsel.verify(letter, allowed=set(), resolved=[], banned=set())
+        # Lines and blank lines stay; a sentence that fails drops out of its line without taking the line with it.
+        self.assertEqual(text, "득실을 따져보면 근력 운동을 해야 할 이유가 훨씬 큽니다.\n\n- A루틴: 레그프레스, 체스트프레스, 플랭크(30초)\n"
+                               "- B루틴: 고블릿 스쿼트, 랫풀다운\n- 공통 마무리(5분): 턱 당기기(10회)\n\n1. 1~2회차: 가장 가벼운 무게로 1~2세트\n"
+                               "2. 3~4회차: 각 2세트.\n3. 5~6회차: 각 3세트\n\n단, 한 가지 예외 조건은 회복 지표입니다.")
+        self.assertEqual(len(problems), 1)
+        result = {**counsel._fixed(text), "emergency": False, "remember": [], "noted": []}
+        html, plain = counsel.render("운동을 어떻게 시작할까?", result)
+        self.assertEqual((html.count("<ul "), html.count("<ol "), html.count("<li ")), (1, 1, 6))
+        self.assertIn("- A루틴: 레그프레스", plain)
+
     def test_health_values_never_borrow_a_finance_figure(self):
         # A goal 180 months away is not an LDL of 180 (sixth review 2026-11-01).
         money = counsel.ledger_money(None)

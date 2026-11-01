@@ -27,7 +27,7 @@ from smith.payload import check_outbound, mask_identifiers
 MODEL = "fable"
 BUDGET_USD = "2.00"
 TIMEOUT_SECONDS = 480
-PROMPT_VERSION = "health-answer-v2"  # v2 (user instruction 2026-10-27): natural Korean (korean.RULES).
+PROMPT_VERSION = "health-answer-v3"  # v3: korean.STYLE (client style guide 2026-11-01); v2 (user instruction 2026-10-27): natural Korean (korean.RULES).
 MAX_ANSWER_CHARS = 1800
 # A symptom that is not a coaching question (health design §8.1). Korean and the English a client may type.
 DANGER = re.compile(r"가슴\s*(?:통증|이\s*아프|이\s*답답|을\s*조이|압박)|흉통|숨(?:이)?\s*(?:차|막히|쉬기\s*힘)|호흡\s*곤란|"
@@ -216,8 +216,7 @@ def note(db: Path, facts: list[str], *, on: date) -> None:
 def render(question_text: str, result: dict[str, Any]) -> tuple[str, str]:
     """(html, text) of the reply in the health letter's register."""
     h = health_html
-    paragraphs = "".join(f'<p style="margin:0 0 12px;font-size:15px;line-height:1.7;color:{h.BODY}">{escape(p)}</p>'
-                         for p in result["text"].split("\n") if p.strip())
+    paragraphs = korean.html_blocks(result["text"], color=h.BODY)   # Prose and lists (style guide rule 3).
     quoted = escape(question_text[:500]).replace("\n", "<br>")
     follow = "" if not result["follow_up"] else (
         f'<div style="font-size:12px;font-weight:700;color:{h.MUTED};margin:16px 0 4px">이어서 물어보실 만한 것</div>'

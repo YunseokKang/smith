@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 # v27: principle 9, natural Korean (user instruction 2026-10-27): no calques, fillers, double passives or dashes; code checks.
 # v28: official quarterly figures and insiders' dealings per holding; v22: no job gap in the reserve, reserve_basis, stale deals;
 # v21: retirement ages.
-PROMPT_VERSION = "narrative-v28"
+PROMPT_VERSION = "narrative-v29"
 MODEL = "fable"
 BUDGET_USD = "5.00"
 # Two calls at most: the write (the markets day with twenty-odd holdings ran past 10 minutes on 2026-10-17) and a

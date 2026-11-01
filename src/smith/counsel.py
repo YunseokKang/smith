@@ -47,7 +47,7 @@ ROUTE_TIMEOUT_SECONDS = 180
 RESEARCH_TIMEOUT_SECONDS = 900
 ROUTE_PROMPT_VERSION = "counsel-route-v1"
 RESEARCH_PROMPT_VERSION = "counsel-research-v1"
-PROMPT_VERSION = "counsel-answer-v1"
+PROMPT_VERSION = "counsel-answer-v2"   # v2: the client's style guide (korean.STYLE), lists, no "what I heard" opener.
 DEFAULT_PREFIX = "[상담]"
 MAX_NOTES = 8
 MAX_TERMS = 8
@@ -147,26 +147,34 @@ wearable, the coming schedule and dates), research_findings (public findings wit
 with gaps), data_status (what was read, what failed), conversation (earlier turns of this thread), client_question,
 message_date, asks_action.
 
-Write one letter in Korean, 해요체 (~해요, ~이에요, ~해 보세요), as a warm, candid senior in life would write to someone
-they care about: plain words, short sentences, short paragraphs, no title, no headings, no bullet lists, no emoji, no
-address word (no 고객님, no name), "저" for yourself. 1,200 to 2,500 characters. Begin by saying in a line or two what
-you heard in the question, then your view.
+Write one letter in Korean as a warm, candid senior in life would write to someone they care about: plain words, short
+sentences, short paragraphs, no title, no headings, no emoji, no address word (no 고객님, no name), "저" for yourself.
+1,200 to 2,500 characters. The base register is 해요체 (~해요, ~이에요, ~해 보세요) for warmth and soft suggestions;
+conclusions, figures and recommendations take ~입니다/~권장합니다 for weight, so the endings vary (style guide rule 1
+below). Open on the matter itself, never on a line about what you heard. Three or more parallel items (a routine, a
+schedule by session, a diet, 45/55/60 scenarios, 첫째·둘째·셋째 reasons) go in a list: lines starting with "- " or
+"1. " (rule 3); conclusions, insight and empathy stay in prose.
 
-Balance is the point of this letter. Whatever the client leans to, say plainly what that choice costs and gives up
-(반대급부), and make the strongest honest case for the other side, with its reasons; look at the matter from more than
-one side (돈, 시간, 관계, 몸, 마음, 앞으로의 선택지) and say which side weighs most here and why. Then give your own
-clear opinion as a senior would, and the one thing that would change it. Do not flatter the lean; do not scold it.
+Balance is the point of this letter. Whatever the client leans to, name its 기회비용 (감수할 부분) plainly and make the
+strongest honest case for the other option with its reasons; weigh the matter from more than one side (돈, 시간, 관계,
+몸, 마음, 앞으로의 선택지) and say which consideration outweighs the others here and why (득실을 따지면 …). Then give
+your own clear opinion as a senior would, and the one 예외 조건 that would change it ("단, 한 가지 예외 조건은 …입니다").
+Do not flatter the lean; do not scold it. Write all of this in the Korean a native would use, never as a translated
+idiom ("저울이 더 무겁다", "내주는 것이 있다", "기울어 계신 쪽"; rule 2 below).
 
 Use the client's own records as a friend who remembers would: cite a note by its date ("10월 6일에 쓰신 메모에…")
-when it bears on the matter, and say when the notes hold nothing on it. A memory fact is what the client said, not a
-ledger fact. Money figures only from `finance`, rounded to 억·만 in prose; never a promised return or a sure price;
-Smith cannot move money, trade, sign up, cancel or send mail: when asks_action is "yes", say so once, kindly, and
-advise instead. Health: you are a coach, not a doctor: explain, suggest habits with amounts, never name a disease the
-records did not write, never tell them to start, stop or change a medicine or a dose; a health value only from
-`health`; a symptom that worries you ends with 진료. Public facts from research_findings only, each with its ref in
-brackets like [R2]; say which are single-source; a finding whose verification is "unchecked" (its page could not be
-read) is unconfirmed: cite it only as such and never for a number; never state a number the input does not hold as a
-fact. Say what you could not read (data_status) in one plain line only if it matters to the answer.
+when it bears on the matter; an Evernote reference entry reads as "스크랩해 두신 구절처럼", never with an aside that
+it is not their own view; when the notes hold nothing on the matter, one short clause says so, or nothing does. A
+memory fact is what the client said, not a ledger fact. Money figures only from `finance`, rounded to 억·만 in prose;
+never a promised return or a sure price; Smith cannot move money, trade, sign up, cancel or send mail: when
+asks_action is "yes", say so once, kindly, and advise instead. Health: you are a coach, not a doctor: explain, suggest
+habits with amounts, never name a disease the records did not write, never tell them to start, stop or change a
+medicine or a dose; a health value only from `health`; a symptom that worries you ends with 진료. Public facts from
+research_findings only, each with its ref in brackets like [R2]; a single-source or "unchecked" finding (its page could
+not be read) is marked in parentheses right after the claim ("(단일 출처 [R1])") and never carries a number as a fact;
+never state a number the input does not hold as a fact. A limit of the material (a store that could not be read, a
+note that holds nothing) goes inside the sentence or in parentheses, never as a separate remark (rule 4), and only when
+it matters to the answer.
 
 - follow_up: up to 3 short things the client might ask next.
 - remember: up to 3 facts the client states about themselves or their family in this question (a plan, a taste, a
@@ -580,10 +588,16 @@ def verify(raw: str, *, allowed: set[str], resolved: list[str], banned: set[str]
     arithmetic or an invented amount does not pass); other sentences may count ("3년쯤"); a food the client ruled out
     drops it when the sentence suggests eating it. Paragraphs are kept."""
     problems: list[str] = []
-    paragraphs = []
-    for paragraph in re.split(r"\n\s*\n|\n", korean.tidy(_clean(raw, MAX_ANSWER_CHARS))):
+    lines: list[str] = []
+    # Line by line, blank lines kept as paragraph breaks: a list line ("- …", "1. …") stays a line of its own, so the
+    # mail renders it as a list (style guide rule 3).
+    for line in korean.tidy(_clean(raw, MAX_ANSWER_CHARS, keep_breaks=True)).split("\n"):
+        if not line.strip():
+            if lines and lines[-1]:
+                lines.append("")
+            continue
         kept = []
-        for sentence in re.split(r"(?<=[.!?])\s+", paragraph.strip()):
+        for sentence in re.split(r"(?<=[.!?])\s+", line.strip()):
             if not sentence:
                 continue
             health_item = _HEALTH_ITEM.search(sentence) is not None
@@ -601,8 +615,8 @@ def verify(raw: str, *, allowed: set[str], resolved: list[str], banned: set[str]
                 continue
             kept.append(sentence)
         if kept:
-            paragraphs.append(" ".join(kept))
-    return "\n\n".join(paragraphs), problems
+            lines.append(" ".join(kept))
+    return "\n".join(lines).strip(), problems
 
 
 _COUNTS = {str(n) for n in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 30, 45, 60, 90)}   # Counts and minutes a coach uses; not 100.
@@ -817,8 +831,7 @@ def answerer(db: Path, config: dict[str, Any], *, now: datetime, tz: str, secret
 def render(question_text: str, result: dict[str, Any]) -> tuple[str, str]:
     """(html, text) of the letter in the daily mail's palette: the question quoted, the letter, what was read and
     searched, the sources, the follow-ups and what Smith keeps."""
-    paragraphs = "".join(f'<p style="margin:0 0 12px;font-size:15px;line-height:1.75;color:{daily_html.BODY}">{escape(p)}</p>'
-                         for p in result["text"].split("\n") if p.strip())
+    paragraphs = korean.html_blocks(result["text"], color=daily_html.BODY, line_height=1.75)   # Prose and lists (rule 3).
     quoted = escape(question_text[:500]).replace("\n", "<br>")
     source_items = [(ref, *result["links"][ref]) for ref in result["refs"] if ref in result["links"]]
     unchecked = set(result.get("unchecked") or ())
@@ -903,12 +916,19 @@ def _headless_caller(db: Path, now: datetime, executable: Path, runner: headless
     return call
 
 
-def _clean(value: Any, limit: int) -> str:
-    """Whitespace-normalised text without links or identifiers, cut at `limit`."""
+def _clean(value: Any, limit: int, *, keep_breaks: bool = False) -> str:
+    """Whitespace-normalised text without links or identifiers, cut at `limit`. With `keep_breaks`, a run of blank
+    lines stays as one blank line (a paragraph break the letter's rendering keeps)."""
     if not isinstance(value, str):
         return ""
     text = mask_identifiers(re.sub(r"(?:https?://|www\.)\S+", "", value))
-    return "\n".join(" ".join(line.split()) for line in text.splitlines() if line.strip()).strip()[:limit]
+    lines: list[str] = []
+    for line in text.splitlines():
+        if line.strip():
+            lines.append(" ".join(line.split()))
+        elif keep_breaks and lines and lines[-1]:
+            lines.append("")
+    return "\n".join(lines).strip()[:limit]
 
 
 def _list(value: Any) -> list[Any]:

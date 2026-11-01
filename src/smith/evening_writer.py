@@ -24,7 +24,7 @@ MODEL = "fable"
 BUDGET_USD = "3.00"
 TIMEOUT_SECONDS = 600
 # v2 (user decision 2026-10-27): the commute (or outing) windows are part of weather and may be named.
-PROMPT_VERSION = "evening-writer-v2"
+PROMPT_VERSION = "evening-writer-v3"   # v3: korean.STYLE (client style guide 2026-11-01).
 LIMITS = {"line": 160, "note": 220, "title": talk.MAX_TITLE}
 PARTNER_QUERY = "아내 와이프 배우자 부인 여보 좋아하는 취향 요즘 일"
 PARTNER_NOTES = 3

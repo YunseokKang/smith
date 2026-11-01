@@ -32,7 +32,7 @@ RESEARCH_TIMEOUT_SECONDS = 900
 # v4 (FR-36, 2026-10-25): client_contacts, the address-book notes on the people the question names.
 # v5 (user decision 2026-10-25): address-book people travel as aliases (P1, P2, ...); the rule for writing them.
 # v6 (user instruction 2026-10-27): natural Korean (korean.RULES); code tidies double passives and dashes.
-PROMPT_VERSION = "daily-answer-v6"
+PROMPT_VERSION = "daily-answer-v7"   # v7: korean.STYLE (client style guide 2026-11-01).
 RESEARCH_PROMPT_VERSION = "daily-research-v1"
 WINDOW_DAYS = 14
 MAX_FINDINGS = 12
@@ -340,8 +340,7 @@ def research(request: dict[str, Any], *, now: datetime, secrets: list[str], call
 
 def render(question_text: str, result: dict[str, Any]) -> tuple[str, str]:
     """(html, text) of the reply in the daily mail's warm register, with the sources it leaned on."""
-    paragraphs = "".join(f'<p style="margin:0 0 12px;font-size:15px;line-height:1.7;color:{daily_html.BODY}">{escape(p)}</p>'
-                         for p in result["text"].split("\n") if p.strip())
+    paragraphs = korean.html_blocks(result["text"], color=daily_html.BODY)   # Prose and lists (style guide rule 3).
     quoted = escape(question_text[:500]).replace("\n", "<br>")
     source_items = [(ref, *result["links"][ref]) for ref in result["refs"] if ref in result["links"]]
     source_html = "" if not source_items else (
