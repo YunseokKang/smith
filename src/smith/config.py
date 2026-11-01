@@ -42,7 +42,7 @@ KNOWN_KEYS = {
     "evernote": {"enabled", "time", "notebooks", "spaces"},
     # Personal counsel (FR-49, docs/counsel-design.md): mails the client writes to themselves under `prefix` are
     # answered as a warm senior would; `max_notes` bounds the client's notes one answer may read.
-    "counsel": {"enabled", "prefix", "max_notes"},
+    "counsel": {"enabled", "prefix", "max_notes", "reader"},
 }
 COUNSEL_PREFIX = re.compile(r"^\[[0-9A-Za-z가-힣]{1,20}\]$")
 HEALTH_MIDWEEK_KEYS = {"enabled", "weekday", "time"}
@@ -248,6 +248,8 @@ def _check_counsel(counsel: object) -> None:
     notes = counsel.get("max_notes", 8)
     if isinstance(notes, bool) or not isinstance(notes, int) or not 1 <= notes <= 20:
         raise ValueError("counsel.max_notes must be a whole number from 1 to 20")
+    if not isinstance(counsel.get("reader", False), bool):   # The first reader adds minutes; off unless asked (2026-11-01).
+        raise ValueError("counsel.reader must be a boolean")
 
 
 def _check_events(events: object) -> None:

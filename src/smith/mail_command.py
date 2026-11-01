@@ -141,6 +141,7 @@ def answer(db: Path, config_path: Path, *, verbose: bool = False, counsel_only: 
         return 1
     for item in results:
         kept = (", looked up" if item.get("looked_up") else "") + (
+            f", reader {item['reading']}" if item.get("reading") else "") + (
             f", remembered {item['remembered']}" if item.get("remembered") else "")
         failed = f", memory not saved ({item['memory_error']})" if item.get("memory_error") else ""
         say(f"Question {item['message_id'][:8]}...: {item['status']}{kept}{failed}")

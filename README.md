@@ -48,7 +48,7 @@ py -3.10 -m uv pip install --python .venv -e .
 | `proposal list` / `proposal accept\|decline\|done KEY [--note]` | 지난 제안 목록, 제안에 대한 결정 기록(다음 보고서의 후속 점검에 반영) |
 | `realestate login\|status\|logout\|sync\|show` | 공공데이터포털·R-ONE 키 저장(화면 비표시), 보유 단지 실거래가 수집과 시세·전세 요약 |
 | `mail login --client-file PATH [--read]` / `mail status` / `mail test` / `mail answer [--counsel-only] [--log]` / `mail logout` | Gmail 권한 연결·확인·시험 발송. `--read`와 `[mail] answer_replies = true`면 보고서 메일에 대한 답장 질문에 답한다. `--counsel-only`는 `[상담]` 메일과 최근 상담 스레드만 본다(상담 전용 작업). 받는 주소는 Git 제외 `config/smith.local.toml` |
-| `ask "질문" [--domains finance,health,life] [--show-payload] [--json]` | 개인 상담(FR-49)을 터미널에서: 편지를 출력만 하고 보내거나 저장하지 않는다 |
+| `ask "질문" [--domains finance,health,life] [--show-payload] [--reader] [--json]` | 개인 상담(FR-49)을 터미널에서: 편지를 출력만 하고 보내거나 저장하지 않는다. `--reader`는 첫 독자(Codex)의 지적과 다시 쓰기까지 |
 | `summary [--as-of TIME] [--known-at TIME] [--json]` | 순자산, 자산 배분, 유동성, 월 현금흐름, 목표, 데이터 신선도와 경고 |
 | `doctor` | 원장·설정·자격 증명(존재 여부만)·작업 스케줄러·최근 동기화·조사·발송·메일 답변·실행 로그를 한 번에 점검. 아무것도 보내거나 쓰지 않는다 |
 

@@ -704,6 +704,7 @@ def poll(db: Path, *, recipient: str, credentials: tuple[str, str, str], now: da
         _finish(db, question, "answered", now, answer_id=answer_id)
         results.append({"message_id": question.message_id, "status": "answered", "memos": len(result["memos"]),
                         "looked_up": bool(result.get("looked_up") or result.get("researched")),
+                        "reading": (result.get("reading") or {}).get("outcome"),   # The counsel's first reader (FR-49).
                         **_remember(db, question, result, tz)})
     return results
 

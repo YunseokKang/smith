@@ -8,7 +8,7 @@ from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from smith import contacts, counsel, gmail, health_qa, keep, ledger, memory, qa
+from smith import contacts, counsel, gmail, headless, health_qa, keep, ledger, memory, qa, reader
 from smith.config import load_config
 from smith.importer import parse_import
 
@@ -299,6 +299,49 @@ class CounselPipelineTests(unittest.TestCase):
             with self.subTest(statement=statement, said=said):
                 self.assertEqual(counsel.said_by_client(statement, said), expected)
 
+    def test_a_first_reader_marks_passages_and_the_letter_is_rewritten_and_rechecked(self):
+        from smith import reader
+        first = {"answer": "이 선택에는 내주는 것이 있어요. 3년쯤 지나면 선택지가 달라질 거예요.", "follow_up": ["다음은요?"],
+                 "remember": [], "health_statements": []}
+        rewrite = {"answer": "이 선택에는 기회비용이 따릅니다. 3년쯤 지나면 선택지가 달라질 거예요. 복용을 시작하세요. 자세한 건 [R7] 참고.",
+                   "follow_up": [], "remember": [], "health_statements": []}
+        notes = [{"path": "p1", "quote": "내주는 것이 있어요", "problem": "unnatural", "why": "직역 비유", "suggestion": "기회비용이 따릅니다"}]
+
+        def reads(letter):
+            self.assertEqual([b["path"] for b in letter["blocks"]], ["p1"])
+            self.assertEqual(letter["matter"], ROUTE["summary"])
+            return {"notes": reader.clean_notes(notes, letter["blocks"]), "raw_notes": 1, "overall": "대체로 읽히나 비유가 어색함", "model": "gpt-6.1-sol"}
+        call, calls = fake_caller([dict(ROUTE, domains=[]), first, rewrite])
+        result = counsel.answer(self.db, CONFIG, QUESTION, now=NOW, received_at=NOW, history=[], secrets=[], tz="Asia/Seoul",
+                                caller=call, first_reader=reads)
+        self.assertEqual([u for u, _, _ in calls], ["counsel-route", "counsel-answer", "counsel-answer-rewrite"])
+        sent = json.loads(calls[2][2])
+        self.assertEqual((sent["previous_output"]["answer"], sent["reader_notes"][0]["quote"]), (first["answer"], "내주는 것이 있어요"))
+        # The rewrite is adopted, after the same checks (the dosing sentence and the stray ref are gone).
+        self.assertEqual(result["text"], "이 선택에는 기회비용이 따릅니다. 3년쯤 지나면 선택지가 달라질 거예요. 자세한 건 참고.")
+        self.assertEqual((result["reading"]["outcome"], result["reading"]["notes"], result["reading"]["kinds"]), ("rewritten", 1, ["unnatural"]))
+        self.assertEqual(result["follow_up"], ["다음은요?"])   # The other fields stay from the first letter.
+        with closing(ledger.connect_read_only(self.db)) as conn:
+            rows = conn.execute("SELECT use_case, outcome, model FROM advice_runs WHERE use_case = 'counsel-reader'").fetchall()
+        self.assertEqual(rows, [("counsel-reader", "success", "gpt-6.1-sol")])
+
+    def test_a_reader_with_no_notes_or_a_failing_reader_leaves_the_letter(self):
+        output = {"answer": "메모만 보고 말씀드려요.", "follow_up": [], "remember": [], "health_statements": []}
+        call, calls = fake_caller([dict(ROUTE, domains=[]), output])
+        clear = counsel.answer(self.db, CONFIG, QUESTION, now=NOW, received_at=NOW, history=[], secrets=[], tz="Asia/Seoul", caller=call,
+                               first_reader=lambda letter: {"notes": [], "raw_notes": 0, "overall": "잘 읽힘", "model": "gpt-6.1-sol"})
+        self.assertEqual((clear["text"], clear["reading"]["outcome"], len(calls)), ("메모만 보고 말씀드려요.", "clear", 2))
+
+        def broken(letter):
+            raise headless.HeadlessError("codex-usage-limit")
+        call, calls = fake_caller([dict(ROUTE, domains=[]), output])
+        kept = counsel.answer(self.db, CONFIG, QUESTION, now=NOW, received_at=NOW, history=[], secrets=[], tz="Asia/Seoul", caller=call,
+                              first_reader=broken)
+        self.assertEqual((kept["text"], kept["reading"]), ("메모만 보고 말씀드려요.", {"outcome": "failure", "error_code": "codex-usage-limit"}))
+        self.assertEqual(reader.letter_blocks("첫 문단.\n\n- 하나\n- 둘\n\n끝."), [
+            {"path": "p1", "section": "편지", "text": "첫 문단."}, {"path": "p2", "section": "편지", "text": "- 하나\n- 둘"},
+            {"path": "p3", "section": "편지", "text": "끝."}])
+
     def test_lists_survive_the_checks_and_render_as_lists(self):
         letter = ("득실을 따져보면 근력 운동을 해야 할 이유가 훨씬 큽니다.\n\n- A루틴: 레그프레스, 체스트프레스, 플랭크(30초)\n"
                   "- B루틴: 고블릿 스쿼트, 랫풀다운\n- 공통 마무리(5분): 턱 당기기(10회)\n\n1. 1~2회차: 가장 가벼운 무게로 1~2세트\n"
@@ -497,6 +540,15 @@ class CounselMailTests(unittest.TestCase):
         self.assertEqual(sorted(q.message_id for q in questions), ["counselmsg01", "oldfollow01"])
         self.assertTrue(any("/threads/thread0001?" in url for url in self.reads))
 
+    def test_the_mail_answerer_attaches_the_reader_only_when_configured(self):
+        # The structure is there; the letter the client waits for is not read unless [counsel] reader = true.
+        with unittest.mock.patch.object(counsel.reader, "installed", return_value=(lambda letter: {}, None)) as installed:
+            counsel.answerer(self.db, CONFIG, now=NOW, tz="Asia/Seoul", secrets=[])
+            self.assertEqual(installed.call_count, 0)
+            counsel.answerer(self.db, {**CONFIG, "counsel": {**CONFIG["counsel"], "reader": True}}, now=NOW, tz="Asia/Seoul", secrets=[])
+            self.assertEqual(installed.call_count, 1)
+            self.assertEqual(installed.call_args.kwargs["brief"], reader.COUNSEL_PROMPT)
+
     def test_mail_answer_flags_parse(self):
         import argparse
 
@@ -527,11 +579,12 @@ class CounselMailTests(unittest.TestCase):
 
     def test_counsel_section_is_validated(self):
         config = load_config(EXAMPLE)
-        self.assertEqual(config["counsel"], {"enabled": False, "prefix": "[상담]", "max_notes": 8})
+        self.assertEqual(config["counsel"], {"enabled": False, "prefix": "[상담]", "max_notes": 8, "reader": False})
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "test.toml"
             for before, after in (('prefix = "[상담]"', 'prefix = "[Smith][상담]"'), ('max_notes = 8', 'max_notes = 0'),
-                                  ('prefix = "[상담]"', 'prefix = "상담"'), ('max_notes = 8', 'max_notes = true')):
+                                  ('prefix = "[상담]"', 'prefix = "상담"'), ('max_notes = 8', 'max_notes = true'),
+                                  ('reader = false', 'reader = "yes"')):
                 with self.subTest(after=after):
                     path.write_text(EXAMPLE.read_text(encoding="utf-8").replace(before, after), encoding="utf-8")
                     with self.assertRaises(ValueError):

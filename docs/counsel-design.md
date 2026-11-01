@@ -153,6 +153,23 @@
   진술은 본인 것만, 복용·진단·연락처 표현이 없는 것만 `data/health/client-notes.md`에 쓴다(메일 경로에서만).
 - 남은 문장이 없으면 실패로 기록해 다시 시도한다(최대 3회).
 
+### 3.7 첫 독자 (`reader.COUNSEL_PROMPT`, `counsel-reader-v1`, Codex gpt-6.1-sol; 사용자 제안 2026-11-01)
+
+재무 보고서의 첫 독자(보고서 설계 §6e)를 상담 편지에도 붙인다. 검증을 마친 편지의 **산문만**(문단·목록 블록 `p1`, `p2`…와 질문
+한 줄)을 작가와 다른 회사 모델(OpenAI Codex, 없으면 Claude headless로 대체하고 `fallback_from`에 남김)이 고객의 눈으로 읽고
+막히는 구절을 짚는다. 문제 종류는 보고서 독자의 여덟 가지에 문체 지침(§3.5)에서 온 세 가지를 더한 것이다: `monotone`(어미 단조·
+"~라는 말씀으로 들었어요" 도입), `needs_list`(셋 이상 나열을 줄글로), `meta_remark`(자료 한계를 별도 문장으로). `unnatural`에는
+지침의 직역 비유 예시가 들어 있다. 독자는 조언의 옳고 그름을 판단하지 않고 수치·사실을 보탤 수 없으며, 인용은 블록의 원문과
+같아야 코드가 받는다(`reader.clean_notes`).
+
+지적이 있으면 작가가 `previous_output`과 `reader_notes`를 받아 편지 전체를 다시 쓰고(`counsel-answer-rewrite`), 다시 쓴 글은 §3.6의
+검사를 그대로 통과해야 채택된다(실패·빈 결과·독자 실패는 원래 편지를 보낸다). 독자 호출은 `advice_runs`에 `counsel-reader`로
+남고, 결과(`clear`·`rewritten`·`failure`…)는 실행 로그의 "reader …"로 보인다. 시간: 독자 3분, 다시 쓰기는 답변과 같은 상한.
+
+**기본은 꺼짐**(사용자 결정 2026-11-01: "구조는 만들고 바로 붙이진 마. 상담은 너무 오래 걸리면 안 되니"). 메일 경로는 `[counsel]
+reader = true`일 때만 독자를 붙이고, 터미널에서는 `smith ask --reader`로 한 통씩 시험해 지적 종류와 다시 쓴 결과를 본다(출력 끝에
+"첫 독자: rewritten, 지적 N건, 종류 …"). 켜면 편지 한 통에 3~8분이 더 걸린다. 테스트는 독자를 주입하고, 독자를 주지 않으면 읽지 않는다.
+
 ## 4. 답장 모양 (`render`)
 
 하루 일과 메일의 팔레트. 머리 "SMITH · 상담", 질문 인용, 편지 문단, **읽은 자료 한 줄**("메모 2개(에버노트 1개 참고), 기억 1개,
@@ -166,10 +183,11 @@
 enabled = false      # 켜면 run-due가 [상담] 메일을 찾는다 ([mail] answer_replies = true와 읽기 권한 필요)
 prefix = "[상담]"    # 대괄호 한 낱말
 max_notes = 8        # 답 하나가 읽는 메모 수 (1~20)
+reader = false       # 첫 독자(Codex)와 다시 쓰기 한 번: 켜면 편지마다 몇 분 더 걸린다 (§3.7)
 ```
 
-`smith ask "질문" [--domains finance,health,life] [--show-payload] [--json]`. 감사 기록은 `advice_runs`의 `counsel-route`,
-`counsel-research`, `counsel-answer`(질문 칸은 "counsel").
+`smith ask "질문" [--domains finance,health,life] [--show-payload] [--reader] [--json]`. 감사 기록은 `advice_runs`의
+`counsel-route`, `counsel-research`, `counsel-answer`, `counsel-answer-rewrite`, `counsel-reader`(질문 칸은 "counsel").
 
 ## 6. 실패 모드와 처리
 

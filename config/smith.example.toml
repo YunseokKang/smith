@@ -148,3 +148,5 @@ spaces = ["Reading", "Travel"]
 enabled = false
 prefix = "[상담]"
 max_notes = 8
+# The first reader (Codex) reading each letter and one rewrite of what it marks: minutes more per letter, so off.
+reader = false
