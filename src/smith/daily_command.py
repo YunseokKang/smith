@@ -1,7 +1,7 @@
 """`smith daily`: preview the daily-routine mail (FR-31) without sending, or print what a model would receive."""
 import argparse
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +79,7 @@ def run_due(db: Path, config: dict[str, Any], *, now: datetime) -> list[str]:
     slot = daily_send.slot_for(config, day)
     lines += _sync_keep(db, now)
     lines += _sync_contacts(db, now)
+    lines += _sync_evernote(db, config, now, slot)
     if slot - PREPARE_AHEAD <= now < slot and daily_send.is_mail_day(config, day):
         daily_config = config.get("daily", {})
         try:
@@ -117,6 +118,33 @@ def _sync_keep(db: Path, now: datetime) -> list[str]:
         return [f"keep sync: {result['outcome']}" + (f" {result['imported']} notes from {result['stamp']}" if result["outcome"] == "imported" else "")
                 + (f" ({result['error_code']})" if result["error_code"] else "")]
     return []
+
+
+EVERNOTE_QUIET_BEFORE, EVERNOTE_QUIET_AFTER = timedelta(hours=2), timedelta(minutes=30)
+
+
+def _sync_evernote(db: Path, config: dict[str, Any], now: datetime, slot: datetime) -> list[str]:
+    """Once a night at `[evernote] time` (default 03:00): read the allowed Evernote sources through Aside (daily design
+    §13.1). It takes 10-15 minutes, so it never runs from two hours before the morning mail until half an hour after
+    (a PC woken at 05:30 reads after the mail). Never raises; a failure keeps the stored copy."""
+    from smith import evernote, evernote_command
+
+    settings = config.get("evernote", {})
+    # Yesterday's and tomorrow's slots too: a 23:00 sync before a 01:00 mail is inside the window (review 2026-11-01).
+    near_mail = any(at - EVERNOTE_QUIET_BEFORE <= now < at + EVERNOTE_QUIET_AFTER
+                    for at in (slot - timedelta(days=1), slot, slot + timedelta(days=1)))
+    if not settings.get("enabled") or near_mail:
+        return []
+    local_now = local_time(now, config["app"]["timezone"])
+    folder = evernote.directory(db)
+    if not evernote.sync_due(folder, now=now, local_now=local_now, at=time.fromisoformat(settings.get("time", "03:00"))):
+        return []
+    try:
+        result = evernote.sync(folder, list(settings.get("notebooks", [])), list(settings.get("spaces", [])),
+                               now=now, today=local_now.date())
+    except OSError as error:
+        return [f"evernote sync failed ({type(error).__name__})"]
+    return [evernote_command.describe(result)]
 
 
 def _sync_contacts(db: Path, now: datetime) -> list[str]:

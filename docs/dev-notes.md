@@ -354,3 +354,24 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
   `command-too-long`으로 미리 거부한다(BUG-2026-005).
 - 예방: 긴 텍스트(지시문, 데이터, 스키마)는 인자가 아니라 stdin이나 파일로 넘긴다. `launch-failed`가 보이면 먼저
   `subprocess.list2cmdline(args)` 길이를 잰다.
+
+### TS-035 PowerShell에서 `aside repl`에 넘긴 스크립트의 한글이 깨져 `DOMException` (2026-11-01)
+
+- 증상: Evernote 웹 탭에서 `[aria-label="노트 목록"]` 같은 한글 선택자를 쓴 `aside repl "..."`이 `Error: DOMException`으로 끝났다.
+  `includes('불러오는 중')` 같은 한글 비교도 오류 없이 틀린 값(false)을 냈다. 한글이 없는 스크립트는 정상이었다.
+- 원인: Windows PowerShell 5.1이 네이티브 실행 파일에 넘기는 인자의 한글을 시스템 코드 페이지로 바꿔 깨뜨린다(TS-024와 같은 경로).
+- 해결: `aside repl` 스크립트는 Bash 도구에서 `read -r -d '' S <<'EOF' ... EOF` 후 `aside.exe repl "$S"`로 넘긴다. 한글이 그대로 전달된다.
+- 참고: Evernote 웹의 노트 목록 항목은 `button[id$="_qa-NOTES_SIDEBAR_NOTE"]`(id 앞부분이 노트 GUID), 본문은 이름이
+  `qa-COMMON_EDITOR_IFRAME`인 iframe의 `document.body.innerText`로 읽힌다. 목록은 가상 스크롤이라 스크롤해야 뒤 항목이 생긴다.
+- 덧붙임: 정규식·역슬래시가 든 repl 스크립트는 Bash heredoc 대신 scratchpad의 `.js` 파일로 쓰고 `aside.exe repl "$(cat 파일)"`로
+  넘긴다(TS-030과 같은 이스케이프 손상). Smith 코드는 `subprocess`에 인자 목록으로 넘기므로 셸을 거치지 않아 문제가 없다.
+
+### TS-036 Evernote 웹 목록을 빠짐없이 모으기: 가상 스크롤과 `aside repl` 120초 한도 (2026-11-01)
+
+- 증상: 기본 노트북(화면 표시 255개)의 목록이 실행마다 206·209·229·239개로 달랐다. 작은 스크롤로 고치자 255개가 모였지만 115~118초가
+  걸려 한 번은 `aside-timeout`으로 실패했다.
+- 원인: ① 가상 스크롤은 화면 근처 행만 그리는데 화면 높이의 80%씩 내리면 그리기가 따라오기 전에 다음 위치로 넘어가 중간 행이 한 번도
+  DOM에 나타나지 않았다. ② `aside repl` 한 번은 120초가 한도다(탭 열기와 앱 로딩에 15~30초).
+- 해결: 40%씩 내리고 첫 행이 바뀔 때까지(최대 약 1초) 기다린다. 화면 수에 못 미치면 끝에서 조금 올렸다 내리며 최대 30초 더 기다린다.
+  호출은 스크립트 시작부터 90초 예산에서 스스로 멈추고 스크롤 위치를 알려, 다음 호출이 그 위치부터 이어 받는다(`evernote._list_source`).
+- 예방: 목록은 화면이 밝힌 개수와 모은 개수를 늘 함께 기록한다(`found/expected`). 덜 모인 소스는 예전 노트를 지우지 않는다.

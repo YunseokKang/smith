@@ -230,8 +230,8 @@ def answer(db: Path, ctx: dict[str, Any], question_text: str, *, now: datetime, 
     call = caller or _headless_caller(db, now, executable or headless.find_claude(), runner)
     facts = memory.load(memory.directory(db))
     chosen = memory.retrieve(facts, question_text)
-    # The client's own Keep notes about the matter asked (daily design §13): a few, masked, never the whole store.
-    notes = keep.search(keep.load(keep.directory(db)), question_text, limit=5)
+    # The client's own Keep and Evernote notes about the matter asked (daily design §13): a few, masked, never the store.
+    notes = keep.search(keep.load_all(db), question_text, limit=5)
     # The address book's notes on the people the question names (daily design §14): one to three, never the whole book.
     # The context's own contact rows are cut to those same people, so one call never sees more than MODEL_PEOPLE.
     address_book = contacts.load(contacts.path(db))

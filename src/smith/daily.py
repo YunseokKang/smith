@@ -128,7 +128,7 @@ def collect(db: Path, config: dict[str, Any], *, now: datetime, day: date | None
             events_today = history.events_for(day, cache=history.path(db), now=now)
     except (OSError, ValueError) as error:
         failures["history"] = str(error)[:40]
-    notes = keep.load(keep.directory(db))
+    notes = keep.load_all(db, thoughts=True)
     return Inputs(report, events, tasks, book, today_holiday, ahead, failures, events_today, notes, keep.used(keep.directory(db)),
                   weather_label, address_book, _carried_filings(db))
 

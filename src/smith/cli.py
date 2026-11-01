@@ -63,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
     macro.add_argument("--days", type=int, default=400, help="sync: history window in days (default: 400)")
     macro.add_argument("--as-of", type=date.fromisoformat, help="show: YYYY-MM-DD (default: today)")
     from smith import (advise_command, agenda_command, backup_command, contacts_command, daily_command,
-                       dividends_command, doctor_command, fundamentals_command, evening_command, events_command,
+                       dividends_command, doctor_command, fundamentals_command, evening_command, events_command, evernote_command,
                        followup_command, health_command, keep_command, mail_command, people_command, picks_command,
                        memory_command, realestate_command, report_command, trade_command, weather_command)
     agenda_command.add_parser(sub)
@@ -72,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     daily_command.add_parser(sub, DEFAULT_DB)
     evening_command.add_parser(sub, DEFAULT_DB)
     keep_command.add_parser(sub, DEFAULT_DB)
+    evernote_command.add_parser(sub, DEFAULT_DB)
     weather_command.add_parser(sub)
     advise_command.add_parser(sub, DEFAULT_DB)
     events_command.add_parser(sub, DEFAULT_DB)
@@ -95,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
                 "realestate": realestate_command.run, "doctor": doctor_command.run, "backup": backup_command.run,
                 "memory": memory_command.run, "picks": picks_command.run, "events": events_command.run,
                 "people": people_command.run, "agenda": agenda_command.run, "weather": weather_command.run,
-                "daily": daily_command.run, "keep": keep_command.run, "contacts": contacts_command.run,
+                "daily": daily_command.run, "keep": keep_command.run, "evernote": evernote_command.run, "contacts": contacts_command.run,
                 "health": health_command.run, "evening": evening_command.run, "dividends": dividends_command.run,
                 "fundamentals": fundamentals_command.run, "trade": trade_command.run}
     return commands[args.command](args)

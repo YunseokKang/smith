@@ -96,7 +96,7 @@ def write_and_record(db: Path, data: dict[str, Any], *, now: datetime, secrets: 
     facts = memory.load(memory.directory(db))
     query = " ".join([r.occurrence.label for r in data["reminders"]] + ["선물 취향 좋아하는"])
     chosen = memory.retrieve(facts, query)
-    family_notes = notes_by_reminder(data, keep.load(keep.directory(db)))
+    family_notes = notes_by_reminder(data, keep.load_all(db))
     from smith import daily_art
 
     payload = {**daily.payload(data), "client_memory": memory.for_model(chosen),

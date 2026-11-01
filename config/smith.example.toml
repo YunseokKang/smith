@@ -131,3 +131,12 @@ max_daily_krw = 10000000       # all orders of one local day
 plan_ttl_minutes = 60          # how long a confirmation can be approved while the market is open
 limit_band_pct = 1.0           # limit price this far through the last price, so the order fills at once
 drift_halt_pct = 3.0           # stop instead of ordering if the price moved this much since the plan
+
+# Evernote through the Aside browser (FR-48, docs/daily-design.md §13.1). Aside must be running and signed in to
+# Evernote; `run-due` reads the listed notebooks and spaces once a night (never two hours before the morning mail).
+# Only these names are read: a new space stays unread until it is added here.
+[evernote]
+enabled = false
+time = "03:00"
+notebooks = ["My Notebook"]
+spaces = ["Reading", "Travel"]

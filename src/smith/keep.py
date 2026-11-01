@@ -136,6 +136,14 @@ def load(folder: Path) -> list[Note]:
     return notes
 
 
+def load_all(db: Path, *, thoughts: bool = False) -> list[Note]:
+    """The client's notes for selection and search: Keep plus the Evernote notes read from the allowed sources (daily
+    design §13.1). `thoughts=True` leaves out Evernote spaces (book and lecture summaries are not the client's words)."""
+    from smith import evernote
+
+    return load(directory(db)) + evernote.notes(evernote.directory(db), spaces=not thoughts)
+
+
 def imported_at(folder: Path) -> datetime | None:
     path = folder / NOTES_FILE
     try:

@@ -103,7 +103,7 @@ def write_and_record(db: Path, data: dict[str, Any], *, now: datetime, secrets: 
     Returns {"prose": dict | None, "problems": [...], "error_code": str | None, "cost_usd"}.
     """
     facts = memory.load(memory.directory(db))
-    notes = keep.load(keep.directory(db))
+    notes = keep.load_all(db)
     chosen = memory.retrieve(facts, " ".join([r.occurrence.label for r in data["reminders"]] + ["선물 취향 좋아하는"]))
     partner_facts = memory.retrieve(facts, PARTNER_QUERY)
     partner_notes = keep.for_model(keep.search(notes, PARTNER_QUERY, limit=PARTNER_NOTES))

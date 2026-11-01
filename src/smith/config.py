@@ -38,6 +38,8 @@ KNOWN_KEYS = {
     # trade executor orders, and only for a plan the client approved with an authenticator code.
     "trading": {"enabled", "account", "max_order_krw", "max_daily_krw", "plan_ttl_minutes", "limit_band_pct",
                 "drift_halt_pct"},
+    # Evernote through the Aside browser (daily design §13.1): the nightly read and the allowlist of sources.
+    "evernote": {"enabled", "time", "notebooks", "spaces"},
 }
 HEALTH_MIDWEEK_KEYS = {"enabled", "weekday", "time"}
 HEALTH_TOPICS = ("vascular", "uric-weight", "nutrition-gut", "balance", "stomach-habits")
@@ -122,6 +124,7 @@ def load_config(path: Path) -> dict:
     _check_health(config.get("health", {}))
     _check_evening(config.get("evening", {}))
     _check_trading(config.get("trading", {}))
+    _check_evernote(config.get("evernote", {}))
     if "properties" in config or "targets" in config:
         from smith.realestate import RealEstateError, validate_properties, validate_targets
         try:
@@ -203,6 +206,28 @@ def _check_trading(trading: object) -> None:
             raise ValueError(f"trading.{key} must be a number from {low} to {high}")
     if trading.get("max_daily_krw", 10_000_000) < trading.get("max_order_krw", 5_000_000):
         raise ValueError("trading.max_daily_krw must not be below trading.max_order_krw")
+
+
+def _check_evernote(evernote: object) -> None:
+    """Optional `[evernote]` (daily design §13.1): whether `run-due` reads Evernote nightly, the local time, and the
+    notebooks and spaces it may read (by their names in Evernote; anything else stays unread)."""
+    if not isinstance(evernote, dict):
+        raise ValueError("evernote must be a table")
+    if not isinstance(evernote.get("enabled", False), bool):
+        raise ValueError("evernote.enabled must be a boolean")
+    clock = evernote.get("time", "03:00")
+    try:
+        if not isinstance(clock, str) or len(clock) != 5 or time.fromisoformat(clock).tzinfo is not None:
+            raise ValueError()
+    except ValueError:
+        raise ValueError("evernote.time must be HH:MM") from None
+    for key in ("notebooks", "spaces"):
+        names = evernote.get(key, [])
+        if (not isinstance(names, list) or len(names) > 20 or len(set(names)) != len(names)
+                or any(not isinstance(n, str) or not n.strip() or len(n) > 100 for n in names)):
+            raise ValueError(f"evernote.{key} must list up to 20 distinct names")
+    if evernote.get("enabled") and not (evernote.get("notebooks") or evernote.get("spaces")):
+        raise ValueError("evernote.enabled needs at least one notebook or space")
 
 
 def _check_events(events: object) -> None:
