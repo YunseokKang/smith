@@ -4,7 +4,9 @@
 
 Act as a Principal Software Architect building a reliable, simple Python personal wealth adviser.
 Smith analyzes assets, liabilities, cash flow, financial goals, and relevant macroeconomic context.
-It is a read-only financial adviser; Hermes is a separate fund manager.
+It is a read-only financial adviser; Hermes is a separate fund manager. The one execution path is approval-gated
+Toss stock orders (FR-47, `docs/trading-design.md`): the client requests, code plans, the client approves each plan
+with an authenticator code, and code places the order. The adviser LLM never reaches that path.
 
 These instructions guide development agents. They are not a substitute for runtime permissions.
 Read `docs/requirements.md` before implementing behavior. Preserve confirmed user requirements;
@@ -27,6 +29,9 @@ when the code shares meaning and reasons to change, not merely similar syntax.
 
 - Never expose or implement trading, transfers, loan applications, product subscription/cancellation,
   or commands that cause Hermes to execute financial actions without an explicit change of scope.
+  The scope change of 2026-10-30 (FR-47) covers only Toss cash LIMIT DAY orders through `toss_orders.py`, called only
+  by `trade_executor.py` for a plan approved with an authenticator code. Model-facing modules must not import or
+  mention that path (a test pins it); a model output can never create, approve or change a plan.
 - Enforce this boundary in available tools, adapter operations, and permissions, not only prompts.
 - Prefer provider-issued read-only credentials when supported; otherwise explicitly allow only
   verified read operations. Authentication POST requests are not financial execution operations.
@@ -182,6 +187,7 @@ If `docs/INDEX.md` exists, use it to locate relevant topics. Otherwise use the c
 - `docs/architecture.md`: proposed architecture and decisions.
 - `docs/data-contract.md`: JSON import/update semantics.
 - `docs/toss-openapi.md`: verified Toss Securities Open API facts and the read-only allowlist.
+- `docs/trading-design.md`: approval-gated Toss orders (FR-47): threat model, workflow, state machine, limits.
 - `docs/report-design.md`: report reader principles, structure, sector pipeline and verification.
 - `docs/design-reference.md`: user-supplied visual design reference for reports (style only, no brand marks).
 - `docs/daily-design.md`: the daily-routine mail (personal-secretary scope, data sources, date DB, subject scheme).

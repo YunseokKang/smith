@@ -4,7 +4,8 @@ Verified against Google's docs on 2026-10-04: desktop OAuth uses the loopback re
 (https://developers.google.com/identity/protocols/oauth2/native-app) and sending is
 `POST gmail/v1/users/me/messages/send` with a base64url RFC 2822 message and the `gmail.send` scope.
 Answering the client's e-mail replies (FR-18, opt-in) additionally needs `gmail.readonly`, a
-restricted scope: Smith then reads only the threads of reports it sent itself, never the inbox.
+restricted scope: Smith then reads only the threads of mails it sent itself, never the inbox, plus one search of the
+client's sent mail for a trade-approval code (message ids only, `sent_containing`).
 
 A request that may have reached Google but returned no answer has an unknown outcome; it is
 reported as such and never retried automatically, so a report is not sent twice.
@@ -218,6 +219,20 @@ def message_body(token: str, message_id: str, *, getter: Getter = get) -> dict[s
     return _read(token, f"messages/{_checked(message_id)}?format=full", getter).get("payload", {})
 
 
+def sent_containing(token: str, text: str, *, after: int, before: int, getter: Getter = get) -> list[str]:
+    """Ids of the client's sent messages between two epoch seconds whose text contains `text` (digits only).
+
+    Trade approval (docs/trading-design.md §5) uses it to check that an authenticator code appears in exactly one sent
+    message. Gmail search returns ids only; no message body is read here.
+    """
+    if not text.isdigit():
+        raise MailError("invalid-query")
+    # Anywhere, trash included: a copy's original moved to the trash still counts (permanent deletion does not).
+    query = urllib.parse.quote(f'in:anywhere from:me after:{after} before:{before} "{text}"')
+    found = _read(token, f"messages?q={query}&maxResults=20", getter)
+    return [str(m.get("id")) for m in found.get("messages", []) or [] if isinstance(m, dict)]
+
+
 def _checked(identifier: str) -> str:
     if not _ID.fullmatch(identifier or ""):
         raise MailError("invalid-id")
@@ -225,7 +240,7 @@ def _checked(identifier: str) -> str:
 
 
 def _read(token: str, path: str, getter: Getter) -> dict[str, Any]:
-    """The only Gmail read: users/me/messages or threads by id (see the three functions above)."""
+    """The only Gmail read: messages or threads by id, and the one sent-mail search above (ids only)."""
     try:
         status, payload = getter(f"{API_URL}/{path}", {"Authorization": f"Bearer {token}"})
     except (OSError, http.client.HTTPException):

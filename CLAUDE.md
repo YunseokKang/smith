@@ -12,7 +12,9 @@ If `docs/INDEX.md` exists, use it for navigation; otherwise follow the paths in 
 Claude Code used for development may edit project files and run appropriate local verification.
 Smith's runtime adviser has a narrower role: read financial information and provide advice.
 Development access must never be treated as authority for the runtime adviser to trade, transfer,
-apply for loans, change recipients, or execute Hermes commands.
+apply for loans, change recipients, or execute Hermes commands. Approval-gated Toss orders (FR-47) are code-only:
+a development agent may run `smith trade propose` when the user asks, but must never approve a plan, run
+`smith trade enroll`, read the authenticator secret, or place an order outside `smith trade`.
 
 The initial interaction channel is Claude Code; the initial inference provider is Claude Code headless.
 Keep the application services independent of that interface so a future app can reuse them.

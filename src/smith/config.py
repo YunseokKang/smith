@@ -34,6 +34,10 @@ KNOWN_KEYS = {
     "health": {"enabled", "weekday", "time", "topics", "goals", "midweek"},
     # The evening 내일 준비 mail (daily design §16): its time and days, how the reader calls his wife, the talk kinds.
     "evening": {"enabled", "time", "weekdays", "partner", "talk_kinds", "commute_hours", "rest_hours", "netflix", "sleep"},
+    # Approval-gated Toss orders (trading design §8). The adviser stays read-only (`app.financial_access`); only the
+    # trade executor orders, and only for a plan the client approved with an authenticator code.
+    "trading": {"enabled", "account", "max_order_krw", "max_daily_krw", "plan_ttl_minutes", "limit_band_pct",
+                "drift_halt_pct"},
 }
 HEALTH_MIDWEEK_KEYS = {"enabled", "weekday", "time"}
 HEALTH_TOPICS = ("vascular", "uric-weight", "nutrition-gut", "balance", "stomach-habits")
@@ -117,6 +121,7 @@ def load_config(path: Path) -> dict:
     _check_daily(config.get("daily", {}))
     _check_health(config.get("health", {}))
     _check_evening(config.get("evening", {}))
+    _check_trading(config.get("trading", {}))
     if "properties" in config or "targets" in config:
         from smith.realestate import RealEstateError, validate_properties, validate_targets
         try:
@@ -178,6 +183,26 @@ def _check_backup(backup: object) -> None:
     keep = backup.get("keep", 1)
     if not isinstance(keep, int) or isinstance(keep, bool) or not 1 <= keep <= 1000:
         raise ValueError("backup.keep must be a whole number from 1 to 1000")
+
+
+def _check_trading(trading: object) -> None:
+    """Optional `[trading]` (trading design §8): limits that neither mail nor a model can change."""
+    if not isinstance(trading, dict):
+        raise ValueError("trading must be a table")
+    if not isinstance(trading.get("enabled", False), bool):
+        raise ValueError("trading.enabled must be a boolean")
+    account = trading.get("account")
+    if account is not None and not (isinstance(account, str) and re.fullmatch(r"toss-[0-9a-f]{8}", account)):
+        raise ValueError("trading.account must be an account key like toss-0123abcd")
+    for key, low, high, default in (("max_order_krw", 10_000, 99_000_000, 5_000_000),
+                                    ("max_daily_krw", 10_000, 99_000_000, 10_000_000),
+                                    ("plan_ttl_minutes", 10, 720, 60), ("limit_band_pct", 0, 3, 1.0),
+                                    ("drift_halt_pct", 0.5, 10, 3.0)):
+        value = trading.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high:
+            raise ValueError(f"trading.{key} must be a number from {low} to {high}")
+    if trading.get("max_daily_krw", 10_000_000) < trading.get("max_order_krw", 5_000_000):
+        raise ValueError("trading.max_daily_krw must not be below trading.max_order_krw")
 
 
 def _check_events(events: object) -> None:

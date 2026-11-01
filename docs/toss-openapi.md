@@ -88,6 +88,20 @@ Smith는 값의 성격에 따라 다르게 처리한다.
   `rate-limit-exceeded`/`edge-rate-limit-exceeded`(429), `internal-error`/`maintenance`(500).
 - 로그에는 HTTP 상태, `code`, `requestId`만 남긴다. `message`와 `data`는 남기지 않는다.
 
+## 주문 API (2026-10-30, 명세 v1.2.28 확인)
+
+승인형 주문(FR-47, `docs/trading-design.md`)이 쓰는 사실.
+- `POST /api/v1/orders`: `LIMIT`/`MARKET`, `timeInForce` `DAY`/`CLS`/`OPG`, `quantity` 또는 `orderAmount`(US 시장가 전용).
+  소수점 수량은 US 시장가 매도에만. 1억 원 이상은 `confirmHighValueOrder=true`가 없으면 400. Smith는 `LIMIT`+`DAY`+정수 수량만 보낸다.
+- `clientOrderId`(36자, 영숫자·`-`·`_`)는 멱등키다. 같은 값으로 다시 보내면 이전 결과를 돌려주고 10분 동안 유효하다.
+  처리 중인 같은 키는 409 `request-in-progress`. 응답 `Order`에는 `clientOrderId`가 없어 목록 대조는 종목·방향·수량·가격·시각으로 한다.
+- 같은 종목에 반대 방향 미체결 주문이 있으면 409 `opposite-pending-order-exists`: 매도 후 재매수는 체결 뒤에만 가능하다.
+- 상태: `PENDING`, `PARTIAL_FILLED`, `FILLED`, `CANCELED`, `REJECTED`, 정정·취소 대기와 거부. `execution`에 체결 수량·평균가·수수료·세금·결제일.
+- 422 `prerequisite-required`: 약관 동의·교육·위험 고지가 없으면 주문이 거부된다(첫 실주문 전 확인 필요).
+- 한도 그룹 `ORDER` 초당 10회. 장 시간은 `GET /api/v1/market-calendar/{KR|US}`(KST 시각, 전·당·익 영업일).
+- 조회 전용 client 허용 목록에 계획용 조회를 더했다: 현재가, 종목 정보, 매수 유의사항, 매도 가능 수량, 수수료율, 장 시간, 주문 조회.
+  쓰기는 `toss_orders.OrderClient`만 하며 주문 생성과 취소 두 가지뿐이다.
+
 ## Smith 구현 현황
 
 - `src/smith/toss.py`: 표준 라이브러리 `urllib` 기반 조회 전용 client. 위 표의 5개 요청만 허용하고,

@@ -35,6 +35,9 @@ py -3.10 -m uv pip install --python .venv -e .
 | `records [--as-of TIME] [--known-at TIME] [--db PATH]` | 지정 시각에 유효한 레코드 목록. `--known-at`은 그 시각까지 기록된 내용만 사용 |
 | `toss login` / `toss logout` | 토스 client ID·secret을 OS 자격 증명 저장소에 저장·삭제. 입력은 화면에 표시되지 않는다 |
 | `toss check [--show-values]` | 허용된 조회 API를 한 번씩 호출해 연결 점검. 기본은 금액·종목을 숨긴다 |
+| `trade propose --sell SYM [--qty N\|all] [--rebuy] \| --buy SYM --qty N [--said "…"] [--dry-run]` | 승인형 주문 계획(FR-47). 확인 메일을 보내고 고객의 "승인 + 인증 앱 6자리" 답장을 기다린다. `--dry-run`은 조회만 하고 계획을 보여 준다 |
+| `trade run` / `trade status [--plan T-XXXX]` / `trade halt` / `trade resume` | 승인 확인·실행 한 번(정기 실행도 15분마다 같은 일), 상태, 즉시 중단(Smith의 미체결 주문 취소)과 재개 |
+| `trade enroll` | 인증 앱 등록. **고객이 자기 터미널에서만** 실행한다(키를 본 사람은 승인할 수 있다) |
 | `toss sync [--dry-run] [--close-missing] [--allow-empty]` | 토스 보유 주식을 snapshot으로 원장에 저장. 매수 가능 금액·환율은 참고 관측값. `--close-missing`은 매도된 종목을 종료(정기 실행은 항상 사용), 보유 종목이 0개인 응답은 `--allow-empty`가 있을 때만 반영 |
 | `evidence login` / `evidence sync [--days N]` / `evidence show [--as-of DATE]` | ECOS·FRED 금리 근거 저장·조회. 키는 OS 자격 증명 저장소 |
 | `advise --case portfolio\|funding\|home [--question] [--show-payload]` | 비식별 payload로 headless 자문. 주택 목표일은 원장의 주택 목표가 있으면 그 날짜, 없으면 실행일로부터 3년 뒤. `--show-payload`는 보낼 내용만 표시 |

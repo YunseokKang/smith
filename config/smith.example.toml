@@ -119,3 +119,15 @@ time = "18:00"
 # exclusive_area_m2 = 84.9
 # region = "서울특별시 종로구"
 # reference_price = 2500000000         # asking or sale-launch price when no trades are recorded (won)
+
+# Approval-gated Toss orders (FR-47, docs/trading-design.md). Off until the client enrolls an authenticator
+# (`smith trade enroll`, in their own terminal) and the Gmail grant can read replies (`smith mail login --read`).
+# `app.financial_access` stays "read_only": that is the adviser; only `smith trade` orders, per approved plan.
+[trading]
+enabled = false
+# account = "toss-0123abcd"   # the key `smith toss sync --show-values` prints; default: the only brokerage account
+max_order_krw = 5000000        # one order, in won (USD at the Toss mid rate)
+max_daily_krw = 10000000       # all orders of one local day
+plan_ttl_minutes = 60          # how long a confirmation can be approved while the market is open
+limit_band_pct = 1.0           # limit price this far through the last price, so the order fills at once
+drift_halt_pct = 3.0           # stop instead of ordering if the price moved this much since the plan

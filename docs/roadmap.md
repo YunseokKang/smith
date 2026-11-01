@@ -279,6 +279,14 @@
       - [ ] 실제 발행 한 번으로 독자 메모·다시 쓰기 채택률과 소요 시간 확인. 이후 건강 레터·데일리·메일 답변에 넓힐지 결정.
       - [ ] Gemini: 개인 구글 로그인으로 Gemini CLI 사용이 2026-06-18 종료(Antigravity CLI로 대체, 미설치). 무료 API는 학습에
             쓰이므로 가계 데이터 금지. 유료 API 키 또는 Antigravity CLI 확인 뒤 재검토.
+- [ ] 승인형 주식 주문(FR-47, `docs/trading-design.md`, 사용자 결정 2026-10-30).
+      - [x] 1단계(2026-10-30): `toss_orders`(주문·취소만, 본문 검사), `trade_plan`(사전 점검·지정가·한도), `trade_mail`(확인 메일, 코드로 답장 판독),
+            `totp`, `trade_store`(`data/trades.db`), `trade_executor`(상태 기계, 같은 키 재전송·목록 대조), `smith trade`, 15분 정기 실행 연결.
+            가짜 브로커 테스트와 실계좌 조회 전용 미리보기(`--dry-run`, 셀레스티카)로 확인. 실주문 없음.
+      - [ ] 고객: `smith trade enroll`(본인 터미널), `smith mail login --read` 확인, `[trading] enabled = true`.
+      - [ ] 2단계 카나리: 싼 국내 ETF 1주를 체결되지 않을 지정가로 주문하고 바로 취소(실계좌, 고객 승인). 토스 `prerequisite-required` 여부 확인.
+      - [ ] 3단계: 셀레스티카 매도 후 재매수(11월 중, 토스 앱의 양도세 예상 화면 확인 뒤).
+      - [ ] 4단계: 재무 스레드 메일 자연어 요청 입구(모델은 초안만, 코드 검증). `smith doctor` 거래 상태 줄.
 - [ ] 이후 Hermes 조회 API 연결 및 전용 앱.
 
 테스트는 단계별 실제 위험에 맞춘다. 첫 외부 테스트는 조회만 수행한다.

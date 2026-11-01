@@ -6,6 +6,7 @@ therefore checked against an allowlist before it reaches the network. See docs/t
 import http.client
 import json
 import logging
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -25,7 +26,18 @@ _ALLOWED = frozenset({
     ("GET", "/api/v1/holdings"),
     ("GET", "/api/v1/buying-power"),
     ("GET", "/api/v1/exchange-rate"),
+    # Reads a trade plan checks before it is proposed and again before each order (trading design §4).
+    ("GET", "/api/v1/prices"),
+    ("GET", "/api/v1/stocks"),
+    ("GET", "/api/v1/sellable-quantity"),
+    ("GET", "/api/v1/commissions"),
+    ("GET", "/api/v1/market-calendar/KR"),
+    ("GET", "/api/v1/market-calendar/US"),
+    ("GET", "/api/v1/orders"),
 })
+# Path templates allowed for GET with one opaque segment (a symbol or an order id), matched segment by segment.
+_ALLOWED_TEMPLATES = (("GET", ("api", "v1", "stocks", "*", "warnings")), ("GET", ("api", "v1", "orders", "*")))
+_SEGMENT = re.compile(r"[A-Za-z0-9._\-]{1,128}")
 
 # (method, url, headers, body) -> (status, payload bytes)
 Transport = Callable[[str, str, dict[str, str], bytes | None], tuple[int, bytes]]
@@ -82,6 +94,35 @@ class TossClient:
     def exchange_rate(self, base: str, quote: str) -> dict[str, Any]:
         return self._get("/api/v1/exchange-rate", {"baseCurrency": base, "quoteCurrency": quote})
 
+    def prices(self, symbols: list[str]) -> list[dict[str, Any]]:
+        return self._get("/api/v1/prices", {"symbols": ",".join(symbols)})
+
+    def stocks(self, symbols: list[str]) -> list[dict[str, Any]]:
+        return self._get("/api/v1/stocks", {"symbols": ",".join(symbols)})
+
+    def warnings(self, symbol: str) -> list[dict[str, Any]]:
+        return self._get(f"/api/v1/stocks/{_segment(symbol)}/warnings")
+
+    def sellable_quantity(self, account_seq: int, symbol: str) -> dict[str, Any]:
+        return self._get("/api/v1/sellable-quantity", {"symbol": symbol}, account_seq=account_seq)
+
+    def commissions(self, account_seq: int) -> list[dict[str, Any]]:
+        return self._get("/api/v1/commissions", account_seq=account_seq)
+
+    def market_calendar(self, market: str) -> dict[str, Any]:
+        if market not in ("KR", "US"):
+            raise ForbiddenRequest(f"unknown market {market!r}")
+        return self._get(f"/api/v1/market-calendar/{market}")
+
+    def orders(self, account_seq: int, *, status: str, symbol: str | None = None, day: str | None = None) -> Any:
+        """Smith's own order lookups: OPEN orders or CLOSED orders of one day (100 at most, newest first)."""
+        query = {"status": status, **({"symbol": symbol} if symbol else {}),
+                 **({"from": day, "to": day, "limit": "100"} if day else {})}
+        return self._get("/api/v1/orders", query, account_seq=account_seq)
+
+    def order(self, account_seq: int, order_id: str) -> dict[str, Any]:
+        return self._get(f"/api/v1/orders/{_segment(order_id)}", account_seq=account_seq)
+
     def _get(self, path: str, query: dict[str, str] | None = None, *, account_seq: int | None = None) -> Any:
         headers = {} if account_seq is None else {"X-Tossinvest-Account": str(account_seq)}
         for attempt in range(2):
@@ -111,10 +152,19 @@ class TossClient:
             self._token, self.token_expires_in = token, payload.get("expires_in")
         return self._token
 
+    def _allows(self, method: str, path: str) -> bool:
+        """The read-only allowlist. The order client (toss_orders) widens it; this client never sends a write."""
+        if (method, path) in _ALLOWED:
+            return True
+        parts = tuple(path.strip("/").split("/"))
+        return any(method == m and len(parts) == len(t) and all(p == q or (q == "*" and _SEGMENT.fullmatch(p))
+                                                                 for p, q in zip(parts, t))
+                   for m, t in _ALLOWED_TEMPLATES)
+
     def _send(self, method: str, path: str, query: dict[str, str] | None, headers: dict[str, str],
               body: bytes | None = None) -> dict[str, Any]:
-        if (method, path) not in _ALLOWED:
-            raise ForbiddenRequest(f"{method} {path} is not an allowed read-only request")
+        if not self._allows(method, path):
+            raise ForbiddenRequest(f"{method} {path} is not an allowed request")
         url = BASE_URL + path + (f"?{urllib.parse.urlencode(query)}" if query else "")
         status, raw = self._transport(method, url, {"Accept": "application/json", **headers}, body)
         try:
@@ -130,3 +180,10 @@ class TossClient:
             raise TossError(status, error if isinstance(error, str) else "unknown")
         logger.debug("Toss %s %s -> %s", method, path, status)
         return payload
+
+
+def _segment(value: str) -> str:
+    """One path segment from data (a symbol or an order id): checked so it cannot add a path or a query."""
+    if not _SEGMENT.fullmatch(value or "") or value in (".", ".."):
+        raise ForbiddenRequest("invalid path segment")
+    return value

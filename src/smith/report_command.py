@@ -477,6 +477,25 @@ def _run_health(args: argparse.Namespace) -> None:
         _say(args.db, f"Health letter crashed: {type(error).__name__}")
 
 
+def _run_trades(args: argparse.Namespace, config: dict[str, Any]) -> None:
+    """Approved trades (docs/trading-design.md §5): read approval replies, place and follow orders. Never raises.
+    A finished plan changed the holdings, so the Toss snapshot is refreshed right after."""
+    from smith import trade_command, trade_store
+    from smith.cli import main as cli_main
+
+    if not (config.get("trading") or {}).get("enabled"):
+        return
+    try:
+        with closing(trade_store.connect(trade_command.store_path(args.db))) as conn:
+            lines = trade_command.run_pass(conn, config, trade_command.store_path(args.db))
+        for line in lines:
+            _say(args.db, line)
+        if any(line.endswith((": done", ": halted")) or ": done (" in line or ": halted (" in line for line in lines):
+            cli_main(["toss", "sync", "--close-missing", "--db", str(args.db)])
+    except (Exception, SystemExit) as error:  # noqa: BLE001 - a trade pass must never block or fail a report run.
+        _say(args.db, f"Trade run crashed: {type(error).__name__}")
+
+
 def _publish_once(args: argparse.Namespace) -> int:
     from smith import credentials, delivery
     from smith.cli import main as cli_main
@@ -519,6 +538,7 @@ def _publish_once(args: argparse.Namespace) -> int:
                     _say(args.db, f"Answering questions failed (exit {code}).")
             except Exception as error:  # noqa: BLE001 - answering questions must never block a report.
                 _say(args.db, f"Answering questions crashed: {type(error).__name__}")
+        _run_trades(args, config)
         if found is None:
             # Same-day event notes (report design §29): once a day after the check time, apart from the reports.
             _check_events(args.db, config, now, reason="slot", sync=True)

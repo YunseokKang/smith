@@ -43,7 +43,9 @@ class TossTests(unittest.TestCase):
         transport = FakeTransport({})
         client = TossClient("id", "secret", transport=transport)
         for method, path in [("POST", "/api/v1/orders"), ("POST", "/api/v1/orders/1/cancel"),
-                             ("DELETE", "/api/v1/conditional-orders/1"), ("GET", "/api/v1/orders")]:
+                             ("POST", "/api/v1/orders/1/modify"), ("POST", "/api/v1/conditional-orders"),
+                             ("DELETE", "/api/v1/conditional-orders/1"), ("GET", "/api/v1/stocks/CLS/warnings/x"),
+                             ("GET", "/api/v1/orders/1/2")]:
             with self.subTest(path=path), self.assertRaises(ForbiddenRequest):
                 client._send(method, path, None, {})
         self.assertEqual(transport.requests, [])

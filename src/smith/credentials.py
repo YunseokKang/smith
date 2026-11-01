@@ -17,6 +17,8 @@ EVIDENCE_PROVIDERS = ("ecos", "fred")
 REAL_ESTATE_PROVIDERS = ("datagokr", "rone")
 # The FSS electronic disclosure system (OpenDART): company filings such as dividend decisions (FR-43).
 DISCLOSURE_PROVIDERS = ("dart",)
+# The authenticator secret that approves trades (trading design §5). Only the trade approval check reads it.
+_TRADE_TOTP = "smith.trade-totp"
 
 
 def load_toss_client() -> tuple[str, str] | None:
@@ -42,8 +44,20 @@ def all_secrets() -> list[str]:
     toss = load_toss_client() or ()
     gmail = load_gmail() or ()
     health = load_health() or ()
-    return [*toss, *gmail, *health, *(load_api_key(p) or "" for p in EVIDENCE_PROVIDERS + REAL_ESTATE_PROVIDERS
-                                                        + DISCLOSURE_PROVIDERS)]
+    return [*toss, *gmail, *health, load_trade_totp() or "",
+            *(load_api_key(p) or "" for p in EVIDENCE_PROVIDERS + REAL_ESTATE_PROVIDERS + DISCLOSURE_PROVIDERS)]
+
+
+def load_trade_totp() -> str | None:
+    return keyring.get_password(_TRADE_TOTP, "secret") or None
+
+
+def save_trade_totp(secret: str) -> None:
+    keyring.set_password(_TRADE_TOTP, "secret", secret)
+
+
+def delete_trade_totp() -> None:
+    _delete(_TRADE_TOTP, ("secret",))
 
 
 def load_health() -> tuple[str, str, str] | None:
