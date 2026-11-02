@@ -2,8 +2,8 @@
 
 Smith reasons about after-tax outcomes: which account a won should go into, when gains should be
 realized, and how housing, marriage registration and gifts interact with tax rules. Every rule below is
-an explicit constant tagged with the tax year it reflects; reports add "현행 법령 확인 필요" because
-the rules change (the 2026 tax bill was still pending when these were written). Amounts are computed
+an explicit constant tagged with the tax year it reflects; the report's footer names that year and asks to
+confirm current law once (user decision 2026-11-02: not per sentence) because the rules change (the 2026 tax bill was still pending when these were written). Amounts are computed
 here; the narrative stage may explain them but never produces new ones.
 """
 from dataclasses import dataclass
@@ -368,7 +368,7 @@ def notes(t: dict[str, Any], guards: list[tuple[str, dict[str, Any]]] = ()) -> l
              "반면 규제지역에서는 다주택 세대의 신규 주택담보대출이 막혀 있어, 새 집 매수·기존 집 매도·혼인신고의 순서에 따라 "
              "대출 가능 여부와 취득세가 달라질 수 있습니다. 또 2024~2026년에 혼인신고를 하면 두 분 각각 "
              f"{short_won(MARRIAGE_CREDIT)}의 혼인 세액공제(생애 1회)를 받을 수 있어, 올해 안에 신고하실지도 함께 따져 볼 만합니다."),
-            "주택 이전 계획을 정하기 전", "세법 기준(현행 법령 확인 필요, 실행 전 세무사·은행 상담 권장)"))
+            "주택 이전 계획을 정하기 전", "세법 기준(실행 전 세무사·은행 상담 권장)"))
     year = t["year"]
     for home in t["home_records"]:
         if home["value"] is None or not home["acquired_price"] or not home["acquired_year"]:
@@ -386,7 +386,7 @@ def notes(t: dict[str, Any], guards: list[tuple[str, dict[str, Any]]] = ()) -> l
                  f"(보유·거주 {held}년 가정, 장기보유특별공제 {percent(exempt['deduction_rate'], 0)}), 요건을 못 갖추면 약 "
                  f"{short_won(general['total'])}(지방소득세 포함)입니다. 세대의 주택 수, 정확한 취득일과 실제 거주 기간에 따라 "
                  "이 범위 안에서 달라지며, 보유·거주가 1년 늘 때마다 1주택 공제가 8%p씩 커집니다."),
-                "매도 시점을 정할 때", "계산(취득가·평가액 기준, 범위 추정) + 세법 기준(현행 법령 확인 필요)"))
+                "매도 시점을 정할 때", "계산(취득가·평가액 기준, 범위 추정) + 세법 기준"))
         elif home["owner"] != "self" and (home.get("residence_years") or 0) >= 2:
             # The client confirmed the residence (e-mail 2026-10-21): the exemption is the figure, the general
             # case the fallback, and the sale order under a marriage is what remains to plan.
@@ -399,7 +399,7 @@ def notes(t: dict[str, Any], guards: list[tuple[str, dict[str, Any]]] = ()) -> l
                  f"초과분만 과세)으로 약 {short_won(lived['total'])}을 예상하고, 요건을 못 갖추면 약 {short_won(not_lived['total'])}"
                  f"(지방소득세 포함)입니다. 혼인신고를 하시면 혼인일부터 {MARRIAGE_MERGE_YEARS}년 안에 이 집을 먼저 파는 순서가 안전하고, "
                  "혼인신고 전에는 각자 1주택으로 봅니다. 거주 요건은 소유자인 배우자분 세대의 거주로 따집니다."),
-                "주택 이전 순서를 정하기 전", "계산(취득가·평가액 기준, 거주 기간은 고객님 확인) + 세법 기준(현행 법령 확인 필요)"))
+                "주택 이전 순서를 정하기 전", "계산(취득가·평가액 기준, 거주 기간은 고객님 확인) + 세법 기준"))
         elif home["owner"] != "self":
             lived = capital_gains(price, acquired, held=held, lived=2, one_home=True)  # The partner's own tax.
             not_lived = capital_gains(price, acquired, held=held, lived=0, one_home=False)
@@ -410,7 +410,7 @@ def notes(t: dict[str, Any], guards: list[tuple[str, dict[str, Any]]] = ()) -> l
                  f"{short_won(lived['total'])}이지만, 거주하지 않아 비과세가 안 되면 약 {short_won(not_lived['total'])}"
                  "(지방소득세 포함)으로 커집니다. 어느 집을 먼저 팔지, 혼인신고를 언제 할지 정하기 전에 거주 이력을 확인해 두시는 것이 "
                  "중요합니다."),
-                "주택 이전 순서를 정하기 전", "계산(취득가·평가액 기준) + 세법 기준(현행 법령 확인 필요, 세무사 확인 권장)"))
+                "주택 이전 순서를 정하기 전", "계산(취득가·평가액 기준) + 세법 기준(세무사 확인 권장)"))
     for owner, value, occupancy in own:
         if value is not None and value > HIGH_VALUE_HOME and not any(
                 h["owner"] == "self" and h["acquired_price"] for h in t["home_records"]):
@@ -419,13 +419,13 @@ def notes(t: dict[str, Any], guards: list[tuple[str, dict[str, Any]]] = ()) -> l
                 (f"1세대 1주택 비과세는 양도가액 {short_won(HIGH_VALUE_HOME)}까지이고, 넘는 부분 비율만큼 양도차익에 세금이 "
                  f"붙습니다(현재 평가액 {short_won(value)}). 이때 보유·거주 기간에 따라 장기보유특별공제가 크게 달라지므로, "
                  "취득일과 취득가를 알려 주시면 이전 시점별 예상 세금을 계산해 드리겠습니다."),
-                "매도 시점을 정하기 전", "세법 기준(현행 법령 확인 필요) + 자료 요청"))
+                "매도 시점을 정하기 전", "세법 기준 + 자료 요청"))
     if t["married"] is False:
         found.append(Note(
             "혼인 전후 2년은 부모님 증여 공제가 커집니다",
             (f"혼인신고일 전후 2년 안에 부모님께 받는 증여는 기본 공제에 더해 {short_won(MARRIAGE_GIFT_EXTRA)}을 추가로 "
              "공제받을 수 있습니다. 주택 이전에 가족의 도움이 있다면, 그 시기를 혼인신고 일정과 맞추는 것이 세금상 유리합니다."),
-            "가족 지원 계획이 있을 때", "세법 기준(현행 법령 확인 필요)"))
+            "가족 지원 계획이 있을 때", "세법 기준"))
     for amount, frequency, start in t["premiums"]:
         monthly = None if amount is None or frequency not in _MONTHS else amount / _MONTHS[frequency]
         if monthly is not None and Decimal(500_000) <= monthly <= SAVINGS_INSURANCE_MONTHLY_CAP:
@@ -434,7 +434,7 @@ def notes(t: dict[str, Any], guards: list[tuple[str, dict[str, Any]]] = ()) -> l
                 (f"월 {short_won(monthly)}을 내는 보험이 저축성이라면, 월 납입 {short_won(SAVINGS_INSURANCE_MONTHLY_CAP)} "
                  "이하로 5년 이상 내고 10년 이상 유지해야 이자(보험차익)가 비과세입니다. 중간에 해지하면 세금과 해지 손실이 "
                  f"함께 생기므로, 비상금은 따로 마련해 두시는 것이 안전합니다({start[:4]}년 가입 기준)."),
-                "가입 기간 내내", "세법 기준(현행 법령 확인 필요, 보험 종류 확인 필요)"))
+                "가입 기간 내내", "세법 기준(보험 종류 확인 필요)"))
     # First: the one note with the household's own numbers on the tax day (user review 2026-10-18).
     found.insert(0, Note(
         "금융소득종합과세 선제 방어: 이자·배당이 연 2천만 원을 넘기 전에 계좌를 고릅니다",
@@ -445,7 +445,7 @@ def notes(t: dict[str, Any], guards: list[tuple[str, dict[str, Any]]] = ()) -> l
          "세액공제), 저축성 보험의 비과세 한도, 분리과세가 적용되는 채권·인프라펀드, 그리고 배당이 아니라 양도차익으로 과세돼 종합과세와 "
          "분리되는 해외주식입니다. 같은 수익이라도 어느 통로에 두느냐에 따라 세후 결과가 달라집니다."),
         "자산 배치를 바꾸거나 큰 돈이 들어올 때",
-        "세법 기준(현행 법령 확인 필요)" + (" + 계산(단기 시장 금리를 예금 금리로 가정"
+        "세법 기준" + (" + 계산(단기 시장 금리를 예금 금리로 가정"
                                          + (", 배당은 최근 1년 기준" if any(g["dividends"] is not None for _, g in guards)
                                             else ", 배당 제외") + ")" if guards else "")))
     return found
@@ -518,7 +518,7 @@ def sources() -> list[tuple[str, str]]:
 
 
 def assumptions() -> list[str]:
-    return [f"세법 기준 {RULES_YEAR}년(개정안 반영 전, {RULES_CHECKED} 공식 자료로 확인, 현행 법령 확인 필요)",
+    return [f"세법 기준 {RULES_YEAR}년(개정안 반영 전, {RULES_CHECKED} 공식 자료로 확인)",
             "연금계좌 납입: 원장의 정기 이체를 공제 대상 납입으로 가정(계좌 간 이전·ISA 만기 이전액은 제외 대상)",
             f"연금계좌 공제율 {percent(CREDIT_RATE_HIGH, 1)}(총급여 5,500만 원 초과 가정)",
             f"해외주식 양도세 {percent(OVERSEAS_RATE, 0)}, 기본공제 연 {short_won(OVERSEAS_DEDUCTION)}, 원화 손익은 현재 환율 기준 근사",

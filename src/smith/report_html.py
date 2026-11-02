@@ -24,7 +24,7 @@ from html import escape
 from typing import Any
 
 from smith.fmt import short_won as _short
-from smith import editions, korean, picks, principles, stress
+from smith import editions, korean, picks, principles, stress, tax
 from smith.holdings import STANCES
 from smith.proposals import Track
 from smith.realestate import MIN_BASIS
@@ -1316,10 +1316,10 @@ def _home_lead(home: dict[str, Any]) -> str:
     if after and after.get("case") == "exempt":
         text += (f" 배우자 주택은 2년 보유·거주를 확인해 주셔서 팔 때 양도세를 1세대 1주택 비과세 기준 약 {_short(after['tax']['exempt'])}"
                  f"(12억 원 초과분만 과세)으로 보며, 요건을 못 갖추면 약 {_short(after['tax']['general'])}입니다. 혼인신고를 하시면 혼인일부터 "
-                 "10년 안에 이 집을 먼저 파는 순서가 안전합니다. 현행 법령 확인이 필요합니다.")
+                 "10년 안에 이 집을 먼저 파는 순서가 안전합니다.")
     elif after:
         text += (f" 배우자 주택을 팔아 쓰는 경우의 양도세는 1세대 1주택 비과세 요건을 갖추면 약 {_short(after['tax']['exempt'])}, 일반 "
-                 f"과세면 약 {_short(after['tax']['general'])}이며, 혼인신고 시점과 2년 거주 여부에 따라 갈립니다. 현행 법령 확인이 필요합니다.")
+                 f"과세면 약 {_short(after['tax']['general'])}이며, 혼인신고 시점과 2년 거주 여부에 따라 갈립니다.")
     if home.get("pay_at_target") is None and home.get("pay_after_target") is None:
         pass
     elif home.get("pay_at_target") is None:  # Unknown (no FX rate for some pay), never shown as none.
@@ -1407,7 +1407,7 @@ def _lease_plan(data: dict[str, Any]) -> str:
         lead += (f" 전세를 끼고 팔거나 만기에 맞춰 파는 경우에는 돈이 나가지 않고 약 {_short(-sale['cash_out'])}이 들어옵니다. "
                  + (f"2년 보유·거주를 확인해 주셔서 1세대 1주택 비과세 기준이며, 요건을 못 갖추면 약 {_short(sale['net_inflow']['general'])}입니다."
                     if sale.get("tax_case") == "exempt" else
-                    f"1세대 1주택 비과세 요건을 갖추면 약 {_short(sale['net_inflow']['exempt'])}이며, 현행 법령 확인이 필요합니다."))
+                    f"1세대 1주택 비과세 요건을 갖추면 약 {_short(sale['net_inflow']['exempt'])}입니다."))
     elif sale["cash_out"] is not None:
         lead += f" 팔아서 돌려드리는 경우에는 약 {_short(-sale['cash_out'])}이 들어옵니다. 취득가를 알려 주시면 양도세까지 계산해 드립니다."
     if loan["amount"] is not None:
@@ -2083,9 +2083,9 @@ def _move_targets(data: dict[str, Any]) -> str:
                else "입니다(매도가에서 담보대출·보증금을 뺀 값, 취득가를 몰라 양도세는 빼지 않음)."))
     if case == "exempt":
         lead += (" 두 집 모두 2년 보유·거주가 확인되어 12억 원 초과분만 과세로 보았고, 두 집을 판 뒤 새 집을 사는 전제입니다"
-                 "(현행 법령 확인 필요).")
+                 ".")
     elif pr["exempt"] is not None and pr["tax_known"]:
-        lead += f" 각 집에 1세대 1주택 비과세가 적용되면 약 {_short(pr['exempt'])}까지 늘어나며, 현행 법령 확인이 필요합니다."
+        lead += f" 각 집에 1세대 1주택 비과세가 적용되면 약 {_short(pr['exempt'])}까지 늘어납니다."
     for h in plan["homes"]:
         if h["tax"] is not None and h["tax_case"] == "exempt":
             lead += f" {h['label']}의 양도세는 비과세 기준 약 {_short(h['tax']['exempt'])}(요건 미충족 시 약 {_short(h['tax']['general'])})입니다."
@@ -2210,7 +2210,7 @@ def _stack_note(stack: dict[str, Any]) -> str:
             + (f" 공제 밖 월 {_short(c['isa'])}은 ISA 등에 모은다고" if c["isa"] else "") + " 계산했습니다. "
             f"지금처럼 연금저축 월 {_short(now['pension_savings'])}, IRP 월 {_short(now['irp'])}을 계속 넣으면 "
             f"{stack['retirement_age']}세 은퇴 기준 세후 합계는 약 {_short(stack['current_split']['total_net'])}입니다. "
-            "공제받지 않은 납입 원금은 꺼낼 때 세금이 없어 그만큼 세금을 빼지 않았습니다(현행 법령 확인 필요).")
+            "공제받지 않은 납입 원금은 꺼낼 때 세금이 없어 그만큼 세금을 빼지 않았습니다.")
     return f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin:8px 0 4px">{escape(text)}</div>'
 
 
@@ -2404,7 +2404,8 @@ def _footer(warnings: list[str] | tuple[str, ...] = (), week: str = "", correcti
     checked = ("" if not corrections else
                f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-bottom:6px">{escape(corrections)}</div>')
     return (f'<tr><td>{warn}{guide}{checked}<div style="font-size:12px;line-height:1.6;color:{MUTED}">Smith는 조회 전용 자문입니다(매매·이체·대출 '
-            '실행 없음). 세금·법령은 실행 전 확인하시고, 판단 근거는 답장으로 물어 주십시오.</div></td></tr>')
+            f'실행 없음). 세금·법령은 {tax.RULES_YEAR}년 기준으로 계산했으니 실행 전 현행 법령을 확인하십시오. 판단 근거는 답장으로 '
+            '물어 주십시오.</div></td></tr>')  # The one law caveat of the mail (user decision 2026-11-02).
 
 
 def _corrections_line(data: dict[str, Any]) -> str:

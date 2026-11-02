@@ -28,7 +28,7 @@ from typing import Any
 from smith import headless, narrative, reader
 from smith.payload import check_outbound, mask_identifiers
 
-PROMPT_VERSION = "team-v12"  # v12: narrative-v31 (offsetting parts); v11: narrative-v30 (headline is the judgement, not the action); v10: narrative-v27 (natural Korean); v9: narrative-v26 (last_report.earlier); v8: narrative-v25 (last_report); v7: narrative-v24 (holding_quantity_changes); v6: narrative-v23 (reader_notes); v5: narrative-v22 rules (reserve without a job gap, reserve_basis, stale deals); v4: fx.
+PROMPT_VERSION = "team-v13"  # v13: narrative-v32 (law caveat in the footer only); v12: narrative-v31 (offsetting parts); v11: narrative-v30 (headline is the judgement, not the action); v10: narrative-v27 (natural Korean); v9: narrative-v26 (last_report.earlier); v8: narrative-v25 (last_report); v7: narrative-v24 (holding_quantity_changes); v6: narrative-v23 (reader_notes); v5: narrative-v22 rules (reserve without a job gap, reserve_basis, stale deals); v4: fx.
 SPECIALIST_BUDGET_USD = "2.00"
 # All specialists run at once (five minutes at most), then the editor's write and repair. The editor
 # reads more than the single writer (about 70 KB against 50 KB) and timed out at its ten minutes on real
@@ -87,8 +87,8 @@ a headline under 100 characters, and what, why_it_matters and so_what two or thr
 
 Rules (checked by code): numbers only from your input or the research items you cite; no new sums,
 differences, percentages or projections. Outside facts (policy, rates, markets) cite R or N refs; laws,
-taxes and loan rules cite an official-tier R item, an N announcement or "tax", and say "현행 법령 확인
-필요". No certainty about prices, returns or approvals. Never state the client's legal home count as a
+taxes and loan rules cite an official-tier R item, an N announcement or "tax"; never add "현행 법령 확인
+필요" (the mail's footer says it once). No certainty about prices, returns or approvals. Never state the client's legal home count as a
 fact. Assets managed by Hermes (managed_by "hermes") are never to be sold or changed directly. Assets of
 household_member_* are not the client's legal property. Ref codes go only in refs, never in the text."""
 

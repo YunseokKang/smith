@@ -152,6 +152,9 @@ class LayoutTests(Upgrade):
         for text in ("데이터 상태 및 시스템 노트", "이번 보고에 쓴 원칙과 출처", "상태 판정:"):
             self.assertNotIn(text, page)
         self.assertIn("Smith는 조회 전용 자문입니다", page)
+        self.assertIn("세금·법령은 2026년 기준으로 계산했으니 실행 전 현행 법령을 확인하십시오", page)   # Said once, here.
+        self.assertNotIn("현행 법령 확인 필요", page)
+        self.assertNotIn("현행 법령 확인이 필요", page)
         notes = report_html.system_notes(data)
         self.assertTrue(any(n.startswith("상태 판정: ") for n in notes) and any(n.startswith("가정: ") for n in notes))
 

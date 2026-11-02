@@ -26,7 +26,7 @@ proposes it, so the stack never assumes the opposite (review 2026-10-23); the pa
 row (an ISA or similar account). Contributions no credit covered come back tax-free, so a payout is taxed only on
 its taxable share.
 
-Every tax factor is an assumption echoed in the result (현행 법령 확인 필요). An unknown pipeline makes the
+Every tax factor is an assumption echoed in the result . An unknown pipeline makes the
 total a lower bound, never zero.
 """
 from datetime import date
@@ -453,7 +453,7 @@ def assumptions() -> list[str]:
     return [f"연금 스택: 국민연금 세후 {TAX_FACTORS['national'] * 100:.0f}% 차감, 연금저축·IRP 연금소득세 "
             f"{TAX_FACTORS['irp'] * 100:.1f}%(과세 대상 사적연금이 연 {PRIVATE_SEPARATE_LIMIT / 10_000:,.0f}만 원 초과 시 "
             f"{PRIVATE_HIGH_TAX * 100:.1f}%), 세액공제를 받지 않은 납입 원금은 꺼낼 때 비과세(올해 이전 해의 공제 밖 납입은 "
-            "모름: 과세로 본 하한), ISA 등 공제 밖 적립은 이익에만 9.9%, 연금보험 비과세 요건 충족 가정(현행 법령 확인 필요)",
+            "모름: 과세로 본 하한), ISA 등 공제 밖 적립은 이익에만 9.9%, 연금보험 비과세 요건 충족 가정",
             f"은퇴 나이: 정하지 않아 {tiers} 세 경우로 계산. 납입은 은퇴 때 멈추고, 연금 계좌는 {PRIVATE_EARLIEST_AGE}세 전에는 "
             "받지 않으며, 국민연금은 조회값이 전제한 가입 기간 대비 줄어든 개월 수에 비례해 감액(임의 가입 계속 납부는 가정 안 함)",
             f"연금 계좌 수령액: 지금 잔액과 월 납입(세액공제를 빠짐없이 받는 연금저축·IRP 분할, 공제 밖 나머지는 ISA 등)을 "

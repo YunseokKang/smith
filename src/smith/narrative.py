@@ -63,7 +63,8 @@ logger = logging.getLogger(__name__)
 # v30: the headline is the judgement behind the action, not the action again: the badge above names it and the
 # first proposal card below states it with its amounts (user review of the 2026-11-02 letter: three repeats).
 # v31: a part that moved against the total is named with what offset it (the 2026-11-02 letter: +58만 beside -176만).
-PROMPT_VERSION = "narrative-v31"
+# v32: no per-sentence law caveat; the footer says it once (user decision 2026-11-02); the check no longer asks for it.
+PROMPT_VERSION = "narrative-v32"
 MODEL = "fable"
 BUDGET_USD = "5.00"
 # Two calls at most: the write (the markets day with twenty-odd holdings ran past 10 minutes on 2026-10-17) and a
@@ -184,7 +185,8 @@ Nine principles of the writing (the hard rules at the end are checked by code):
    treat that double concentration as the first investment matter and use the code's trim schedule
    (portfolio_facts.concentration_plan). For property and tax, reason in sequences (marriage registration,
    selling one home, buying the next) and say how taxes and loan limits change at each step, conditionally
-   and with 현행 법령 확인 필요. Standing rule: the household's bonuses and share grants will push interest
+   with no per-sentence "현행 법령 확인 필요": the mail's footer carries the one reminder to confirm current law
+   (user decision 2026-11-02). Standing rule: the household's bonuses and share grants will push interest
    and dividends toward the financial-income threshold (tax notes), so whenever you weigh a product or a
    placement, compare after tax and name the tax-advantaged route first (ISA, pension accounts, the
    savings-insurance exemption, separately taxed bonds and infrastructure funds, overseas shares taxed as
@@ -429,8 +431,8 @@ Hard rules (checked by code; a block that breaks one is deleted):
 - Every holding with must_opine true has an opinion.
 - Sources: any block that states an outside fact (policy, regulation, rates, markets, prices) cites the
   R or N refs it rests on. Laws, taxes, loan rules and regulated areas must cite at least one R item of
-  tier "official", an N announcement, or "tax" (Smith's own tax rules and calculations in the input),
-  and the block must say "현행 법령 확인 필요" (or ask to confirm).
+  tier "official", an N announcement, or "tax" (Smith's own tax rules and calculations in the input).
+  Never add "현행 법령 확인 필요" or ask the client to confirm the law: the mail's footer carries the one reminder to confirm current law (user decision 2026-11-02).
 - Refs go only in refs arrays. Never write ref codes (R1, A3, N2 ...) in the prose; describe in words.
 - Never write that prices, rates or returns will certainly move, or that a loan or outcome is guaranteed.
 - Ownership: follow ownership_notes. Never state the client's legal home count or multi-home status as a
@@ -1151,7 +1153,6 @@ MEMOS = {"no-source": "출처가 확인되지 않은 외부 사실이 들어 있
          "other-holding-source": "다른 종목의 조사 자료를 근거로 든 부분이 있어 링크를 뺐습니다.",
          "no-holding-source": "이 회사에 대한 조사 자료 없이 쓴 기업 사실이 있습니다.",
          "unofficial-law-source": "법·세제 내용의 공식 출처가 확인되지 않았습니다. 현행 법령을 확인하십시오.",
-         "law-unqualified": "법·세제 내용은 실행 전 현행 법령 확인이 필요합니다.",
          "certainty": "확정적인 표현이 있으나 미래는 불확실하니 참고로만 보십시오.",
          "home-count-asserted": "주택 수 판단은 세대 구성(혼인신고 여부 등)에 따라 달라질 수 있습니다.",
          "unknown-ref": "확인되지 않은 출처 표시가 있어 그 링크는 뺐습니다.",
@@ -1424,7 +1425,6 @@ _REASONS = {"unknown-ref": "cites a ref that is not in the input",
             "ref-in-prose": "writes ref codes in the prose",
             "no-source": "states an outside fact without an R or N ref",
             "unofficial-law-source": "states a law, tax or loan rule without an official-tier R or an N ref",
-            "law-unqualified": "states a law, tax or loan rule without saying it must be confirmed",
             "certainty": "presents an uncertain outcome as certain",
             "home-count-asserted": "states the client's legal home count as a fact",
             "duplicate": "repeats a proposal key",
@@ -1607,8 +1607,6 @@ def _problem(texts: list[str], refs: list[str], known_refs: set[str], official: 
     if any(word in joined for word in _LAW):
         if not any(ref in official or ref.startswith("N") or ref == "tax" for ref in sources):
             return "unofficial-law-source"
-        if "확인" not in joined:
-            return "law-unqualified"
     if any(pattern.search(joined) for pattern in _CERTAINTY):
         return "certainty"
     for sentence in re.split(r"(?<=[.!?。])\s+", joined):
@@ -1934,7 +1932,7 @@ def code_opinion(data: dict[str, Any], position: dict[str, Any]) -> dict[str, An
                   "한도 안이므로 유지하되, 앞으로 받는 자사주 보상은 받는 즉시 분산하는 원칙을 권합니다.")
         stance = "hold"
     return {"stance": stance, "reason": reason,
-            "alternative": ("정리한 돈은 넓은 지수펀드(코어)로 옮기고, 세금은 종목의 시장별 규칙을 확인하십시오(현행 법령 확인 필요). "
+            "alternative": ("정리한 돈은 넓은 지수펀드(코어)로 옮기고, 세금은 종목의 시장별 규칙을 확인하십시오. "
                             "앞으로 받는 자사주 보상은 한도 안으로 내려올 때까지 받는 즉시 분산하시길 권합니다." if stance == "trim"
                             else ""),
             "reconsider": "비중이 한도 아래로 내려오거나 회사 주식 보상 계획이 바뀌면 다시 판단합니다.",

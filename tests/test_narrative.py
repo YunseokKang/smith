@@ -193,7 +193,6 @@ class NarrativeTests(unittest.TestCase):
             ("situation", dict(EMPTY, situation=block("고객님은 다주택자입니다.")), "home-count-asserted"),
             ("situation", dict(EMPTY, situation=block("영통이 규제지역이 되었습니다. 현행 법령 확인 필요.", ["R2"])),
              "unofficial-law-source"),
-            ("situation", dict(EMPTY, situation=block("영통이 토지거래허가구역입니다.", ["R1"])), "law-unqualified"),
             ("situation", dict(EMPTY, situation=block("영통 아파트값이 -3.4% 하락했습니다.", ["R2"])), "ungrounded-number"),
             ("situation", dict(EMPTY, situation=block("영통 아파트값이 3.4% 올랐습니다.", ["R1"])), "ungrounded-number"),
             ("situation", dict(EMPTY, situation=block("기사 번호 77777을 보십시오.", ["R2"])), "ungrounded-number"),
@@ -209,8 +208,9 @@ class NarrativeTests(unittest.TestCase):
                 _, dropped = narrative.verify(output, payload)
                 self.assertIn(reason, [d.split(":")[1] for d in dropped if d.startswith(path)])
         good = dict(EMPTY, situation=block("영통 아파트값이 3.4% 올랐습니다(전망 아님, 지난주 기준).", ["R2"]),
-                    direction=block("영통이 토지거래허가구역으로 지정되어 매도 일정이 길어질 수 있습니다(현행 법령 확인 필요).",
-                                    ["R1"]))
+                    # A law with its official source needs no per-sentence caveat: the footer says it once (user
+                    # decision 2026-11-02).
+                    direction=block("영통이 토지거래허가구역으로 지정되어 매도 일정이 길어질 수 있습니다.", ["R1"]))
         verified, dropped = narrative.verify(good, payload)
         self.assertEqual(dropped, [])
         self.assertTrue(verified["situation"]["text"] and verified["direction"]["text"])

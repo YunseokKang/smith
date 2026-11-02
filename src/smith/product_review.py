@@ -172,7 +172,7 @@ def _review(view: LedgerView, payout: Any, premium: Any, policy: Any, *, birth: 
                         "search_range": f"{SEARCH_LOW}~{SEARCH_HIGH}",
                         "alternative": "해지금과 남은 보험료를 넓은 지수펀드에 넣어 연금 개시까지 굴린 뒤 연 4%씩 인출(세금 전)",
                         "lifetime": "연금은 사망 시까지 같은 명목 금액(물가 연동 없음), 보험사 예시표의 최저보증액 기준",
-                        "payout_tax": "저축성 보험 비과세 요건 충족 가정(현행 법령 확인 필요)"},
+                        "payout_tax": "저축성 보험 비과세 요건 충족 가정"},
     }
 
 

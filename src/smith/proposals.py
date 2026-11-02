@@ -409,8 +409,8 @@ def _lease_sale(lease: dict[str, Any], plan: dict[str, Any]) -> Proposal:
     taxed = sale["net_inflow"]
     exempt_led = sale.get("tax_case") == "exempt"
     exempt = ("" if not priced else
-              f"(요건을 못 갖추면 일반 과세로 약 {short_won(taxed['general'])}, 현행 법령 확인 필요)" if exempt_led else
-              f"(1세대 1주택 비과세 요건을 갖추면 약 {short_won(taxed['exempt'])}, 현행 법령 확인 필요)" if taxed else
+              f"(요건을 못 갖추면 일반 과세로 약 {short_won(taxed['general'])})" if exempt_led else
+              f"(1세대 1주택 비과세 요건을 갖추면 약 {short_won(taxed['exempt'])})" if taxed else
               "(취득가를 몰라 양도세는 빼지 않았습니다)")
     shortfall = plan["need"]
     left = (f"남는 금액은 아직 계산하지 못했습니다({sale['basis']})" if not priced else
@@ -434,8 +434,8 @@ def _lease_sale(lease: dict[str, Any], plan: dict[str, Any]) -> Proposal:
                 "있습니다."),
         risks=("만기까지 팔리지 않으면 보증금을 먼저 돌려줘야 하므로, 새 세입자 승계나 퇴거자금대출을 예비로 확인해 두십시오. "
                + ("혼인신고를 하시면 혼인일부터 10년 안에 이 집을 먼저 파는 순서가 안전하고, 새 집을 먼저 사면 세대 주택 수가 늘어 비과세 요건이 "
-                  "달라집니다(현행 법령 확인 필요)." if exempt_led else
-                  "매도 순서와 혼인신고 시점에 따라 양도세가 크게 달라집니다(현행 법령 확인 필요).")),
+                  "달라집니다." if exempt_led else
+                  "매도 순서와 혼인신고 시점에 따라 양도세가 크게 달라집니다.")),
         timing=f"{deadline:%Y.%m}까지 매도 일정·순서 결정(만기 {DECISION_LEAD_MONTHS}개월 전)",
         reconsider="매도 계획이 바뀌거나 집값·대출 잔액이 크게 바뀌면 다시 계산합니다.",
         certainty=("계산(실거래·원장 기준 매도가, 양도세 1세대 1주택 비과세 추정: 2년 보유·거주 확인) + 고객님 계획(만기 매도)" if exempt_led
@@ -452,9 +452,9 @@ def _lease_alternatives(plan: dict[str, Any]) -> str:
         taxed = sale["net_inflow"]
         parts.append(f" 전세를 끼고 팔거나 만기에 맞춰 파는 경우에는 돈이 나가지 않고, {sale['price_basis']}에서 보증금과 담보대출"
                      + (f", 양도세(비과세 기준)를 빼면 약 {short_won(inflow)}이 들어옵니다(요건을 못 갖추면 약 "
-                        f"{short_won(taxed['general'])}, 현행 법령 확인 필요)." if taxed and sale.get("tax_case") == "exempt" else
+                        f"{short_won(taxed['general'])})." if taxed and sale.get("tax_case") == "exempt" else
                         f", 양도세를 빼면 약 {short_won(inflow)}이 들어옵니다(1세대 1주택 비과세 요건을 갖추면 약 "
-                        f"{short_won(taxed['exempt'])}, 현행 법령 확인 필요)." if taxed else
+                        f"{short_won(taxed['exempt'])})." if taxed else
                         f"을 빼면 약 {short_won(inflow)}이 들어옵니다(취득가를 몰라 양도세는 빼지 않았습니다)."))
     if loan["amount"] is not None:
         parts.append(f" 퇴거자금대출은 소득 대비 상환 비율 기준으로 약 {short_won(loan['amount'])}까지 가능할 수 있지만, "
@@ -580,7 +580,7 @@ def _reserve_by_swap(facts: dict[str, Any], swap: dict[str, Any], priority: int,
              "몇 달씩 비상금에 묶는 것은 자산 전체를 보지 않는 계산입니다." + source),
         effect=(f"비상금은 이번 달 안에 채워지고, 매월 여유 {short_won(surplus)}은 비상금에 묶이지 않은 채 정기 투자 적립과 "
                 "안심 소비 한도로 그대로 남습니다."),
-        risks=("주식을 팔 때는 시세와 세금(해외 종목은 양도세와 연 기본공제, 현행 법령 확인 필요), 수수료가 따릅니다. 시세가 낮을 때 "
+        risks=("주식을 팔 때는 시세와 세금(해외 종목은 양도세와 연 기본공제), 수수료가 따릅니다. 시세가 낮을 때 "
                "파는 것이 아깝다면 두세 번에 나눠 옮기셔도 되지만, 비상금은 수익을 내는 돈이 아니라 보험입니다. 비상금은 수시로 "
                "넣고 빼면서 이자가 붙는 계좌(CMA·파킹통장)에 두십시오." + _confirm_ask(cash)),
         timing="이번 달 안에 한 번",
@@ -653,7 +653,7 @@ def _goal_stocks_glide(facts: dict[str, Any]) -> Proposal | Undetermined | None:
         risks=("옮긴 뒤 주가가 오르면 그만큼의 이익을 놓칩니다. 공격형 성향을 우선하신다면 옮기는 금액을 줄이는 대신, 부족할 때 쓸 "
                "다른 재원(재계약, 대출 한도)을 미리 확인해 두는 방법도 있습니다. 미국 주식은 한 해 이익이 "
                f"{short_won(tax.OVERSEAS_DEDUCTION)}을 넘으면 넘는 부분에 양도세 {percent(tax.OVERSEAS_RATE, 0)}가 붙으므로, 손실 종목이나 국내 종목부터 "
-               "팔거나 해마다 공제 한도 안에서 나눠 파는 편이 세금에 유리합니다(현행 법령 확인 필요)."),
+               "팔거나 해마다 공제 한도 안에서 나눠 파는 편이 세금에 유리합니다."),
         timing=f"{first['start']:%Y.%m}~{first['end']:%Y.%m}, 분기마다 {first['quarters']}번",
         reconsider=("".join(dict.fromkeys(_GLIDE_RECONSIDER[s["label"]] for s in plan["steps"]))
                     + "월 여유 자금이 크게 달라지거나 주식 평가액이 크게 바뀌면 다시 계산합니다."),
@@ -699,7 +699,7 @@ def _concentration_trim(facts: dict[str, Any]) -> Proposal | Undetermined | None
                 "그치고, 옮긴 돈은 넓은 지수펀드에서 시장 전체의 성장을 따릅니다. 실적 발표 뒤 주가가 좋은 구간에 나눠 팔면 한 시점의 "
                 "주가에 덜 좌우됩니다." + grant_rule),
         risks=("정리한 뒤 그 종목이 더 오르면 그만큼의 이익을 놓칩니다. 세금은 종목의 시장에 따라 다르니(국내 상장 주식은 대주주가 아니면 "
-               "양도세가 없고, 해외 종목은 연 기본공제를 넘는 이익에 양도세) 팔기 전에 확인하십시오(현행 법령 확인 필요). 회사를 깊이 "
+               "양도세가 없고, 해외 종목은 연 기본공제를 넘는 이익에 양도세) 팔기 전에 확인하십시오. 회사를 깊이 "
                "이해하셔서 집중을 유지하시겠다면, 그 판단의 근거를 기록해 두시길 권합니다."),
         timing=f"{facts['today']:%Y.%m}부터 {quarters}분기, 분기마다 한 번(실적 발표 뒤)",
         reconsider="비중이 한도 아래로 내려오거나, 회사 주식 보상 계획이 바뀌거나, 한 종목 한도를 바꾸기로 하시면 다시 계산합니다.",
@@ -762,7 +762,7 @@ def _insurance_review(facts: dict[str, Any]) -> Proposal | None:
         timing="다음 보험료 납입일 전까지 보험사 앱에서 계약 종류와 환급금 확인",
         reconsider="보험료가 바뀌거나, 보험 종류와 해약환급금이 확인되거나, 주택 이전 시점이 바뀌면 다시 계산합니다.",
         certainty=(f"계산(기록된 보험료) + 가정(보험료 기준 소득의 {percent(INSURANCE_SHARE_LIMIT, 0)}, 월 "
-                   f"{short_won(SAVINGS_PREMIUM_MIN)} 이상이면 저축성 가능, 비과세 만기 {SAVINGS_INSURANCE_YEARS}년) + 세법 기준(현행 법령 확인 필요)"),
+                   f"{short_won(SAVINGS_PREMIUM_MIN)} 이상이면 저축성 가능, 비과세 만기 {SAVINGS_INSURANCE_YEARS}년) + 세법 기준"),
         figures={"premiums": premiums, **({} if share is None else {"share": share}), "savings_monthly": savings})
 
 
@@ -842,7 +842,7 @@ def _pension_credit(facts: dict[str, Any]) -> Proposal | None:
                + (" ISA는 의무 가입 기간이 3년입니다." if rest else "")),
         timing=f"{today.year}.12.31까지(올해 공제분)" if room else f"{today.year + 1}년 1월 납입부터",
         reconsider="올해 IRP에 이미 넣은 금액이 있거나 납입 계획이 바뀌면 다시 계산합니다.",
-        certainty=(f"계산(정기 이체를 공제 대상 납입으로 가정) + 세법 기준 {tax.RULES_YEAR}년(현행 법령 확인 필요)"),
+        certainty=(f"계산(정기 이체를 공제 대상 납입으로 가정) + 세법 기준 {tax.RULES_YEAR}년"),
         figures={"irp_room": plan["irp_room"], "excess": plan["excess"], "refund_gain": plan["refund_gain"],
                  "credit_gain": gain, "next_rest": rest})
 
@@ -891,7 +891,7 @@ def _overseas_harvest(facts: dict[str, Any]) -> Proposal | Undetermined | None:
         timing=(f"미국 현지 {trade_by:%Y.%m.%d} 거래까지. 세금은 결제일로 세고 미국 주식은 다음 거래일(T+1)에 결제되므로 "
                 "이날 판 주식은 그해 마지막 거래일에 결제됩니다."),
         reconsider="올해 해외 주식 매도 이익이 이미 있거나, 장기 보유 종목의 비중을 바꿀 계획이면 다시 계산합니다.",
-        certainty=f"조건부 시나리오(올해 실현 손익 없음·현재 환율 가정) + 세법 기준 {tax.RULES_YEAR}년(현행 법령 확인 필요)",
+        certainty=f"조건부 시나리오(올해 실현 손익 없음·현재 환율 가정) + 세법 기준 {tax.RULES_YEAR}년",
         figures={"realize": plan["realize"], "saving": plan["saving"], "gains": plan["gains"]})
 
 
@@ -915,7 +915,7 @@ def _isa(facts: dict[str, Any]) -> Proposal | None:
         risks="3년 안에 깨면 혜택이 사라집니다. 2026년 세법개정안에 ISA 개편 내용이 있어, 가입 전 확정 내용을 확인하십시오.",
         timing="개편 확정 후 또는 연내",
         reconsider="ISA 제도 개편 내용이 확정되면 다시 계산합니다.",
-        certainty=f"세법 기준 {tax.RULES_YEAR}년(현행 법령 확인 필요)",
+        certainty=f"세법 기준 {tax.RULES_YEAR}년",
         figures={})
 
 
@@ -1031,7 +1031,7 @@ def _refinance(facts: dict[str, Any]) -> Proposal | Undetermined | None:
                 f"{percent(PREPAYMENT_FEE_RATE, 1)}로 보면 약 {short_won(r['fee'])}이어서 {r['break_even_months']:.0f}개월이면 "
                 "수수료를 회수합니다(가정)."),
         risks=("중도상환수수료율과 잔여 면제 기간은 대출 약정서에 따라 다르고, 새 대출의 한도(LTV·DSR)와 금리는 심사 결과에 달려 "
-               "확정이 아닙니다. 규제지역 여부와 주택 수에 따라 대환 자체가 제한될 수 있습니다(현행 법령 확인 필요)."),
+               "확정이 아닙니다. 규제지역 여부와 주택 수에 따라 대환 자체가 제한될 수 있습니다."),
         timing="이번 달 은행 두 곳 이상 견적 비교",
         reconsider=f"고객님 금리와 시중 평균의 차이가 {percent(REFINANCE_MARGIN, 1)}p 안으로 좁혀지면 유지로 돌아갑니다.",
         certainty="계산(한국은행 월간 평균 금리와 수수료 가정 기준, 실제 조건은 은행 확인 필요)",
@@ -1296,11 +1296,11 @@ def _home_tiers(home: dict[str, Any]) -> str:
     if after and after.get("case") == "exempt":
         text += (f" 배우자 주택은 2년 보유·거주를 확인해 주셔서 팔 때 양도세를 비과세 기준 약 {short_won(after['tax']['exempt'])}으로 보아 "
                  f"준비 가능액은 약 {short_won(after['available']['exempt'])}이고, 요건을 못 갖추면 약 {short_won(after['tax']['general'])}을 "
-                 f"내 약 {short_won(after['available']['general'])}입니다(현행 법령 확인 필요).")
+                 f"내 약 {short_won(after['available']['general'])}입니다.")
     elif after:
         text += (f" 배우자 주택을 팔아 쓰는 경우 양도세는 1세대 1주택 비과세 요건을 갖추면 약 {short_won(after['tax']['exempt'])}, 일반 "
                  f"과세면 약 {short_won(after['tax']['general'])}이어서, 준비 가능액은 각각 약 {short_won(after['available']['exempt'])}과 "
-                 f"{short_won(after['available']['general'])}입니다(혼인신고 시점과 2년 거주 여부에 따름, 현행 법령 확인 필요).")
+                 f"{short_won(after['available']['general'])}입니다(혼인신고 시점과 2년 거주 여부에 따름).")
     return text
 
 

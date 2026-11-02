@@ -77,7 +77,7 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "replaces most of it, so the household's own cash is the reverse-jeonse gap plus a buffer; selling "
             "brings cash in; a move-out loan is bounded by the debt-service cap), the regional housing market and "
             "housing policy, and the sequence of marriage registration, selling one home and buying the next as it "
-            "changes taxes and loan limits (conditionally, with 현행 법령 확인 필요). When "
+            "changes taxes and loan limits (conditionally). When "
             "sector_metrics.real_estate.move_plan is present, it is the day's core: for each target complex the "
             "spread between its cost and the net proceeds of selling both homes, whether that spread widened or "
             "narrowed over six months, and how much of it the expected pay (by certainty) and the employer stock's "
