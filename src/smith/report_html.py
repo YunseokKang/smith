@@ -605,7 +605,9 @@ def _subject(data: dict[str, Any], status: str) -> str:
     themed = editions.of(data["kind"]) is not None and data["kind"] != "overview"
     lead = f"제안 {len(proposals[:3])}건" if proposals else (
         "새 제안 없음" if themed else "기준선 보고" if change is None else f"순자산 {_signed_short(change)}")
-    return f"[Smith] {day} {edition} · {STATUS[status][1]} · {lead}"
+    # A report whose prose failed says so before it is opened (user decision 2026-11-03): its opinions are missing.
+    failed = ((data.get("narrative") or {}).get("status") or {}).get("outcome") == "failure"
+    return f"[Smith] {day} {edition} · {STATUS[status][1]} · {lead}" + (" · 해설 없음" if failed else "")
 
 
 # --- formatting -------------------------------------------------------------------------------------------

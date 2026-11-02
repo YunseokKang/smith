@@ -72,6 +72,12 @@ BUDGET_USD = "10.00"
 # Two calls at most: the write (the markets day with twenty-odd holdings ran past 10 minutes on 2026-10-17) and a
 # shorter repair, 22 minutes together, inside the 30-minute report lease with the syncs and the send.
 TIMEOUT_SECONDS = 900
+# One more attempt when the first failed fast (a launch failure, a transient CLI exit): the 2026-10-27 property
+# report went out without prose after a launch failure. A slow failure is not retried, so the second attempt stays
+# inside the report lease; a failure that would only repeat (setup, policy, budget) is not retried at all.
+RETRY_WITHIN_SECONDS = 300
+NO_RETRY = frozenset({"audit-write-failed", "claude-not-found", "unsafe-launcher", "recursive-launch",
+                      "tool-not-allowed", "command-too-long", "error_max_budget_usd", "PayloadRejected"})
 REPAIR_TIMEOUT_SECONDS = 420
 # The first reader and the rewrite of what it marked run only when both still fit in those 22 minutes (a reading took
 # 41 seconds on 2026-10-26; the rewrite writes the whole output again, like a repair).
@@ -2051,9 +2057,10 @@ def korean_history(conn: sqlite3.Connection, *, limit: int = 30) -> list[dict[st
 def narrate(db: Path, view: Any, data: dict[str, Any], *, now: datetime, secrets: list[str],
             brief_id: str | None = None, executable: Path | None = None,
             runner: headless.Runner = subprocess.run, pipeline: str = "single",
-            first_reader: reader.Reader | None = None) -> None:
+            first_reader: reader.Reader | None = None, clock: Callable[[], float] = time.monotonic) -> None:
     """Run the narrative stage for one report and attach its result. Never raises for a model failure:
-    the report then goes out with its deterministic content and says so in the data-status footer.
+    the report then goes out with its deterministic content and says so in the data-status footer. A failure
+    within `RETRY_WITHIN_SECONDS` that could pass on a second try is retried once (`status["attempts"]`).
 
     `pipeline` "single" is one writer; "team" is specialists and an editor (smith.team) with the same
     output, verification and attachment. `first_reader` (smith.reader) reviews the verified prose either way.
@@ -2098,15 +2105,24 @@ def narrate(db: Path, view: Any, data: dict[str, Any], *, now: datetime, secrets
     remembered, status["memory"] = report_memory(db, data)
     previous = previous_report(db, data)
     status["last_report"] = None if previous is None else previous["date"]
-    try:
-        result = writer(view, data, brief, secrets=secrets, executable=executable or headless.find_claude(),
-                        runner=runner, audit=audit, client_memory=remembered, first_reader=first_reader,
-                        last_report=previous)
-    except Exception as error:  # noqa: BLE001 - the report must still go out.
-        code = "audit-write-failed" if isinstance(error, AuditError) else getattr(error, "code", None) or type(error).__name__
-        status.update(outcome="failure", error_code=str(code)[:80])
-        attach(data, None, brief, status)
-        return
+    status["attempts"] = 0
+    while True:
+        status["attempts"] += 1
+        started = clock()
+        try:
+            result = writer(view, data, brief, secrets=secrets, executable=executable or headless.find_claude(),
+                            runner=runner, audit=audit, client_memory=remembered, first_reader=first_reader,
+                            last_report=previous)
+            break
+        except Exception as error:  # noqa: BLE001 - the report must still go out.
+            code = "audit-write-failed" if isinstance(error, AuditError) else getattr(error, "code", None) or type(error).__name__
+            if (status["attempts"] < 2 and clock() - started < RETRY_WITHIN_SECONDS
+                    and not {str(code), str(getattr(error, "detail", ""))} & NO_RETRY):
+                logger.warning("narrative attempt failed (%s); retrying once", code)
+                continue
+            status.update(outcome="failure", error_code=str(code)[:80])
+            attach(data, None, brief, status)
+            return
     status.update(outcome="success", dropped=result["dropped"], cost_usd=result["cost_usd"], reader=result["reader"],
                   korean=result.get("korean"))
     if "specialists" in result:

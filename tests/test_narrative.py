@@ -2,6 +2,7 @@ import json
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import closing
 from dataclasses import replace
@@ -508,13 +509,25 @@ class NarrativeTests(unittest.TestCase):
         data = self.data()
         failing = lambda args, **kwargs: subprocess.CompletedProcess(args, 1, "{}", "")  # noqa: E731
         narrative.narrate(self.db, data["view"], data, now=AT, secrets=[], executable=Path("claude.exe"), runner=failing)
-        self.assertEqual(data["narrative"]["status"]["outcome"], "failure")
-        _, html = render(data)
+        # A fast failure is tried once more; the subject says the prose is missing.
+        self.assertEqual((data["narrative"]["status"]["outcome"], data["narrative"]["status"]["attempts"]), ("failure", 2))
+        subject, html = render(data)
+        self.assertTrue(subject.endswith(" · 해설 없음"))
         self.assertTrue(any("계산 결과만으로 작성했습니다" in n for n in report_html.system_notes(data)))
         self.assertNotIn("Smith의 판단", html)
         with closing(ledger.connect_read_only(self.db)) as conn:
             rows = list(conn.execute("SELECT use_case, outcome FROM advice_runs"))
-        self.assertEqual(rows, [("report-narrative", "failure")])
+        self.assertEqual(rows, [("report-narrative", "failure")] * 2)
+        # A slow failure, or one that would only repeat (the budget), is not retried.
+        budget = json.dumps({"type": "result", "subtype": "error_max_budget_usd"})
+        ticks = iter([0, 400])
+        for runner, clock in ((lambda args, **kwargs: subprocess.CompletedProcess(args, 1, budget, ""), time.monotonic),
+                              (failing, lambda: next(ticks))):
+            with self.subTest(clock=clock):
+                data = self.data()
+                narrative.narrate(self.db, data["view"], data, now=AT, secrets=[], executable=Path("claude.exe"),
+                                  runner=runner, clock=clock)
+                self.assertEqual(data["narrative"]["status"]["attempts"], 1)
 
     def test_listed_holdings_carry_gain_and_return_on_cost_only_when_known(self):
         def holding(symbol, currency, quantity, price, cost):
