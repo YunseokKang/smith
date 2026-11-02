@@ -53,7 +53,9 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "pensions, the household's month and goals), so stay at the level of the whole picture. The stress test "
             "has its own section; leave it out of the narrative. When the brief has a benchmark item (the official "
             "survey of net worth and income by age band), say in the direction where this household's net worth sits "
-            "in its age band, with the survey year: a position, not a goal, and never the headline. When "
+            "in its age band, with the survey year: a position, not a goal, and never the headline. When the item "
+            "has no figure for the household's age band, leave the comparison out: never compare with the all-household "
+            "average instead or say the band is unconfirmed or withheld (the letter of 2026-11-02 did both). When "
             "change_since_last_report is present, brief the week's change in two figures with its dates: market prices, "
             "FX and revaluations applied to what the household held (market_and_valuation, \"시장·평가 변동\") and what "
             "moved in or out (net_inflow); never let a market loss hide behind new entries in a single total."),
