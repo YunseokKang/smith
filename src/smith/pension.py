@@ -26,7 +26,7 @@ proposes it, so the stack never assumes the opposite (review 2026-10-23); the pa
 row (an ISA or similar account). Contributions no credit covered come back tax-free, so a payout is taxed only on
 its taxable share.
 
-Every tax factor is an assumption echoed in the result . An unknown pipeline makes the
+Every tax factor is an assumption echoed in the result. An unknown pipeline makes the
 total a lower bound, never zero.
 """
 from datetime import date

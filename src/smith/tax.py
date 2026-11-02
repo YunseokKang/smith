@@ -3,7 +3,8 @@
 Smith reasons about after-tax outcomes: which account a won should go into, when gains should be
 realized, and how housing, marriage registration and gifts interact with tax rules. Every rule below is
 an explicit constant tagged with the tax year it reflects; the report's footer names that year and asks to
-confirm current law once (user decision 2026-11-02: not per sentence) because the rules change (the 2026 tax bill was still pending when these were written). Amounts are computed
+confirm current law once (user decision 2026-11-02: not per sentence) because the rules change (the 2026
+tax bill was still pending when these were written). Amounts are computed
 here; the narrative stage may explain them but never produces new ones.
 """
 from dataclasses import dataclass
