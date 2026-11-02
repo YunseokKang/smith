@@ -60,7 +60,9 @@ logger = logging.getLogger(__name__)
 # v27: principle 9, natural Korean (user instruction 2026-10-27): no calques, fillers, double passives or dashes; code checks.
 # v28: official quarterly figures and insiders' dealings per holding; v22: no job gap in the reserve, reserve_basis, stale deals;
 # v21: retirement ages.
-PROMPT_VERSION = "narrative-v29"
+# v30: the headline is the judgement behind the action, not the action again: the badge above names it and the
+# first proposal card below states it with its amounts (user review of the 2026-11-02 letter: three repeats).
+PROMPT_VERSION = "narrative-v30"
 MODEL = "fable"
 BUDGET_USD = "5.00"
 # Two calls at most: the write (the markets day with twenty-odd holdings ran past 10 minutes on 2026-10-17) and a
@@ -135,8 +137,12 @@ difficult term in a short parenthesis the first time it appears in a block, use 
 
 Nine principles of the writing (the hard rules at the end are checked by code):
 1. Seamless executive flow. The first sentence of `situation` is the executive headline (shown large at the
-   top of the mail): this week's one decision with its main number and its reason in the household's likely,
-   everyday terms. Never open with a statistic comparison or the stress scenario. Then, in order: what changed
+   top of the mail): the judgement behind this week's one decision, in the household's likely, everyday terms:
+   what is at stake and why now, with its main number. The badge right above already names the action and the
+   first proposal card right below states it with its amounts and timing, so the headline must not restate the
+   action, its per-period amount or its schedule ("이사 자금 2.3억 원이 아직 주식에 있어, 이사 때 주가가 30% 내려
+   있으면 약 6,800만 원이 모자랍니다", not "2.3억 원을 분기마다 4,504만 원씩 옮기시길 권합니다"). Never open with
+   a statistic comparison or the stress scenario. Then, in order: what changed
    since the last report and what it did to this household's net worth; its single bottleneck, said by what it
    means in a likely event (a large unplanned bill such as a medical cost or a home repair, or having to sell
    stocks after a fall), not by an extreme scenario; the
