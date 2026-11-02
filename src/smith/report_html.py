@@ -1883,6 +1883,9 @@ def _holdings_week(data: dict[str, Any]) -> str:
         notes.append(f"수량 기록이 없어 비교하지 못한 종목: {', '.join(str(n) for n in found['uncompared'])}.")
     if unsplit:
         notes.append(f"가격이나 환율을 몰라 시세와 매매로 나누지 못해 뺀 종목: {', '.join(str(n) for n in unsplit)}.")
+    repriced = [r for r in data["view"].records if r.fields.get("statement_price")] if data.get("view") else []
+    if repriced:
+        notes.append(f"직접 입력한 계좌의 {len(repriced)}개 보유분은 같은 종목의 토스 시세로 다시 매겼습니다(수량은 마지막 입력 기준).")
     foot = "".join(f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-top:4px">{escape(n)}</div>' for n in notes)
     if moves["stale"]:
         # A stale price hides that holding's move; said where it is read, not in the grey notes.

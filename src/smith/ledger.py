@@ -12,6 +12,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from itertools import groupby
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,7 @@ from typing import Any
 from smith.announcements import Announcement
 from smith.records import (
     REFERENCE_FIELDS, Action, ChangeType, ImportBatch, ImportRejected, ImportResult, Kind, Observation,
-    RecordInput, Status, StoredRevision,
+    RecordInput, Status, StoredRevision, canonical_decimal,
 )
 
 logger = logging.getLogger(__name__)
@@ -1312,6 +1313,49 @@ def record_states(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
         if state is not None:
             states.append(state)
     return states
+
+
+# Sources whose listed prices are market quotes taken at sync time (smith.toss_sync).
+MARKET_SOURCES = ("toss",)
+
+
+def valued_states(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetime) -> list[StoredRevision]:
+    """`record_states` with every manually imported listed lot valued at a newer market quote of the same
+    instrument (`reprice`); the stored revisions are untouched. The report's readers (summary, view, exposures,
+    week-over-week decomposition) use this, so net worth, holdings and changes agree on one price."""
+    return reprice(record_states(conn, as_of=as_of, known_at=known_at))
+
+
+def reprice(states: list[StoredRevision]) -> list[StoredRevision]:
+    """Value each active listed lot imported by hand (a brokerage statement) at the newest market quote of the same
+    instrument (market, symbol, currency) among the active lots from `MARKET_SOURCES`, when that quote is newer than
+    the lot's own price (report design §37; user decision 2026-11-03: the largest holding read a two-week-old price).
+
+    The quantity stays the statement's. The lot keeps its `effective_at` (its quantity is as old as the statement)
+    and gains `priced_at` (the quote's time) and `statement_price`; its value becomes quantity x quote, and
+    `value_after_costs`, which the statement computed at its own price, is dropped."""
+    quotes: dict[tuple[Any, ...], tuple[datetime, str]] = {}
+    for state in states:
+        record, fields = state.record, state.record.fields
+        if (state.source in MARKET_SOURCES and record.status is Status.ACTIVE and record.kind is Kind.ASSET
+                and fields.get("symbol") and fields.get("unit_price")):
+            key = (fields.get("market"), fields["symbol"], fields["currency"])
+            if key not in quotes or record.effective_at > quotes[key][0]:
+                quotes[key] = (record.effective_at, fields["unit_price"])
+    valued = []
+    for state in states:
+        record, fields = state.record, state.record.fields
+        quote = quotes.get((fields.get("market"), fields.get("symbol"), fields.get("currency")))
+        if (quote is None or state.source in MARKET_SOURCES or record.status is not Status.ACTIVE
+                or record.kind is not Kind.ASSET or not fields.get("quantity") or not fields.get("unit_price")
+                or quote[0] <= record.effective_at):
+            valued.append(state)
+            continue
+        value = canonical_decimal(str(Decimal(fields["quantity"]) * Decimal(quote[1])))
+        repriced = {**fields, "value": value, "unit_price": quote[1], "value_after_costs": None,
+                    "priced_at": quote[0].isoformat(), "statement_price": fields["unit_price"]}
+        valued.append(replace(state, record=replace(record, fields=repriced)))
+    return valued
 
 
 def _state_at(history: list[StoredRevision], as_of: datetime) -> StoredRevision | None:

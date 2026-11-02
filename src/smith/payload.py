@@ -76,7 +76,7 @@ class LedgerView:
 def load_view(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetime) -> LedgerView:
     with ledger.snapshot(conn):
         summary = build_summary(conn, as_of=as_of, known_at=known_at)
-        states = [s for s in ledger.record_states(conn, as_of=as_of, known_at=known_at)
+        states = [s for s in ledger.valued_states(conn, as_of=as_of, known_at=known_at)
                   if s.record.status is Status.ACTIVE]
         links = exposures(conn, as_of=as_of, known_at=known_at)
         series = evidence.describe(ledger.load_evidence(conn, known_at=known_at), as_of=as_of.date())

@@ -110,6 +110,12 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     advice["assumptions"] = advice["assumptions"] + future_income.assumptions(pay)
     if sectors["macro"]["fx"] is not None:
         advice["assumptions"].append(_FX_ASSUMPTION)
+    # Hand-imported listed lots valued at a newer market quote of the same stock (ledger.reprice, report design §37).
+    repriced = [r for r in view.records if r.fields.get("statement_price")]
+    if repriced:
+        oldest = min(r.effective_at for r in repriced)
+        advice["assumptions"].append(f"직접 입력한 계좌의 상장 주식 {len(repriced)}건은 같은 종목의 최신 토스 시세로 평가"
+                                     f"(수량은 마지막 입력 기준, 가장 오래된 입력 {oldest:%Y-%m-%d})")
     # The products the review team chose for a proposal that moves money (report design §26), sized here.
     reviews = picks.load(conn, known_at)
     advice["proposals"] = picks.attach(advice["proposals"], reviews, view.rates)
@@ -260,7 +266,7 @@ def holding_changes(conn: sqlite3.Connection, t0: datetime, t1: datetime, known_
                          "currency": currency, "hermes": record.fields.get("managed_by") == "hermes", "start": start, "end": end,
                          "quantity_start": _quantity(earlier), "quantity_end": _quantity(later),
                          "price_start": _price(earlier), "price_end": _price(later),
-                         "priced_at_start": earlier and earlier.effective_at, "priced_at_end": later and later.effective_at,
+                         "priced_at_start": _priced_at(earlier), "priced_at_end": _priced_at(later),
                          "rate_start": rates0.get(currency), "rate_end": rates1.get(currency),
                          "market_change": parts.get("market", Decimal(0)), "fx": parts.get("fx", Decimal(0)),
                          "trades": parts.get("trades", Decimal(0)), "unconverted": bool(unconverted)})
@@ -362,6 +368,14 @@ def price_moves(rows: list[dict[str, Any]], since: datetime) -> dict[str, Any]:
             "moves": moves, "unknown": sorted(unknown), "stale": stale}
 
 
+def _priced_at(record: RecordInput | None) -> datetime | None:
+    """When a lot's price was observed: the market quote it was revalued at (`ledger.reprice`), else its revision."""
+    if record is None:
+        return None
+    quoted = record.fields.get("priced_at")
+    return datetime.fromisoformat(quoted) if quoted else record.effective_at
+
+
 def _price(record: RecordInput | None) -> Decimal | None:
     price = None if record is None else record.fields.get("unit_price")
     return None if price in (None, "") else Decimal(price)
@@ -376,7 +390,7 @@ def _quantity(record: RecordInput | None) -> Decimal | None:
 
 
 def _active(conn: sqlite3.Connection, as_of: datetime, known_at: datetime) -> dict[str, RecordInput]:
-    return {s.record.record_id: s.record for s in ledger.record_states(conn, as_of=as_of, known_at=known_at)
+    return {s.record.record_id: s.record for s in ledger.valued_states(conn, as_of=as_of, known_at=known_at)
             if s.record.status is Status.ACTIVE and s.record.kind in (Kind.ASSET, Kind.LIABILITY)}
 
 

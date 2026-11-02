@@ -47,7 +47,7 @@ def exposures(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetime) 
     """Measure exposures from one consistent ledger snapshot, the same view `smith summary` uses."""
     with ledger.snapshot(conn):
         summary = build_summary(conn, as_of=as_of, known_at=known_at)
-        states = [s.record for s in ledger.record_states(conn, as_of=as_of, known_at=known_at)
+        states = [s.record for s in ledger.valued_states(conn, as_of=as_of, known_at=known_at)
                   if s.record.status is Status.ACTIVE]
     rates = {BASE_CURRENCY: Decimal(1), **{f["subject"]: f["value"] for f in summary.fx}}
 

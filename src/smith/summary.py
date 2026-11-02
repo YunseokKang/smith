@@ -79,7 +79,7 @@ def build_summary(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
 
 def _build(conn: sqlite3.Connection, summary: Summary) -> Summary:
     as_of, known_at = summary.as_of, summary.known_at
-    states = [s for s in ledger.record_states(conn, as_of=as_of, known_at=known_at)
+    states = [s for s in ledger.valued_states(conn, as_of=as_of, known_at=known_at)
               if s.record.status is Status.ACTIVE]
     rates = _load_observations(conn, summary)
     by_id = {s.record.record_id: s.record for s in states}

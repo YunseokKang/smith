@@ -288,3 +288,29 @@ def tearDownModule():  # noqa: N802 - unittest hook
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RepriceTests(unittest.TestCase):
+    def test_hand_imported_lots_take_a_newer_quote_of_the_same_stock(self):
+        from smith.records import ChangeType, RecordInput, Status, StoredRevision
+
+        def lot(record_id, source, when, symbol="AAA", price="100", quantity="10", status=Status.ACTIVE, **extra):
+            fields = {"category": "stock", "currency": "KRW", "market": "KR", "symbol": symbol, "quantity": quantity,
+                      "unit_price": price, "value": str(int(quantity) * int(price)), "value_after_costs": "990", **extra}
+            record = RecordInput(record_id, Kind.ASSET, "self", when, 1, status, ChangeType.UPDATE, None, None, fields)
+            return StoredRevision(record, source, when, "i")
+        states = ledger.reprice([
+            lot("m1", "manual-sam", SEP15),                                   # Older statement: takes the quote.
+            lot("t1", "toss", OCT15, price="120", quantity="2"), lot("t0", "toss", SEP15, price="90", quantity="1"),
+            lot("m2", "manual-sam", NOV15),                                   # Statement newer than the quote: kept.
+            lot("m3", "manual-sam", SEP15, symbol="BBB"),                     # No quote for this stock: kept.
+            lot("t9", "toss", NOV15, price="200", status=Status.CLOSED),     # A sold-out lot is no quote.
+        ])
+        by_id = {s.record.record_id: s.record.fields for s in states}
+        self.assertEqual({k: by_id["m1"][k] for k in ("value", "unit_price", "statement_price", "value_after_costs")},
+                         {"value": "1200", "unit_price": "120", "statement_price": "100", "value_after_costs": None})
+        self.assertEqual(by_id["m1"]["priced_at"], OCT15.isoformat())
+        self.assertEqual(states[0].record.effective_at, SEP15)               # The quantity's date stays the statement's.
+        for kept in ("m2", "m3", "t0", "t1"):
+            with self.subTest(kept=kept):
+                self.assertNotIn("statement_price", by_id[kept])
