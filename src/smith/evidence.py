@@ -55,6 +55,16 @@ FED_TARGET_UPPER = "DFEDTARU"
 BOK_RATE_MEETINGS = (date(2026, 1, 15), date(2026, 2, 26), date(2026, 4, 10), date(2026, 5, 28), date(2026, 7, 16),
                      date(2026, 8, 27), date(2026, 10, 22), date(2026, 11, 26))
 
+# Stock indices (unit "pt"), the benchmark the markets day sets the holdings' week against (report design §38).
+# Codes checked against the live APIs on 2026-11-03 (ECOS 802Y001/0001000 is KOSPI: 5,859.08 on 11-02; 0089000 is
+# KOSDAQ). Optional: a renamed code leaves the comparison out instead of failing the rates.
+INDEX_SERIES = (
+    SeriesSpec("ecos", "802Y001/0001000", "KOSPI", "pt", "https://ecos.bok.or.kr/ (802Y001 0001000)", 10, required=False),
+    SeriesSpec("fred", "SP500", "S&P 500", "pt", "https://fred.stlouisfed.org/series/SP500", 10, required=False),
+    SeriesSpec("fred", "NASDAQCOM", "NASDAQ Composite", "pt", "https://fred.stlouisfed.org/series/NASDAQCOM", 10,
+               required=False),
+)
+
 SERIES = (
     SeriesSpec("ecos", BOK_BASE_RATE, "Bank of Korea base rate", "%",
                "https://ecos.bok.or.kr/ (722Y001 0101000)", 10, policy=True),
@@ -78,6 +88,7 @@ SERIES = (
     SeriesSpec("fred", "DGS10", "US treasury 10Y", "%", "https://fred.stlouisfed.org/series/DGS10", 10),
     SeriesSpec("fred", "MORTGAGE30US", "US 30Y fixed mortgage", "%",
                "https://fred.stlouisfed.org/series/MORTGAGE30US", 14),
+    *INDEX_SERIES,
 )
 
 # url -> (status, body bytes)
@@ -207,6 +218,24 @@ def _moves(points: dict[date, tuple[str, date | None]], latest_day: date) -> lis
         if previous is not None and value != previous:
             moves.append((day, value - previous))
         previous = value
+    return moves
+
+
+def index_moves(series: dict[tuple[str, str], dict[date, tuple[str, date | None]]], *, since: date,
+                as_of: date) -> list[dict[str, Any]]:
+    """Each stock index's change from its last close on or before `since` to its last close on or before `as_of`
+    (the dates differ by market and by publication lag, so they travel with the figure). An index without both closes,
+    or whose newer close is not after the older one, is left out rather than shown as flat."""
+    moves = []
+    for spec in INDEX_SERIES:
+        points = series.get((spec.provider, spec.series_id), {})
+        start = max((day for day in points if day <= since), default=None)
+        end = max((day for day in points if day <= as_of), default=None)
+        if start is None or end is None or end <= start:
+            continue
+        first, last = Decimal(points[start][0]), Decimal(points[end][0])
+        moves.append({"spec": spec, "start_on": start, "end_on": end, "start": first, "end": last,
+                      "ratio": last / first - 1})
     return moves
 
 

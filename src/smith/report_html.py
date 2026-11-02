@@ -1864,7 +1864,7 @@ def _holdings_week(data: dict[str, Any]) -> str:
          else f"수량이 바뀐 종목 {len(mine)}개"
          + (" · 금액 미상" if traded is None else " · 확인된 금액만" if partial else ""))])
     movers = [m for m in moves["moves"] if m["effect"]][:5]
-    inner = stats
+    inner = stats + _benchmarks(ratio if effect is not None else None, data.get("index_moves") or [], since)
     if movers:
         rows = "".join(f'<tr><td style="font-size:14px;color:{INK};padding:7px 8px 7px 0;border-bottom:1px solid {STRONG}">'
                        f'{escape(m["name"])}</td><td style="text-align:right;white-space:nowrap;font-size:14px;padding:7px 0;'
@@ -1897,6 +1897,33 @@ def _holdings_week(data: dict[str, Any]) -> str:
             f'{_heading("지난주 대비 보유 종목 변화", size=26)}'
             f'<div style="font-size:15px;line-height:1.65;color:{BODY}">{lead}</div></td></tr>'
             f'{inner}<tr><td style="padding-top:12px">{foot}</td></tr>')
+
+
+INDEX_LABELS = {"802Y001/0001000": "코스피", "SP500": "S&P 500", "NASDAQCOM": "나스닥"}
+
+
+def _benchmarks(ratio: Decimal | None, indices: list[dict[str, Any]], since: str) -> str:
+    """The holdings' week beside the indices' (report design §38): the holdings in won with the rate's effect, each
+    index in its own currency over its own last closes, dates shown because they differ by market and lag."""
+    if not indices:
+        return ""
+    def line(label: str, value: Decimal | None, note: str) -> str:
+        shown = (f'<span style="font-family:{MONO};color:{MUTED}">미상</span>' if value is None else
+                 _toned_text(value, _delta_pct(value)))
+        return (f'<tr><td style="font-size:14px;color:{INK};padding:6px 8px 6px 0;border-bottom:1px solid {STRONG}">{escape(label)}'
+                f'<div style="font-size:12px;color:{MUTED}">{escape(note)}</div></td>'
+                f'<td style="text-align:right;white-space:nowrap;font-size:15px;padding:6px 0;border-bottom:1px solid {STRONG}">'
+                f'{shown}</td></tr>')
+    rows = line("내 보유 종목", ratio, f"{since} 이후 · 원화, 환율 포함") + "".join(
+        line(INDEX_LABELS.get(m["spec"].series_id, m["spec"].label), m["ratio"],
+             f'{m["start_on"]:%m/%d} → {m["end_on"]:%m/%d} 종가 · {m["spec"].provider.upper()}') for m in indices)
+    return (f'<tr><td><div style="font-size:13px;font-weight:700;color:{INK};margin:18px 0 4px">시장과 비교</div>'
+            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{rows}</table></td></tr>')
+
+
+def _toned_text(value: Decimal, text: str) -> str:
+    color = MUTED if not value else UP if value > 0 else DOWN
+    return f'<span style="font-family:{MONO};font-weight:700;color:{color}">{escape(text)}</span>'
 
 
 def _toned(amount: Decimal) -> str:
@@ -2423,7 +2450,8 @@ def _macro(macro: dict[str, Any], *, compact: bool = False) -> str:
     table = _table(["지표", "값", "1년 변화", "출처·관측일"],
                    [[SERIES_LABELS.get(r["spec"].series_id, r["spec"].label),
                      f"{r['value']}{'%' if r['spec'].unit == '%' else '원'}", _delta(r["change_12m"]),
-                     (f"{r['spec'].provider.upper()} {r['observed_on']:%m.%d}", r["spec"].link)] for r in rows])
+                     (f"{r['spec'].provider.upper()} {r['observed_on']:%m.%d}", r["spec"].link)] for r in rows
+                    if r["spec"].unit != "pt"])  # Stock indices are the markets panel's benchmark (§38), not rates.
     if compact:
         return _section("시장 금리와 환율", lead, chart + table + _fx_block(macro.get("fx")))
     table += _table(["금리·환율 변화에 노출된 자산·부채", "금액"],

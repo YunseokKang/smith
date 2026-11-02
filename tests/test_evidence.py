@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from smith import ledger
 from smith.announcements import FEEDS, Announcement, FeedError, fetch_feed
-from smith.evidence import SERIES, EvidenceError, describe, fetch_provider, next_policy_meeting
+from smith.evidence import SERIES, EvidenceError, describe, fetch_provider, index_moves, next_policy_meeting
 
 START, END = date(2025, 9, 1), date(2026, 10, 4)
 
@@ -52,6 +52,15 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(ledger.store_evidence(conn, [point[:3] + ("5.25", None)], retrieved_at=later), 1)
         value = lambda known_at: ledger.load_evidence(conn, known_at=known_at)[("fred", "DGS10")][date(2026, 10, 1)][0]
         self.assertEqual((value(first), value(later)), ("5.24", "5.25"))
+
+    def test_index_moves_compare_the_last_closes_and_skip_an_index_without_both(self):
+        series = {("ecos", "802Y001/0001000"): {date(2026, 10, 23): ("2000", None), date(2026, 10, 26): ("2500", None),
+                                                date(2026, 11, 2): ("2600", None)},
+                  ("fred", "SP500"): {date(2026, 10, 30): ("5000", None)},              # No close before the start.
+                  ("fred", "NASDAQCOM"): {date(2026, 10, 20): ("100", None)}}           # No newer close.
+        moves = index_moves(series, since=date(2026, 10, 26), as_of=date(2026, 11, 2))
+        self.assertEqual([(m["spec"].label, m["start_on"], m["end_on"], m["ratio"]) for m in moves],
+                         [("KOSPI", date(2026, 10, 26), date(2026, 11, 2), Decimal("0.04"))])
 
     def test_describe_reports_latest_changes_and_staleness(self):
         series = {("fred", "DGS10"): {date(2025, 10, 1): ("4.12", None), date(2026, 7, 1): ("4.49", None),

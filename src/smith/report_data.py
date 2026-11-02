@@ -129,6 +129,11 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
             "change": change, "timeline": _timeline(view, pay), "sectors": sectors, "holdings": review,
             "holding_quantity_changes": None if moved is None else quantity_changes(moved),
             "holding_price_moves": None if moved is None else price_moves(moved, baseline),
+            # The indices over the same week, for the panel's market comparison (report design §38): the closes before
+            # each report's day, as a 06:00 report holds the previous session's prices.
+            "index_moves": None if moved is None else evidence.index_moves(
+                ledger.load_evidence(conn, known_at=known_at), since=baseline.date() - timedelta(days=1),
+                as_of=as_of.date() - timedelta(days=1)),
             # The holdings' latest official quarters as known at the report (fundamentals.py).
             "fundamentals": fundamentals.load(conn, known_at),
             "insiders": insiders.load(conn, known_at),

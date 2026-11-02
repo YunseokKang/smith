@@ -468,6 +468,15 @@ class ReportTests(unittest.TestCase):
         panel = html.index("지난주 대비 보유 종목 변화")
         self.assertTrue(all(html.find(later) == -1 or html.find(later) > panel for later in ("오늘의 제안", "보유 종목 점검")))
         self.assertEqual(html.count("9월 1일 이후 수량이 바뀐 종목"), 1)
+        self.assertEqual(data["index_moves"], [])                       # No index stored: no comparison block.
+        self.assertNotIn("시장과 비교", html)
+        from smith.evidence import INDEX_SERIES
+        data["index_moves"] = [{"spec": INDEX_SERIES[0], "start_on": date(2026, 8, 31), "end_on": date(2026, 9, 30),
+                                "start": Decimal(2500), "end": Decimal(2600), "ratio": Decimal("0.04")}]
+        html = render(data)[1]
+        self.assertIn("시장과 비교", html)
+        self.assertIn("08/31 → 09/30 종가", html)
+        self.assertIn("+4.0%", html)
         moved = narrative.holdings_payload(data["view"], data)["holding_quantity_changes"]
         self.assertEqual(moved, {"from": "2026-09-01", "changes": [
             {"symbol": "XYZ", "market": "US", "quantity_before": "10", "quantity_after": "12", "change": "more",
