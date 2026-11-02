@@ -98,6 +98,7 @@ class ProductClass:
     official_hosts: tuple[str, ...] = ()  # Hosts (or parent domains) whose pages count as a verification.
     context_note: str = ""          # What the selector should weigh about this household's tax route, in English.
     seeds_held: bool = True         # The household's broad index funds are candidates again and rank 1 favours them.
+    tax_route: bool = True          # Rank 1 weighs the Korean-listed overseas-index tax route (rank_first).
 
     def official(self, url: str) -> bool:
         """Whether the page belongs to one of the class's official hosts (the host or a subdomain of it)."""
@@ -160,7 +161,7 @@ SAFE_PARKING = ProductClass(
                   "household's financial-income threshold outside an ISA. An ISA locks money for three years and a "
                   "pension account until retirement, so money needed sooner sits in an ordinary account; compare "
                   "the after-tax yield with a bank time deposit."),
-    seeds_held=False,
+    seeds_held=False, tax_route=False,
 )
 CLASSES: dict[str, ProductClass] = {spec.key: spec for spec in (CORE_ETF, SAFE_PARKING)}
 LIVE_AGE = timedelta(days=14)  # A proposal shown in a report this recent, and not declined or done, is live.
@@ -333,7 +334,8 @@ def review(view: LedgerView, spec: ProductClass, household: dict[str, Any] | Non
                     CRITIQUE_PROMPT, CRITIQUE_SCHEMA, timeout=THINK_TIMEOUT)
     reviews = clean_reviews(critique["reviews"], passing)
     previous = [{"rank": p["rank"], "symbol": p["symbol"], "reason": p["reason"]} for p in (prior or {}).get("picks", [])]
-    first = rank_first(passing, context["for_model"], next((p["symbol"] for p in previous if p["rank"] == 1), None))
+    first = rank_first(passing, context["for_model"], next((p["symbol"] for p in previous if p["rank"] == 1), None),
+                       spec.tax_route)
     selection_input = {"need": spec.need, "household_context": context["for_model"], "reviews": reviews,
                        "rank_1": first, "previous_picks": previous}
     selected = call("product-select", selection_input, SELECT_PROMPT, SELECT_SCHEMA, timeout=THINK_TIMEOUT)
@@ -518,7 +520,8 @@ def facts_of(candidate: dict[str, Any]) -> dict[str, str]:
     return facts
 
 
-def rank_first(passing: list[dict[str, Any]], context: dict[str, Any], prior_first: str | None) -> str | None:
+def rank_first(passing: list[dict[str, Any]], context: dict[str, Any], prior_first: str | None,
+               tax_route: bool = True) -> str | None:
     """Code's rank 1 among the verified candidates: the lowest yearly cost in basis points, plus TAX_PENALTY_BP for
     a Korean-listed overseas-index fund when the household has neither an ISA nor a pension account (its gains
     count toward the financial-income threshold), minus HELD_BONUS_BP for a fund it already holds. Last review's
@@ -529,7 +532,9 @@ def rank_first(passing: list[dict[str, Any]], context: dict[str, Any], prior_fir
         if cost is None:
             continue
         score = cost
-        if c["market"] == "KR" and not _DOMESTIC_INDEX.search(c["index"]) and not (context.get("has_isa") or context.get("has_pension_accounts")):
+        # Only where the route differs between candidates (CORE_ETF): every won short-term fund is taxed alike, and
+        # an index named "KRX CD91" would otherwise beat a cheaper KOFR fund (review 2026-11-02).
+        if tax_route and c["market"] == "KR" and not _DOMESTIC_INDEX.search(c["index"])                 and not (context.get("has_isa") or context.get("has_pension_accounts")):
             score += TAX_PENALTY_BP
         if c["symbol"] in context.get("holds_broad_index_funds", []):
             score -= HELD_BONUS_BP

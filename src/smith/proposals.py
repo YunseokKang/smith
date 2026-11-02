@@ -860,6 +860,7 @@ def _overseas_harvest(facts: dict[str, Any]) -> Proposal | Undetermined | None:
     # The action first, with the shares and the day (user review 2026-11-02: the card opened with a condition and
     # named neither); the condition Smith cannot check, sales earlier this year, follows as one sentence.
     trade_by = plan["trade_by"]
+    realized = plan["sold_gain"] if plan["sell"] else plan["realize"]  # One amount on the card (review 2026-11-02).
     day = f"{trade_by.month}월 {trade_by.day}일({_WEEKDAYS[trade_by.weekday()]})"
     shares = "·".join(f"{s['symbol']} {s['shares']}주" for s in plan["sell"])
     if shares:
@@ -879,8 +880,8 @@ def _overseas_harvest(facts: dict[str, Any]) -> Proposal | Undetermined | None:
              f"22%가 붙습니다. 지금 이익이 난 미국 주식의 평가이익은 약 {short_won(plan['gains'])}입니다"
              + (f"(손실 중인 종목 {short_won(-plan['losses'])}은 팔기 전까지 상계되지 않습니다)" if plan["losses"] else "")
              + ". 공제는 해마다 새로 주어지고 이월되지 않습니다."),
-        effect=(f"이익이 난 종목만 {short_won(plan['realize'])}만큼 실현하고 다시 사면, 나중에 낼 세금이 최대 약 "
-                f"{short_won(plan['saving'])} 줄어드는 시나리오입니다."),
+        effect=(f"이익이 난 종목만 {short_won(realized)}만큼 실현하고 다시 사면, 나중에 낼 세금이 최대 약 "
+                f"{short_won(realized * tax.OVERSEAS_RATE)} 줄어드는 시나리오입니다."),
         risks=("올해 이미 실현한 주식 손익을 Smith는 모릅니다. 그 손익과 합쳐 공제가 한 번만 적용되므로, 증권사 양도소득 내역을 먼저 "
                "확인하십시오. 원화 손익은 현재 환율로 계산한 근사값이며, 실제 세금은 사고판 날의 환율로 계산됩니다. 매매 수수료·환전 "
                "비용과 다시 사는 사이의 가격 변동도 있습니다."

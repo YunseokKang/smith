@@ -1,5 +1,6 @@
 import json
 import unittest
+from types import SimpleNamespace
 from contextlib import closing
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -120,6 +121,11 @@ class TaxTests(unittest.TestCase):
                                            {"symbol": "SCHD", "quantity": Decimal(3), "gain": Decimal(30_000)}],
                                           Decimal(2_500_000)),
                          [{"symbol": "VOO", "shares": 17, "gain": Decimal(2_380_000)}])   # 30 thousand won: no extra trade.
+        # One lot per stock across accounts: never "VOO 4주·VOO 1주" (review 2026-11-02).
+        two = [SimpleNamespace(fields={"symbol": "VOO", "quantity": "30"}), SimpleNamespace(fields={"symbol": "VOO", "quantity": "10"})]
+        self.assertEqual(tax._lots(two, [Decimal(4_200_000), Decimal(1_400_000)]),
+                         [{"symbol": "VOO", "quantity": Decimal(40), "gain": Decimal(5_600_000)}])
+        self.assertEqual(tax._lots(two, [Decimal(4_200_000), None]), [])   # Part unknown: the per-share gain is unknown.
         stack = self.data()["pension_stack"]
         self.assertEqual((stack["age"], [t["retire_age"] for t in stack["tiers"]]), (37, [50, 55, 60]))
 

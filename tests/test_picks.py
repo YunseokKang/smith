@@ -301,6 +301,13 @@ class ReviewTests(Upgrade):
         self.assertEqual(context["holds_broad_index_funds"], [])
         self.assertIn("bank time deposit", context["note"])
         self.assertIn("US-listed", picks.household_context(view, picks.CORE_ETF, HOUSEHOLD)["for_model"]["note"])
+        # Rank 1 by cost alone: every won short-term fund is taxed alike, so the core's tax-route penalty, which spares
+        # an index named KRX, would put a dearer CD-rate fund first (review 2026-11-02).
+        cd = dict(candidate("CD91", "KR", "50,000원", expense="0.09%"), index="KRX CD91 금리")
+        kofr = dict(candidate("KOFR", "KR", "100,000원", expense="0.02%"), index="KOFR 금리")
+        plain = {"has_isa": False, "has_pension_accounts": False, "holds_broad_index_funds": []}
+        self.assertEqual(picks.rank_first([cd, kofr], plain, None, picks.SAFE_PARKING.tax_route), "KOFR")
+        self.assertEqual(picks.rank_first([cd, kofr], plain, None), "CD91")   # What the core's rule would do.
 
     def test_a_failed_scout_is_recorded_and_the_report_goes_out_without_a_table(self):
         db = self.file_ledger()

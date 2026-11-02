@@ -1008,15 +1008,12 @@ def write(view: Any, data: dict[str, Any], brief: dict[str, Any] | None, *, secr
     # The reader's count only when it read the text: the letter of 2026-11-02 said "첫 독자 지적 0건" on a day the
     # reader was skipped for time (user review). A reader that was due but did not read is said as such.
     unnatural = reading.pop("unnatural", [])
-    if reading["outcome"] in READER_READ:
+    if "notes" in reading:  # The reader's status carries its count once it has read (whatever the rewrite did).
         stats["reader_notes"] = unnatural
     elif reading["outcome"] != "off":
         stats["reader_skipped"] = reading["outcome"]
     return {"output": verified, "dropped": dropped, "memos": memos, "cost_usd": _sum_costs(costs), "reader": reading,
             "korean": stats}
-
-
-READER_READ = ("clear", "rewritten", "rewrite-failed")  # read_and_rewrite outcomes after the reader read the text.
 
 
 def korean_flags(dropped: list[str]) -> list[dict[str, str]]:

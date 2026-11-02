@@ -157,8 +157,7 @@ def facts(view: LedgerView, today: date, household: dict[str, Any] | None) -> di
         "us_gains": sum((g for g in known if g > 0), Decimal(0)), "us_losses": sum((g for g in known if g < 0), Decimal(0)),
         "us_unknown": len(gains) - len(known), "us_positions": len(us),
         # The positions with a gain, for the shares to sell (harvest_lots): symbol, shares held, gain in won.
-        "us_lots": [{"symbol": r.fields["symbol"], "quantity": Decimal(r.fields["quantity"]), "gain": g}
-                    for r, g in zip(us, gains) if g is not None and g > 0 and Decimal(r.fields["quantity"]) > 0],
+        "us_lots": _lots(us, gains),
         "hermes_managed": any(r.fields.get("managed_by") == "hermes" for r in mine if r.kind is Kind.ASSET),
         "homes": [(r.owner_id, base_amount(view, r), r.fields.get("occupancy")) for r in view.records
                   if r.kind is Kind.ASSET and r.fields["category"] == "real_estate"],
@@ -175,6 +174,24 @@ def facts(view: LedgerView, today: date, household: dict[str, Any] | None) -> di
         "birth_year": household.get("birth_year"), "monthly_spend": household.get("retirement_monthly_spend"),
         "married": household.get("marriage_registered"), "cohabiting": household.get("cohabiting"),
     }
+
+
+def _lots(records: list[Any], gains: list[Decimal | None]) -> list[dict[str, Any]]:
+    """One lot per symbol across the accounts holding it (review 2026-11-02: per record, VOO in two accounts read
+    "VOO 4주·VOO 1주"): the shares and the gain added up. A symbol with any lot of unknown gain is left out
+    (its average per-share gain is unknown), as is one with no gain."""
+    found: dict[str, dict[str, Any]] = {}
+    unknown = set()
+    for record, gain in zip(records, gains):
+        symbol = record.fields["symbol"]
+        if gain is None or not record.fields.get("quantity"):
+            unknown.add(symbol)
+            continue
+        lot = found.setdefault(symbol, {"symbol": symbol, "quantity": Decimal(0), "gain": Decimal(0)})
+        lot["quantity"] += Decimal(record.fields["quantity"])
+        lot["gain"] += gain
+    return [lot for symbol, lot in sorted(found.items())
+            if symbol not in unknown and lot["gain"] > 0 and lot["quantity"] > 0]
 
 
 def _months_in_year(fields: dict[str, Any], year: int) -> int:
