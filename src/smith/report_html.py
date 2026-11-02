@@ -1331,7 +1331,7 @@ def _home_plan(home: dict[str, Any]) -> str:
     bars.append(("본인 자원만", home["available_self"], False))
     with_pay = any(s.get("expected_pay_at_target") not in (None, "0") for s in home["scenarios"])
     household = any(s.get("available_household") is not None for s in home["scenarios"])
-    headers = ["시나리오", "필요 자금", "본인 자원"] + (["가구 통합"] if household else []) \
+    headers = ["시나리오", "필요 자금(그때 집값·비용)", "본인 자원"] + (["가구 통합"] if household else []) \
         + (["가구 통합 + 예정 소득"] if with_pay and household else []) + ["부족분(기준)"]
     rows = []
     for s in home["scenarios"]:
@@ -1452,8 +1452,8 @@ def _future_income(data: dict[str, Any], *, overview: bool = False) -> str:
         # A known 0% now (no securities yet) still warns; only unknown shares are skipped.
         if stock["share_now"] is None or stock["share_with_grants"] is None or not stock["granted"]:
             continue
-        inner += (f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin-top:10px">회사 주식 집중: 지금 보유한 '
-                  f'{escape(stock.get("name") or stock["symbol"])} 주식은 본인 증권 자산의 <b>{_pct(stock["share_now"], 0)}</b>이고, 예정된 주식 보상과 자사주로 '
+        inner += (f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin-top:10px">회사 주식 집중: '
+                  f'{escape(stock.get("name") or stock["symbol"])}의 비중은 지금 주식의 <b>{_pct(stock["share_now"], 0)}</b>이고, 예정된 주식 보상과 자사주로 '
                   f'받는 성과급(기준, 세후)을 받으면 <b>{_pct(stock["share_with_grants"], 0)}</b>가 됩니다. 받는 대로 일부를 분산하는 '
                   "원칙을 정해 두시길 권합니다.</div>")
     return _section("앞으로 들어올 돈", lead, inner)

@@ -257,7 +257,7 @@ class FutureIncomeTests(unittest.TestCase):
         self.assertIn("앞으로 들어올 돈", html)
         self.assertIn("최종 세후", html)
         # The client reads the company and plain certainty words; the model context keeps only the ticker.
-        self.assertIn("삼성전자 주식은 본인 증권 자산의", html)
+        self.assertIn("삼성전자의 비중은 지금 주식의", html)   # The trim proposal's base (user review 2026-11-02).
         self.assertIn("불확실(받을 수도 있는 것)", html)
         self.assertNotIn("name", context["expected_pay"]["same_stock"][0])
         self.assertTrue(any(i["kind"] == "inflow" for i in data["timeline"]))

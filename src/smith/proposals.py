@@ -778,8 +778,12 @@ def _surplus_plan(facts: dict[str, Any]) -> Proposal | Undetermined | None:
                else " 그런데 이 돈이")
     return Proposal(
         key="surplus-plan", priority=2, watch=("surplus",),
-        headline=f"월 여유 {short_won(surplus)} 자동이체 배정",
-        title=f"매월 남는 약 {short_won(surplus)}의 쓰임새를 정해 자동이체로 묶어 두시길 권합니다.",
+        # Named as the part of the monthly surplus without a destination: the letter of 2026-11-02 showed 321만
+        # (the tile), this 97만 and the spending room 9만 all as "월 여유" (user review).
+        headline=f"쓰임새 미정 월 {short_won(surplus)} 자동이체 배정",
+        title=(f"매월 남는 {short_won(surplus + allocated)} 가운데 쓰임새가 정해지지 않은 약 {short_won(surplus)}을 "
+               "자동이체로 묶어 두시길 권합니다." if allocated else
+               f"매월 남는 약 {short_won(surplus)}의 쓰임새를 정해 자동이체로 묶어 두시길 권합니다."),
         why=(f"수입 {short_won(summary.monthly_inflow)}에서 생활비·대출 상환·보험료 {short_won(summary.monthly_outflow)}을 "
              f"빼면 매월 {short_won(surplus + allocated)}이 남습니다.{already} 어디로 가는지(저축·투자 이체)가 기록되어 있지 않습니다. "
              "정해 두지 않은 돈은 이자가 거의 없는 통장에 머물거나 소비로 흘러가기 쉽습니다."),
@@ -1159,7 +1163,7 @@ def _spending_room(facts: dict[str, Any]) -> Proposal | Undetermined | None:
                 " 다만 계획한 목표까지 지금 속도로 지키려면 여유가 없습니다.")
         return Proposal(
             key="spending-room", priority=3, watch=("room",), tolerance=Decimal("0.25"),
-            headline=f"월 {short_won(room['room'])} 안심 소비 가능",
+            headline=f"비상금·약정 적립 뒤 월 {short_won(room['room'])} 소비 여유",
             title=f"매월 약 {short_won(room['room'])}은 비상금과 약정을 지키고도 쓰실 수 있는 돈입니다.{tail}",
             why=basis + goals_note + " 약정 기준 한도 안의 소비는 비상금과 보증금 반환을 늦추지 않습니다. 돈을 끝까지 쌓아 두는 "
                                      "것은 계획의 목적이 아니며, 제때 삶으로 바꾸는 것도 자산 관리의 일부입니다.",

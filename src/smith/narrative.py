@@ -62,7 +62,8 @@ logger = logging.getLogger(__name__)
 # v21: retirement ages.
 # v30: the headline is the judgement behind the action, not the action again: the badge above names it and the
 # first proposal card below states it with its amounts (user review of the 2026-11-02 letter: three repeats).
-PROMPT_VERSION = "narrative-v30"
+# v31: a part that moved against the total is named with what offset it (the 2026-11-02 letter: +58만 beside -176만).
+PROMPT_VERSION = "narrative-v31"
 MODEL = "fable"
 BUDGET_USD = "5.00"
 # Two calls at most: the write (the markets day with twenty-odd holdings ran past 10 minutes on 2026-10-17) and a
@@ -143,7 +144,9 @@ Nine principles of the writing (the hard rules at the end are checked by code):
    action, its per-period amount or its schedule ("이사 자금 2.3억 원이 아직 주식에 있어, 이사 때 주가가 30% 내려
    있으면 약 6,800만 원이 모자랍니다", not "2.3억 원을 분기마다 4,504만 원씩 옮기시길 권합니다"). Never open with
    a statistic comparison or the stress scenario. Then, in order: what changed
-   since the last report and what it did to this household's net worth; its single bottleneck, said by what it
+   since the last report and what it did to this household's net worth (when you name a part that moved against
+   the total, name in the same sentence what offset it: "주가로 176만 원 줄었지만 다른 자산 평가가 올라 시장·평가 변동은
+   +58만 원", never the part alone beside the total); its single bottleneck, said by what it
    means in a likely event (a large unplanned bill such as a medical cost or a home repair, or having to sell
    stocks after a fall), not by an extreme scenario; the
    one strategy of the period that resolves it. No fragmented warnings, no list of facts, no repeated status

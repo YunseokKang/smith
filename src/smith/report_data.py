@@ -648,7 +648,10 @@ def _timeline(view: LedgerView, pay: list[future_income.Inflow]) -> list[dict[st
                               "kind": "cash_need", "category": f["category"]})
     for goal in view.summary.goals:
         if today < goal["target_date"] <= horizon:
-            items.append({"date": goal["target_date"], "label": f"목표: {_goal_label(goal['category'])}",
+            # A home goal's amount is today's price; the plan needs the price then plus purchase costs, shown
+            # beside it as 필요 자금 (the letter of 2026-11-02 read 30.0억 here and 32.1억 there, user review).
+            label = f"목표: {_goal_label(goal['category'])}" + ("(지금 집값)" if goal["category"] == "home" else "")
+            items.append({"date": goal["target_date"], "label": label,
                           "amount": goal["target"], "kind": "goal"})
     return sorted(items, key=lambda item: item["date"])
 

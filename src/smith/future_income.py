@@ -226,12 +226,17 @@ def _same_stock(view: LedgerView, items: list[Inflow]) -> list[dict[str, Any]]:
     employer's own stock adds to the risk already carried by the salary)."""
     mine = [r for r in view.records if r.kind is Kind.ASSET and r.owner_id == "self"
             and r.fields["category"] in _SECURITIES]
-    securities = [base_amount(view, r) for r in mine]
-    total = None if any(v is None for v in securities) else sum(securities, Decimal(0))
+    # The same base as the single-company limit (holdings.review: the tradable securities Smith gives opinions
+    # on, Hermes and pension accounts aside), so the report gives one share per stock: the letter of 2026-11-02
+    # said 40% in the trim proposal and 29% here (user review).
+    from smith import holdings  # Here: holdings -> cases -> future_income at import time.
+
+    review = holdings.review(view)
+    total = review["total"]
     found = []
     for market, symbol in sorted({(i.market, i.symbol) for i in items if i.in_stock and i.owner_id == "self"}):
-        held_values = [base_amount(view, r) for r in mine if r.fields.get("symbol") == symbol
-                       and r.fields.get("market") == market]
+        held_values = [p["value"] for p in review["positions"] if not p["hermes"] and p["symbol"] == symbol
+                       and p["market"] == market]
         grants = [i.net for i in items if i.in_stock and i.owner_id == "self" and i.symbol == symbol
                   and i.market == market and i.certainty in SCENARIO_CERTAINTIES["base"]]
         held = None if any(v is None for v in held_values) else sum(held_values, Decimal(0))
