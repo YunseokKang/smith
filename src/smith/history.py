@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from smith import gmail
+from smith.payload import mask_identifiers
 
 API = "https://ko.wikipedia.org/w/api.php"
 USER_AGENT = "Smith/0.1 (personal daily mail)"
@@ -106,7 +107,9 @@ def pick(events: list[Event], day: date) -> Event | None:
 
 
 def for_model(events: list[Event]) -> list[dict[str, Any]]:
-    return [{"year": e.year, "event": e.text[:200]} for e in events]
+    # Web text can look like an identifier ("테헤란로 8중 추돌" reads as an address): masked like other web text so the
+    # writer's check_outbound does not reject the whole mail (2026-11-03).
+    return [{"year": e.year, "event": mask_identifiers(e.text)[:200]} for e in events]
 
 
 def _read(cache: Path) -> dict[str, Any]:

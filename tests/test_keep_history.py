@@ -5,6 +5,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from smith import daily, daily_writer, history, keep, people
+from smith.payload import check_outbound
 
 WIKITEXT = """{{달력}}
 == 사건 ==
@@ -80,6 +81,12 @@ class HistoryTests(unittest.TestCase):
                           (2022, "대구 매천시장에서 화재가 발생했다.")])
         self.assertEqual(history.pick(events, date(2026, 10, 25)).year, 1597)       # A Korean event is preferred.
         self.assertEqual(history.page_url(date(2026, 10, 25)), "https://ko.wikipedia.org/wiki/10%EC%9B%94_25%EC%9D%BC")
+
+    def test_for_model_masks_text_that_reads_as_an_identifier(self):
+        events = [history.Event(1994, "서울 강남구 테헤란로 8중 추돌 사고가 발생 했다.")]
+        sent = json.dumps(history.for_model(events), ensure_ascii=False)
+        check_outbound(sent, [])                                                    # 2026-11-03: this rejected the daily mail.
+        self.assertIn("중 추돌 사고", sent)
 
     def test_cache_is_used_when_fresh(self):
         calls = []

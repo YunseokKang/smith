@@ -375,3 +375,15 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
 - 해결: 40%씩 내리고 첫 행이 바뀔 때까지(최대 약 1초) 기다린다. 화면 수에 못 미치면 끝에서 조금 올렸다 내리며 최대 30초 더 기다린다.
   호출은 스크립트 시작부터 90초 예산에서 스스로 멈추고 스크롤 위치를 알려, 다음 호출이 그 위치부터 이어 받는다(`evernote._list_source`).
 - 예방: 목록은 화면이 밝힌 개수와 모은 개수를 늘 함께 기록한다(`found/expected`). 덜 모인 소스는 예전 노트를 지우지 않는다.
+
+### TS-037 하루 일과 메일이 `build-PayloadRejected`로 세 번 실패: 역사 항목이 주소로 오인됨 (2026-11-03)
+
+- 증상: 11/03 하루 일과 메일이 06:27·06:31·06:46 세 번 `daily 2026-11-03: failed (build-PayloadRejected)`로 실패해 하루 재시도
+  한도(`MAX_ATTEMPTS = 3`)에 걸렸고 발송되지 않았다. 로그에는 어떤 규칙에 걸렸는지 남지 않는다.
+- 원인: '역사의 오늘' 후보(한국어 위키백과) "서울 강남구 테헤란로 8중 추돌 사고"의 "테헤란로 8"이 `korean-address` 규칙에 맞아,
+  작성기 payload의 `check_outbound`가 메일 전체를 거부했다. 뉴스·토크 등 다른 웹 텍스트와 달리 `history.for_model`만
+  `mask_identifiers`를 거치지 않았다.
+- 해결: `history.for_model`이 사건 문장을 `mask_identifiers`로 가린 뒤 넘긴다. 당일 메일은 `smith daily send --model --force`로 보냈다
+  (한도에 걸린 날은 `--force` 없이는 `skipped`).
+- 예방: 웹에서 온 텍스트를 모델 payload에 넣을 때는 언제나 `mask_identifiers`를 먼저 거친다. 어느 규칙에 걸렸는지는
+  `daily_writer.check_outbound`를 감싸 payload를 경로별로 훑는 진단 스크립트로 찾는다(모델 호출·발송 없이).
