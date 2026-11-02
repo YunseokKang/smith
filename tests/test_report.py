@@ -477,6 +477,16 @@ class ReportTests(unittest.TestCase):
         self.assertIn("시장과 비교", html)
         self.assertIn("08/31 → 09/30 종가", html)
         self.assertIn("+4.0%", html)
+        # The narrative gets the week's change per holding and the indices (narrative-v33); for a holding that moved
+        # 10% or more, the opinion's first sentence (why it moved) shows under its row.
+        sent = narrative.holdings_payload(data["view"], data)
+        self.assertEqual(([h["week_change"] for h in sent["holdings"]], sent["index_moves"][0]["change"]),
+                         (["0.1846"], "0.0400"))
+        key = data["holdings"]["positions"][0]["key"]
+        data["narrative"] = {"holdings": {key: {"stance": "hold", "reason": "분기 실적 발표로 올랐습니다. 비중은 유지합니다."}}}
+        html = render(data)[1]
+        self.assertIn("↳ 분기 실적 발표로 올랐습니다.", html)
+        self.assertNotIn("비중은 유지합니다.</td>", html)
         moved = narrative.holdings_payload(data["view"], data)["holding_quantity_changes"]
         self.assertEqual(moved, {"from": "2026-09-01", "changes": [
             {"symbol": "XYZ", "market": "US", "quantity_before": "10", "quantity_after": "12", "change": "more",
@@ -528,12 +538,13 @@ class ReportTests(unittest.TestCase):
     def test_price_moves_add_up_with_the_trades_and_leave_stale_lots_out_of_the_ratio(self):
         from smith.report_data import price_moves
 
-        def row(symbol, q0, q1, start, end, p0=None, p1=None, priced_at=T1, hermes=False, unconverted=False):
+        def row(symbol, q0, q1, start, end, p0=None, p1=None, priced_at=T1, hermes=False, unconverted=False,
+                priced_from=T0):
             dec = lambda v: None if v is None else Decimal(v)
             return {"name": symbol, "symbol": symbol, "market": "US", "currency": "USD", "hermes": hermes,
                     "unconverted": unconverted, "start": dec(start), "end": dec(end),
                     "quantity_start": dec(q0), "quantity_end": dec(q1), "price_start": dec(p0), "price_end": dec(p1),
-                    "priced_at_start": T0, "priced_at_end": priced_at,
+                    "priced_at_start": priced_from, "priced_at_end": priced_at,
                     "rate_start": Decimal(1300), "rate_end": Decimal(1400)}
         # Each effect is the change in value less the trade at today's rate (Codex review 2026-11-03).
         moves = price_moves([
@@ -576,6 +587,14 @@ class ReportTests(unittest.TestCase):
         html = report_html._holdings_week({"holding_price_moves": stale_only, "baseline": T0,
                                            "holding_quantity_changes": {"changes": [], "uncompared": []}})
         self.assertNotIn("새로 보유", html)
+        # A comparison price from an old statement spans more than the week: the amount stays, the ratio is not given.
+        early = price_moves([row("OLD", "10", "10", "1000", "1500", p1="150",
+                                 priced_from=datetime(2026, 8, 1, tzinfo=timezone.utc))], T0)
+        self.assertEqual((early["moves"][0]["effect"], early["moves"][0]["ratio"]), (Decimal(500), None))
+        self.assertEqual([s["name"] for s in early["early_priced"]], ["OLD"])
+        html = report_html._holdings_week({"holding_price_moves": early, "baseline": T0,
+                                           "holding_quantity_changes": {"changes": [], "uncompared": []}})
+        self.assertIn("OLD 10주(08/01 가격부터)", html)
 
     def test_decomposition_is_exact_for_the_largest_importable_values(self):
         big = datetime(2026, 9, 3, tzinfo=timezone.utc)

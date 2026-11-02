@@ -64,7 +64,8 @@ logger = logging.getLogger(__name__)
 # first proposal card below states it with its amounts (user review of the 2026-11-02 letter: three repeats).
 # v31: a part that moved against the total is named with what offset it (the 2026-11-02 letter: +58만 beside -176만).
 # v32: no per-sentence law caveat; the footer says it once (user decision 2026-11-02); the check no longer asks for it.
-PROMPT_VERSION = "narrative-v32"
+# v33: holdings[].week_change and index_moves; a holding that moved 10% or more opens its reason with why (2026-11-03).
+PROMPT_VERSION = "narrative-v33"
 MODEL = "fable"
 # A runaway guard, not a cost limit (flat-rate subscription): the markets day cost 4.39 USD on 2026-10-27 and, with a
 # payload a fifth larger, ran past 5.00 on 2026-11-03 (error_max_budget_usd), so that report went out without opinions.
@@ -362,6 +363,14 @@ Input JSON:
   An empty list with holdings_not_compared at 0 means no count changed: say so in a few words at most.
   holdings_not_compared counts holdings whose quantity is not recorded, so whether they changed is unknown:
   never say "nothing changed" for them.
+- holdings[].week_change (the markets day, when present): the holding's price-and-FX change since
+  holding_quantity_changes.from on the shares held then, as a ratio (null when it could not be computed or a lot's
+  price was not refreshed; never read null as flat). index_moves: KOSPI, S&P 500 and NASDAQ over the same week,
+  each with its first and last close dates (they differ by market). The report shows these figures above the
+  proposals; the client asked why a holding moved. For every holding whose week_change is 0.10 or more either
+  way, open its opinion's reason with one short clause on why it moved this week, from a dated research finding,
+  its fundamentals or its insiders, cited in refs; when none of them explains it, say the sources do not show
+  the cause rather than guess. Set the holdings' week against index_moves at most once, in the portfolio prose.
 - principles: the part of Smith's investment principles library this report needs: well-known investors'
   principles (Buffett, Munger, Marks, Vanguard/Bogle, Dalio, Templeton, Lynch, Graham, Lefevre) paraphrased
   from their primary sources, each with an id and how Smith applies it to a household; where two read against
@@ -479,7 +488,8 @@ def build_payload(view: Any, data: dict[str, Any], brief: dict[str, Any] | None,
         return payload
     payload["edition_focus"] = edition.focus
     if edition.key != "markets":
-        payload.update(holdings=[], holding_quantity_changes=None, principles=[], policy_checks=[], portfolio_facts=None)
+        payload.update(holdings=[], holding_quantity_changes=None, index_moves=None, principles=[], policy_checks=[],
+                       portfolio_facts=None)
     if edition.key not in ("property", "overview"):
         payload["property_market"] = []
     if edition.key not in ("tax", "property"):
@@ -836,6 +846,7 @@ def holdings_payload(view: Any, data: dict[str, Any]) -> dict[str, Any]:
     code. Hermes-managed holdings are left out: Smith gives no opinion on them."""
     review, glide = data["holdings"], data["advice"].get("glide")
     refs = research.holding_refs(view)
+    week = {(m["market"], m["symbol"]): m["ratio"] for m in (data.get("holding_price_moves") or {}).get("moves", [])}
 
     def num(value: Decimal | None) -> str | None:
         return None if value is None else str(value)
@@ -857,7 +868,9 @@ def holdings_payload(view: Any, data: dict[str, Any]) -> dict[str, Any]:
                                                        data["as_of"].date()),
                   # Insiders' dealings over the last 90 days (insiders.py), a weak signal, totals only.
                   "insiders": insiders.for_report((data.get("insiders") or {}).get(f"{p['market']}:{p['symbol']}"),
-                                                  data["as_of"].date())}
+                                                  data["as_of"].date()),
+                  # The week's price-and-FX change on the shares held (report design §39), markets day only.
+                  "week_change": ratio(week.get((p["market"], p["symbol"])))}
                  for p in review["positions"] if not p["hermes"] and p["key"] in refs]
     plan = data["advice"].get("concentration")
     found, baseline = data.get("holding_quantity_changes"), data.get("baseline")
@@ -868,7 +881,10 @@ def holdings_payload(view: Any, data: dict[str, Any]) -> dict[str, Any]:
                      "quantity_after": num(c["quantity_end"]), "change": c["change"], "value_change": won(c["amount"])}
                     for c in found["changes"] if not c["hermes"]],
         "holdings_not_compared": len(found["uncompared"])}
-    return {"holdings": positions, "holding_quantity_changes": quantity_changes,
+    indices = None if data.get("index_moves") is None else [
+        {"index": m["spec"].label, "from": m["start_on"].isoformat(), "to": m["end_on"].isoformat(),
+         "change": ratio(m["ratio"])} for m in data["index_moves"]]
+    return {"holdings": positions, "holding_quantity_changes": quantity_changes, "index_moves": indices,
             "principles": [{"id": p.id, "investor": p.investor, "title": p.title, "principle": p.principle,
                             "apply": p.apply} for p in principles.relevant(data)],
             "policy_checks": [{"key": c.key, "title": c.title, "standard": c.standard, "current": c.current,
@@ -1655,7 +1671,7 @@ def _known_refs(payload: dict[str, Any]) -> set[str]:
 # answers) is excluded by default, so a new payload key is not evidence until it is listed here.
 _EVIDENCE_KEYS = ("edition", "change_since_last_report", "proposals", "undetermined", "proposals_in_progress",
                   "strategy", "assumptions", "ownership_notes", "property_market", "sector_metrics",
-                  "household_profile", "holdings", "holding_quantity_changes", "principles", "policy_checks",
+                  "household_profile", "holdings", "holding_quantity_changes", "index_moves", "principles", "policy_checks",
                   "portfolio_facts", "tax",
                   "report_date", "message_date",
                   # An e-mail answer may quote the report's own status reasons, data status and the principles it

@@ -53,6 +53,15 @@ class EvidenceTests(unittest.TestCase):
         value = lambda known_at: ledger.load_evidence(conn, known_at=known_at)[("fred", "DGS10")][date(2026, 10, 1)][0]
         self.assertEqual((value(first), value(later)), ("5.24", "5.25"))
 
+    def test_a_failing_optional_series_does_not_cost_the_required_ones(self):
+        def get(url):
+            if "SP500" in url or "NASDAQCOM" in url:
+                return 400, json.dumps({"error_code": 400}).encode()
+            return 200, json.dumps({"observations": [{"date": "2026-10-01", "value": "4.5"}]}).encode()
+        with self.assertLogs("smith.evidence", "WARNING"):
+            points = fetch_provider("fred", "k", start=START, end=END, get=get)
+        self.assertEqual({p[1] for p in points}, {s.series_id for s in SERIES if s.provider == "fred" and s.required})
+
     def test_index_moves_compare_the_last_closes_and_skip_an_index_without_both(self):
         series = {("ecos", "802Y001/0001000"): {date(2026, 10, 23): ("2000", None), date(2026, 10, 26): ("2500", None),
                                                 date(2026, 11, 2): ("2600", None)},

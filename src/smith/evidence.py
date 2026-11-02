@@ -8,6 +8,7 @@ API keys travel in request URLs, so URLs and raw error messages are never printe
 """
 import http.client
 import json
+import logging
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -20,6 +21,7 @@ from typing import Any
 from smith.net import open_url
 from smith.records import canonical_decimal
 
+logger = logging.getLogger(__name__)
 _TIMEOUT_SECONDS = 15
 
 
@@ -117,7 +119,9 @@ def urllib_get(url: str) -> tuple[int, bytes]:
 
 def fetch_provider(provider: str, api_key: str, *, start: date, end: date,
                    get: Getter = urllib_get) -> list[Point]:
-    """Fetch every configured series of one provider; any failure fails the whole provider.
+    """Fetch every configured series of one provider; a required series' failure fails the whole provider. An
+    optional series (the mortgage band, the stock indices) that fails is left out and logged, so a renamed index
+    code cannot cost the rates (Codex review 2026-11-03).
 
     Raises:
         EvidenceError: a request failed or a response was malformed.
@@ -127,9 +131,13 @@ def fetch_provider(provider: str, api_key: str, *, start: date, end: date,
     for spec in (s for s in SERIES if s.provider == provider):
         try:
             series = fetch(spec, api_key, start, end, get)
-        except EvidenceError as error:
-            raise EvidenceError(provider, error.code) from None
-        except (KeyError, TypeError, ValueError, AttributeError):
+        except (EvidenceError, KeyError, TypeError, ValueError, AttributeError) as error:
+            if not spec.required:
+                logger.warning("optional series %s/%s left out: %s", provider, spec.series_id,
+                               getattr(error, "code", type(error).__name__))
+                continue
+            if isinstance(error, EvidenceError):
+                raise EvidenceError(provider, error.code) from None
             raise EvidenceError(provider, "invalid-response") from None
         # Every required series must answer. An empty one (a renamed code, a provider change)
         # must not leave old values looking freshly confirmed. An optional series may be absent.

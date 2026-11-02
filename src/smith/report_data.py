@@ -328,6 +328,9 @@ def _group_trade(lots: list[dict[str, Any]]) -> tuple[Decimal | None, Decimal | 
     return before, after, None if None in (before, after, price, rate) else (after - before) * price * rate
 
 
+RESTATED_AFTER = timedelta(days=7)  # A comparison price older than this before the report spans more than the week.
+
+
 def price_moves(rows: list[dict[str, Any]], since: datetime) -> dict[str, Any]:
     """What prices and the won/dollar rate did to the client's listed positions since the comparison report
     (report design §36), from `holding_changes` rows grouped as in `quantity_changes`; Hermes lots are left out.
@@ -346,7 +349,7 @@ def price_moves(rows: list[dict[str, Any]], since: datetime) -> dict[str, Any]:
     for row in rows:
         if not row["hermes"]:
             groups.setdefault((row["market"], row["symbol"], row["currency"]), []).append(row)
-    moves, unknown, stale = [], [], []
+    moves, unknown, stale, early_priced = [], [], [], []
     for (market, symbol, _), lots in groups.items():
         traded = None if any(l["unconverted"] for l in lots) else _group_trade(lots)
         if traded is None or traded[2] is None:
@@ -357,9 +360,15 @@ def price_moves(rows: list[dict[str, Any]], since: datetime) -> dict[str, Any]:
         old = [l for l in lots if None not in (l["start"], l["end"]) and l["quantity_end"] != 0
                and l["priced_at_end"] is not None and l["priced_at_end"] <= since]
         stale += [{"name": l["name"], "quantity": l["quantity_end"], "priced_at": l["priced_at_end"]} for l in old]
-        repriced = start - sum((l["start"] for l in old), Decimal(0))
-        repriced_effect = effect - sum((l["end"] - l["start"] for l in old), Decimal(0))
-        split = repriced and all(l["quantity_start"] == l["quantity_end"] for l in old)
+        # A lot whose comparison price was already old (a statement first repriced since) carries the move from that
+        # price's date, not the week's: kept in the amount, left out of the ratio and named (Codex review 2026-11-03).
+        early = [l for l in lots if None not in (l["start"], l["end"]) and l["quantity_end"] != 0 and l not in old
+                 and l["priced_at_start"] is not None and l["priced_at_start"] < since - RESTATED_AFTER]
+        early_priced += [{"name": l["name"], "quantity": l["quantity_end"], "priced_at": l["priced_at_start"]} for l in early]
+        apart = old + early
+        repriced = start - sum((l["start"] for l in apart), Decimal(0))
+        repriced_effect = effect - sum((l["end"] - l["start"] for l in apart), Decimal(0))
+        split = repriced and all(l["quantity_start"] == l["quantity_end"] for l in apart)
         moves.append({"name": lots[0]["name"], "symbol": symbol, "market": market, "effect": effect, "start": start,
                       "new": all(l["start"] is None for l in lots),
                       "ratio": repriced_effect / repriced if split else None,
@@ -370,7 +379,8 @@ def price_moves(rows: list[dict[str, Any]], since: datetime) -> dict[str, Any]:
             "start": sum((m["start"] for m in moves), Decimal(0)),
             "repriced": sum((m["repriced"] for m in moves), Decimal(0)),
             "repriced_effect": sum((m["repriced_effect"] for m in moves), Decimal(0)),
-            "moves": moves, "unknown": sorted(unknown), "stale": stale}
+            "moves": moves, "unknown": sorted(unknown), "stale": stale,
+            "early_priced": sorted(early_priced, key=lambda s: (s["priced_at"], str(s["name"])))}
 
 
 def _priced_at(record: RecordInput | None) -> datetime | None:

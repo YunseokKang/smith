@@ -417,7 +417,7 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
         "requests": lambda: (_requests(data.get("requests") or [], False, "생활·목표 보고") if overview
                              else _requests(data.get("requests") or [], True)),
         # The week's holding changes lead the markets day (report design §36); the holdings card then omits them.
-        "week": lambda: _holdings_week(data),
+        "week": lambda: _holdings_week(data, story),
         "holdings": lambda: _holdings(data, story, True, quantities="week" not in edition.opening),
         "policy": lambda: _policy(data, story, True),
         "macro": lambda: _macro(sectors["macro"]), "macro_brief": lambda: _macro(sectors["macro"], compact=True),
@@ -1827,7 +1827,7 @@ def _holdings(data: dict[str, Any], story: dict[str, Any], full: bool, *, quanti
     return _section("보유 종목 점검", _holdings_lead(review, sec, opined), inner, note=escape(note))
 
 
-def _holdings_week(data: dict[str, Any]) -> str:
+def _holdings_week(data: dict[str, Any], story: dict[str, Any] | None = None) -> str:
     """The week's change in the client's listed holdings, open at the top of the markets day (report design §36; user
     request 2026-11-03: "지난주 대비 변동내역은 중요하니까 더 가독성 높여서 상단에"). Two figures apart (what prices and
     the won/dollar rate did to the shares held, and what bought or sold shares added), the positions that moved most,
@@ -1864,13 +1864,14 @@ def _holdings_week(data: dict[str, Any]) -> str:
          else f"수량이 바뀐 종목 {len(mine)}개"
          + (" · 금액 미상" if traded is None else " · 확인된 금액만" if partial else ""))])
     movers = [m for m in moves["moves"] if m["effect"]][:5]
+    why = _week_reasons(data, story or {})
     inner = stats + _benchmarks(ratio if effect is not None else None, data.get("index_moves") or [], since)
     if movers:
         rows = "".join(f'<tr><td style="font-size:14px;color:{INK};padding:7px 8px 7px 0;border-bottom:1px solid {STRONG}">'
                        f'{escape(m["name"])}</td><td style="text-align:right;white-space:nowrap;font-size:14px;padding:7px 0;'
                        f'border-bottom:1px solid {STRONG}">{_toned(m["effect"])}'
                        f'<span style="font-size:12px;color:{MUTED}"> {"새로 보유" if m["new"] else "" if m["ratio"] is None else _delta_pct(m["ratio"])}'
-                       f'</span></td></tr>' for m in movers)
+                       f'</span></td></tr>' + why.get((m["market"], m["symbol"]), "") for m in movers)
         inner += (f'<tr><td><div style="font-size:13px;font-weight:700;color:{INK};margin:18px 0 4px">시세로 많이 움직인 종목</div>'
                   f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{rows}</table></td></tr>')
     inner += f'<tr><td>{_quantity_cards(mine, since, scoped=bool(found["uncompared"]))}</td></tr>'
@@ -1881,6 +1882,9 @@ def _holdings_week(data: dict[str, Any]) -> str:
         notes.append(f"Hermes 운용분은 따로 보지 않습니다(수량이 바뀐 종목 {hermes}개).")
     if found["uncompared"]:
         notes.append(f"수량 기록이 없어 비교하지 못한 종목: {', '.join(str(n) for n in found['uncompared'])}.")
+    if moves.get("early_priced"):
+        lots = ", ".join(f"{s['name']} {_qty(s['quantity'])}주({s['priced_at']:%m/%d} 가격부터)" for s in moves["early_priced"])
+        notes.append(f"지난 보고 때 가격이 오래돼 그 뒤 변화까지 이번 금액에 잡힌 보유분: {lots}. 비율에서는 뺐습니다.")
     if unsplit:
         notes.append(f"가격이나 환율을 몰라 시세와 매매로 나누지 못해 뺀 종목: {', '.join(str(n) for n in unsplit)}.")
     repriced = [r for r in data["view"].records if r.fields.get("statement_price")] if data.get("view") else []
@@ -1924,6 +1928,25 @@ def _benchmarks(ratio: Decimal | None, indices: list[dict[str, Any]], since: str
 def _toned_text(value: Decimal, text: str) -> str:
     color = MUTED if not value else UP if value > 0 else DOWN
     return f'<span style="font-family:{MONO};font-weight:700;color:{color}">{escape(text)}</span>'
+
+
+WHY_MOVED = Decimal("0.10")  # A week's move from which the narrative says why (narrative-v33, report design §39).
+
+
+def _week_reasons(data: dict[str, Any], story: dict[str, Any]) -> dict[tuple[Any, Any], str]:
+    """For a holding that moved 10% or more this week, the first sentence of Smith's opinion, which the narrative
+    opens with why it moved; shown under the mover's row. Nothing without an opinion written by the model."""
+    opinions = story.get("holdings") or {}
+    week = {(m["market"], m["symbol"]): m["ratio"] for m in (data.get("holding_price_moves") or {}).get("moves", [])}
+    rows = {}
+    for p in (data.get("holdings") or {}).get("positions", []):
+        ratio, opinion = week.get((p["market"], p["symbol"])), _of(opinions, p)
+        if ratio is None or abs(ratio) < WHY_MOVED or not opinion.get("reason") or opinion.get("by_code"):
+            continue
+        rows[(p["market"], p["symbol"])] = (
+            f'<tr><td colspan="2" style="font-size:13px;line-height:1.6;color:{BODY};padding:0 0 8px;'
+            f'border-bottom:1px solid {STRONG}">↳ {escape(_first_sentence(opinion["reason"]))}</td></tr>')
+    return rows
 
 
 def _toned(amount: Decimal) -> str:

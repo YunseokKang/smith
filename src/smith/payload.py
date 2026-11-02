@@ -196,6 +196,10 @@ def _asset(view: LedgerView, record: RecordInput, include_positions: bool) -> di
             "account_type": f.get("account_type"), "currency": f["currency"], "value": won(base_amount(view, record)),
             "liquidity": f["liquidity"], "valuation_method": f["valuation_method"],
             "valued_on": record.effective_at.date().isoformat(), "occupancy": f.get("occupancy"),
+            # A hand-imported lot revalued at a newer market quote (ledger.reprice): the quantity is the statement's
+            # (valued_on), the price is the quote's, so the model does not date the new value to the statement.
+            **({"priced_on": f["priced_at"][:10], "price_source": "market quote of the same stock"}
+               if f.get("priced_at") else {}),
             "managed_by": f.get("managed_by"), "region": f.get("region")}
     if include_positions and f.get("symbol"):
         item.update(symbol=f["symbol"], market=f.get("market"))
