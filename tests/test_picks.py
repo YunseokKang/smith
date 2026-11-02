@@ -273,11 +273,32 @@ class ReviewTests(Upgrade):
         start = page.index("옮길 곳 1~2순위")
         self.assertNotIn("<th", page[start:page.index("출처:", start)])
         self.assertIn("https://issuer.example/360750", page)
-        self.assertEqual(data["advice"]["pending_products"], [])
+        self.assertEqual(data["advice"]["pending_products"], ["goal-stocks-glide"])   # Its own class, not reviewed yet.
         notes = report_html.system_notes(data)
         self.assertTrue(any(n.startswith("상품 검토 · 코어 지수 ETF") for n in notes))
         self.assertTrue(any("SPY" in n and "mismatch" in n for n in notes))
         self.assertTrue(any("미선정 IVV" in n for n in notes))
+
+    def test_money_leaving_stocks_for_a_dated_goal_gets_won_safe_assets_once_a_report_showed_it(self):
+        """The glide proposal named "예금·단기채" without a product (user review 2026-11-02): its own class, Korean
+        won only, live while a report showed it in the last two weeks; the household's index funds are no
+        candidates there."""
+        db = self.file_ledger()
+        view = self.view()
+        with closing(ledger.connect_read_only(db)) as conn:
+            self.assertEqual([s.key for s in picks.due(view, "markets", conn, AT)], ["core-etf"])   # Never shown yet.
+        with closing(ledger.connect(db)) as conn, conn:
+            ledger._record_shown(conn, "r1", AT, [{"key": "goal-stocks-glide", "identity": "goal-stocks-glide:2028-08-07",
+                                                   "figures": {}, "renewed": False}])
+        with closing(ledger.connect_read_only(db)) as conn:
+            self.assertEqual([s.key for s in picks.due(view, "markets", conn, AT)], ["core-etf", "safe-parking"])
+            self.assertEqual([s.key for s in picks.due(view, "tax", conn, AT)], [])
+            self.assertEqual([s.key for s in picks.due(view, "markets", conn, AT + timedelta(days=15))], ["core-etf"])
+        self.assertEqual(picks.SAFE_PARKING.markets, ("KR",))
+        context = picks.household_context(view, picks.SAFE_PARKING, HOUSEHOLD)["for_model"]
+        self.assertEqual(context["holds_broad_index_funds"], [])
+        self.assertIn("bank time deposit", context["note"])
+        self.assertIn("US-listed", picks.household_context(view, picks.CORE_ETF, HOUSEHOLD)["for_model"]["note"])
 
     def test_a_failed_scout_is_recorded_and_the_report_goes_out_without_a_table(self):
         db = self.file_ledger()
@@ -294,7 +315,7 @@ class ReviewTests(Upgrade):
             self.assertEqual([s.key for s in picks.due(self.view(), "markets", conn, AT + timedelta(hours=7))], ["core-etf"])
             data = build_report(conn, as_of=AT, known_at=AT, baseline=None, kind="markets", household=HOUSEHOLD)
         self.assertEqual(next(p for p in data["advice"]["proposals"] if p.key == "concentration-trim").table, ())
-        self.assertEqual(data["advice"]["pending_products"], ["concentration-trim"])   # The card says the table follows.
+        self.assertEqual(data["advice"]["pending_products"], ["concentration-trim", "goal-stocks-glide"])  # Tables follow.
         self.assertIn("검토 팀의 확인이 끝나는 대로", render(data)[1])
 
     def file_ledger(self) -> Path:

@@ -96,6 +96,8 @@ class ProductClass:
     official_sources: str           # Pages the verifier must prefer.
     criteria: str                   # How the critic and the selector judge.
     official_hosts: tuple[str, ...] = ()  # Hosts (or parent domains) whose pages count as a verification.
+    context_note: str = ""          # What the selector should weigh about this household's tax route, in English.
+    seeds_held: bool = True         # The household's broad index funds are candidates again and rank 1 favours them.
 
     def official(self, url: str) -> bool:
         """Whether the page belongs to one of the class's official hosts (the host or a subdomain of it)."""
@@ -127,8 +129,41 @@ CORE_ETF = ProductClass(
                     "schwab.com", "invesco.com", "tigeretf.com", "kodex.com", "samsungfund.com", "riseetf.co.kr",
                     "kbam.co.kr", "aceetf.co.kr", "kimasset.co.kr", "soletf.com", "shinhanfund.com", "krx.co.kr",
                     "kofia.or.kr", "sec.gov", "nyse.com", "nasdaq.com", "cboe.com"),
+    context_note=("Gains of a Korean-listed overseas-index ETF count toward this household's financial-income "
+                  "threshold outside an ISA or pension account; weigh that against the US-listed alternative."),
 )
-CLASSES: dict[str, ProductClass] = {CORE_ETF.key: CORE_ETF}
+# Where the money for a dated goal goes when it leaves stocks (goal-stocks-glide: "예금·단기채 같은 안전 자산").
+# The 2026-11-02 letter named the action without a product (user review). Won only: the money is spent in won.
+SAFE_PARKING = ProductClass(
+    key="safe-parking", label="안전 자산(원화 단기)", proposals=("goal-stocks-glide",), markets=("KR",),
+    need=("Korean won moved out of stocks in quarterly steps and held until a known date one to three years away (a "
+          "home purchase), when it is spent in full: it must keep its value in won, be sellable within days at a "
+          "price close to what was paid, and earn about a short-term interest rate meanwhile."),
+    universe=("Exchange-traded funds listed in Korea (KRX) that hold won-denominated short-term instruments: CD-rate, "
+              "KOFR or money-market (active) ETFs, and short-term Korean government, monetary stabilization or "
+              "high-grade bond ETFs with a duration of about one year or less. Not foreign-currency, long-duration, "
+              "leveraged, inverse, high-yield or equity-mixed products."),
+    official_sources=("the issuer's own product page or factsheet (삼성 KODEX, 미래에셋 TIGER, KB RISE, 한국투자 ACE, "
+                      "신한 SOL, 키움 KOSEF, 한화 PLUS), KRX 정보데이터시스템 (data.krx.co.kr) or 금융투자협회 전자공시 "
+                      "(dis.kofia.or.kr)"),
+    criteria=("how little its price can fall before the date (duration, the rate risk it carries and the credit "
+              "quality of what it holds), total cost (the total expense including other costs the filing states), "
+              "size and daily trading value, how it pays out (distributing or total-return), tax for a Korean "
+              "resident (interest and gains of a bond or money-market ETF are dividend income counted toward the "
+              "financial-income threshold outside an ISA; a pension account cannot hold money needed before "
+              "retirement), and the issuer's record. A bank time deposit is the plain alternative: say what the "
+              "product adds over one (daily liquidity, rate) and what it gives up (deposit insurance)."),
+    official_hosts=("tigeretf.com", "kodex.com", "samsungfund.com", "riseetf.co.kr", "kbam.co.kr", "aceetf.co.kr",
+                    "kimasset.co.kr", "soletf.com", "shinhanfund.com", "kiwoomam.com", "hanwhafund.co.kr",
+                    "krx.co.kr", "kofia.or.kr"),
+    context_note=("Every candidate is a Korean-listed won fund whose income is dividend income counted toward this "
+                  "household's financial-income threshold outside an ISA. An ISA locks money for three years and a "
+                  "pension account until retirement, so money needed sooner sits in an ordinary account; compare "
+                  "the after-tax yield with a bank time deposit."),
+    seeds_held=False,
+)
+CLASSES: dict[str, ProductClass] = {spec.key: spec for spec in (CORE_ETF, SAFE_PARKING)}
+LIVE_AGE = timedelta(days=14)  # A proposal shown in a report this recent, and not declined or done, is live.
 
 _CANDIDATE_FIELDS = ("symbol", "name", "issuer", "market", "index", "expense_ratio", "aum", "inception", "return_1y",
                      "return_3y", "return_5y", "price", "price_date", "distribution", "tax_note", "source_url",
@@ -328,15 +363,15 @@ def household_context(view: LedgerView, spec: ProductClass, household: dict[str,
     plan = holdings.concentration_plan(held) or {}
     trimmed = sorted({p["symbol"] for p in plan.get("positions") or []})
     accounts = {r.fields.get("account_type") for r in view.records if r.kind is Kind.ASSET}
-    broad = sorted({p["symbol"] for p in held["positions"] if not p["hermes"] and holdings.kind(p) == "broad_index"})
+    broad = sorted({p["symbol"] for p in held["positions"] if not p["hermes"] and holdings.kind(p) == "broad_index"}
+                   if spec.seeds_held else ())
     share = held.get("overseas_share")
     return {"trimmed": trimmed, "for_model": {
         "proceeds_currency": "KRW", "holds_broad_index_funds": broad,
         "has_isa": "isa" in accounts, "has_pension_accounts": bool(accounts & {"pension_savings", "irp"}),
         "overseas_share_of_securities": None if share is None else f"{share:.2f}",
         "risk_preference": (household or {}).get("risk_preference"), "stocks_being_trimmed": trimmed,
-        "note": "Gains of a Korean-listed overseas-index ETF count toward this household's financial-income "
-                "threshold outside an ISA or pension account; weigh that against the US-listed alternative."}}
+        "note": spec.context_note}}
 
 
 def clean_candidates(raw: list[dict[str, Any]], spec: ProductClass, trimmed: list[str]) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -654,8 +689,7 @@ def due(view: LedgerView, kind: str | None, conn: Any, now: datetime) -> list[Pr
     """The product classes to review before a report of `kind`: a class whose proposal the edition carries, whose
     proposal is live for this household, without a successful review younger than REUSE_AGE and without a failure
     younger than FAIL_COOLDOWN."""
-    plan = holdings.concentration_plan(holdings.review(view)) or {}
-    live = {"concentration-trim": bool(plan.get("positions"))}
+    live = _live(view, conn, now)
     found = []
     for spec in CLASSES.values():
         carried = any(kind is None or editions.carries(kind, key) for key in spec.proposals)
@@ -670,6 +704,17 @@ def due(view: LedgerView, kind: str | None, conn: Any, now: datetime) -> list[Pr
     return found
 
 
+def _live(view: LedgerView, conn: Any, now: datetime) -> dict[str, bool]:
+    """Which proposals that move money are live: a stock above the single-company limit (computed here), and a
+    goal-stocks glide shown in a report within LIVE_AGE and neither declined nor done (it needs the whole report
+    to compute, so the proposal log stands in)."""
+    plan = holdings.concentration_plan(holdings.review(view)) or {}
+    glide = any(item["key"] == "goal-stocks-glide" and item["status"] in ("open", "accepted") and item["last_shown_at"]
+                and now - datetime.fromisoformat(item["last_shown_at"]) <= LIVE_AGE
+                for item in ledger.active_proposals(conn).values())
+    return {"concentration-trim": bool(plan.get("positions")), "goal-stocks-glide": glide}
+
+
 def load(conn: Any, now: datetime) -> dict[str, dict[str, Any]]:
     """The newest usable review per proposal key as of `now`, for the report build: never a review created after
     it, so a report rebuilt for an e-mail answer reads the review the sent report had (review 2026-10-20)."""
@@ -682,13 +727,11 @@ def load(conn: Any, now: datetime) -> dict[str, dict[str, Any]]:
     return found
 
 
-def pending(view: LedgerView, kind: str | None, reviews: dict[str, dict[str, Any]]) -> list[str]:
-    """The proposal keys of this report whose product review is live but has no usable result yet: the card says
-    the table follows in a later report (the review runs ahead of the slot and never delays a report)."""
-    plan = holdings.concentration_plan(holdings.review(view)) or {}
-    live = {"concentration-trim": bool(plan.get("positions"))}
-    return [key for spec in CLASSES.values() for key in spec.proposals
-            if (kind is None or editions.carries(kind, key)) and live.get(key) and key not in reviews]
+def pending(shown: set[str], reviews: dict[str, dict[str, Any]]) -> list[str]:
+    """The proposal keys among this report's proposals (`shown`) that a product class serves but no usable review
+    covers yet: the card says the table follows in a later report (the review runs ahead of the slot and never
+    delays a report)."""
+    return [key for spec in CLASSES.values() for key in spec.proposals if key in shown and key not in reviews]
 
 
 # --- the report -------------------------------------------------------------------------------------------

@@ -638,10 +638,13 @@ def _goal_stocks_glide(facts: dict[str, Any]) -> Proposal | Undetermined | None:
         title=(f"{first['due']:%Y년 %m월} {first['label']}에 쓸 돈 가운데 약 {short_won(first['from_stocks'])}이 주식에 "
                f"있습니다. {first['start']:%Y년 %m월}{begin} 약 {short_won(first['per_quarter'])}씩 예금·단기채 같은 안전 자산으로 "
                "옮기시길 권합니다."),
-        why=(f"Smith는 {first['label']} 자금 계획에 주식을 지금 평가액 그대로 넣어 계산합니다. 지금 현금과 그때까지 모일 여유 "
-             f"자금만으로는 모자라, 그 날짜에 주식을 팔아야 하는 금액이 약 {short_won(first['from_stocks'])}입니다. 주식은 한 해에 "
-             f"{percent(plan['drawdown'], 0)} 넘게 떨어지는 해도 있어, 그때 팔게 되면 계획보다 약 {short_won(plan['stress'])}이 "
-             "모자랍니다. 날짜가 정해진 돈은 날짜가 가까워질수록 값이 덜 흔들리는 곳에 두는 것이 원칙입니다." + later),
+        # The reason first: the overview card shows only the first sentence (user review 2026-11-02: it showed
+        # how Smith counts, not why to move the money).
+        why=(f"주식은 한 해에 {percent(plan['drawdown'], 0)} 넘게 떨어지는 해도 있어, {first['label']} 때 주가가 그만큼 내려 "
+             f"있으면 계획보다 약 {short_won(first['from_stocks'] * plan['drawdown'])}이 모자랍니다. 지금 현금과 그때까지 모일 여유 자금만으로는 모자라 "
+             f"그 날짜에 주식을 팔아 마련해야 하는 금액이 약 {short_won(first['from_stocks'])}이고, Smith는 이 계획에 주식을 "
+             "지금 평가액 그대로 넣어 계산합니다. 날짜가 정해진 돈은 날짜가 가까워질수록 값이 덜 흔들리는 곳에 두는 것이 원칙입니다."
+             + later),
         effect=(f"목표 {holdings.GLIDE_END_MONTHS}개월 전까지 나눠 옮겨 두면, 그 사이 주가가 떨어져도 계획이 흔들리지 않습니다. "
                 + (f"나머지 주식 {short_won(plan['free'])}은 장기 성장 자산으로 그대로 둡니다. " if plan["free"] > 0 else
                    "지금 보유한 주식 전부가 이 목표 자금에 해당합니다. 장기 성장 투자는 목표 이후에 쓸 돈(연금 계좌 등)에서 "

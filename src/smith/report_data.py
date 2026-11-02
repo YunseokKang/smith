@@ -113,7 +113,7 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     # The products the review team chose for a proposal that moves money (report design §26), sized here.
     reviews = picks.load(conn, known_at)
     advice["proposals"] = picks.attach(advice["proposals"], reviews, view.rates)
-    advice["pending_products"] = picks.pending(view, kind, reviews)  # Live, but no usable review yet: the card says so.
+    advice["pending_products"] = picks.pending({p.key for p in advice["proposals"]}, reviews)  # Live, but no usable review yet: the card says so.
     # What was bought, sold or vested since last week's report on the theme (report design §32), for the reports
     # that show the holdings in full; the price moves are in `change`.
     edition = editions.of(kind)
