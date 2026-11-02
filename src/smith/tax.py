@@ -156,6 +156,9 @@ def facts(view: LedgerView, today: date, household: dict[str, Any] | None) -> di
         "has_irp": "irp" in accounts.values(), "has_isa": "isa" in accounts.values(),
         "us_gains": sum((g for g in known if g > 0), Decimal(0)), "us_losses": sum((g for g in known if g < 0), Decimal(0)),
         "us_unknown": len(gains) - len(known), "us_positions": len(us),
+        # The positions with a gain, for the shares to sell (harvest_lots): symbol, shares held, gain in won.
+        "us_lots": [{"symbol": r.fields["symbol"], "quantity": Decimal(r.fields["quantity"]), "gain": g}
+                    for r, g in zip(us, gains) if g is not None and g > 0 and Decimal(r.fields["quantity"]) > 0],
         "hermes_managed": any(r.fields.get("managed_by") == "hermes" for r in mine if r.kind is Kind.ASSET),
         "homes": [(r.owner_id, base_amount(view, r), r.fields.get("occupancy")) for r in view.records
                   if r.kind is Kind.ASSET and r.fields["category"] == "real_estate"],
@@ -218,16 +221,49 @@ def yearly_credit_base(savings_monthly: Decimal, irp_monthly: Decimal) -> Decima
     return min(min(savings_monthly * 12, PENSION_SAVINGS_LIMIT) + irp_monthly * 12, PENSION_TOTAL_LIMIT)
 
 
-def harvest_plan(t: dict[str, Any]) -> dict[str, Decimal] | None:
-    """Realizing overseas gains up to the yearly basic deduction each year keeps them out of tax later."""
+def harvest_plan(t: dict[str, Any]) -> dict[str, Any] | None:
+    """Realizing overseas gains up to the yearly basic deduction each year keeps them out of tax later. `sell`
+    names the whole shares that do it (harvest_lots) and `trade_by` the last US trading day that still settles
+    within the year (user review 2026-11-02: the card said neither)."""
     if t["us_positions"] == 0 or t["us_gains"] <= 0:
         return None
     net = t["us_gains"] + t["us_losses"]
     # Selling only positions with gains: losses still held are not netted until they are sold too.
     realize = min(t["us_gains"], OVERSEAS_DEDUCTION)
+    sell = harvest_lots(t.get("us_lots") or [], realize)
     return {"gains": t["us_gains"], "losses": t["us_losses"], "net": net, "realize": realize,
             "saving": realize * OVERSEAS_RATE, "unknown": Decimal(t["us_unknown"]),
-            "tax_if_all_sold": max(Decimal(0), net - OVERSEAS_DEDUCTION) * OVERSEAS_RATE}
+            "tax_if_all_sold": max(Decimal(0), net - OVERSEAS_DEDUCTION) * OVERSEAS_RATE,
+            "sell": sell, "sold_gain": sum((s["gain"] for s in sell), Decimal(0)), "trade_by": us_year_end_trade_day(t["year"])}
+
+
+def harvest_lots(lots: list[dict[str, Any]], cap: Decimal) -> list[dict[str, Any]]:
+    """Whole shares whose gain stays within `cap`, from the position with the largest gain first (fewest
+    trades): [{"symbol", "shares", "gain"}]. A share whose own gain exceeds what is left is skipped, so the
+    total never passes the deduction; empty when no single share fits."""
+    left, found = cap, []
+    for lot in sorted(lots, key=lambda x: (-x["gain"], x["symbol"])):
+        per_share = lot["gain"] / lot["quantity"]
+        shares = min(int(lot["quantity"]), int(left / per_share)) if per_share > 0 else 0
+        if shares <= 0:
+            continue
+        gain = per_share * shares
+        found.append({"symbol": lot["symbol"], "shares": shares, "gain": gain})
+        left -= gain
+    return found
+
+
+def us_year_end_trade_day(year: int) -> date:
+    """The last US trading day whose T+1 settlement (since 2024-05-28) still falls in `year`: the business day
+    before the year's last one. Korean tax counts an overseas sale on its settlement day. Business days are
+    weekdays except Christmas (Friday the 24th or Monday the 26th when it falls on a weekend); the exchange does
+    not close on 31 December for a New Year's Day on Saturday. Other closures before Christmas are not modelled."""
+    christmas = date(year, 12, 25)
+    closed = {christmas, date(year, 12, 24) if christmas.weekday() == 5 else date(year, 12, 26) if christmas.weekday() == 6
+              else christmas}
+    days = [date(year, 12, d) for d in range(31, 19, -1)]
+    open_days = [d for d in days if d.weekday() < 5 and d not in closed]
+    return open_days[1]
 
 
 def capital_gains(price: Decimal, acquired: Decimal, *, held: int, lived: int, one_home: bool) -> dict[str, Decimal]:

@@ -103,6 +103,19 @@ class TaxTests(unittest.TestCase):
         harvest = tax.harvest_plan(t)
         self.assertEqual(harvest["gains"], Decimal(5_600_000))         # (500 - 400) x 40 shares x 1,400.
         self.assertEqual((harvest["realize"], harvest["saving"]), (Decimal(2_500_000), Decimal("550000.00")))
+        # Whole shares within the deduction (17 x 140,000 = 2.38M) and the last US trading day that settles in 2026
+        # (T+1 on Thursday 31 December), named on the card (user review 2026-11-02).
+        self.assertEqual(harvest["sell"], [{"symbol": "VOO", "shares": 17, "gain": Decimal(2_380_000)}])
+        self.assertEqual(harvest["trade_by"], date(2026, 12, 30))
+        card = next(p for p in self.data()["advice"]["proposals"] if p.key == "overseas-harvest")
+        self.assertEqual(card.headline, "연내 VOO 17주 팔고 다시 사기(이익 238만 원)")
+        self.assertTrue(card.title.startswith("미국 현지 12월 30일(수) 거래까지 VOO 17주를 팔았다가 다시 사서"), card.title)
+        self.assertEqual([tax.us_year_end_trade_day(y) for y in (2022, 2027, 2032)],
+                         [date(2022, 12, 29), date(2027, 12, 30), date(2032, 12, 30)])
+        self.assertEqual(tax.harvest_lots([{"symbol": "BIG", "quantity": Decimal(2), "gain": Decimal(6_000_000)},
+                                           {"symbol": "SMALL", "quantity": Decimal(10), "gain": Decimal(1_000_000)}],
+                                          Decimal(2_500_000)),
+                         [{"symbol": "SMALL", "shares": 10, "gain": Decimal(1_000_000)}])   # One BIG share alone is over.
         stack = self.data()["pension_stack"]
         self.assertEqual((stack["age"], [t["retire_age"] for t in stack["tiers"]]), (37, [50, 55, 60]))
 

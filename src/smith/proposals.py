@@ -851,14 +851,26 @@ def _overseas_harvest(facts: dict[str, Any]) -> Proposal | Undetermined | None:
     today = facts["today"]
     if plan is None and t["us_positions"] and t["us_unknown"] == t["us_positions"]:
         return Undetermined("해외주식 양도세 기본공제 활용", "미국 주식의 매입 단가가 없어 평가이익을 계산하지 못했습니다.")
-    if plan is None or plan["realize"] <= 0:
-        return None
+    if plan is None or plan["realize"] <= 0 or today > plan["trade_by"]:
+        return None  # After the last trading day that settles this year, the year's deduction is gone.
+    # The action first, with the shares and the day (user review 2026-11-02: the card opened with a condition and
+    # named neither); the condition Smith cannot check, sales earlier this year, follows as one sentence.
+    trade_by = plan["trade_by"]
+    day = f"{trade_by.month}월 {trade_by.day}일({_WEEKDAYS[trade_by.weekday()]})"
+    shares = "·".join(f"{s['symbol']} {s['shares']}주" for s in plan["sell"])
+    if shares:
+        headline = f"연내 {shares} 팔고 다시 사기(이익 {short_won(plan['sold_gain'])})"
+        title = (f"미국 현지 {day} 거래까지 {shares}를 팔았다가 다시 사서, 이익 약 {short_won(plan['sold_gain'])}을 해외주식 "
+                 f"양도세 기본공제 {short_won(tax.OVERSEAS_DEDUCTION)} 안에서 실현하시길 권합니다. 올해 이미 판 해외 주식 "
+                 "이익이 있다면 그만큼 덜 파십시오.")
+    else:
+        headline = f"연내 미국 주식 이익 {short_won(plan['realize'])} 실현"
+        title = (f"미국 현지 {day} 거래까지 미국 주식 이익 {short_won(plan['realize'])}만큼을 소수점 매매로 팔았다가 다시 사서 "
+                 "해외주식 양도세 기본공제를 쓰시길 권합니다. 올해 이미 판 해외 주식 이익이 있다면 그만큼 덜 파십시오.")
     return Proposal(
         key="overseas-harvest", priority=1 if today.month >= 11 else 3, identity=f"overseas-harvest:{today.year}",
         watch=("realize",), tolerance=Decimal("0.3"),
-        headline=f"연내 미국 주식 이익 {short_won(plan['realize'])} 실현 검토",
-        title=(f"올해 주식을 팔아 이익을 낸 적이 없다면, 연말 전에 미국 주식 이익 {short_won(plan['realize'])}만큼을 "
-               "팔았다가 다시 사서 해외주식 양도세 기본공제를 쓰시는 방안을 검토해 보십시오."),
+        headline=headline, title=title,
         why=(f"해외 주식(과세 대상 국내 주식 포함)은 한 해 이익 {short_won(tax.OVERSEAS_DEDUCTION)}까지 세금이 없고, 넘는 부분에 "
              f"22%가 붙습니다. 지금 이익이 난 미국 주식의 평가이익은 약 {short_won(plan['gains'])}입니다"
              + (f"(손실 중인 종목 {short_won(-plan['losses'])}은 팔기 전까지 상계되지 않습니다)" if plan["losses"] else "")
@@ -871,10 +883,14 @@ def _overseas_harvest(facts: dict[str, Any]) -> Proposal | Undetermined | None:
                + (f" 매입 원가를 모르는 종목 {int(plan['unknown'])}개는 계산에서 빠졌습니다." if plan["unknown"] else "")
                + (" Hermes가 운용하는 종목은 매도 대상에서 뺐지만, 그 계좌에서 올해 실현한 이익도 같은 기본공제를 함께 "
                   "쓰므로 Hermes와 상의해 확인하십시오." if t.get("hermes_managed") else "")),
-        timing=f"{today.year}년 12월 결제일 기준 마감 전(증권사 해외주식 연말 결제 일정 확인)",
+        timing=(f"미국 현지 {trade_by:%Y.%m.%d} 거래까지. 세금은 결제일로 세고 미국 주식은 다음 거래일(T+1)에 결제되므로 "
+                "이날 판 주식은 그해 마지막 거래일에 결제됩니다."),
         reconsider="올해 해외 주식 매도 이익이 이미 있거나, 장기 보유 종목의 비중을 바꿀 계획이면 다시 계산합니다.",
         certainty=f"조건부 시나리오(올해 실현 손익 없음·현재 환율 가정) + 세법 기준 {tax.RULES_YEAR}년(현행 법령 확인 필요)",
         figures={"realize": plan["realize"], "saving": plan["saving"], "gains": plan["gains"]})
+
+
+_WEEKDAYS = "월화수목금토일"
 
 
 def _isa(facts: dict[str, Any]) -> Proposal | None:
