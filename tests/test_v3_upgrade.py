@@ -161,6 +161,10 @@ class LayoutTests(Upgrade):
         self.assertNotIn("<details open", overview.split("고객님께 드리는 제안")[1].split("함께 검토한")[-1])
         self.assertIn("background:#f8f9fa;padding:16px 20px;border-radius:16px;", overview)
         self.assertIn("▼ 펼쳐서 상세 보기", overview)
+        # A phone reads the home scenarios as cards and the gauge label on its own line (user review 2026-11-02).
+        self.assertEqual(overview.count("시나리오 · "), 3)
+        self.assertNotIn(">시나리오</th>", overview)
+        self.assertNotIn('white-space:nowrap">주택 목표 준비율', overview)
         # Gmail drops <details> and shows every card open: the hint is hidden inline and only the stylesheet,
         # inside a real <details>, shows it (client report 2026-11-02).
         hints = re.findall(r'<span class="mk-hint[^"]*" style="([^"]*)"', overview)

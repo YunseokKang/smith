@@ -887,8 +887,10 @@ def _gauge(label: str, ratio: Decimal | None, text: str) -> str:
     """Progress toward a target: the filled share (capped at 100%), the figure beside it, a line under it."""
     fill = 0 if ratio is None else max(0, min(100, int(ratio * 100)))
     shown = "미상" if ratio is None else _pct(ratio, 0)
-    return (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:6px 0 4px"><tr>'
-            f'<td style="width:160px;font-size:13px;color:{BODY};padding:4px 8px 4px 0;white-space:nowrap">{escape(label)}</td>'
+    # The label on its own line: "주택 목표 준비율(가구 통합 + 예정 소득(확정·예상, 세후))" in a 160px cell that would not
+    # wrap pushed the bar off a phone screen (user review 2026-11-02).
+    return (f'<div style="font-size:13px;line-height:1.5;color:{BODY};margin-top:6px">{escape(label)}</div>'
+            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:4px 0 4px"><tr>'
             f'<td><div style="background:{STRONG};height:14px;border-radius:100px"><div style="background:{ACCENT};height:14px;'
             f'width:{fill}%;border-radius:100px"></div></div></td>'
             f'<td style="width:64px;text-align:right;font-family:{MONO};font-size:13px;color:{INK};padding-left:8px">{shown}</td>'
@@ -1335,21 +1337,25 @@ def _home_plan(home: dict[str, Any]) -> str:
     bars.append(("본인 자원만", home["available_self"], False))
     with_pay = any(s.get("expected_pay_at_target") not in (None, "0") for s in home["scenarios"])
     household = any(s.get("available_household") is not None for s in home["scenarios"])
-    headers = ["시나리오", "필요 자금(그때 집값·비용)", "본인 자원"] + (["가구 통합"] if household else []) \
-        + (["가구 통합 + 예정 소득"] if with_pay and household else []) + ["부족분(기준)"]
-    rows = []
+    # One card per scenario, not a six-column table at 12px (user review 2026-11-02: readable on a phone).
+    cards = []
     for s in home["scenarios"]:
-        row = [SCENARIO_LABELS.get(s["name"], s["name"]), _short(_dec(s["required_with_costs"])), _short(_dec(s["available_self"]))]
+        parts = [("필요 자금(그때 집값·비용)", s["required_with_costs"]), ("본인 자원", s["available_self"])]
         if household:
-            row.append(_short(_dec(s["available_household"])))
+            parts.append(("가구 통합", s["available_household"]))
         if with_pay and household:
-            row.append(_short(_dec(s["available_household_with_expected_pay"])))
-        gap = (s["gap_household_with_expected_pay"] if with_pay and household and s.get("gap_household_with_expected_pay") is not None
-               else s["gap_including_partner_property_equity"] if household else s["gap_self"])
-        row.append(_short(_dec(gap)))
-        rows.append(row)
+            parts.append(("예정 소득까지", s["available_household_with_expected_pay"]))
+        gap = _dec(s["gap_household_with_expected_pay"] if with_pay and household and s.get("gap_household_with_expected_pay") is not None
+                   else s["gap_including_partner_property_equity"] if household else s["gap_self"])
+        verdict = ("부족분 미상" if gap is None else f"부족 {_short(gap)}" if gap > 0 else
+                   "딱 맞음" if gap == 0 else f"남음 {_short(-gap)}")
+        figures = " · ".join(f"{label} {_short(_dec(value))}" for label, value in parts)
+        cards.append(f'<div style="border:1px solid {HAIRLINE};border-radius:16px;padding:12px 14px;margin-top:8px">'
+                     f'<div style="font-size:14px;font-weight:600;color:{INK}">'
+                     f'{escape(SCENARIO_LABELS.get(s["name"], s["name"]))} 시나리오 · {escape(verdict)}</div>'
+                     f'<div style="font-size:13px;line-height:1.65;color:{BODY};margin-top:4px">{escape(figures)}</div></div>')
     gauge = _gauge(f"주택 목표 준비율({home['baseline_label']})", home["ratio_baseline"], "")
-    return '<div style="height:12px"></div>' + gauge + _table(headers, rows)
+    return '<div style="height:12px"></div>' + gauge + "".join(cards)
 
 
 def _goals_brief(data: dict[str, Any]) -> str:
