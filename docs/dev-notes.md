@@ -387,3 +387,13 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
   (한도에 걸린 날은 `--force` 없이는 `skipped`).
 - 예방: 웹에서 온 텍스트를 모델 payload에 넣을 때는 언제나 `mask_identifiers`를 먼저 거친다. 어느 규칙에 걸렸는지는
   `daily_writer.check_outbound`를 감싸 payload를 경로별로 훑는 진단 스크립트로 찾는다(모델 호출·발송 없이).
+
+### TS-038 화요 투자·시장 보고 서술이 비용 상한(`error_max_budget_usd`)에 걸려 종목 의견 없이 발송 (2026-11-03)
+
+- 증상: 11/03 06:27 화요판이 `Narrative (markets) failure: exit-1`로 서술 없이 나갔다. 모든 종목이 "의견 없음"이었다.
+  `advice_runs.advice`에 `{"detail": "error_max_budget_usd"}`가 남아 있었다.
+- 원인: 서술 호출의 `--max-budget-usd`가 5.00이었다. 화요판 비용은 10/27에 4.39달러였고, 11/03 입력은 145k자로 지난주(120k자)보다
+  5분의 1 커져 상한을 넘었다. 화요판은 종목 수만큼 입력이 커서 다른 요일(2.5~3.5달러)보다 먼저 닿는다.
+- 해결: `narrative.BUDGET_USD`를 10.00으로 올렸다. 정액 구독이라 상한은 폭주 방지용일 뿐 비용 절감 장치가 아니다.
+- 예방: `advice_runs`의 `cost_usd`가 상한의 80%를 넘으면 다음 회차 전에 상한을 다시 본다. 실패 사유는 `report-runs.log`에는
+  `exit-1`만 남으니 `advice_runs.advice.detail`에서 확인한다.

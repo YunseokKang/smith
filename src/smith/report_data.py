@@ -118,11 +118,11 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     # that show the holdings in full; the price moves are in `change`.
     edition = editions.of(kind)
     shows_holdings = kind == "monday" if edition is None else "holdings" in edition.sections
-    quantities = (quantity_changes(holding_changes(conn, baseline, as_of, known_at))
-                  if baseline is not None and shows_holdings else None)
+    moved = holding_changes(conn, baseline, as_of, known_at) if baseline is not None and shows_holdings else None
     data = {"kind": kind, "as_of": as_of, "baseline": baseline, "kpis": kpis, "schedule": schedule,
             "change": change, "timeline": _timeline(view, pay), "sectors": sectors, "holdings": review,
-            "holding_quantity_changes": quantities,
+            "holding_quantity_changes": None if moved is None else quantity_changes(moved),
+            "holding_price_moves": None if moved is None else price_moves(moved, baseline),
             # The holdings' latest official quarters as known at the report (fundamentals.py).
             "fundamentals": fundamentals.load(conn, known_at),
             "insiders": insiders.load(conn, known_at),
@@ -237,7 +237,7 @@ def holding_changes(conn: sqlite3.Connection, t0: datetime, t1: datetime, known_
     """Per listed holding (a record with a symbol), its base-currency value at t0 and the market, FX and trade
     parts of its change to t1: the split of `decompose`, one row per holding, for the event note that asks which
     holdings moved (report design §29). A holding whose currency has no rate reads `unconverted` with zero parts
-    (unknown, left out of the caller's sums); one bought after t0 has no `start`."""
+    (unknown, left out of the caller's sums); one bought after t0 has no `start`, one closed by t1 no `end`."""
     with ledger.snapshot(conn):
         before, after = _active(conn, t0, known_at), _active(conn, t1, known_at)
         rates0, rates1 = _rates(conn, t0, known_at), _rates(conn, t1, known_at)
@@ -254,9 +254,10 @@ def holding_changes(conn: sqlite3.Connection, t0: datetime, t1: datetime, known_
             currency = record.fields["currency"]
             start = (None if earlier is None or currency not in rates0
                      else Decimal(earlier.fields["value"]) * rates0[currency])
+            end = None if later is None or currency not in rates1 else Decimal(later.fields["value"]) * rates1[currency]
             rows.append({"record_id": record_id, "name": record.fields.get("instrument_name") or record.fields["symbol"],
                          "symbol": record.fields["symbol"], "market": record.fields.get("market"),
-                         "currency": currency, "hermes": record.fields.get("managed_by") == "hermes", "start": start,
+                         "currency": currency, "hermes": record.fields.get("managed_by") == "hermes", "start": start, "end": end,
                          "quantity_start": _quantity(earlier), "quantity_end": _quantity(later),
                          "price_start": _price(earlier), "price_end": _price(later),
                          "priced_at_start": earlier and earlier.effective_at, "priced_at_end": later and later.effective_at,
@@ -284,24 +285,81 @@ def quantity_changes(rows: list[dict[str, Any]]) -> dict[str, Any]:
         groups.setdefault((row["market"], row["symbol"], row["currency"], row["hermes"]), []).append(row)
     changes, uncompared = [], []
     for (market, symbol, _, hermes), lots in groups.items():
-        before, after = _total(l["quantity_start"] for l in lots), _total(l["quantity_end"] for l in lots)
-        if (before is None or after is None) and 0 not in (before, after):
+        traded = _group_trade(lots)
+        if traded is None:
             if not hermes:
                 uncompared.append(lots[0]["name"])
             continue
+        before, after, amount = traded
         if before == after:
             continue
         change = "new" if before == 0 else "closed" if after == 0 else "more" if after > before else "less"
-        side = "start" if after == 0 else "end"
-        # The newest valuation's price, as in holdings.review: a manual lot can carry an older price (review 2026-10-27).
-        priced = [l for l in lots if l[f"price_{side}"] is not None]
-        price = max(priced, key=lambda l: l[f"priced_at_{side}"])[f"price_{side}"] if priced else None
-        rate = lots[0][f"rate_{side}"]
-        amount = None if None in (before, after, price, rate) else (after - before) * price * rate
         changes.append({"name": lots[0]["name"], "symbol": symbol, "market": market, "hermes": hermes,
                         "quantity_start": before, "quantity_end": after, "change": change, "amount": amount})
     changes.sort(key=lambda c: (c["amount"] is None, -abs(c["amount"] or 0), c["symbol"]))
     return {"changes": changes, "uncompared": sorted(uncompared)}
+
+
+def _group_trade(lots: list[dict[str, Any]]) -> tuple[Decimal | None, Decimal | None, Decimal | None] | None:
+    """One instrument's quantities at both times and its net quantity change at today's price and rate (sold out: at
+    the comparison price and rate), the amount None when that price or rate is unknown. None when a quantity is unknown
+    and the position was held at both times: whether it changed is unknown."""
+    before, after = _total(l["quantity_start"] for l in lots), _total(l["quantity_end"] for l in lots)
+    if (before is None or after is None) and 0 not in (before, after):
+        return None
+    if before == after:
+        return before, after, Decimal(0)
+    side = "start" if after == 0 else "end"
+    # The newest valuation's price, as in holdings.review: a manual lot can carry an older price (review 2026-10-27).
+    priced = [l for l in lots if l[f"price_{side}"] is not None]
+    price = max(priced, key=lambda l: l[f"priced_at_{side}"])[f"price_{side}"] if priced else None
+    rate = lots[0][f"rate_{side}"]
+    return before, after, None if None in (before, after, price, rate) else (after - before) * price * rate
+
+
+def price_moves(rows: list[dict[str, Any]], since: datetime) -> dict[str, Any]:
+    """What prices and the won/dollar rate did to the client's listed positions since the comparison report
+    (report design §36), from `holding_changes` rows grouped as in `quantity_changes`; Hermes lots are left out.
+
+    `moves[].effect` is the instrument's change in value less its trade amount from `quantity_changes`, so the two
+    figures always add up to the change in value: a move between two own accounts, a lot set to zero shares, or a lot
+    valued without a unit price all fall out right (Codex review 2026-11-03). A position whose trade amount or
+    quantity is unknown, or whose currency has no rate, cannot be split and is named in `unknown` (not zero).
+
+    A lot held at both times whose price was last recorded at or before `since` (a manual statement) shows no price
+    move and is listed in `stale` with its price date. `ratio` leaves such lots out of numerator and denominator
+    alike, so they neither shrink a stock's move nor add their FX to it; it is None for a new position, or when a
+    stale lot's quantity changed (its share of the trade cannot be told apart). `total`, `start`, `repriced` and
+    `repriced_effect` sum the split positions only."""
+    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for row in rows:
+        if not row["hermes"]:
+            groups.setdefault((row["market"], row["symbol"], row["currency"]), []).append(row)
+    moves, unknown, stale = [], [], []
+    for (market, symbol, _), lots in groups.items():
+        traded = None if any(l["unconverted"] for l in lots) else _group_trade(lots)
+        if traded is None or traded[2] is None:
+            unknown.append(lots[0]["name"])
+            continue
+        start = sum((l["start"] for l in lots if l["start"] is not None), Decimal(0))
+        effect = sum((l["end"] for l in lots if l["end"] is not None), Decimal(0)) - start - traded[2]
+        old = [l for l in lots if None not in (l["start"], l["end"]) and l["quantity_end"] != 0
+               and l["priced_at_end"] is not None and l["priced_at_end"] <= since]
+        stale += [{"name": l["name"], "quantity": l["quantity_end"], "priced_at": l["priced_at_end"]} for l in old]
+        repriced = start - sum((l["start"] for l in old), Decimal(0))
+        repriced_effect = effect - sum((l["end"] - l["start"] for l in old), Decimal(0))
+        split = repriced and all(l["quantity_start"] == l["quantity_end"] for l in old)
+        moves.append({"name": lots[0]["name"], "symbol": symbol, "market": market, "effect": effect, "start": start,
+                      "new": all(l["start"] is None for l in lots),
+                      "ratio": repriced_effect / repriced if split else None,
+                      "repriced": repriced if split else Decimal(0), "repriced_effect": repriced_effect if split else Decimal(0)})
+    moves.sort(key=lambda m: (-abs(m["effect"]), m["symbol"]))
+    stale.sort(key=lambda s: (s["priced_at"], str(s["name"])))
+    return {"total": sum((m["effect"] for m in moves), Decimal(0)),
+            "start": sum((m["start"] for m in moves), Decimal(0)),
+            "repriced": sum((m["repriced"] for m in moves), Decimal(0)),
+            "repriced_effect": sum((m["repriced_effect"] for m in moves), Decimal(0)),
+            "moves": moves, "unknown": sorted(unknown), "stale": stale}
 
 
 def _price(record: RecordInput | None) -> Decimal | None:

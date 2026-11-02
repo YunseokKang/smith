@@ -66,7 +66,9 @@ logger = logging.getLogger(__name__)
 # v32: no per-sentence law caveat; the footer says it once (user decision 2026-11-02); the check no longer asks for it.
 PROMPT_VERSION = "narrative-v32"
 MODEL = "fable"
-BUDGET_USD = "5.00"
+# A runaway guard, not a cost limit (flat-rate subscription): the markets day cost 4.39 USD on 2026-10-27 and, with a
+# payload a fifth larger, ran past 5.00 on 2026-11-03 (error_max_budget_usd), so that report went out without opinions.
+BUDGET_USD = "10.00"
 # Two calls at most: the write (the markets day with twenty-odd holdings ran past 10 minutes on 2026-10-17) and a
 # shorter repair, 22 minutes together, inside the 30-minute report lease with the syncs and the send.
 TIMEOUT_SECONDS = 900

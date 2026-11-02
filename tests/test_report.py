@@ -459,6 +459,15 @@ class ReportTests(unittest.TestCase):
         html = render(data)[1]
         self.assertIn("9월 1일 이후 수량이 바뀐 종목", html)
         self.assertIn("10 → 12", html)
+        # The week's panel leads the day, above the proposals, and the holdings card does not repeat it (§36).
+        # Price and FX on the 10 shares held (10 x 10 x 1300 + 10 x 110 x 100) plus the trade at today's rate add up
+        # to the change in value (12 x 110 x 1400 - 10 x 100 x 1300): the FX on the 2 new shares is counted once.
+        moves = data["holding_price_moves"]
+        self.assertEqual((moves["total"], moves["stale"]), (Decimal(240_000), []))
+        self.assertEqual(moves["total"] + Decimal(308_000), Decimal(548_000))
+        panel = html.index("지난주 대비 보유 종목 변화")
+        self.assertTrue(all(html.find(later) == -1 or html.find(later) > panel for later in ("오늘의 제안", "보유 종목 점검")))
+        self.assertEqual(html.count("9월 1일 이후 수량이 바뀐 종목"), 1)
         moved = narrative.holdings_payload(data["view"], data)["holding_quantity_changes"]
         self.assertEqual(moved, {"from": "2026-09-01", "changes": [
             {"symbol": "XYZ", "market": "US", "quantity_before": "10", "quantity_after": "12", "change": "more",
@@ -506,6 +515,58 @@ class ReportTests(unittest.TestCase):
         for quantity, shown in (("28.582791", "28.5828"), ("1200.00", "1,200"), ("0.5", "0.5"), (None, "미상")):
             with self.subTest(quantity=quantity):
                 self.assertEqual(report_html._qty(None if quantity is None else Decimal(quantity)), shown)
+
+    def test_price_moves_add_up_with_the_trades_and_leave_stale_lots_out_of_the_ratio(self):
+        from smith.report_data import price_moves
+
+        def row(symbol, q0, q1, start, end, p0=None, p1=None, priced_at=T1, hermes=False, unconverted=False):
+            dec = lambda v: None if v is None else Decimal(v)
+            return {"name": symbol, "symbol": symbol, "market": "US", "currency": "USD", "hermes": hermes,
+                    "unconverted": unconverted, "start": dec(start), "end": dec(end),
+                    "quantity_start": dec(q0), "quantity_end": dec(q1), "price_start": dec(p0), "price_end": dec(p1),
+                    "priced_at_start": T0, "priced_at_end": priced_at,
+                    "rate_start": Decimal(1300), "rate_end": Decimal(1400)}
+        # Each effect is the change in value less the trade at today's rate (Codex review 2026-11-03).
+        moves = price_moves([
+            row("MOV", "10", "0", "1300000", None, p0="100"), row("MOV", "0", "10", None, "1540000", p1="110"),  # Own move.
+            row("ZRO", "10", "0", "1300000", "0", p0="100", p1="110"),          # Set to zero shares: sold at the old price.
+            row("NOP", "10", "10", "1300000", "1430000"),                       # Valued without a unit price.
+            row("BUY", "10", "12", "1300000", "1848000", p0="100", p1="110"),  # 12 x 110 x 1400 less 2 x 110 x 1400.
+            # 10 shares repriced, 90 stale: the stale FX (+900k) is real but left out of the ratio.
+            row("MIX", "10", "10", "1300000", "1540000", p1="110"), row("MIX", "90", "90", "11700000", "12600000",
+                                                                         p1="100", priced_at=T0),
+            row("HRM", "1", "1", "100", "200", hermes=True), row("FXX", "1", "1", "100", None, unconverted=True),
+            row("FOG", None, None, "100", "200"), row("NPX", "1", "2", "130000", "300000", p1=None)], T0)
+        self.assertEqual({m["symbol"]: (m["effect"], m["ratio"]) for m in moves["moves"]},
+                         {"MOV": (Decimal(240_000), Decimal(240_000) / Decimal(1_300_000)), "ZRO": (Decimal(0), Decimal(0)),
+                          "NOP": (Decimal(130_000), Decimal("0.1")), "BUY": (Decimal(240_000), Decimal(240_000) / Decimal(1_300_000)),
+                          "MIX": (Decimal(1_140_000), Decimal(240_000) / Decimal(1_300_000))})
+        self.assertEqual(moves["unknown"], ["FOG", "FXX", "NPX"])
+        self.assertEqual([(s["name"], s["priced_at"]) for s in moves["stale"]], [("MIX", T0)])
+        self.assertEqual((moves["repriced_effect"], moves["repriced"]), (Decimal(850_000), Decimal(6_500_000)))
+        html = report_html._holdings_week({"holding_price_moves": moves, "baseline": T0,
+                                           "holding_quantity_changes": {"changes": [], "uncompared": ["FOG"]}})
+        self.assertIn("주가 변화가 빠진 보유분: MIX 90주(09/01 가격)", html)
+        self.assertIn("수량을 비교할 수 있는 종목 가운데 수량이 바뀐 종목은 없습니다", html)
+        # An unknown trade amount is neither zero nor a bound: all unknown reads 미상, some unknown is scoped.
+        change = {"name": "X", "hermes": False, "quantity_start": Decimal(0), "quantity_end": Decimal(1), "change": "new"}
+        for amounts, shown in (([None], "금액은 확인하지 못했습니다"), ([None, Decimal(-5000)], "금액을 확인한 종목만")):
+            with self.subTest(amounts=amounts):
+                found = {"changes": [dict(change, amount=a) for a in amounts], "uncompared": []}
+                html = report_html._holdings_week({"holding_price_moves": moves, "baseline": T0,
+                                                   "holding_quantity_changes": found})
+                self.assertIn(shown, html)
+                self.assertNotIn("이상", html)
+        # Nothing could be split: the effect is unknown, not "no change"; a held stale lot is not "new".
+        html = report_html._holdings_week({"holding_price_moves": price_moves([row("FOG", None, None, "100", "200")], T0),
+                                           "baseline": T0, "holding_quantity_changes": {"changes": [], "uncompared": ["FOG"]}})
+        self.assertIn("시세·환율 효과를 매매와 나누지 못했고", html)
+        self.assertNotIn("변동 없음", html)
+        stale_only = price_moves([row("OLD", "10", "10", "1300000", "1400000", p1="100", priced_at=T0)], T0)
+        self.assertEqual((stale_only["moves"][0]["new"], stale_only["moves"][0]["ratio"]), (False, None))
+        html = report_html._holdings_week({"holding_price_moves": stale_only, "baseline": T0,
+                                           "holding_quantity_changes": {"changes": [], "uncompared": []}})
+        self.assertNotIn("새로 보유", html)
 
     def test_decomposition_is_exact_for_the_largest_importable_values(self):
         big = datetime(2026, 9, 3, tzinfo=timezone.utc)

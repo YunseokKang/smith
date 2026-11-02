@@ -416,7 +416,10 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
         "goals": lambda: _goals_brief(data), "future_income": lambda: _future_income(data, overview=True),
         "requests": lambda: (_requests(data.get("requests") or [], False, "생활·목표 보고") if overview
                              else _requests(data.get("requests") or [], True)),
-        "holdings": lambda: _holdings(data, story, True), "policy": lambda: _policy(data, story, True),
+        # The week's holding changes lead the markets day (report design §36); the holdings card then omits them.
+        "week": lambda: _holdings_week(data),
+        "holdings": lambda: _holdings(data, story, True, quantities="week" not in edition.opening),
+        "policy": lambda: _policy(data, story, True),
         "macro": lambda: _macro(sectors["macro"]), "macro_brief": lambda: _macro(sectors["macro"], compact=True),
         "real_estate": lambda: _real_estate(sectors["real_estate"], data.get("figures") or {}),
         "lease_plan": lambda: _lease_plan(data), "move_targets": lambda: _move_targets(data),
@@ -1770,9 +1773,10 @@ def _spending(room: dict[str, Any] | None, split: dict[str, Any] | None = None) 
 
 
 
-def _holdings(data: dict[str, Any], story: dict[str, Any], full: bool) -> str:
+def _holdings(data: dict[str, Any], story: dict[str, Any], full: bool, *, quantities: bool = True) -> str:
     """Holdings review (report design §12.7): the figures code computed, Smith's view of the whole, a table
-    with an opinion per holding, and cards for every opinion other than hold. Thursday lists only those."""
+    with an opinion per holding, and cards for every opinion other than hold. Thursday lists only those.
+    `quantities` False leaves the quantity changes to the week's panel at the top (§36)."""
     review, sec = data["holdings"], data["sectors"]["securities"]
     positions = review["positions"]
     opinions = story.get("holdings") or {}
@@ -1787,7 +1791,7 @@ def _holdings(data: dict[str, Any], story: dict[str, Any], full: bool) -> str:
                         note=escape(f"{len(active)}개 종목"))
     if not positions:
         # Selling the last holding is still news: the quantity changes show without a current position.
-        return _section("보유 종목 점검", "종목 단위 정보가 있는 증권이 없습니다.", _quantity_changes(data))
+        return _section("보유 종목 점검", "종목 단위 정보가 있는 증권이 없습니다.", _quantity_changes(data) if quantities else "")
     listed = [p for p in positions if p["value"] is not None]
     segments = [(str(p["name"])[:12], p["value"], "") for p in listed[:4]]
     if len(listed) > 4:
@@ -1798,7 +1802,8 @@ def _holdings(data: dict[str, Any], story: dict[str, Any], full: bool) -> str:
                       Raw(_pill("Hermes 운용", "neutral")) if p["hermes"] else
                       Raw(_stance(_of(opinions, p)["stance"])) if _of(opinions, p).get("stance") else "의견 없음"]
                      for p in positions])
-    inner += _quantity_changes(data)
+    if quantities:
+        inner += _quantity_changes(data)
     # The employer's stock and any holding above the limit come first: the double concentration is the
     # first investment matter (report design §17.4).
     active.sort(key=lambda p: (not p.get("must_opine"), -(p["value"] or 0)))
@@ -1818,6 +1823,111 @@ def _holdings(data: dict[str, Any], story: dict[str, Any], full: bool) -> str:
             counts[stance] = counts.get(stance, 0) + 1
     note = f"{len(positions)}개 종목 상세 점검" + "".join(f" · {STANCES[s]} {n}" for s, n in counts.items() if s != "hold")
     return _section("보유 종목 점검", _holdings_lead(review, sec, opined), inner, note=escape(note))
+
+
+def _holdings_week(data: dict[str, Any]) -> str:
+    """The week's change in the client's listed holdings, open at the top of the markets day (report design §36; user
+    request 2026-11-03: "지난주 대비 변동내역은 중요하니까 더 가독성 높여서 상단에"). Two figures apart (what prices and
+    the won/dollar rate did to the shares held, and what bought or sold shares added), the positions that moved most,
+    and the quantity changes as cards. Hermes-managed positions are left out, as in the hero. Nothing without a
+    comparison report."""
+    moves, found, baseline = data.get("holding_price_moves"), data.get("holding_quantity_changes"), data.get("baseline")
+    if moves is None or found is None or baseline is None:
+        return ""
+    since = f"{baseline.month}월 {baseline.day}일"
+    mine = [c for c in found["changes"] if not c["hermes"]]
+    # An unknown trade amount is not zero, and with a sale among the unknowns the known sum is no bound either: all
+    # unknown reads 미상, some unknown reads "금액을 확인한 종목만" (Codex review 2026-11-03).
+    known = [c["amount"] for c in mine if c["amount"] is not None]
+    traded = sum(known, Decimal(0)) if known else None
+    partial = len(known) < len(mine)
+    ratio = moves["repriced_effect"] / moves["repriced"] if moves["repriced"] else None
+    # A position that could not be split, or whose quantity could not be compared, is not "no change" (Codex review
+    # 2026-11-03): with none split the effect is unknown, with some the figures are scoped to the split ones.
+    unsplit = [n for n in moves["unknown"] if n not in found["uncompared"]]
+    gaps = bool(moves["unknown"] or found["uncompared"])
+    effect = moves["total"] if moves["moves"] or not gaps else None
+    scope = "나눌 수 있는 종목만" if gaps else ""
+    lead = f"{since} 이후 보유 종목은 " + (
+        "시세·환율 효과를 매매와 나누지 못했고, " if effect is None else
+        f"시세·환율로 <b>{_toned(effect)}</b>" + (f"({scope}), " if scope else ", ")) + (
+        "수량을 비교할 수 있는 종목 가운데 사고판 것은 없습니다." if not mine and found["uncompared"] else
+        "사고판 종목은 없습니다." if not mine else
+        f"사고판 종목은 {len(mine)}개인데 금액은 확인하지 못했습니다." if traded is None else
+        f"사고판 것으로 <b>{_toned(traded)}</b> 바뀌었습니다" + ("(금액을 확인한 종목만)." if partial else "."))
+    stats = _week_stats([
+        ("시세·환율 효과", effect, "수량 그대로일 때의 변화" + ("" if ratio is None else f" · {_delta_pct(ratio)}")
+         + (f" · {scope}" if scope and effect is not None else "")),
+        ("사고판 몫", traded, ("비교한 종목 가운데 없음" if found["uncompared"] else "없음") if not mine
+         else f"수량이 바뀐 종목 {len(mine)}개"
+         + (" · 금액 미상" if traded is None else " · 확인된 금액만" if partial else ""))])
+    movers = [m for m in moves["moves"] if m["effect"]][:5]
+    inner = stats
+    if movers:
+        rows = "".join(f'<tr><td style="font-size:14px;color:{INK};padding:7px 8px 7px 0;border-bottom:1px solid {STRONG}">'
+                       f'{escape(m["name"])}</td><td style="text-align:right;white-space:nowrap;font-size:14px;padding:7px 0;'
+                       f'border-bottom:1px solid {STRONG}">{_toned(m["effect"])}'
+                       f'<span style="font-size:12px;color:{MUTED}"> {"새로 보유" if m["new"] else "" if m["ratio"] is None else _delta_pct(m["ratio"])}'
+                       f'</span></td></tr>' for m in movers)
+        inner += (f'<tr><td><div style="font-size:13px;font-weight:700;color:{INK};margin:18px 0 4px">시세로 많이 움직인 종목</div>'
+                  f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{rows}</table></td></tr>')
+    inner += f'<tr><td>{_quantity_cards(mine, since, scoped=bool(found["uncompared"]))}</td></tr>'
+    notes = ["사고판 몫은 바뀐 수량을 지금 가격·환율로 환산한 값이고(판 종목은 그때 가격), 주식 보상 입고나 처음 등록한 계좌도 "
+             "여기에 잡힙니다. 시세·환율 효과는 평가액 변화에서 사고판 몫을 뺀 나머지라 둘을 더하면 평가액 변화입니다."]
+    hermes = len(found["changes"]) - len(mine)
+    if hermes:
+        notes.append(f"Hermes 운용분은 따로 보지 않습니다(수량이 바뀐 종목 {hermes}개).")
+    if found["uncompared"]:
+        notes.append(f"수량 기록이 없어 비교하지 못한 종목: {', '.join(str(n) for n in found['uncompared'])}.")
+    if unsplit:
+        notes.append(f"가격이나 환율을 몰라 시세와 매매로 나누지 못해 뺀 종목: {', '.join(str(n) for n in unsplit)}.")
+    foot = "".join(f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-top:4px">{escape(n)}</div>' for n in notes)
+    if moves["stale"]:
+        # A stale price hides that holding's move; said where it is read, not in the grey notes.
+        lots = ", ".join(f"{s['name']} {_qty(s['quantity'])}주({s['priced_at']:%m/%d} 가격)" for s in moves["stale"])
+        foot = (f'<div style="font-size:13px;line-height:1.6;color:{BODY};background:{PILLS["warn"][0]};border-radius:12px;'
+                f'padding:10px 12px;margin-bottom:6px">가격이 지난 보고 뒤로 갱신되지 않아 주가 변화가 빠진 보유분: '
+                f'{escape(lots)}. 직접 입력한 계좌라 새 잔고를 가져오면 반영됩니다.</div>') + foot
+    return (f'<tr><td>{_eyebrow(f"{baseline:%m/%d} 대비", color="#ffffff", background=BLUE)}'
+            f'{_heading("지난주 대비 보유 종목 변화", size=26)}'
+            f'<div style="font-size:15px;line-height:1.65;color:{BODY}">{lead}</div></td></tr>'
+            f'{inner}<tr><td style="padding-top:12px">{foot}</td></tr>')
+
+
+def _toned(amount: Decimal) -> str:
+    """A signed amount in the chart's diverging colours: a gain red, a loss blue, nothing grey (Korean convention)."""
+    color = MUTED if not amount else UP if amount > 0 else DOWN
+    return f'<span style="font-family:{MONO};font-weight:700;color:{color}">{escape(_signed_short(amount))}</span>'
+
+
+def _week_stats(stats: list[tuple[str, Decimal | None, str]]) -> str:
+    """Two light tiles side by side: the label, the signed amount at 22px in its colour, a short line under it."""
+    def tile(label: str, amount: Decimal | None, sub: str) -> str:
+        value = (f'<span style="font-family:{MONO};font-size:22px;color:{MUTED}">{"–" if sub.endswith("없음") else "미상"}</span>'
+                 if amount is None else
+                 _toned(amount).replace("font-weight:700", "font-weight:700;font-size:22px", 1))
+        return (f'<td style="width:50%;padding:5px;vertical-align:top"><div style="border-radius:16px;padding:14px 16px;'
+                f'background:{SOFT}"><div style="font-size:13px;font-weight:600;color:{MUTED}">{escape(label)}</div>'
+                f'<div style="margin:6px 0 2px">{value}</div>'
+                f'<div style="font-size:12px;line-height:1.5;color:{MUTED}">{escape(sub)}</div></div></td>')
+    return (f'<tr><td style="padding-top:14px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0">'
+            f'<tr>{"".join(tile(*s) for s in stats)}</tr></table></td></tr>')
+
+
+def _quantity_cards(changes: list[dict[str, Any]], since: str, *, scoped: bool) -> str:
+    """The client's quantity changes as one short card each (a phone could not read the four-column table, §33).
+    `scoped`: some positions could not be compared, so an empty list speaks only of the compared ones (§32)."""
+    title = f'<div style="font-size:13px;font-weight:700;color:{INK};margin:18px 0 4px">{since} 이후 수량이 바뀐 종목</div>'
+    if not changes:
+        scope = "수량을 비교할 수 있는 종목 가운데 " if scoped else ""
+        return title + f'<div style="font-size:14px;line-height:1.6;color:{BODY}">{scope}수량이 바뀐 종목은 없습니다.</div>'
+    cards = "".join(
+        f'<div style="border:1px solid {HAIRLINE};border-radius:14px;padding:10px 14px;margin-top:6px">'
+        f'<div style="font-size:14px;font-weight:600;line-height:1.5;color:{INK}">{_pill(QUANTITY_CHANGES[c["change"]])} '
+        f'{escape(c["name"])}</div><div style="font-size:14px;line-height:1.6;color:{BODY};margin-top:4px">'
+        f'<span style="font-family:{MONO}">{_qty(c["quantity_start"])} → {_qty(c["quantity_end"])}주</span> · '
+        f'{"금액 미상" if c["amount"] is None else _toned(c["amount"])}</div></div>' for c in changes)
+    return title + cards
 
 
 def _quantity_changes(data: dict[str, Any]) -> str:
@@ -2135,7 +2245,10 @@ def _move_targets(data: dict[str, Any]) -> str:
 
 
 def _delta_pct(ratio: Decimal | None) -> str:
-    return "-" if ratio is None else f"{'+' if ratio > 0 else ''}{ratio * 100:.1f}%"
+    if ratio is None:
+        return "-"
+    shown = (ratio * 100).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+    return f"{'+' if shown > 0 else ''}{abs(shown) if not shown else shown}%"
 
 
 def _pension_stack(data: dict[str, Any]) -> str:
