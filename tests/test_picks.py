@@ -140,6 +140,7 @@ class ReviewTests(Upgrade):
         self.assertEqual(picks._rate_text("연 0.0062% (운용보수 0.0001%); 기타비용 미표시"), "0.0062%")
         self.assertEqual(picks._name_text("Vanguard Total Stock Market ETF (페이지 제목 표기: Vanguard Morningstar …)"),
                          "Vanguard Total Stock Market ETF")
+        self.assertEqual(picks._name_text("Vanguard Morningstar Total Stock Market ETF"), "Vanguard Morningstar Total Stock Market ETF")
 
     def test_a_number_the_facts_do_not_carry_drops_the_pick(self):
         passing = [dict(candidate("VOO", "US", "$500.00"), status="verified")]
@@ -266,9 +267,10 @@ class ReviewTests(Upgrade):
             self.assertEqual(list(picks.load(conn, AT)), ["concentration-trim"])
             self.assertEqual(picks.load(conn, AT - timedelta(hours=1)), {})     # A rebuild as of before the review: none.
         priced = picks.pick_table(trim, stored["review"], {"KRW": Decimal(1), "USD": Decimal(1300)})
-        self.assertEqual(priced.table[1][3], f"{int(step / 650_000)}주 × $500.00(약 65만 원)")
+        self.assertEqual(priced.table[1][3], f"{int(step / 650_000)}주 · 1주 $500.00(약 65만 원)")
         page = render(data)[1]
         self.assertIn("옮길 곳 1~2순위", page)
+        self.assertIn("넣을 때입니다. 2순위는 1순위 대신", page)   # Two picks: no "2·3순위".
         self.assertIn("1순위</span> VOO 펀드 (VOO)", page)   # Cards, one piece per line, not a four-column table.
         start = page.index("옮길 곳 1~2순위")
         self.assertNotIn("<th", page[start:page.index("출처:", start)])

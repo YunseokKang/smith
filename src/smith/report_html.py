@@ -969,11 +969,15 @@ def _proposals(advice: dict[str, Any], full: bool, edition: editions.Edition | N
         if p.table:
             # The researched products the action moves money into (client request 2026-10-20).
             step = p.figures.get("per_quarter")
-            detail += (f'<div style="font-size:14px;font-weight:700;color:{INK};margin-top:14px">옮길 곳 1~{len(p.table) - 1}순위'
+            count = len(p.table) - 1
+            # The note names the ranks there are (the 2026-11-02 letter had two picks and spoke of "2·3순위").
+            others = {1: "", 2: "2순위는 1순위 대신 고를 때의 대안입니다. "}.get(count, f"2~{count}순위는 1순위 대신 고를 때의 대안입니다. ")
+            detail += (f'<div style="font-size:14px;font-weight:700;color:{INK};margin-top:14px">옮길 곳 '
+                       + ("1순위" if count == 1 else f"1~{count}순위")
                        + (f" · 분기 {_short(step)}" if step is not None else "") + "</div>"
                        + _pick_cards(p.table[1:]) + _sources(p.table_links)
                        + f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-top:6px">수량은 분기 금액을 1순위에 모두 '
-                       "넣을 때이고 2·3순위는 1순위 대신 고를 때의 대안입니다. 가격은 조사 시점 종가라 주문 전 다시 확인하십시오.</div>")
+                       f"넣을 때입니다. {others}가격은 조사 시점 종가라 주문 전 다시 확인하십시오.</div>")
         elif p.key in (advice.get("pending_products") or ()):
             detail += (f'<div style="font-size:12px;color:{MUTED};margin-top:10px">옮길 상품 1~3순위는 검토 팀의 확인이 끝나는 대로 '
                        "다음 보고서에 싣습니다.</div>")

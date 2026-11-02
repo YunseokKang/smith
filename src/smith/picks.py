@@ -55,7 +55,7 @@ from smith.payload import LedgerView, check_outbound
 from smith.proposals import Proposal
 from smith.records import Kind
 
-PROMPT_VERSION = "product-review-v4"  # v4: korean.STYLE (client style guide 2026-11-01); v3: natural Korean (korean.RULES, checked); v2: code fixes rank 1, confirmed facts only.
+PROMPT_VERSION = "product-review-v5"  # v5: no review process in a pick's reason (letter of 2026-11-02); v4: korean.STYLE (client style guide 2026-11-01); v3: natural Korean (korean.RULES, checked); v2: code fixes rank 1, confirmed facts only.
 MODEL = "fable"
 BUDGET_USD = "5.00"
 SCOUT_TIMEOUT = 1200
@@ -260,7 +260,8 @@ household. Choose ranks 2 and 3 yourself, or none when nothing adds to rank 1. O
 `reviews`; never a product the context marks as the stock being trimmed. List every other reviewed candidate in
 `rejected` with why (one clause). Continuity: `previous_picks` are last review's choices; keep ranks 2 and 3
 unless a verified fact (cost, tax treatment, a listing change, a candidate that failed verification) now argues
-otherwise, and when you change one, say in its reason what changed. Write to the client: never mention the input,
+otherwise, and when you change one, say in its reason what changed in one short clause about the products ("지난번
+VT 대신"), never the review's process (candidates, verification, which review chose what). Write to the client: never mention the input,
 the context, notes or memos ("입력 메모", "컨텍스트"), and at most one parenthesis per sentence.
 """ + korean.RULES
 
@@ -767,7 +768,8 @@ def pick_table(proposal: Proposal, review: dict[str, Any], rates: dict[str, Deci
             size = f"대안 · 1주 {unit}"
         else:
             size = (f"약 {short_won(step)}어치(환율 미상)" if krw is None else
-                    f"{shares}주 × {unit}" if shares else f"1주 미만 × {unit}")
+                    f"{shares}주 · 1주 {unit}" if shares else f"1주 미만 · 1주 {unit}")
+        # "17주 × $371.57(약 50만 원)" read as 17 shares for 50만 원 (user review 2026-11-02): the price is per share.
         market = "미국 상장" if c["market"] == "US" else "국내 상장"
         rows.append((str(pick["rank"]), f"{_name_text(c['name'])} ({c['symbol']})", pick["reason"], size,
                      f"{market} · 보수 {_rate_text(c['expense_ratio'])} · {c['price_date']} 종가 기준"))
@@ -816,9 +818,10 @@ def _price_text(price: Decimal | None, currency: str) -> str:
 
 
 def _name_text(text: str) -> str:
-    """The product name without the scout's parenthetical notes, at most 40 characters."""
+    """The product name without the scout's parenthetical notes, at most 60 characters (a card line wraps;
+    "Vanguard Morningstar Total Stock Market ETF" was cut at 40, user review 2026-11-02)."""
     name = re.sub(r"\s*\([^)]*\)", "", text).strip()
-    return name[:40] if len(name) <= 40 else name[:39] + "…"
+    return name if len(name) <= 60 else name[:59] + "…"
 
 
 def _rate_text(text: str) -> str:
