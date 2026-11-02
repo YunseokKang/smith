@@ -118,6 +118,9 @@ class CarriedByWritersTest(unittest.TestCase):
                  "reader_notes": [{"path": "direction", "quote": "것입니다"}]}
         self.assertEqual(korean.summary(stats), "한국어 교정: 고정 수정 3건(이중 피동 2, 대시 1), 재작성 요청 2건(번역 칼크 1, 상투구 1: "
                                                 "을 통해, 결론적으로), 남은 것 1건(번역 칼크 1: 을 통해), 첫 독자 지적 1건")
+        # A reader that was due but skipped is said so, never as zero marks (user review 2026-11-02).
+        self.assertEqual(korean.summary({"tidied": [], "reader_skipped": "skipped-time"}),
+                         "한국어 교정: 고정 수정 0건, 첫 독자 검토 못 함(시간 부족)")
         self.assertEqual(korean.summary({"tidied": []}), "한국어 교정: 고정 수정 0건")   # The daily mail and the health letter.
         self.assertIsNone(korean.summary(None))
         self.assertEqual(narrative.korean_flags(["situation:unnatural-korean:에 대해", "watch[0]:no-source"]),

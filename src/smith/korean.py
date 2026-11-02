@@ -222,6 +222,8 @@ def summary(stats: dict[str, Any] | None) -> str | None:
         parts.append(f"남은 것 {len(stats['remaining'])}건" + _detail(_flags(stats["remaining"])))
     if "reader_notes" in stats:
         parts.append(f"첫 독자 지적 {len(stats['reader_notes'])}건")
+    elif stats.get("reader_skipped"):
+        parts.append("첫 독자 검토 못 함" + ("(시간 부족)" if stats["reader_skipped"] == "skipped-time" else ""))
     return "한국어 교정: " + ", ".join(parts)
 
 

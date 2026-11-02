@@ -412,10 +412,11 @@ class NarrativeTests(unittest.TestCase):
         self.assertEqual(uses, ["report-narrative", narrative.FINAL_USE_CASE])
         # The Korean corrections travel with the narrative as sent and into the footer (report design §34).
         self.assertEqual(final["korean"], data["narrative"]["status"]["korean"])
-        self.assertEqual(set(final["korean"]), {"tidied", "flagged", "remaining", "reader_notes"})
+        self.assertEqual(set(final["korean"]), {"tidied", "flagged", "remaining"})   # No reader configured: no count.
         self.assertTrue(any(n.startswith("한국어 교정: ") for n in report_html.system_notes(data)))
         footer = render(data)[1].rsplit("Smith는 조회 전용 자문입니다", 1)[0][-900:]  # In the mail itself, not only the notes.
-        self.assertIn("한국어 교정: 고정 수정 0건, 재작성 요청 0건, 남은 것 0건, 첫 독자 지적 0건", footer)
+        self.assertIn("한국어 교정: 고정 수정 0건, 재작성 요청 0건, 남은 것 0건<", footer)
+        self.assertNotIn("첫 독자", footer)
         # A themed day sends one insight: the record of what was sent (read by mail answers) holds that one only.
         data = self.data()
         data["kind"] = "rates"
