@@ -116,6 +116,10 @@ class TaxTests(unittest.TestCase):
                                            {"symbol": "SMALL", "quantity": Decimal(10), "gain": Decimal(1_000_000)}],
                                           Decimal(2_500_000)),
                          [{"symbol": "SMALL", "shares": 10, "gain": Decimal(1_000_000)}])   # One BIG share alone is over.
+        self.assertEqual(tax.harvest_lots([{"symbol": "VOO", "quantity": Decimal(40), "gain": Decimal(5_600_000)},
+                                           {"symbol": "SCHD", "quantity": Decimal(3), "gain": Decimal(30_000)}],
+                                          Decimal(2_500_000)),
+                         [{"symbol": "VOO", "shares": 17, "gain": Decimal(2_380_000)}])   # 30 thousand won: no extra trade.
         stack = self.data()["pension_stack"]
         self.assertEqual((stack["age"], [t["retire_age"] for t in stack["tiers"]]), (37, [50, 55, 60]))
 

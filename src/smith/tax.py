@@ -237,10 +237,16 @@ def harvest_plan(t: dict[str, Any]) -> dict[str, Any] | None:
             "sell": sell, "sold_gain": sum((s["gain"] for s in sell), Decimal(0)), "trade_by": us_year_end_trade_day(t["year"])}
 
 
+# Assumption: a further position whose shares add less gain than this is not worth another sale and purchase
+# (the real ledger's second position added about 30 thousand won, user review 2026-11-02).
+HARVEST_EXTRA_MIN = Decimal(300_000)
+
+
 def harvest_lots(lots: list[dict[str, Any]], cap: Decimal) -> list[dict[str, Any]]:
     """Whole shares whose gain stays within `cap`, from the position with the largest gain first (fewest
     trades): [{"symbol", "shares", "gain"}]. A share whose own gain exceeds what is left is skipped, so the
-    total never passes the deduction; empty when no single share fits."""
+    total never passes the deduction, and a further position adding less than HARVEST_EXTRA_MIN is left out;
+    empty when no single share fits."""
     left, found = cap, []
     for lot in sorted(lots, key=lambda x: (-x["gain"], x["symbol"])):
         per_share = lot["gain"] / lot["quantity"]
@@ -248,6 +254,8 @@ def harvest_lots(lots: list[dict[str, Any]], cap: Decimal) -> list[dict[str, Any
         if shares <= 0:
             continue
         gain = per_share * shares
+        if found and gain < HARVEST_EXTRA_MIN:
+            continue
         found.append({"symbol": lot["symbol"], "shares": shares, "gain": gain})
         left -= gain
     return found
