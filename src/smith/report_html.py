@@ -380,10 +380,11 @@ def system_notes(data: dict[str, Any]) -> list[str]:
 
 def _page(bands: list[str]) -> str:
     spacer = '<tr><td style="height:12px;line-height:12px;font-size:0">&nbsp;</td></tr>'
-    # The expand hint of a collapsible card follows its state where <style> is honoured. The "open" hint is
-    # hidden inline, so a client without <style> or <details> (Gmail) shows the card open with one hint
-    # (▼ 펼쳐서 상세 보기), never both; here the stylesheet swaps them with !important over the inline style.
+    # The expand hint of a collapsible card is hidden inline and appears only inside a real <details>, where it
+    # follows the card's state. Gmail drops <details> (every card shows open), so there it never appears and
+    # never promises a tap that does nothing; the stylesheet overrides the inline style with !important.
     style = ('<style>details>summary{list-style:none}details>summary::-webkit-details-marker{display:none}'
+             'details>summary .mk-hint{display:inline!important}details>summary .mk-hint.mk-block{display:block!important}'
              'details[open]>summary .mk-open{display:inline!important}'
              'details[open]>summary .mk-closed{display:none!important}</style>')
     return (f'<!doctype html><html lang="ko"><head><meta charset="utf-8">'
@@ -1027,11 +1028,14 @@ def _undetermined(advice: dict[str, Any]) -> str:
 
 
 def _expand_hint(*, on_dark: bool = False, block: bool = False) -> str:
-    """"▼ 펼쳐서 상세 보기" on a closed card, "▲ 접기" on an open one where <style> is honoured; floated right in a
-    section summary, or its own line (`block`) under a card title."""
+    """"▼ 펼쳐서 상세 보기" on a closed card, "▲ 접기" on an open one; floated right in a section summary, or its
+    own line (`block`) under a card title. Hidden inline and shown only by the stylesheet inside a real <details>:
+    Gmail (app and web) drops <details> and shows every card open, so the hint there promised a tap that did
+    nothing (client report 2026-11-02)."""
     color = ON_DARK if on_dark else BLUE
-    place = "display:block;margin-top:6px" if block else "float:right;margin-left:10px"
-    return (f'<span style="{place};font-size:12px;font-weight:600;color:{color};white-space:nowrap">'
+    place = "margin-top:6px" if block else "float:right;margin-left:10px"
+    kind = "mk-hint mk-block" if block else "mk-hint"
+    return (f'<span class="{kind}" style="display:none;{place};font-size:12px;font-weight:600;color:{color};white-space:nowrap">'
             f'<span class="mk-closed">▼ 펼쳐서 상세 보기</span><span class="mk-open" style="display:none">▲ 접기</span></span>')
 
 

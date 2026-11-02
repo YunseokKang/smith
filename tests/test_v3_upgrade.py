@@ -161,6 +161,12 @@ class LayoutTests(Upgrade):
         self.assertNotIn("<details open", overview.split("고객님께 드리는 제안")[1].split("함께 검토한")[-1])
         self.assertIn("background:#f8f9fa;padding:16px 20px;border-radius:16px;", overview)
         self.assertIn("▼ 펼쳐서 상세 보기", overview)
+        # Gmail drops <details> and shows every card open: the hint is hidden inline and only the stylesheet,
+        # inside a real <details>, shows it (client report 2026-11-02).
+        hints = re.findall(r'<span class="mk-hint[^"]*" style="([^"]*)"', overview)
+        self.assertTrue(hints and all(style.startswith("display:none;") for style in hints))
+        self.assertEqual(len(hints), overview.count("▼ 펼쳐서 상세 보기"))
+        self.assertIn("details>summary .mk-hint{display:inline!important}", overview)
         rates = render(self.report("rates"))[1]
         self.assertIn("<details open style", rates)
         self.assertLess(rates.index("부채·금리 현황 및 금리 변동 민감도"), rates.index("고객님께 드리는 제안"))
