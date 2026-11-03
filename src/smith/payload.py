@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
-from smith import evidence, ledger
+from smith import evidence, ledger, realized
 from smith.announcements import Announcement
 from smith.records import Kind, RecordInput, Status
 from smith.relevance import ExposureResult, exposures
@@ -71,6 +71,8 @@ class LedgerView:
     owner_aliases: dict[str, str] = field(default_factory=dict)  # owner id -> role-preserving alias.
     source_aliases: dict[str, str] = field(default_factory=dict)  # source id -> alias for warnings.
     record_sources: dict[str, str] = field(default_factory=dict)  # record id -> import source; stays local.
+    sales: list[realized.Sale] = field(default_factory=list)  # Listed stocks sold this year (realized.sales).
+    sales_since: datetime | None = None  # The first broker snapshot: sales before it are unknown.
 
 
 def load_view(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetime) -> LedgerView:
@@ -81,9 +83,11 @@ def load_view(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetime) 
         links = exposures(conn, as_of=as_of, known_at=known_at)
         series = evidence.describe(ledger.load_evidence(conn, known_at=known_at), as_of=as_of.date())
         news = ledger.load_announcements(conn, since=as_of - timedelta(days=90), until=as_of, known_at=known_at)
+        sales = realized.sales(conn, as_of=as_of, known_at=known_at)
+        sales_since = realized.covered_since(conn, known_at=known_at)
     rates = {BASE_CURRENCY: Decimal(1), **{f["subject"]: f["value"] for f in summary.fx}}
     view = LedgerView(as_of, summary, [s.record for s in states], rates, links, series, news,
-                      record_sources={s.record.record_id: s.source for s in states})
+                      record_sources={s.record.record_id: s.source for s in states}, sales=sales, sales_since=sales_since)
     view.aliases = _aliases(view)
     view.owner_aliases = _owner_aliases(view)
     sources = {row["source"] for row in summary.freshness} | {row["source"] for row in summary.sync}

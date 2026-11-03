@@ -7,3 +7,4 @@
 | [BUG-2026-003](BUG-2026-003-source-check-hash-tripped-the-phone-rule.md) | 조사 항목의 출처 확인 해시(SHA-256) 숫자열이 전화번호 규칙에 걸려 금리판이 서술 없이 발송 | 2026-10-18 | 모델 입력 항목을 본문 필드로 한정, 서술 실패를 발송 로그에 기록 |
 | [BUG-2026-004](BUG-2026-004-fitbit-days-booked-on-utc-date.md) | Fitbit 수면·운동 기록이 현지 날짜가 아니라 UTC 날짜로 저장돼 아침에 끝난 잠이 전날로 들어감 | 2026-10-27 | `fitbit._local`(UTC 시각 + 시차), 14일 재동기화 |
 | [BUG-2026-005](BUG-2026-005-system-prompt-past-windows-command-line-limit.md) | 해석 지시문이 Windows 명령줄 한도(32,767자)를 넘어 부동산 레터가 AI 해석 없이 발송됨 | 2026-10-28 | `--system-prompt-file`, 명령줄 길이 검사 |
+| [BUG-2026-006](BUG-2026-006-sold-stock-cost-asked-of-the-client.md) | 판 종목의 매입가를 고객에게 되묻고, 연말 공제 제안이 올해 실현 이익을 모름 | 2026-11-03 | `realized.sales`, 남은 공제 기준 제안, `mail-answer-v17` |

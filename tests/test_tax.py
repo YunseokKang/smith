@@ -2,12 +2,12 @@ import json
 import unittest
 from types import SimpleNamespace
 from contextlib import closing
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
-from smith import ledger, tax
+from smith import ledger, narrative, tax
 from smith.importer import parse_import
-from smith.records import ImportBatch, ImportRejected, Observation
+from smith.records import ChangeType, ImportBatch, ImportRejected, Kind, Observation, RecordInput, Status
 from smith.report_data import build_report
 from smith.report_html import render
 
@@ -41,6 +41,20 @@ RECORDS = [
     rec("to-pension", "cashflow", category="internal_transfer", direction="outflow", currency="KRW", amount="990000",
         frequency="monthly", start_date="2026-06-01", target_record_id="pension"),
 ]
+
+
+def _toss(conn, import_id, at, positions, fx=None):
+    """A Toss snapshot of USD positions (symbol, name, quantity, price, average cost[, account])."""
+    records = tuple(RecordInput(f"toss-{(rest or ['a'])[0] * 8}-{symbol.lower()}", Kind.ASSET, "self", at, 0, Status.ACTIVE,
+                                ChangeType.UPDATE, None, None,
+                                {"category": "stock", "account_type": "brokerage", "currency": "USD",
+                                 "value": str(Decimal(qty) * Decimal(price)), "valuation_method": "api",
+                                 "liquidity": "days", "symbol": symbol, "instrument_name": name, "market": "US",
+                                 "quantity": qty, "unit_price": price, "average_cost": cost})
+                    for symbol, name, qty, price, cost, *rest in positions)
+    observations = () if fx is None else (Observation("USD", "fx_mid_rate", "KRW", fx, at),)
+    ledger.apply_import(conn, ImportBatch(import_id, "toss", "snapshot", at, ("self",), records, import_id, observations),
+                        recorded_at=at, close_missing=True)
 
 
 class TaxTests(unittest.TestCase):
@@ -128,6 +142,101 @@ class TaxTests(unittest.TestCase):
         self.assertEqual(tax._lots(two, [Decimal(4_200_000), None]), [])   # Part unknown: the per-share gain is unknown.
         stack = self.data()["pension_stack"]
         self.assertEqual((stack["age"], [t["retire_age"] for t in stack["tiers"]]), (37, [50, 55, 60]))
+
+    def test_this_years_toss_sales_take_the_deduction_and_reach_the_model(self):
+        # Client reply 2026-11-03: Smith asked for the cost of a stock it had just recorded as sold. A Toss position
+        # closed (all 10 sold) and one cut from 10 to 4 are sales at the last quote; the manual VOO lot is not.
+        # Synthetic symbols and amounts.
+        t1, t2 = datetime(2026, 10, 20, tzinfo=timezone.utc), datetime(2026, 11, 2, tzinfo=timezone.utc)
+        toss = lambda *args: _toss(self.conn, *args)
+        toss("s1", t1, [("ABC", "에이비씨", "10", "280", "100"), ("XYZ", "엑스와이지", "10", "400", "300")], "1300")
+        toss("s2", t2, [("XYZ", "엑스와이지", "4", "410", "300")], "1350")
+        doc = {"schema_version": 1, "import_id": "t5", "source": "manual", "mode": "patch", "as_of": t2.isoformat(),
+               "owners": [{"id": "self"}], "records": [dict(RECORDS[3], effective_at=t2.isoformat(), revision=2, quantity="30",
+                                                             value="15000")]}
+        ledger.apply_import(self.conn, parse_import(json.dumps(doc)), recorded_at=t2)
+        data = build_report(self.conn, as_of=t2, known_at=t2, baseline=None, kind="monday", household=HOUSEHOLD)
+        view = data["view"]
+        self.assertEqual([(s.symbol, s.quantity, s.price, s.gain_won) for s in view.sales],
+                         [("ABC", Decimal(10), Decimal(280), Decimal(2_430_000)),    # 180 x 10 x 1,350.
+                          ("XYZ", Decimal(6), Decimal(400), Decimal(810_000))])      # 100 x 6 x 1,350.
+        self.assertEqual(view.sales_since, t1)
+        t = tax.facts(view, t2.date(), HOUSEHOLD)
+        plan = tax.harvest_plan(t)
+        self.assertEqual((plan["realized"], plan["room"]), (Decimal(3_240_000), Decimal(-740_000)))
+        self.assertEqual(plan["realize"], 0)
+        card = next(p for p in data["advice"]["proposals"] if p.key == "overseas-harvest")
+        self.assertEqual(card.headline, "올해 해외주식 공제 소진, 추가 매도는 내년으로")
+        self.assertIn("약 324만 원으로 해외주식 양도세 기본공제 250만 원을 다 썼습니다", card.title)
+        self.assertIn("에이비씨 10주·엑스와이지 6주", card.why)
+        realized = tax.realized_payload(view)
+        self.assertEqual((realized["self_us_realized_gain_won"], realized["self_us_deduction_left_won"]), ("3240000", "0"))
+        self.assertEqual(realized["sales"][0]["average_cost"], "100")
+        self.assertIn(("해외주식 양도소득", "올해 실현 이익 약 324만 원(토스 매도 2건, 추정) / 남은 공제 0원"),
+                      [row[:2] for row in tax.checklist(t)])
+        # Every day's model input carries the sales, and Smith's tax figures are then a source to cite.
+        rates = build_report(self.conn, as_of=t2, known_at=t2, baseline=None, kind="rates", household=HOUSEHOLD)
+        payload = narrative.build_payload(rates["view"], rates, None)
+        self.assertEqual(payload["tax"]["realized_this_year"]["self_us_deduction_left_won"], "0")
+        self.assertIn("tax", narrative._known_refs(payload))
+        # The next year starts with nothing realized.
+        later = datetime(2027, 1, 10, tzinfo=timezone.utc)
+        self.assertEqual(build_report(self.conn, as_of=later, known_at=t2, baseline=None, kind="monday",
+                                      household=HOUSEHOLD)["view"].sales, [])
+
+    def test_sales_review_cases(self):
+        # Review 2026-11-03: a move between Toss accounts is no sale; a sale without an FX rate leaves the deduction
+        # unknown, not whole; much deduction left beside a small gain is no "used up" card. Synthetic values.
+        t1, t2 = datetime(2026, 10, 20, tzinfo=timezone.utc), datetime(2026, 11, 2, tzinfo=timezone.utc)
+        cases = {
+            # Which account sold at which cost cannot be told when the stock grew elsewhere: unknown, not dropped.
+            "moved": ([("ABC", "에이비씨", "10", "280", "100", "a")], [("ABC", "에이비씨", "10", "281", "100", "b")], "1350",
+                      [("ABC", None, "moved")]),
+            # The shares arrive in the other account a day later (review 2026-11-03), checked at the later snapshot.
+            "moved late": ([("ABC", "에이비씨", "10", "280", "100", "a")], [], "1350", [("ABC", None, "moved")]),
+            # Another account exists and nothing arrived yet: the fall may still be a move for a week.
+            "pending": ([("ABC", "에이비씨", "10", "280", "100", "a"), ("XYZ", "엑스와이지", "1", "110", "100", "b")],
+                        [("XYZ", "엑스와이지", "1", "110", "100", "b")], "1350", [("ABC", None, "pending")]),
+            # A 1-for-10 reverse split: fewer shares at ten times the cost, no trade.
+            "reverse split": ([("ABC", "에이비씨", "1000", "5", "1")], [("ABC", "에이비씨", "100", "50", "10")], "1350",
+                              [("ABC", None, "cost-changed")]),
+            # Account a's last quote and b's arrival in one snapshot, a closed the next (review 2026-11-03).
+            "moved same": ([("ABC", "에이비씨", "10", "281", "100", "a"), ("ABC", "에이비씨", "10", "281", "100", "b")],
+                           [("ABC", "에이비씨", "10", "282", "100", "b")], "1350", [("ABC", None, "moved")]),
+            "no fx": ([("ABC", "에이비씨", "10", "280", "100"), ("XYZ", "엑스와이지", "1", "110", "100")],
+                      [("XYZ", "엑스와이지", "1", "110", "100")], None, [("ABC", None, None)]),
+            "room left": ([("ABC", "에이비씨", "10", "105", "100"), ("XYZ", "엑스와이지", "1", "110", "100")],
+                          [("XYZ", "엑스와이지", "1", "110", "100")], "1350", [("ABC", Decimal(67_500), None)]),
+        }
+        for name, (first, second, fx, expected) in cases.items():
+            with self.subTest(name):
+                conn = ledger.connect(":memory:")
+                self.addCleanup(conn.close)
+                doc = {"schema_version": 1, "import_id": "t1", "source": "manual", "mode": "patch",
+                       "as_of": AT.isoformat(), "owners": [{"id": "self"}], "records": RECORDS[:3]}
+                ledger.apply_import(conn, parse_import(json.dumps(doc)), recorded_at=AT)
+                _toss(conn, "s1", t1, first, fx and "1300")   # "no fx": no rate at all.
+                _toss(conn, "s2", t2, second, fx)
+                at = t2 + timedelta(days=1)
+                _toss(conn, "s3", at, second + [("ABC", "에이비씨", "10", "281", "100", "b")] * (name == "moved late"),
+                      "1350")                                   # The rate arrives only after the sale was seen.
+                data = build_report(conn, as_of=at, known_at=at, baseline=None, kind="monday", household=HOUSEHOLD)
+                self.assertEqual([(s.symbol, s.gain_won, s.unclear) for s in data["view"].sales], expected)
+                t = tax.facts(data["view"], at.date(), HOUSEHOLD)
+                cards = [p for p in data["advice"]["proposals"] if p.key == "overseas-harvest"]
+                pending = [u for u in data["advice"]["undetermined"] if u.key == "overseas-harvest"]
+                if name in ("no fx", "moved"):   # Unknown gains: no harvest card, the judgement is pending.
+                    self.assertIsNone(tax.harvest_plan(t)["room"])
+                    self.assertIsNone(tax.realized_payload(data["view"])["self_us_deduction_left_won"])
+                    self.assertEqual((cards, len(pending)), ([], 1))
+                    self.assertIsNone(t["us_realized"])                       # Unknown, never shown as 0원.
+                    friday = build_report(conn, as_of=at, known_at=at, baseline=None, kind="tax", household=HOUSEHOLD)
+                    self.assertIn("올해 실현 미상 · 남은 공제 미상", render(friday)[1])
+                    self.assertIn("올해 실현 이익 미상(토스 매도 1건 중 1건 계산 불가) / 남은 공제 미상",
+                                  [row[1] for row in tax.checklist(t)])
+                elif name == "room left":
+                    self.assertEqual(tax.harvest_plan(t)["room"], Decimal(2_432_500))
+                    self.assertNotIn("소진", cards[0].headline)
 
     def test_a_pension_without_an_fx_rate_makes_the_retirement_track_a_lower_bound(self):
         eur = rec("eur-pension", "asset", category="fund", account_type="pension_savings", currency="EUR",

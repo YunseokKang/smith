@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from smith import (adviser, editions, fundamentals, future_income, headless, holdings, insiders, korean, ledger, memory,
-                   principles, reader, research, stress)
+                   principles, reader, research, stress, tax)
 from smith.fmt import short_won
 from smith.payload import PayloadRejected, build_context, check_outbound, won
 from smith.proposals import Proposal
@@ -65,7 +65,8 @@ logger = logging.getLogger(__name__)
 # v31: a part that moved against the total is named with what offset it (the 2026-11-02 letter: +58만 beside -176만).
 # v32: no per-sentence law caveat; the footer says it once (user decision 2026-11-02); the check no longer asks for it.
 # v33: holdings[].week_change and index_moves; a holding that moved 10% or more opens its reason with why (2026-11-03).
-PROMPT_VERSION = "narrative-v33"
+# v34: tax.realized_this_year, this year's sales with their estimated gains and the deduction left (2026-11-03).
+PROMPT_VERSION = "narrative-v34"
 MODEL = "fable"
 # A runaway guard, not a cost limit (flat-rate subscription): the markets day cost 4.39 USD on 2026-10-27 and, with a
 # payload a fifth larger, ran past 5.00 on 2026-11-03 (error_max_budget_usd), so that report went out without opinions.
@@ -332,6 +333,9 @@ Input JSON:
   those count as told too, and code drops their titles as well.
 - tax: tax strategy notes and the year-end checklist computed by code. Use them to explain the after-tax
   logic of the proposals (which account, when to realize gains, marriage-registration timing).
+  tax.realized_this_year: the stocks sold this year as the broker sync saw them (average cost, estimated
+  sale price, gain in won) with the client's own US total and the overseas deduction left. A sale's gain is
+  an estimate (the last quote before the sale, not the fill) and covers only the scope it names: say so.
 - holdings: the listed holdings Smith gives opinions on, computed by code: quantity, price, average cost,
   value, share of the holdings (decimal ratio), return_on_cost, unrealized_gain, whether overseas capital
   gains tax applies, whether the holding is above the concentration limit, employer_stock (the client's
@@ -493,7 +497,8 @@ def build_payload(view: Any, data: dict[str, Any], brief: dict[str, Any] | None,
     if edition.key not in ("property", "overview"):
         payload["property_market"] = []
     if edition.key not in ("tax", "property"):
-        payload["tax"] = {"notes": [], "year_end_checklist": []}
+        # A sale's gain belongs to every day (the markets day sees the trades): only the notes stay on their days.
+        payload["tax"] = {"notes": [], "year_end_checklist": [], "realized_this_year": payload["tax"]["realized_this_year"]}
     if not edition.strategy:
         payload["strategy"] = []
     return payload
@@ -529,7 +534,8 @@ def _full_payload(view: Any, data: dict[str, Any], brief: dict[str, Any] | None,
         **holdings_payload(view, data),
         "client_memory": client_memory or [],
         "tax": {"notes": [{"title": n.title, "body": n.body, "when": n.when} for n in advice.get("tax_notes", [])],
-                "year_end_checklist": [list(row) for row in advice.get("tax_checklist", [])]},
+                "year_end_checklist": [list(row) for row in advice.get("tax_checklist", [])],
+                "realized_this_year": tax.realized_payload(view)},
         "brief": None if brief is None else {
             "researched_at": brief["created_at"].date().isoformat(),
             "items_untrusted": _model_items(brief["brief"]["items"]), "gaps": brief["brief"]["gaps"]},
@@ -1647,10 +1653,11 @@ def _known_refs(payload: dict[str, Any]) -> set[str]:
     known = {"case"}
     # "tax" (Smith's own tax rules and calculations) is a source only when this payload carries them: tax
     # notes or the checklist, a tax proposal, or the holdings (each carries Smith's overseas capital-gains
-    # flag, and a trim or exit opinion must give the tax order of selling). A daily edition without any of
-    # these cannot cite it.
+    # flag, and a trim or exit opinion must give the tax order of selling), or this year's sales with the deduction
+    # they used. A daily edition without any of these cannot cite it.
     tax_inputs = payload.get("tax") or {}
     if (tax_inputs.get("notes") or tax_inputs.get("year_end_checklist") or payload.get("holdings")
+            or (tax_inputs.get("realized_this_year") or {}).get("sales")
             or any(p.get("key") in TAX_PROPOSALS for p in payload.get("proposals", []))):
         known.add("tax")
     for section in ("assets", "liabilities", "goals", "exposures", "evidence", "announcements"):

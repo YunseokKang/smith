@@ -13,7 +13,7 @@ from decimal import Decimal
 from typing import Any
 
 from smith.fmt import percent, short_won
-from smith.payload import LedgerView, base_amount, unrealized_gain
+from smith.payload import LedgerView, base_amount, unrealized_gain, won
 from smith.records import Kind
 
 RULES_YEAR = 2026
@@ -147,6 +147,8 @@ def facts(view: LedgerView, today: date, household: dict[str, Any] | None) -> di
     us = [r for r in listed if r.fields.get("managed_by") != "hermes"]
     gains = [unrealized_gain(view, r) for r in us]
     known = [g for g in gains if g is not None]
+    # This year's US sales seen in the broker sync share the yearly deduction (realized.sales: estimated prices).
+    sold = [sale for sale in view.sales if sale.owner_id == "self" and sale.market == "US"]
     return {
         "today": today, "year": today.year,
         "pension_savings_paid": contributions.get("pension_savings", Decimal(0)),
@@ -159,6 +161,12 @@ def facts(view: LedgerView, today: date, household: dict[str, Any] | None) -> di
         "us_unknown": len(gains) - len(known), "us_positions": len(us),
         # The positions with a gain, for the shares to sell (harvest_lots): symbol, shares held, gain in won.
         "us_lots": _lots(us, gains),
+        "us_sales": sold, "us_sales_since": view.sales_since,
+        # One sale without a won gain (no FX rate, or an unclear move between accounts) makes the year's total
+        # unknown, not smaller: a missing sale may be a gain or a loss (review 2026-11-03).
+        "us_realized_unknown": sum(1 for sale in sold if sale.gain_won is None),
+        "us_realized": (None if any(sale.gain_won is None for sale in sold)
+                        else sum((sale.gain_won for sale in sold), Decimal(0))),
         "hermes_managed": any(r.fields.get("managed_by") == "hermes" for r in mine if r.kind is Kind.ASSET),
         "homes": [(r.owner_id, base_amount(view, r), r.fields.get("occupancy")) for r in view.records
                   if r.kind is Kind.ASSET and r.fields["category"] == "real_estate"],
@@ -239,6 +247,34 @@ def yearly_credit_base(savings_monthly: Decimal, irp_monthly: Decimal) -> Decima
     return min(min(savings_monthly * 12, PENSION_SAVINGS_LIMIT) + irp_monthly * 12, PENSION_TOTAL_LIMIT)
 
 
+_UNCLEAR = {"moved": "the same stock grew in another account around the fall: a move or a buy-back, so the gain is unknown",
+            "cost-changed": "the average cost changed with the fall: a split or another trade, so the gain is unknown",
+            "pending": "fell in the last 7 days while the owner has another broker account: may still arrive there"}
+
+
+def realized_payload(view: LedgerView) -> dict[str, Any]:
+    """This year's listed-stock sales the broker sync saw (realized.sales), for the model. The client's own US total
+    and the deduction left are computed here; the model only reads them (client reply 2026-11-03)."""
+    mine = [sale for sale in view.sales if sale.owner_id == "self" and sale.market == "US"]
+    # A sale without a won amount makes the total unknown, not smaller (an unknown amount is never zero).
+    realized = (None if any(sale.gain_won is None for sale in mine)
+                else sum((sale.gain_won for sale in mine), Decimal(0)))
+    return {
+        "scope": ("sales seen in the Toss brokerage sync since covered_since; other brokerages are not included; "
+                  "estimated_price is the last quote before the sale, not the fill, so gains are estimates"),
+        "covered_since": None if view.sales_since is None else view.sales_since.date().isoformat(),
+        "sales": [{"owner": view.owner_aliases.get(sale.owner_id, "household_member"), "symbol": sale.symbol,
+                   "name": sale.name, "market": sale.market, "currency": sale.currency,
+                   "quantity": str(sale.quantity), "average_cost": str(sale.average_cost),
+                   "estimated_price": str(sale.price),
+                   "sold_between": [sale.held_at.date().isoformat(), sale.seen_at.date().isoformat()],
+                   "gain": None if sale.gain is None else str(sale.gain), "gain_won": won(sale.gain_won),
+                   **({"unclear": _UNCLEAR[sale.unclear]} if sale.unclear else {})} for sale in view.sales],
+        "self_us_realized_gain_won": won(realized),
+        "self_us_deduction_left_won": None if realized is None else won(max(Decimal(0), OVERSEAS_DEDUCTION - realized)),
+    }
+
+
 def harvest_plan(t: dict[str, Any]) -> dict[str, Any] | None:
     """Realizing overseas gains up to the yearly basic deduction each year keeps them out of tax later. `sell`
     names the whole shares that do it (harvest_lots) and `trade_by` the last US trading day that still settles
@@ -246,12 +282,18 @@ def harvest_plan(t: dict[str, Any]) -> dict[str, Any] | None:
     if t["us_positions"] == 0 or t["us_gains"] <= 0:
         return None
     net = t["us_gains"] + t["us_losses"]
-    # Selling only positions with gains: losses still held are not netted until they are sold too.
-    realize = min(t["us_gains"], OVERSEAS_DEDUCTION)
+    # What this year's sales already used (a net loss widens the room); selling only positions with gains: losses
+    # still held are not netted until they are sold too.
+    # A sale whose gain could not be put in won leaves the room unknown (None), never the whole deduction (review
+    # 2026-11-03): nothing is proposed for sale then.
+    realized = t.get("us_realized", Decimal(0))
+    room = None if realized is None else OVERSEAS_DEDUCTION - realized
+    realize = Decimal(0) if room is None else max(Decimal(0), min(t["us_gains"], room))
     sell = harvest_lots(t.get("us_lots") or [], realize)
     return {"gains": t["us_gains"], "losses": t["us_losses"], "net": net, "realize": realize,
+            "realized": realized, "room": room,
             "saving": realize * OVERSEAS_RATE, "unknown": Decimal(t["us_unknown"]),
-            "tax_if_all_sold": max(Decimal(0), net - OVERSEAS_DEDUCTION) * OVERSEAS_RATE,
+            "tax_if_all_sold": None if realized is None else max(Decimal(0), net + realized - OVERSEAS_DEDUCTION) * OVERSEAS_RATE,
             "sell": sell, "sold_gain": sum((s["gain"] for s in sell), Decimal(0)), "trade_by": us_year_end_trade_day(t["year"])}
 
 
@@ -510,6 +552,14 @@ def checklist(t: dict[str, Any]) -> list[tuple[str, str, str]]:
              if plan["irp_room"] else "한도 채움")]
     rows.append(("보장성 보험료", "연 100만 원까지 12% 세액공제", "회사 연말정산에 자동 반영되는지 확인"))
     rows.append(("신용·체크카드", "총급여의 25% 초과분부터 소득공제", "연말까지는 공제율이 높은 체크카드·현금영수증 사용이 유리"))
+    if t.get("us_sales"):
+        realized, count = t["us_realized"], len(t["us_sales"])
+        rows.append(("해외주식 양도소득",
+                     f"올해 실현 이익 미상(토스 매도 {count}건 중 {t['us_realized_unknown']}건 계산 불가) / 남은 공제 미상"
+                     if realized is None else
+                     f"올해 실현 이익 약 {short_won(realized)}(토스 매도 {count}건, 추정) / "
+                     f"남은 공제 {short_won(max(Decimal(0), OVERSEAS_DEDUCTION - realized))}",
+                     "다른 증권사에서 판 해외주식 손익과 합산해 확인, 공제를 넘으면 다음 해 5월 양도소득세 신고"))
     return rows
 
 
@@ -523,5 +573,6 @@ def assumptions() -> list[str]:
             "연금계좌 납입: 원장의 정기 이체를 공제 대상 납입으로 가정(계좌 간 이전·ISA 만기 이전액은 제외 대상)",
             f"연금계좌 공제율 {percent(CREDIT_RATE_HIGH, 1)}(총급여 5,500만 원 초과 가정)",
             f"해외주식 양도세 {percent(OVERSEAS_RATE, 0)}, 기본공제 연 {short_won(OVERSEAS_DEDUCTION)}, 원화 손익은 현재 환율 기준 근사",
+            "올해 실현한 해외주식 이익: 토스 동기화에서 보유 수량이 줄어든 종목을 매도로 보고, 매도 직전 시세로 추정(체결가 아님)",
             f"은퇴 필요 자금: 현재 가치 월 생활비, 실질 수익률 연 {percent(REAL_RETURN, 0)}, 인출률 연 {percent(WITHDRAWAL_RATE, 0)}, 국민연금 제외",
             "양도세 추정: 원장 평가액에 판다고 가정, 누진세율·장기보유특별공제·기본공제 250만 원 반영, 필요경비 제외"]

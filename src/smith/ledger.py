@@ -1305,14 +1305,29 @@ def record_states(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
 
     Closed records are included with status closed; records not yet effective are omitted.
     """
+    states = (_state_at(history, as_of) for history in record_histories(conn, known_at=known_at))
+    return [state for state in states if state is not None]
+
+
+def record_histories(conn: sqlite3.Connection, *, known_at: datetime) -> list[list[StoredRevision]]:
+    """Every record's revisions recorded by `known_at`, in revision order, one list per record."""
     rows = conn.execute(f"SELECT {_COLUMNS} FROM record_revisions WHERE recorded_at <= ? "
                         "ORDER BY record_id, revision", (_db_time(known_at),)).fetchall()
-    states = []
-    for _, group in groupby((_from_row(row) for row in rows), key=lambda r: r.record.record_id):
-        state = _state_at(list(group), as_of)
-        if state is not None:
-            states.append(state)
-    return states
+    return [list(group) for _, group in groupby((_from_row(row) for row in rows), key=lambda r: r.record.record_id)]
+
+
+def first_effective(conn: sqlite3.Connection, *, sources: tuple[str, ...], known_at: datetime) -> datetime | None:
+    """The earliest effective time of any revision from `sources` recorded by `known_at`."""
+    row = conn.execute(f"SELECT MIN(effective_at) FROM record_revisions WHERE source IN ({','.join('?' * len(sources))}) "
+                       "AND recorded_at <= ?", (*sources, _db_time(known_at))).fetchone()
+    return None if row[0] is None else datetime.fromisoformat(row[0])
+
+
+def effective_history(history: list[StoredRevision]) -> list[StoredRevision]:
+    """One record's revisions without those a correction replaced, in effective order."""
+    superseded = {r.record.corrects_revision for r in history}
+    return sorted((r for r in history if r.record.revision not in superseded),
+                  key=lambda r: (r.record.effective_at, r.record.revision))
 
 
 # Sources whose listed prices are market quotes taken at sync time (smith.toss_sync).
@@ -1359,9 +1374,8 @@ def reprice(states: list[StoredRevision]) -> list[StoredRevision]:
 
 
 def _state_at(history: list[StoredRevision], as_of: datetime) -> StoredRevision | None:
-    superseded = {r.record.corrects_revision for r in history}
-    candidates = [r for r in history if r.record.revision not in superseded and r.record.effective_at <= as_of]
-    return max(candidates, key=lambda r: (r.record.effective_at, r.record.revision), default=None)
+    candidates = [r for r in effective_history(history) if r.record.effective_at <= as_of]
+    return candidates[-1] if candidates else None
 
 
 def _revisions(conn: sqlite3.Connection, record_id: str) -> list[StoredRevision]:

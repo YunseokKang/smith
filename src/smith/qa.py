@@ -41,7 +41,7 @@ from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import check_outbound, mask_identifiers
 from smith.report_data import build_report
 
-PROMPT_VERSION = "mail-answer-v16"  # v16: korean.STYLE (client style guide 2026-11-01); v15: public look-ups (FR-43); v14: narrative-v27 (natural Korean); v13: principles are consensus, not law.
+PROMPT_VERSION = "mail-answer-v17"  # v17: tax.realized_this_year; ask the client only what Smith cannot know (2026-11-03); v16: korean.STYLE (client style guide 2026-11-01); v15: public look-ups (FR-43); v14: narrative-v27 (natural Korean); v13: principles are consensus, not law.
 MODEL = "fable"
 BUDGET_USD = "3.00"
 TIMEOUT_SECONDS = 600
@@ -85,12 +85,16 @@ banker replying to a short message.
   ("반영해 두었습니다", "다음 보고서부터 … 계산해 드리겠습니다"). Until then, answer with the figures as they are.
 The input is the full ledger snapshot at the time of the report the client replied to (household,
 proposals, strategy, tax, property_market, sector_metrics, brief; listed holdings carry unrealized_gain and
-return_on_cost when their cost basis is known), so every area can be answered. That report may have been a
+return_on_cost when their cost basis is known; stocks sold this year are in tax.realized_this_year with their
+average cost, estimated sale price and gain), so every area can be answered. That report may have been a
 short themed one (report_kind): only the proposals in report_proposals were in it, and what it said is
 recent_report. Call a proposal "보고서에서 말씀드린 제안" only if it is in report_proposals; any other
 proposal is background you may explain, not something the report said. All figures are as of report_date;
-say "보고서 기준" when timing matters. If the input cannot answer the question, say exactly which
-information is needed instead of guessing.
+say "보고서 기준" when timing matters. Before saying Smith does not know something, look for it in the input
+(a sold stock's cost and gain are in tax.realized_this_year). If the input still cannot answer, say exactly
+which information is missing instead of guessing, and ask the client for it only when it is theirs alone to
+know (another brokerage's records, their plans); never ask the client for a figure Smith records itself
+(client reply 2026-11-03: "DB에 이미 있을텐데").
 
 conversation: the earlier turns of this e-mail thread, oldest first. "client" is what the client wrote,
 "smith" what Smith answered (null: not answered, or delivery unconfirmed). client_question is the newest
@@ -152,8 +156,9 @@ Hard rules (checked by code; a failing answer is rejected):
   client_memory), or the research items you cite in refs. Your own earlier answers are not a source of figures. Do not
   compute new sums, differences, percentages or projections.
 - Outside facts need R or N refs; laws, taxes and loan rules need an official-tier R item, an N
-  announcement, or "tax" (Smith's own tax rules in the input), and "현행 법령 확인 필요". Refs go only in
-  refs, never in the prose.
+  announcement, or "tax" (Smith's own tax rules in the input). Refs go only in refs, never in the prose.
+  Never add "현행 법령 확인 필요": the reply's footer carries the one reminder to confirm current law, as in
+  the report (user decision 2026-11-02).
 - No certainty about prices, rates, returns, approvals or guarantees. Never state the client's legal
   home count as a fact.
 - Assets managed by Hermes (managed_by "hermes") are never to be sold or changed directly: say to discuss
@@ -608,7 +613,7 @@ def render(question: Question, result: dict[str, Any], data: dict[str, Any]) -> 
             f'Smith는 조회 전용 자문입니다. 매매·이체·대출 신청을 실행하지 않으며, 세금과 법령은 실행 전 현행 기준을 '
             f'확인하셔야 합니다. 이 메일에 다시 답장하시면 이어서 답해 드립니다.</div></div></body></html>')
     text = result["text"] + "".join(f"\n참고: {m}" for m in result.get("memos", [])) \
-        + ("\n\n출처: " + ", ".join(url for _, url in sources) if sources else "") \
+        + ("\n\n출처: " + ", ".join(dict.fromkeys(url for _, url in sources)) if sources else "") \
         + ("\n\n기억해 두겠습니다: " + " / ".join(text for _, text in remembered) if remembered else "")
     return html, text
 

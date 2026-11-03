@@ -142,7 +142,9 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
             "stress": stress.test(view, kpis, sectors, lease_plans),
             # This year's pension credit room and overseas gains, for the tax day's headline numbers.
             "tax_plan": {**tax.pension_plan(plan), "us_gains": plan["us_gains"], "us_unknown": plan["us_unknown"],
-                         "us_positions": plan["us_positions"], "pension_unconverted": plan["pension_unconverted"]},
+                         "us_positions": plan["us_positions"], "pension_unconverted": plan["pension_unconverted"],
+                         "us_realized": plan["us_realized"], "us_sales": len(plan["us_sales"]),
+                         "us_realized_unknown": plan["us_realized_unknown"]},
             "requests": checklist.requests(view, household, pension_stack=pension_stack),
             "household_profile": _profile(household, as_of),
             # The balance sheet by kind and owner (hero bar), the four pension pipelines against the monthly

@@ -532,7 +532,10 @@ def _tiles(data: dict[str, Any], edition: editions.Edition) -> list[tuple[str, s
                 room,
                 ("공제받지 못하는 납입", _short(plan["excess"]), "한도를 넘어 세액공제가 없는 금액"),
                 ("해외주식 미실현 이익", _short(plan["us_gains"]) if plan["us_positions"] else "-",
-                 "연 250만 원까지 공제"
+                 (("올해 실현 미상 · 남은 공제 미상" if plan["us_realized"] is None else
+                   f"올해 실현 {_short(plan['us_realized'])}(추정) · 남은 공제 "
+                   f"{_short(max(Decimal(0), tax.OVERSEAS_DEDUCTION - plan['us_realized']))}") if plan.get("us_sales")
+                  else "연 250만 원까지 공제")
                  + (f" · 원가 모르는 {plan['us_unknown']}종목 제외" if plan["us_unknown"] else ""))]
     if edition.tiles == "life":
         summary = data["view"].summary
