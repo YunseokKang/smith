@@ -23,7 +23,7 @@ from smith import (agenda, contacts, credentials, daily, daily_html, gmail, head
 from smith.config import local_time
 from smith.payload import check_outbound, mask_identifiers
 
-MODEL = "fable"
+MODEL = headless.MODEL
 BUDGET_USD = "3.00"
 RESEARCH_BUDGET_USD = "6.00"
 TIMEOUT_SECONDS = 600

@@ -107,7 +107,7 @@ v3는 공급자 동기화 시도의 성공·실패를 남기는 `sync_runs` 표�
 - headless 경계(`src/smith/adviser.py`, Claude Code 2.1.195에서 확인): 네이티브 `claude.exe`를 직접 실행
   (`.cmd` 래퍼는 cmd.exe 인자 해석 때문에 실행 거부), 질문·payload는 stdin, `--tools ""`, `--safe-mode`,
   `--no-session-persistence`, `--system-prompt-file`(작업 폴더의 파일. 인자로 넘기면 Windows 명령줄 32,767자 한도에 걸린다, BUG-2026-005), `--output-format json`, `--json-schema`,
-  `--max-budget-usd`(기본 5.00, 폭주 방지용 상한), 기본 모델 `fable`(가장 강한 추론 모델, 사용자 결정 2026-10-05). "추가 과금 없음"은 운영 환경 가정이다: 현재 Claude Code가 정액 구독 로그인으로 인증되어 있다는 사실에 기대며, 코드가 보장하지 않는다. 허용 환경변수에 `ANTHROPIC_API_KEY`가 있으므로 그 키가 설정되면 API 과금이 된다. OAuth 인증에서 예산 상한의 의미는 문서화되어 있지 않다. 빈 임시 작업 디렉터리, 환경변수 허용 목록,
+  `--max-budget-usd`(기본 5.00, 폭주 방지용 상한), 기본 모델 `sonnet`(`headless.MODEL` 한 곳에서 정함; 사용자 결정 2026-11-07, `fable`이 플랜 한도를 많이 써서 변경. 이전: `fable`, 2026-10-05). "추가 과금 없음"은 운영 환경 가정이다: 현재 Claude Code가 정액 구독 로그인으로 인증되어 있다는 사실에 기대며, 코드가 보장하지 않는다. 허용 환경변수에 `ANTHROPIC_API_KEY`가 있으므로 그 키가 설정되면 API 과금이 된다. OAuth 인증에서 예산 상한의 의미는 문서화되어 있지 않다. 빈 임시 작업 디렉터리, 환경변수 허용 목록,
   `SMITH_HEADLESS=1`(이 값이 있으면 `smith advise`가 거부해 재귀 실행을 막는다), 300초 제한, 출력 1MB 제한.
 - 출력 검증: CLI에는 최소 스키마를 넘긴다(길이·최대 개수·추가 필드 제약이 있으면 실제
   payload에서 `error_max_structured_output_retries`가 났다). 받은 뒤 알 수 없는 필드는 버리고 길이·개수·
@@ -193,7 +193,7 @@ v3는 공급자 동기화 시도의 성공·실패를 남기는 `sync_runs` 표�
   아니다. 독자는 그날 요일판의 이름·주제(`edition`, 종합판은 null)도 받아, 주제판이 일부러 다루지 않는 분야를 빠졌다고
   짚지 않는다(`reader-v2`). 단계 예산 22분(작성 15분 + 수정 7분) 안에 독자 5분 + 다시 쓰기 7분이 남을 때만 돌고(`skipped-time`),
   다시 쓰기는 단계에 남은 시간을 모두 받는다(최소 7분. 고정 7분은 2026-10-28 부동산판에서 12분이 남았는데도 두 번 시간 초과). **폴백**: Codex가 빨리 실패하면(플랜 사용량 한도 `usage-limit`, 오류, 확인된 버전 미설치) 같은 지시를
-  Claude headless(`fable`, 도구 없음, $1 상한)가 독자 5분 중 남은 시간 안에 읽고 상태에 `fallback_from`과 비용을 남긴다.
+  Claude headless(`headless.MODEL`, 도구 없음, $1 상한)가 독자 5분 중 남은 시간 안에 읽고 상태에 `fallback_from`과 비용을 남긴다.
   같은 회사 독자는 약하지만 없는 것보다 낫다. Codex 시간 초과 뒤나 남은 시간이 1분 미만이면 폴백하지 않는다. Codex의
   연결 무제한 재시도(`unbounded_connection_retries`)는 꺼서 장애 때 빨리 실패하게 한다. 한도 초과에는 기계용 코드가 없어
   이벤트 문장("You've hit your usage limit")으로 판별한다(2026-10-26 실제 한도에서 확인). 모든 독자 실패는 서술을 그대로

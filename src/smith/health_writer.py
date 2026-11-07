@@ -22,7 +22,7 @@ from typing import Any
 from smith import headless, health_letter, korean, ledger
 from smith.payload import check_outbound
 
-MODEL = "fable"
+MODEL = headless.MODEL
 BUDGET_USD = "3.00"
 TIMEOUT_SECONDS = 600
 # v2 (user review 2026-10-25): verdict first and in plain words, no numbers in the headline, one line per item on top

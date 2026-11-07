@@ -28,7 +28,7 @@ from smith.headless import HeadlessError, Runner
 PROMPT_VERSION = "reader-v4"  # v2: the edition's theme as context, Claude fallback; v1: Codex reader.
 COUNSEL_PROMPT_VERSION = "counsel-reader-v1"
 TIMEOUT_SECONDS = 300  # Codex and, when it fails fast, the fallback share this.
-FALLBACK_MODEL = "fable"
+FALLBACK_MODEL = headless.MODEL
 FALLBACK_BUDGET_USD = "1.00"
 FALLBACK_MIN_SECONDS = 60  # Less than this left after a Codex failure: no fallback (it would only time out).
 EFFORT = "high"  # A reading task, not a search; ultra would cost the rewrite its time and the plan its quota.

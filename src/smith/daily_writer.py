@@ -19,7 +19,7 @@ from typing import Any
 from smith import contacts, daily, headless, keep, korean, ledger, memory
 from smith.payload import check_outbound, mask_identifiers
 
-MODEL = "fable"
+MODEL = headless.MODEL
 BUDGET_USD = "3.00"
 TIMEOUT_SECONDS = 600
 # v2 (user review 2026-10-25): the sentence grows out of the client's own Keep notes, a 역사의 오늘 aside, news at half length.

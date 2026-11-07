@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 from smith import headless, ledger, research, sources
 from smith.payload import check_outbound, mask_identifiers
 
-MODEL = "fable"
+MODEL = headless.MODEL
 BUDGET_USD = "5.00"
 TIMEOUT_SECONDS = 900
 PROMPT_VERSION = "daily-news-v1"

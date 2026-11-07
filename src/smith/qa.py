@@ -42,7 +42,7 @@ from smith.payload import check_outbound, mask_identifiers
 from smith.report_data import build_report
 
 PROMPT_VERSION = "mail-answer-v17"  # v17: tax.realized_this_year; ask the client only what Smith cannot know (2026-11-03); v16: korean.STYLE (client style guide 2026-11-01); v15: public look-ups (FR-43); v14: narrative-v27 (natural Korean); v13: principles are consensus, not law.
-MODEL = "fable"
+MODEL = headless.MODEL
 BUDGET_USD = "3.00"
 TIMEOUT_SECONDS = 600
 MAX_ANSWERS_PER_DAY = 10

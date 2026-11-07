@@ -56,7 +56,7 @@ from smith.proposals import Proposal
 from smith.records import Kind
 
 PROMPT_VERSION = "product-review-v5"  # v5: no review process in a pick's reason (letter of 2026-11-02); v4: korean.STYLE (client style guide 2026-11-01); v3: natural Korean (korean.RULES, checked); v2: code fixes rank 1, confirmed facts only.
-MODEL = "fable"
+MODEL = headless.MODEL
 BUDGET_USD = "5.00"
 SCOUT_TIMEOUT = 1200
 VERIFY_TIMEOUT = 600

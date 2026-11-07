@@ -24,7 +24,7 @@ from smith import fitbit, headless, health, health_html, health_letter, health_w
 from smith.config import local_time
 from smith.payload import check_outbound, mask_identifiers
 
-MODEL = "fable"
+MODEL = headless.MODEL
 BUDGET_USD = "2.00"
 TIMEOUT_SECONDS = 480
 PROMPT_VERSION = "health-answer-v3"  # v3: korean.STYLE (client style guide 2026-11-01); v2 (user instruction 2026-10-27): natural Korean (korean.RULES).

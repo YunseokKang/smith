@@ -26,7 +26,7 @@ from smith import headless, korean, research, sources
 from smith.payload import check_outbound, mask_identifiers
 
 PROMPT_VERSION = "disclosure-insight-v2"   # v2: korean.STYLE (client style guide 2026-11-01).
-MODEL = "fable"
+MODEL = headless.MODEL
 BUDGET_USD = "6.00"
 TIMEOUT_SECONDS = 900
 SIGNALS = ("positive", "neutral", "caution")

@@ -42,7 +42,7 @@ WINDOW = timedelta(days=365)
 AHEAD = timedelta(days=90)  # A dividend decided now has a record date up to a quarter ahead.
 GENERAL_ACCOUNTS = ("brokerage", "bank", "other")
 PROMPT_VERSION = "dividend-research-v1"
-MODEL = "fable"
+MODEL = headless.MODEL
 BUDGET_USD = "4.00"
 TIMEOUT_SECONDS = 900
 

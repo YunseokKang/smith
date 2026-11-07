@@ -14,7 +14,7 @@ from smith.headless import HEADLESS_ENV, HeadlessError as AdviserError, find_cla
 PROMPT_VERSION = "advice-v10"  # v10: principles are consensus, not law; v9: concrete words.
 # The household uses a flat-rate subscription and asked for the most capable reasoning model
 # (2026-10-05). Fable runs about 2.5x the notional cost of Opus; the cap only bounds a runaway call.
-DEFAULT_MODEL = "fable"
+DEFAULT_MODEL = headless.MODEL
 DEFAULT_BUDGET_USD = "5.00"
 _TIMEOUT_SECONDS = 300
 _MAX_TEXT = 4000

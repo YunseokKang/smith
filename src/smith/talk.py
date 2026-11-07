@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 from smith import daily_news, headless, ledger, research, sources
 from smith.payload import check_outbound, mask_identifiers
 
-MODEL = "fable"
+MODEL = headless.MODEL
 BUDGET_USD = "3.00"
 TIMEOUT_SECONDS = 600
 PROMPT_VERSION = "evening-talk-v1"

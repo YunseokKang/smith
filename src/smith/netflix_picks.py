@@ -30,7 +30,7 @@ from urllib.parse import urlsplit
 from smith import headless, korean, ledger, sources, talk
 from smith.payload import check_outbound, mask_identifiers
 
-MODEL = "fable"
+MODEL = headless.MODEL
 BUDGET_USD = "3.00"
 TIMEOUT_SECONDS = 600
 # v2 (review 2026-10-27): the original title too, and only awards and numbers the source states.

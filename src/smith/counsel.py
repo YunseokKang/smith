@@ -38,7 +38,7 @@ from smith import (cases, contacts, daily_html, daily_qa, future_income, health,
 from smith.config import local_time
 from smith.payload import PayloadRejected, build_context, check_outbound, load_view, mask_identifiers
 
-MODEL = "fable"
+MODEL = headless.MODEL
 BUDGET_USD = "3.00"
 ROUTE_BUDGET_USD = "1.00"
 RESEARCH_BUDGET_USD = "6.00"

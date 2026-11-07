@@ -23,6 +23,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+# The one model alias every Claude call uses (user decision 2026-11-07: `fable` used too much of the plan's limit).
+MODEL = "sonnet"
 HEADLESS_ENV = "SMITH_HEADLESS"
 WEB_TOOLS = ("WebSearch", "WebFetch")
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)   # Windows only; 0 elsewhere.

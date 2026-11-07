@@ -20,7 +20,7 @@ from typing import Any
 from smith import contacts, daily, daily_writer, headless, keep, korean, ledger, memory, talk
 from smith.payload import check_outbound
 
-MODEL = "fable"
+MODEL = headless.MODEL
 BUDGET_USD = "3.00"
 TIMEOUT_SECONDS = 600
 # v2 (user decision 2026-10-27): the commute (or outing) windows are part of weather and may be named.

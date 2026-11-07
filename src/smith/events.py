@@ -50,7 +50,7 @@ BASELINE_DEFAULT = timedelta(days=1)    # ...and over one day when there has bee
 BOK_RESULT_TIME = time(11, 30)          # The decision is out by about 10:00, the press conference at 11:10.
 MAX_ATTEMPTS = 3                        # Unconfirmed or failed notes are retried this often, then skipped.
 BUILDING = timedelta(minutes=30)        # A note claimed this recently is being built by another run (manual + scheduled).
-MODEL = "fable"
+MODEL = headless.MODEL
 BUDGET_USD = "5.00"
 TIMEOUT_SECONDS = 900
 PROMPT_VERSION = "event-research-v2"  # v2: the decision is read from the official page; guidance as a verbatim quote.

@@ -31,7 +31,7 @@ from smith.payload import LedgerView, check_outbound, mask_identifiers
 from smith.records import Kind
 
 PROMPT_VERSION = "research-v3"  # v3: the rates topic asks for the latest meeting's vote and the governor's guidance.
-MODEL = "fable"
+MODEL = headless.MODEL
 BUDGET_USD = "10.00"
 TIMEOUT_SECONDS = 1800
 KINDS = ("fact", "policy", "forecast", "opinion")
