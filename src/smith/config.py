@@ -1,6 +1,6 @@
 """Validate bootstrap settings; this module has no external side effects."""
 import re
-from datetime import datetime, time
+from datetime import date, datetime, time
 from pathlib import Path
 import tomllib
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -20,8 +20,10 @@ KNOWN_KEYS = {
     "privacy": {"remove_personal_identifiers"},
     "reports": {"enabled", "weekdays", "time", "delivery", "editions"},
     "mail": {"recipient", "answer_replies"},
-    "household": {"birth_year", "partner_birth_year", "retirement_monthly_spend", "marriage_registered", "cohabiting",
+    "household": {"birth_year", "birth_month", "partner_birth_year", "retirement_monthly_spend", "marriage_registered", "cohabiting",
                   "annual_gross_salary", "retirement_age", "emergency_months",
+                  "occupational_plan", "occupational_institution", "occupational_average_wage",
+                  "occupational_service_start",
                   "emergency_months_confirmed"},
     "backup": {"dir", "keep"},
     # Same-day event notes (report design §29): the daily check time and the holdings' move that counts.
@@ -167,7 +169,22 @@ def _check_household(household: object) -> None:
         value = household.get(field)
         if value is not None and (not isinstance(value, int) or isinstance(value, bool) or not 1900 <= value <= 2100):
             raise ValueError(f"household.{field} must be a year")
-    for field in ("retirement_monthly_spend", "annual_gross_salary"):
+    month = household.get("birth_month")
+    if month is not None and (not isinstance(month, int) or isinstance(month, bool) or not 1 <= month <= 12):
+        raise ValueError("household.birth_month must be a month from 1 to 12")
+    plan = household.get("occupational_plan")
+    if plan is not None and plan not in ("db", "dc"):
+        raise ValueError('household.occupational_plan must be "db" or "dc"')
+    institution = household.get("occupational_institution")
+    if institution is not None and (not isinstance(institution, str) or not institution.strip()):
+        raise ValueError("household.occupational_institution must be non-empty text")
+    start = household.get("occupational_service_start")
+    if start is not None and not isinstance(start, date):
+        try:
+            date.fromisoformat(start)
+        except (TypeError, ValueError):
+            raise ValueError("household.occupational_service_start must be a date (YYYY-MM-DD)") from None
+    for field in ("retirement_monthly_spend", "annual_gross_salary", "occupational_average_wage"):
         amount = household.get(field)
         if amount is not None and (not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0):
             raise ValueError(f"household.{field} must be a positive whole number of won")

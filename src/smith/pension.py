@@ -37,7 +37,8 @@ from smith.payload import LedgerView, base_amount
 from smith.records import Kind
 from smith.tax import PENSION_SAVINGS_LIMIT, PENSION_TOTAL_LIMIT, REAL_RETURN, WITHDRAWAL_RATE
 
-DEFAULT_PAYOUT_AGE = 60
+# The headline retirement age when none is set: 55 (user decision 2026-11-07, "그래프는 55세 은퇴 기준"; was 60).
+DEFAULT_PAYOUT_AGE = 55
 RETIREMENT_TIERS = (50, 55, 60)   # User request 2026-10-23: never assume one retirement age.
 PIPELINES = ("national", "insurance_annuity", "pension_savings", "irp")  # Always shown, in this order.
 LABELS = {"national": "국민연금", "insurance_annuity": "변액·연금보험", "pension_savings": "연금저축", "irp": "IRP",
@@ -50,9 +51,11 @@ _ACCOUNTS = {"pension_savings": "pension_savings", "irp": "irp"}
 # Assumed tax on the payout (share of the gross monthly figure). National pension income is taxed after the
 # pension-income deduction and comes out small; private pensions paid as an annuity are taxed at 5.5% (55-69)
 # while the year's private payouts stay within the separate-taxation limit, 16.5% above it; an insurer's
-# annuity kept ten years within the premium limits is tax-free.
+# annuity kept ten years within the premium limits is tax-free. A pension paid from severance pay (an employer DB or
+# DC plan, moved to an IRP) is taxed as retirement income at 70% of its retirement-income tax (60% after ten years),
+# outside the private-pension limit: the employer's own statement puts that tax near 5% (2026-11-07), so 3.5%.
 TAX_FACTORS = {"national": Decimal("0.03"), "insurance_annuity": Decimal(0), "pension_savings": Decimal("0.055"),
-               "irp": Decimal("0.055"), "occupational": Decimal("0.055"), "other": Decimal("0.055")}
+               "irp": Decimal("0.055"), "occupational": Decimal("0.035"), "other": Decimal("0.055")}
 PRIVATE_SEPARATE_LIMIT = Decimal(15_000_000)   # Yearly private pension payouts above this lose the low rate.
 # The insurer's annuity: a premium of at least this a month with a fixed payment
 # term (end_date) is the policy's premium; ANNUITY_LOADING of each premium is assumed to go to charges and the
@@ -64,11 +67,29 @@ ANNUITY_LOADING = Decimal("0.10")
 GUARANTEE_SIMPLE_RATE = Decimal("0.05")
 INFLATION = Decimal("0.02")
 PRIVATE_HIGH_TAX = Decimal("0.165")
-_PRIVATE = ("pension_savings", "irp", "occupational", "other")
+_PRIVATE = ("pension_savings", "irp", "other")
 # National pension eligibility age by birth year (국민연금법 부칙): 61 for 1953-56 ... 65 from 1969.
 _NATIONAL_AGES = ((1952, 60), (1956, 61), (1960, 62), (1964, 63), (1968, 64))
 PRIVATE_EARLIEST_AGE = 55
 _MONTHS = {"monthly": 1, "quarterly": 3, "annual": 12}
+TIMELINE_AGES = range(55, 91)
+# The five pension families the letter groups every pipeline under (user request 2026-11-07), each pipeline in
+# exactly one: the IRP is a retirement pension by law (근로자퇴직급여 보장법) even though it shares the pension-account
+# tax credit with the pension savings, and an insurer's annuity kept ten years is the tax-free family.
+CATEGORIES = (("public", "공적연금"), ("occupational", "퇴직연금"), ("personal", "개인연금"),
+              ("tax_free", "비과세 연금(보험)"), ("property", "부동산 연금"))
+CATEGORY_OF = {"national": "public", "occupational": "occupational", "irp": "occupational",
+               "pension_savings": "personal", "isa": "personal", "other": "personal", "insurance_annuity": "tax_free"}
+# Products of each family the household does not hold, named so the table shows the whole map.
+CATEGORY_EXAMPLES = {"public": "국민연금·공무원연금 등", "occupational": "DB형·DC형·IRP", "personal": "연금저축·ISA 등",
+                     "tax_free": "변액연금보험·톤틴연금 등", "property": "주택연금·농지연금"}
+# A pension account with no payout end is paid over this many years: the public pension portal's assumption
+# for an account without a set period, used so Smith and the portal read the same (user decision 2026-11-07).
+ACCOUNT_PAYOUT_YEARS = 20
+# The age a fixed won annuity's erosion is followed to before the shortfall is held level (outside_need).
+PLAN_AGE = 100
+OCCUPATIONAL_PLANS = {"db": "DB형", "dc": "DC형"}
+_TERM_FIELDS = ("institution", "opened_on", "contribution_end", "payout_start", "payout_end", "illustrated_annual_pension")
 
 
 def stack(view: LedgerView, household: dict[str, Any] | None, today: date,
@@ -90,31 +111,88 @@ def stack(view: LedgerView, household: dict[str, Any] | None, today: date,
     if not target:
         return None
     target = Decimal(target)
-    birth = household.get("birth_year")
-    age = None if birth is None else today.year - int(birth)
+    birth = born(household)
+    age = None if birth is None else age_on(birth, today)
     chosen = household.get("retirement_age")
     headline = int(chosen) if chosen else DEFAULT_PAYOUT_AGE
     stated = _stated(view, today)
     contributions = _contribution_plan(view, today, plan)
-    tiers = [_tier(view, stated, contributions, age=age, birth=birth, retire=retire, target=target, today=today)
-             for retire in sorted(set(RETIREMENT_TIERS) | {headline})]
+    kind = household.get("occupational_plan")
+    start = household.get("occupational_service_start")
+    occupational = ({"type": kind, "institution": household.get("occupational_institution"),
+                     "wage": household.get("occupational_average_wage"),
+                     "service_start": date.fromisoformat(start) if isinstance(start, str) else start}
+                    if kind in OCCUPATIONAL_PLANS else None)
+    tiers = [_tier(view, stated, contributions, age=age, birth=birth, retire=retire, target=target, today=today,
+                   occupational=occupational) for retire in sorted(set(RETIREMENT_TIERS) | {headline})]
     head = next(t for t in tiers if t["retire_age"] == headline)
     current = None
     if contributions["changed"]:
         as_now = dict(contributions, **contributions["current"], isa=Decimal(0))
-        row = _tier(view, stated, as_now, age=age, birth=birth, retire=headline, target=target, today=today)
+        row = _tier(view, stated, as_now, age=age, birth=birth, retire=headline, target=target, today=today,
+                    occupational=occupational)
         current = {"total_net": row["total_net"], "ratio": row["ratio"],
                    "pipelines": [p for p in row["pipelines"] if p["key"] in _ACCOUNTS]}
     return {"target": target, "retirement_age": headline, "retirement_age_set": bool(chosen),
             # Private pensions pay from 55 at the earliest, whatever the retirement age (review 2026-10-18).
             "payout_age": max(headline, PRIVATE_EARLIEST_AGE), "age": age, "tiers": tiers,
             "pipelines": head["pipelines"], "total_net": head["total_net"], "ratio": head["ratio"],
+            "first_end_age": head["first_end_age"], "later_age": head["later_age"], "later_net": head["later_net"],
+            "later_ratio": head["later_ratio"],
             "unknown": head["unknown"], "complete": not head["unknown"], "contributions": contributions,
-            "current_split": current, "assumptions": assumptions()}
+            "current_split": current, "timeline": timeline(head), "assumptions": assumptions()}
+
+
+def timeline(tier: dict[str, Any], ages: range = TIMELINE_AGES) -> list[dict[str, Any]]:
+    """The yearly after-tax payout at each age of one retirement tier, in today's won, per pipeline, so the letter
+    can draw the public pension portal's age-by-age chart (중앙노후준비지원센터 '내연금'). A pipeline counts from its
+    start age to the age before its end (none: for life) at its monthly run rate times twelve (no partial first
+    year). A stated pipeline of several records adds each record's share from its own start age; a nominal one
+    (an insurer's fixed won amount, no inflation increase in its terms) loses INFLATION a year after its start, as
+    the same won buys less (user review 2026-11-07). Unknown pipelines are left out.
+
+    Rows: age, parts ({pipeline key: yearly amount}, every known pipeline present), total."""
+    known = [p for p in tier["pipelines"] if p["net_monthly"] is not None and p["start_age"] is not None]
+    rows = []
+    for age in ages:
+        parts = {p["key"]: monthly_at(p, age) * 12 for p in known}
+        rows.append({"age": age, "parts": parts, "total": sum(parts.values(), Decimal(0))})
+    return rows
+
+
+def monthly_at(row: dict[str, Any], age: int) -> Decimal:
+    """A known pipeline's after-tax monthly payout at `age` in today's won: nothing before its start or from its
+    end age, each stated record from its own start, and a nominal (fixed won) record less INFLATION a year after
+    it starts. The one reading the totals, the gap outside the pensions and the age chart share (Codex review
+    2026-11-07)."""
+    if row["net_monthly"] is None or row["start_age"] is None:
+        return Decimal(0)
+    total = Decimal(0)
+    for start, share, erode_from, end in segments(row):
+        if start is not None and start <= age and (end is None or age < end):
+            base = _net_at(row, age)
+            years = 0 if erode_from is None else max(0, age - erode_from)
+            total += base * share / (1 + INFLATION) ** years
+    return total
+
+
+def _net_at(row: dict[str, Any], age: int) -> Decimal:
+    """The after-tax monthly figure at `age`: a private pension is taxed at the high rate only in the years the
+    household's taxable private payouts pass the separate-taxation limit (Codex review 2026-11-07)."""
+    if "net_low" not in row:
+        return row["net_monthly"]
+    return row["net_high"] if age in row["high_ages"] else row["net_low"]
+
+
+def segments(row: dict[str, Any]) -> list[tuple[int | None, Decimal, int | None, int | None]]:
+    """(start age, share of the monthly figure, the age a nominal part starts losing value from or None for a
+    today's-won part, end age or None for life) of each part of a pipeline: one per stated record, or the whole
+    pipeline from its start to its end."""
+    return row.get("start_shares") or [(row["start_age"], Decimal(1), None, row.get("end_age"))]
 
 
 def _tier(view: LedgerView, stated: dict[str, list[Any]], contributions: dict[str, Any], *, age: int | None, birth: Any,
-          retire: int, target: Decimal, today: date) -> dict[str, Any]:
+          retire: int, target: Decimal, today: date, occupational: dict[str, Any] | None = None) -> dict[str, Any]:
     """Every pipeline for one retirement age, the after-tax total once all have started and the readiness ratio,
     the years from retirement to the first pension, and what must be held outside the pensions at retirement."""
     rows = [_pipeline(view, key, stated.get(key, []), age=age, birth=birth, retire=retire, contributions=contributions,
@@ -123,33 +201,96 @@ def _tier(view: LedgerView, stated: dict[str, list[Any]], contributions: dict[st
         rows.append(_isa(contributions, age=age, retire=retire))
     rows += [_pipeline(view, key, records, age=age, birth=birth, retire=retire, contributions=contributions, today=today)
              for key, records in sorted(stated.items()) if key not in PIPELINES]
+    if occupational and "occupational" not in stated:
+        rows.append(_employer_plan(occupational, retire=retire, birth=birth, today=today))
     _apply_tax(rows)
-    total = sum((r["net_monthly"] for r in rows if r["net_monthly"] is not None), Decimal(0))
-    starts = [r["start_age"] for r in rows if r["net_monthly"] is not None and r["start_age"] is not None]
+    for row in rows:
+        row.update(category=CATEGORY_OF.get(row["key"], "personal"))
+        row.setdefault("products", products(view, row["key"]))
+    known = [r for r in rows if r["net_monthly"] is not None]
+    # Every part's own start and end counts: a later payout of the same pipeline starts at its own age.
+    starts = [start for r in known for start, _, _, _ in segments(r) if start is not None]
+    all_on = max(starts, default=None)
+    # Once every pension has started, and once the fixed-term ones have ended (what the lifelong ones leave then).
+    total = sum((monthly_at(r, all_on) if all_on is not None else r["net_monthly"] for r in known), Decimal(0))
+    ends = [end for r in known for _, _, _, end in segments(r) if end is not None]
+    later_age = max(ends, default=None)
+    later = None if later_age is None else sum((monthly_at(r, later_age) for r in known), Decimal(0))
     # The ISA row is savings drawn from retirement, not a pension: the years without a pension ignore it.
     first = min((r["start_age"] for r in rows if r["key"] != "isa" and r["net_monthly"] is not None
                  and r["start_age"] is not None), default=None)
     return {"retire_age": retire, "pipelines": rows, "total_net": total, "ratio": total / target,
+            "first_end_age": min(ends, default=None), "later_age": later_age, "later_net": later,
+            "later_ratio": None if later is None else later / target,
             "unknown": [r["key"] for r in rows if r["net_monthly"] is None], "first_income_age": first,
             "years_without_pension": None if first is None else max(0, first - retire),
-            "all_on_age": max(starts, default=None), "outside_need": _outside_need(rows, target, retire)}
+            "all_on_age": all_on, "outside_need": _outside_need(rows, target, retire)}
+
+
+def _employer_plan(plan: dict[str, Any], *, retire: int, birth: tuple[int, int | None] | None,
+                   today: date) -> dict[str, Any]:
+    """The employer's DB or DC plan the client named in the local settings (the public portal shows a DB plan
+    with no figure: its provider does not report it). A DB plan pays a month of average wage per year of service
+    (근로자퇴직급여 보장법): with the employer's average monthly wage and the service start, the severance at each
+    retirement age is that wage, held in today's won, times the service months; it moves to an IRP and is paid
+    from max(retirement, 55) over ACCOUNT_PAYOUT_YEARS like the other accounts, growing at the real return while it
+    waits. Without those figures (or for a DC plan, whose balance is the client's) it is unknown: a lower bound."""
+    kind = OCCUPATIONAL_PLANS[plan["type"]]
+    start = plan.get("service_start")
+    row = {"key": "occupational", "label": f"퇴직연금({kind})", "start_age": None, "gross_monthly": None,
+           "net_monthly": None, "assets_now": None, "monthly_contribution": None, "basis": "unknown",
+           "basis_text": "회사가 운용하는 퇴직연금이라 금융사가 금액을 알려 주지 않음(정부 조회 0원)",
+           "missing": "회사 인사팀의 퇴직금 추계액, 또는 입사일과 최근 3개월 월평균 임금",
+           "taxable_share": Decimal(1), "retire_age": retire,
+           "products": [{"institution": plan.get("institution"), "name": f"{kind} 퇴직연금",
+                         "opened_on": None if start is None else start.isoformat(), "opened_label": "입사"}]}
+    wage = plan.get("wage")
+    if plan["type"] != "db" or wage is None or start is None or birth is None:
+        return row
+    wage = Decimal(wage)
+    leave = date(birth[0] + retire, birth[1] or 1, 1)
+    months, now_months = _service_months(start, leave), _service_months(start, today)
+    severance = wage * months / 12
+    payout = max(retire, PRIVATE_EARLIEST_AGE)
+    balance = severance * (1 + REAL_RETURN) ** (payout - retire)
+    payment = REAL_RETURN / (1 - (1 + REAL_RETURN) ** -ACCOUNT_PAYOUT_YEARS)
+    row["products"][0]["now_estimate"] = wage * now_months / 12
+    row.update(basis="estimated", missing="", start_age=payout, end_age=payout + ACCOUNT_PAYOUT_YEARS,
+               payout_years=ACCOUNT_PAYOUT_YEARS, gross_monthly=balance * payment / 12, severance=severance,
+               service_months=months,
+               basis_text=f"회사 조회 평균임금 월 {wage / 10_000:,.0f}만 원(오늘 돈 가치로 유지)에 {retire}세 퇴직까지 근속 "
+                          f"{months // 12}년 {months % 12}개월을 곱한 퇴직금 약 {severance / 100_000_000:,.1f}억 원을 IRP로 옮겨 "
+                          f"{payout}세부터 {ACCOUNT_PAYOUT_YEARS}년간 실질 연 {REAL_RETURN * 100:.0f}%로 나눠 받는다고 본 추정")
+    return row
+
+
+def _service_months(start: date, end: date) -> int:
+    """Whole months of service from `start` to `end` (a month counts once its day is reached)."""
+    return max(0, (end.year - start.year) * 12 + end.month - start.month - (end.day < start.day))
 
 
 def _outside_need(rows: list[dict[str, Any]], target: Decimal, retire: int) -> dict[str, Decimal] | None:
     """What the household must hold outside the pensions at retirement, in today's won, to live on the target:
-    each year's shortfall until the last pipeline starts (`bridge`), and the lasting shortfall after it drawn at
-    the withdrawal rate (`lasting`), both discounted to the retirement age at the real return. None when a known
-    pipeline has no start age (the timeline is unknown). With a pipeline whose payout is unknown the figure counts
-    it as nothing and is only an upper bound (`upper_bound`, review 2026-10-23: unknown is not zero)."""
+    each year's shortfall until the last pipeline starts or a fixed-term one ends (`bridge`), and the lasting
+    shortfall after that drawn at the withdrawal rate (`lasting`), both discounted to the retirement age at the
+    real return. Every stated part's own start and end bounds the years walked, and with a fixed won annuity the
+    walk goes on to PLAN_AGE, since its value keeps falling (Codex review 2026-11-07). None when a known pipeline
+    has no start age (the timeline is unknown). With a pipeline whose payout is unknown the figure counts it as
+    nothing and is only an upper bound (`upper_bound`, review 2026-10-23: unknown is not zero)."""
     known = [r for r in rows if r["net_monthly"] is not None]
     if any(r["start_age"] is None for r in known):
         return None
-    last = max([retire] + [r["start_age"] for r in known])
+    parts = [part for r in known for part in segments(r)]
+    last = max([retire] + [start for start, _, _, _ in parts if start is not None]
+               + [end for _, _, _, end in parts if end is not None])
+    # A fixed won annuity keeps losing value: follow the years to PLAN_AGE before the income is held level.
+    if any(erode is not None for _, _, erode, _ in parts):
+        last = max(last, PLAN_AGE)
     bridge = Decimal(0)
     for year in range(retire, last):
-        income = sum((r["net_monthly"] for r in known if r["start_age"] <= year), Decimal(0))
+        income = sum((monthly_at(r, year) for r in known), Decimal(0))
         bridge += max(Decimal(0), target - income) * 12 / (1 + REAL_RETURN) ** (year - retire)
-    gap = max(Decimal(0), target - sum((r["net_monthly"] for r in known), Decimal(0)))
+    gap = max(Decimal(0), target - sum((monthly_at(r, last) for r in known), Decimal(0)))
     lasting = gap * 12 / WITHDRAWAL_RATE / (1 + REAL_RETURN) ** (last - retire)
     return {"bridge": bridge, "lasting": lasting, "total": bridge + lasting,
             "upper_bound": len(known) < len(rows), "unknown": [r["key"] for r in rows if r["net_monthly"] is None]}
@@ -206,20 +347,34 @@ def _pipeline(view: LedgerView, key: str, records: list[Any], *, age: int | None
         nominal = False
         nominal_monthly = Decimal(0)   # The statement's own figure before deflation, for the table.
         starts = [date.fromisoformat(r.fields["start_date"]) for r in records]
-        for amount, record in zip(amounts, records):
+        parts = []                     # (start date, today's-won monthly part) per record, for the age chart.
+        for amount, record, start in zip(amounts, records, starts):
             part = amount / _MONTHS.get(record.fields["frequency"], 1)
             nominal_monthly += part
             if record.fields.get("price_basis") == "nominal":
                 # An insurer's illustration is the amount of the first payment year: bring it to today's won so
                 # it stacks with the national pension statement and the real-return projections.
-                start = date.fromisoformat(record.fields["start_date"])
                 years = Decimal(max(0, (start.year - today.year) * 12 + start.month - today.month)) / 12
                 part = part / (1 + INFLATION) ** years
                 nominal = True
             monthly += part
+            parts.append((start, part, record.fields.get("price_basis") == "nominal"))
         start_year = min(starts).year
-        row.update(basis="stated", start_age=None if birth is None else start_year - int(birth), start_year=start_year,
-                   start_date=min(starts), nominal_deflated=nominal, nominal_monthly=nominal_monthly if nominal else None)
+        # Each record pays from its own start: the chart adds a later one only from its age (Codex review 2026-11-07).
+        # A nominal payout stays the same won amount, so in today's won it shrinks by inflation after it starts.
+        ends = [None if birth is None or not r.fields.get("end_date")
+                else age_on(birth, date.fromisoformat(r.fields["end_date"])) + 1 for r in records]
+        # A nominal part is deflated to today's won up to its start (or today, if it already pays): it erodes from
+        # the later of the two (Codex review 2026-11-07: a running annuity is not deflated for past years twice).
+        shares = []
+        for (start, part, fixed), end in zip(parts, ends):
+            start_age = None if birth is None else age_on(birth, start)
+            erode = None if not fixed or start_age is None else max(start_age, age if age is not None else start_age)
+            shares.append((start_age, part / monthly if monthly else Decimal(0), erode, end))
+        end_age = None if None in ends else max(ends)
+        row.update(basis="stated", start_age=None if birth is None else age_on(birth, min(starts)), start_year=start_year,
+                   start_date=min(starts), nominal_deflated=nominal, nominal_monthly=nominal_monthly if nominal else None,
+                   start_shares=shares, end_age=end_age)
         value_note = f"명목 금액을 물가 {INFLATION * 100:.0f}%로 현재 가치 환산" if nominal else "현재 가치"
         if key == "national":
             scale, note = _national_scale(records, retire=retire, birth=birth)
@@ -234,7 +389,7 @@ def _pipeline(view: LedgerView, key: str, records: list[Any], *, age: int | None
             row.update(gross_monthly=monthly, basis_text=f"알려 주신 예상 수령액(세전, {value_note})")
         return row
     if key == "national":
-        row.update(start_age=None if birth is None else national_pension_age(int(birth)),
+        row.update(start_age=None if birth is None else national_pension_age(birth[0]),
                    basis_text="예상 수령액이 입력되지 않음",
                    missing="국민연금공단 '내 연금 알아보기'의 예상 월 수령액(현재 가치)과 수령 개시 연령")
         return row
@@ -248,9 +403,15 @@ def _pipeline(view: LedgerView, key: str, records: list[Any], *, age: int | None
         if not _has_account(view, _ACCOUNTS[key]):
             row.update(basis_text="계좌가 없음", missing=f"{label} 계좌가 있다면 잔액과 월 납입액")
             return row
-        return _project(row, assets, contribution, age=age, retire=retire, start=payout_age,
-                        nontaxed_now=contributions["nontaxed_now"][key],
-                        uncredited_yearly=_uncredited_yearly(contributions)[key])
+        terms = _terms(products(view, key))
+        stop = None if age is None or terms["contribution_end"] is None else age_on(birth, terms["contribution_end"])
+        row = _project(row, assets, contribution, age=age, retire=retire, start=payout_age,
+                       nontaxed_now=contributions["nontaxed_now"][key],
+                       uncredited_yearly=_uncredited_yearly(contributions)[key],
+                       years=terms["years"], contribution_stop=stop)
+        if terms["mixed"]:
+            row["basis_text"] += ". 수령 기간이나 납입 종료일이 다른 계좌가 섞여 가장 긴 기간과 가장 늦은 종료일로 계산"
+        return row
     if key == "insurance_annuity":
         assets = _assets(view, lambda f: f["category"] == "insurance_surrender_value")
         if assets is None:
@@ -267,14 +428,18 @@ def _pipeline(view: LedgerView, key: str, records: list[Any], *, age: int | None
 
 
 def _project(row: dict[str, Any], assets: Decimal, contribution: Decimal, *, age: int | None, retire: int, start: int,
-             nontaxed_now: Decimal, uncredited_yearly: Decimal) -> dict[str, Any]:
-    """Balance plus contributions until retirement, then the balance alone until the payout starts, at the real
-    return, drawn at the withdrawal rate. The contributions no credit covered (this year's and every later year's
-    `uncredited_yearly`) come back tax-free: their value in today's won at the start sets the taxable share."""
+             nontaxed_now: Decimal, uncredited_yearly: Decimal, years: int = ACCOUNT_PAYOUT_YEARS,
+             contribution_stop: int | None = None) -> dict[str, Any]:
+    """Balance plus contributions until retirement (or the account's contribution end, if earlier), then the
+    balance alone until the payout starts, at the real return, paid out in equal real instalments over `years`
+    (the account's payout period, the public portal's 20 years when none is set; user decision 2026-11-07). The
+    contributions no credit covered (this year's and every later year's `uncredited_yearly`) come back tax-free:
+    their value in today's won at the start sets the taxable share."""
     if age is None:
         row.update(basis_text="출생 연도가 없어 수령 개시까지의 기간을 알 수 없음", missing="출생 연도(로컬 설정)")
         return row
-    paying = max(0, retire - age)
+    until = retire if contribution_stop is None else min(retire, contribution_stop)
+    paying = max(0, until - age)
     projected = _grown(assets, contribution * 12, paying, max(0, start - age))
     # Contributions are constant in today's won; the tax-free principal is the nominal amount paid, so its value in
     # today's won at the payout start is deflated over the years in between.
@@ -282,11 +447,53 @@ def _project(row: dict[str, Any], assets: Decimal, contribution: Decimal, *, age
     nontaxed = nontaxed_now / (1 + INFLATION) ** years_to_start + sum(
         (uncredited_yearly / (1 + INFLATION) ** (years_to_start - year) for year in range(paying)), Decimal(0))
     share = Decimal(1) if not projected else max(Decimal(0), 1 - nontaxed / projected)
-    wait = f" {start}세 수령 개시까지" if start > retire else ""
-    row.update(gross_monthly=projected * WITHDRAWAL_RATE / 12, start_age=start, basis="estimated", taxable_share=share,
-               basis_text=f"지금 잔액에 월 {contribution / 10_000:,.0f}만 원을 {retire}세 은퇴까지 넣고{wait} 실질 연 "
-                          f"{REAL_RETURN * 100:.0f}%로 불려 연 {WITHDRAWAL_RATE * 100:.0f}%씩 꺼내 쓴다고 본 추정")
+    payment = REAL_RETURN / (1 - (1 + REAL_RETURN) ** -years)   # Equal real instalments that empty the account.
+    stop = f"{until}세(납입 종료일)" if until < retire else f"{retire}세 은퇴"
+    row.update(gross_monthly=projected * payment / 12, start_age=start, end_age=start + years, basis="estimated",
+               taxable_share=share, payout_years=years,
+               basis_text=f"지금 잔액에 월 {contribution / 10_000:,.0f}만 원을 {stop}까지 넣고 실질 연 "
+                          f"{REAL_RETURN * 100:.0f}%로 불려 {start}세부터 {years}년간 나눠 받는다고 본 추정")
     return row
+
+
+def products(view: LedgerView, key: str) -> list[dict[str, Any]]:
+    """The client's products behind a pipeline with their stated terms (report design §18.5): the pension
+    accounts of its type, the annuity policies, or the national pension's statement."""
+    if key == "national":
+        return [{"institution": "국민연금공단", "name": "국민연금", "contribution_end": r.fields.get("contribution_end"),
+                 "payout_start": r.fields["start_date"]} for r in view.records
+                if r.kind is Kind.CASHFLOW and r.owner_id == "self" and r.fields["category"] == "pension_income"
+                and r.fields.get("pension_source") == "national"]
+    accept = ((lambda f: f.get("account_type") == _ACCOUNTS[key]) if key in _ACCOUNTS
+              else (lambda f: f["category"] == "insurance_surrender_value") if key == "insurance_annuity" else None)
+    if accept is None:
+        return []
+    found = []
+    for record in view.records:
+        f = record.fields
+        if record.kind is not Kind.ASSET or record.owner_id != "self" or not accept(f):
+            continue
+        if any(f.get(name) for name in _TERM_FIELDS):
+            found.append({"institution": f.get("institution"), "name": f.get("instrument_name"),
+                          "opened_on": f.get("opened_on"), "contribution_end": f.get("contribution_end"),
+                          "payout_start": f.get("payout_start"), "payout_end": f.get("payout_end"),
+                          "illustrated_annual": None if f.get("illustrated_annual_pension") is None
+                          else Decimal(f["illustrated_annual_pension"])})
+    return found
+
+
+def _terms(found: list[dict[str, Any]]) -> dict[str, Any]:
+    """The payout period (whole years) and contribution end of an account type from its stated terms. The type's
+    balances are projected as one, so accounts with different periods are paid over the longest (it pays less a
+    year, never past the money), and contributions run to the latest stated end; `mixed` says so."""
+    periods = set()
+    for p in found:
+        if p["payout_start"] and p["payout_end"]:
+            start, end = date.fromisoformat(p["payout_start"]), date.fromisoformat(p["payout_end"])
+            periods.add(max(1, round(((end.year - start.year) * 12 + end.month - start.month) / 12)))
+    ends = {p["contribution_end"] for p in found if p["contribution_end"]}
+    return {"years": max(periods, default=ACCOUNT_PAYOUT_YEARS), "mixed": len(periods) > 1 or len(ends) > 1,
+            "contribution_end": date.fromisoformat(max(ends)) if ends else None}
 
 
 def _isa(contributions: dict[str, Any], *, age: int | None, retire: int) -> dict[str, Any]:
@@ -327,7 +534,7 @@ def _national_scale(records: list[Any], *, retire: int, birth: Any) -> tuple[Dec
     if not months or not end or birth is None:
         return Decimal(1), " · 가입 기간 정보가 없어 조기 은퇴 시 감액은 반영하지 않음(상한)"
     months = int(Decimal(months))
-    end_age = date.fromisoformat(end).year - int(birth)
+    end_age = age_on(birth, date.fromisoformat(end))
     kept = months - max(0, end_age - retire) * 12
     if kept >= months:
         return Decimal(1), ""
@@ -393,19 +600,43 @@ def _annuity(view: LedgerView, row: dict[str, Any], assets: Decimal, *, age: int
 
 def _apply_tax(rows: list[dict[str, Any]]) -> None:
     """Net monthly figures by the assumed tax factors on each payout's taxable share (contributions no credit
-    covered come back tax-free and do not count toward the limit); taxable private payouts above the
-    separate-taxation limit in a year are taxed at the high rate instead of the low pension-income rate."""
-    private_yearly = sum((r["gross_monthly"] * r["taxable_share"] for r in rows
-                          if r["key"] in _PRIVATE and r["gross_monthly"] is not None), Decimal(0)) * 12
-    high = private_yearly > PRIVATE_SEPARATE_LIMIT
+    covered come back tax-free and do not count toward the limit). A private pension carries both its low-rate and
+    high-rate net and the ages at which the household's taxable private payouts pass the separate-taxation limit:
+    monthly_at reads the right one per age, and net_monthly is its first payment year's."""
+    private = [r for r in rows if r["key"] in _PRIVATE and r["gross_monthly"] is not None and r["start_age"] is not None]
+    # The ages whose taxable private payouts (only those paying that year) pass the limit.
+    high_ages = frozenset(age for age in range(PRIVATE_EARLIEST_AGE, PLAN_AGE + 1)
+                          if sum((r["gross_monthly"] * r["taxable_share"] * share
+                                  for r in private for start, share, _, end in segments(r)
+                                  if start is not None and start <= age and (end is None or age < end)), Decimal(0)) * 12
+                          > PRIVATE_SEPARATE_LIMIT)
     for row in rows:
         gross = row["gross_monthly"]
         if gross is None or row.get("stated_net"):
             continue
-        factor = (ISA_GAINS_TAX if row["key"] == "isa" else PRIVATE_HIGH_TAX if high and row["key"] in _PRIVATE
-                  else TAX_FACTORS.get(row["key"], Decimal("0.055")))
-        row.update(tax_factor=factor, net_monthly=gross * (1 - factor * row["taxable_share"]),
-                   high_private_tax=high and row["key"] in _PRIVATE)
+        if row["key"] in _PRIVATE:
+            low = gross * (1 - TAX_FACTORS.get(row["key"], Decimal("0.055")) * row["taxable_share"])
+            high = gross * (1 - PRIVATE_HIGH_TAX * row["taxable_share"])
+            starts_high = row["start_age"] in high_ages
+            row.update(net_low=low, net_high=high, high_ages=high_ages, high_private_tax=starts_high,
+                       tax_factor=PRIVATE_HIGH_TAX if starts_high else TAX_FACTORS.get(row["key"], Decimal("0.055")),
+                       net_monthly=high if starts_high else low)   # The table's figure: its first payment year.
+            continue
+        factor = ISA_GAINS_TAX if row["key"] == "isa" else TAX_FACTORS.get(row["key"], Decimal("0.055"))
+        row.update(tax_factor=factor, net_monthly=gross * (1 - factor * row["taxable_share"]), high_private_tax=False)
+
+
+def born(household: dict[str, Any]) -> tuple[int, int | None] | None:
+    """(birth year, birth month or None) from [household]; None without a birth year."""
+    year = household.get("birth_year")
+    return None if year is None else (int(year), household.get("birth_month"))
+
+
+def age_on(birth: tuple[int, int | None], when: date) -> int:
+    """Age in full years on `when`. With the birth month the birthday month counts as reached (the national
+    pension starts the month after it); with the year alone it is the age reached during that calendar year."""
+    year, month = birth
+    return when.year - year - (month is not None and when.month < month)
 
 
 def national_pension_age(birth_year: int) -> int:
@@ -457,9 +688,10 @@ def assumptions() -> list[str]:
             f"은퇴 나이: 정하지 않아 {tiers} 세 경우로 계산. 납입은 은퇴 때 멈추고, 연금 계좌는 {PRIVATE_EARLIEST_AGE}세 전에는 "
             "받지 않으며, 국민연금은 조회값이 전제한 가입 기간 대비 줄어든 개월 수에 비례해 감액(임의 가입 계속 납부는 가정 안 함)",
             f"연금 계좌 수령액: 지금 잔액과 월 납입(세액공제를 빠짐없이 받는 연금저축·IRP 분할, 공제 밖 나머지는 ISA 등)을 "
-            f"은퇴 때까지 넣고 수령 개시까지 실질 연 {REAL_RETURN * 100:.0f}%로 불려 연 {WITHDRAWAL_RATE * 100:.0f}%씩 인출한다고 "
-            "가정. 납입액은 오늘 돈 가치로 고정(물가만큼 늘려 넣는다는 뜻)",
-            f"연금 밖에서 준비할 돈: 은퇴부터 마지막 연금이 시작될 때까지 해마다의 부족분과 그 뒤 계속되는 부족분(연 "
+            f"은퇴 때(계좌의 납입 종료일이 더 이르면 그때)까지 넣고 수령 개시까지 실질 연 {REAL_RETURN * 100:.0f}%로 불려, 계좌에 "
+            f"정한 수령 기간(없으면 정부 '내연금'과 같은 {ACCOUNT_PAYOUT_YEARS}년) 동안 같은 실질 금액으로 나눠 받는다고 가정. "
+            "납입액은 오늘 돈 가치로 고정(물가만큼 늘려 넣는다는 뜻)",
+            f"연금 밖에서 준비할 돈: 은퇴부터 마지막 연금이 시작되거나 기간이 정해진 연금이 끝날 때까지 해마다의 부족분과 그 뒤 계속되는 부족분(연 "
             f"{WITHDRAWAL_RATE * 100:.0f}% 인출 기준)을 실질 연 {REAL_RETURN * 100:.0f}%로 은퇴 시점까지 할인한 오늘 돈 가치",
             f"연금보험: 납입 기간 끝까지 보험료를 내고 해지하지 않으며 사업비 {ANNUITY_LOADING * 100:.0f}%, 납입보험료 연 "
             f"{GUARANTEE_SIMPLE_RATE * 100:.0f}% 단리 최저보증(물가 {INFLATION * 100:.0f}%로 현재 가치 환산, 약관 확인 필요) 가정"]

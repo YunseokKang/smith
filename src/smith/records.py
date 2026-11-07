@@ -56,6 +56,8 @@ ASSET_CATEGORIES = frozenset({
 ACCOUNT_TYPES = frozenset({
     "bank", "brokerage", "isa", "pension_savings", "irp", "dc", "insurance", "crypto_exchange", "none", "other",
 })
+# Accounts that may carry a pension product's terms (institution, dates, illustrated payout).
+PENSION_ACCOUNT_TYPES = frozenset({"pension_savings", "irp", "dc", "insurance"})
 VALUATION_METHODS = frozenset({"manual", "statement", "market", "appraisal", "api"})
 LIQUIDITY_CLASSES = frozenset({"immediate", "days", "months", "restricted"})
 MARKETS = frozenset({"KR", "US", "other"})

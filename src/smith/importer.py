@@ -12,7 +12,7 @@ from typing import Any, NoReturn
 from smith.records import (
     ACCOUNT_TYPES, AMOUNT_BASES, ASSET_CATEGORIES, CERTAINTIES, COMMITMENTS, COMPENSATION_CATEGORIES, CURRENCIES,
     FREQUENCIES, GOAL_CATEGORIES, INFLOW_CATEGORIES, LIABILITY_CATEGORIES, LIQUIDITY_CLASSES, MANAGERS, MARKETS,
-    OCCUPANCY, OUTFLOW_CATEGORIES, PAYMENT_STATUSES, PENSION_SOURCES, PRICE_BASES, PRIORITIES, RATE_TYPES, REPAYMENT_METHODS,
+    OCCUPANCY, OUTFLOW_CATEGORIES, PAYMENT_STATUSES, PENSION_ACCOUNT_TYPES, PENSION_SOURCES, PRICE_BASES, PRIORITIES, RATE_TYPES, REPAYMENT_METHODS,
     TRANSFER_CATEGORIES,
     POLICY_CATEGORIES, VALUATION_METHODS,
     ChangeType, ImportBatch, ImportRejected, Kind, RecordInput, Status, canonical_decimal,
@@ -154,6 +154,15 @@ _KIND_FIELDS: dict[Kind, dict[str, _Field]] = {
         "managed_by": _Field(_enum(MANAGERS), nullable=True),
         # Coarse location for local-policy matching; approved by the user at city/district level only.
         "region": _Field(_region, nullable=True),
+        # A pension product's terms as the provider or the public pension portal states them (pension accounts
+        # and annuity policies only, report design §18.5): who holds it, when it was opened, when contributions
+        # end, when the payout starts and ends (none: for life) and the provider's illustrated yearly payout.
+        "institution": _Field(_name, nullable=True),
+        "opened_on": _Field(_date, nullable=True),
+        "contribution_end": _Field(_date, nullable=True),
+        "payout_start": _Field(_date, nullable=True),
+        "payout_end": _Field(_date, nullable=True),
+        "illustrated_annual_pension": _Field(_decimal(), nullable=True),
     },
     Kind.LIABILITY: {
         "category": _Field(_enum(LIABILITY_CATEGORIES)),
@@ -365,6 +374,8 @@ def _record(raw: Any, path: str, owner_ids: set[str], problems: _Problems) -> Re
         fields = _kind_fields(raw, specs, path, closing=status == Status.CLOSED, problems=problems)
         if kind is Kind.CASHFLOW:
             _check_cashflow(fields, path, problems, closing=status == Status.CLOSED)
+        if kind is Kind.ASSET:
+            _check_pension_terms(fields, path, problems)
     if len(problems.items) > before:
         return None
     return RecordInput(record_id, kind, owner_id, effective_at, revision, Status(status),
@@ -404,6 +415,21 @@ def _change_details(raw: dict[str, Any], path: str, change_type: str | None, rev
     if corrects is not None and revision is not None and corrects >= revision:
         problems.add(f"{path}.corrects_revision", "must refer to an earlier revision")
     return corrects, reason
+
+
+def _check_pension_terms(fields: dict[str, str | None], path: str, problems: _Problems) -> None:
+    """Product terms belong to pension accounts and insurance policies, and their dates run in order."""
+    names = ("institution", "opened_on", "contribution_end", "payout_start", "payout_end", "illustrated_annual_pension")
+    if fields.get("account_type") not in PENSION_ACCOUNT_TYPES:
+        for name in names:
+            if fields.get(name) is not None:
+                problems.add(f"{path}.{name}", "is only allowed for pension_savings, irp, dc and insurance accounts")
+        return
+    start, end = fields.get("payout_start"), fields.get("payout_end")
+    if end is not None and start is None:
+        problems.add(f"{path}.payout_end", "needs payout_start")
+    elif start and end and end <= start:
+        problems.add(f"{path}.payout_end", "must be after payout_start")
 
 
 def _check_cashflow(fields: dict[str, str | None], path: str, problems: _Problems, *, closing: bool = False) -> None:

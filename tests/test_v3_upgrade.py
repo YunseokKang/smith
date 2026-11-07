@@ -17,6 +17,7 @@ from smith.config import load_config
 from smith.importer import parse_import
 from smith.records import ImportBatch, ImportRejected, Observation
 from smith.report_data import build_report
+from smith import delivery, pension_chart
 from smith.report_html import render
 
 AT = datetime(2026, 10, 18, tzinfo=timezone.utc)
@@ -179,7 +180,7 @@ class LayoutTests(Upgrade):
         self.assertLess(rates.index("부채·금리 현황 및 금리 변동 민감도"), rates.index("고객님께 드리는 제안"))
         tax_page = render(self.report("tax"))[1]
         self.assertLess(tax_page.index("노후 현금흐름 준비율"), tax_page.index("고객님께 드리는 제안"))
-        self.assertIn("노후 준비율(4대 연금 세후)", tax_page)
+        self.assertIn("노후 준비율(연금 세후)", tax_page)
 
     def test_opinions_and_policy_checks_are_colour_pills(self):
         data = self.report("markets")
@@ -318,7 +319,10 @@ class PensionTests(Upgrade):
         self.assertEqual((national["basis"], national["net_monthly"], national["start_age"]), ("unknown", None, 65))
         growth = (1 + tax.REAL_RETURN) ** 24                                      # 36 -> 60.
         projected = Decimal(30_000_000) * growth + Decimal(300_000) * 12 * (growth - 1) / tax.REAL_RETURN
-        self.assertEqual(savings["gross_monthly"], projected * tax.WITHDRAWAL_RATE / 12)
+        # Paid over the portal's 20 years in equal real instalments (user decision 2026-11-07).
+        twenty = tax.REAL_RETURN / (1 - (1 + tax.REAL_RETURN) ** -pension.ACCOUNT_PAYOUT_YEARS)
+        self.assertEqual(savings["gross_monthly"], projected * twenty / 12)
+        self.assertEqual((savings["start_age"], savings["end_age"]), (60, 80))
         # This year's IRP above the credit (60만) comes back tax-free: the IRP pays tax on a taxable share below one.
         self.assertLess(irp["taxable_share"], 1)
         self.assertEqual(irp["net_monthly"], irp["gross_monthly"] * (1 - pension.PRIVATE_HIGH_TAX * irp["taxable_share"]))
@@ -332,6 +336,8 @@ class PensionTests(Upgrade):
         self.assertEqual(stack["unknown"], ["national"])
         self.assertEqual(stack["total_net"], annuity["net_monthly"] + savings["net_monthly"] + irp["net_monthly"]
                          + isa["net_monthly"])
+        # The accounts end at 80; the annuity and the ISA draw go on.
+        self.assertEqual((stack["later_age"], stack["later_net"]), (80, annuity["net_monthly"] + isa["net_monthly"]))
         self.assertEqual([t["retire_age"] for t in stack["tiers"]], [50, 55, 60])
         # The national pension is unknown, not zero: what must be held outside the pensions is only a ceiling.
         self.assertTrue(all(t["outside_need"]["upper_bound"] for t in stack["tiers"]))
@@ -339,7 +345,7 @@ class PensionTests(Upgrade):
         self.assertEqual(stack["ratio"], stack["total_net"] / Decimal(5_500_000))
         self.assertIn("pension-pipelines", [r.key for r in data["requests"]])
         page = render(data)[1]
-        self.assertIn("4대 연금 스택", page)
+        self.assertIn("연금 종류별 스택", page)
         self.assertIn("입력 필요: 국민연금공단", page)
         # The client states the national pension: it is used as entered and the request disappears.
         self.apply("v2", [flow("np", "pension_income", "1500000", "inflow", pension_source="national", start_date="2055-06-01")])
@@ -377,7 +383,7 @@ class PensionTests(Upgrade):
         self.assertEqual(annuity["nominal_monthly"], Decimal(1_450_000))
         data = build_report(self.conn, as_of=later, known_at=later, baseline=None, kind="tax", household=HOUSEHOLD)
         page = render(data)[1]
-        self.assertIn("2055년 금액 145만 원", page)
+        self.assertIn("2055년 금액 월 145만 원", page)              # In the letter's calculation notes.
         # The product review (FR-24): forward IRR rises with lifespan, the alternative with its return, and the
         # break-even sits where the alternative's withdrawal equals the annuity.
         review = data["annuity_reviews"][0]
@@ -397,6 +403,169 @@ class PensionTests(Upgrade):
         self.assertEqual((metrics["verdict"], metrics["policy"]), (review["verdict"], "연금보험 1"))
         with self.assertRaises(ImportRejected):
             self.apply("v7", [flow("bad2", "salary", "1", "inflow", price_basis="nominal")])
+
+
+    def test_the_age_chart_stacks_each_pipeline_from_its_start_to_its_end(self):
+        data = self.report("tax")
+        stack = data["pension_stack"]
+        rows = {r["age"]: r for r in stack["timeline"]}
+        self.assertEqual((min(rows), max(rows)), (55, 90))
+        _, annuity, savings, irp, isa = stack["pipelines"]
+        self.assertEqual(rows[59]["total"], 0)                         # Everything known starts at 60.
+        self.assertEqual(rows[60]["parts"], {"insurance_annuity": annuity["net_monthly"] * 12,
+                                             "pension_savings": savings["net_monthly"] * 12,
+                                             "irp": irp["net_monthly"] * 12, "isa": isa["net_monthly"] * 12})
+        self.assertAlmostEqual(rows[79]["total"], stack["total_net"] * 12, places=6)
+        self.assertAlmostEqual(rows[80]["total"], stack["later_net"] * 12, places=6)  # The 20-year accounts ended.
+        self.assertEqual([p["category"] for p in stack["pipelines"]],
+                         ["public", "tax_free", "personal", "occupational", "personal"])
+        page = render(data)[1]
+        self.assertIn("60세 예상 연금 수령액", page)
+        self.assertIn("계산 기준", page)                                 # Details moved to the letter's end.
+        self.assertNotIn("정부 예시", page)
+        self.assertIn("가입 없음(주택연금·농지연금)", page)
+        # Two stated annuity records with their own starts: the later one counts only from its age.
+        self.apply("v2", [flow("a1", "pension_income", "1000000", "inflow", pension_source="insurance_annuity",
+                               start_date="2050-01-01"),
+                          flow("a2", "pension_income", "2000000", "inflow", pension_source="insurance_annuity",
+                               start_date="2060-01-01")])
+        stack = self.report("tax")["pension_stack"]
+        rows = {r["age"]: r for r in stack["timeline"]}
+        self.assertEqual(rows[69]["parts"]["insurance_annuity"], Decimal(12_000_000))
+        self.assertEqual(rows[70]["parts"]["insurance_annuity"], Decimal(36_000_000))
+        # An insurer's fixed won amount shrinks in today's won once it is paid.
+        self.apply("v3", [dict(flow("a2", "pension_income", "2000000", "inflow", pension_source="insurance_annuity",
+                                    start_date="2060-01-01", price_basis="nominal"), revision=2,
+                               effective_at="2026-10-19T00:00:00+00:00")])
+        later = datetime(2026, 10, 20, tzinfo=timezone.utc)
+        stack = build_report(self.conn, as_of=later, known_at=later, baseline=None, kind="tax",
+                             household=HOUSEHOLD)["pension_stack"]
+        rows = {r["age"]: r for r in stack["timeline"]}
+        fixed = [rows[age]["parts"]["insurance_annuity"] - Decimal(12_000_000) for age in (70, 71)]
+        self.assertAlmostEqual(fixed[1], fixed[0] / (1 + pension.INFLATION), places=6)
+
+    def test_an_account_follows_its_stated_terms_and_an_employer_db_plan_is_asked_for(self):
+        terms = dict(institution="예시증권", opened_on="2016-05-10", contribution_end="2040-03-21",
+                     payout_start="2050-03-01", payout_end="2065-03-01", illustrated_annual_pension="9000000")
+        changed = "2026-10-19T00:00:00+00:00"
+        self.apply("t1", [dict(RECORDS[9], revision=2, effective_at=changed, **terms)])   # The pension-savings account.
+        household = dict(HOUSEHOLD, occupational_plan="db", occupational_institution="예시생명")
+        later = datetime(2026, 10, 20, tzinfo=timezone.utc)
+        data = build_report(self.conn, as_of=later, known_at=later, baseline=None, kind="tax", household=household)
+        stack = data["pension_stack"]
+        savings = next(p for p in stack["pipelines"] if p["key"] == "pension_savings")
+        self.assertEqual((savings["payout_years"], savings["end_age"]), (15, 75))   # 60 + 15.
+        self.assertIn("50세(납입 종료일)까지", savings["basis_text"])              # 2040-03 is age 50 for 1990.
+        self.assertEqual(savings["products"][0]["illustrated_annual"], Decimal(9_000_000))
+        db = next(p for p in stack["pipelines"] if p["key"] == "occupational")
+        self.assertEqual((db["category"], db["net_monthly"], db["label"]), ("occupational", None, "퇴직연금(DB형)"))
+        self.assertIn("occupational", stack["unknown"])
+        page = render(data)[1]
+        for text in ("예시증권", "예시생명 DB형 퇴직연금", "입력 필요: 회사 인사팀"):   # Product names only in the table.
+            self.assertIn(text, page)
+        for text in ("2016.05 가입", "납입 ~2040.03", "정부 예시 연 900만 원"):
+            self.assertNotIn(text, page)
+        # The hero bar reads the same age as the total (a fixed-term pension may have ended by then).
+        _, segments, _ = report_html._hero_segments(data, "tax")
+        self.assertAlmostEqual(sum(v for label, v, _ in segments if label != "목표까지 부족"), stack["total_net"], places=6)
+        # A contribution end alone is a term; a second account with another period: the longest, said so.
+        self.apply("t4", [dict(RECORDS[8], revision=2, effective_at=changed, contribution_end="2030-01-01"),
+                          rec("savings-2", "asset", category="fund", account_type="pension_savings", currency="KRW",
+                              value="1000000", valuation_method="statement", liquidity="restricted",
+                              effective_at=changed, payout_start="2050-03-01", payout_end="2075-03-01")])
+        data = build_report(self.conn, as_of=later, known_at=later, baseline=None, kind="tax", household=household)
+        pipes = {p["key"]: p for p in data["pension_stack"]["pipelines"]}
+        self.assertIn("40세(납입 종료일)까지", pipes["irp"]["basis_text"])
+        self.assertEqual(pipes["pension_savings"]["payout_years"], 25)
+        self.assertIn("가장 긴 기간", pipes["pension_savings"]["basis_text"])
+        # A fixed annuity's erosion counts in the total after the accounts end, as in the chart.
+        self.apply("t5", [flow("np2", "pension_income", "1200000", "inflow", pension_source="insurance_annuity",
+                               start_date="2055-01-01", price_basis="nominal", effective_at=changed)])
+        stack = build_report(self.conn, as_of=later, known_at=later, baseline=None, kind="tax",
+                             household=household)["pension_stack"]
+        rows = {r["age"]: r for r in stack["timeline"]}
+        self.assertAlmostEqual(stack["later_net"] * 12, rows[stack["later_age"]]["total"], places=6)
+        with self.assertRaises(ImportRejected):
+            self.apply("t2", [dict(RECORDS[0], revision=2, effective_at=changed, institution="예시은행")])   # A bank account has no terms.
+        with self.assertRaises(ImportRejected):
+            self.apply("t3", [dict(RECORDS[9], revision=3, effective_at=changed, payout_start="2050-03-01",
+                                   payout_end="2049-03-01")])
+
+    def test_each_stated_part_keeps_its_own_start_and_end_in_the_totals(self):
+        # 1990: 100만 from 60 until the end of 2059 (age 69), 200만 from 70 for life, both after tax.
+        self.apply("s1", [flow("p1", "pension_income", "1000000", "inflow", pension_source="other", amount_basis="net",
+                               start_date="2050-01-01", end_date="2059-12-31"),
+                          flow("p2", "pension_income", "2000000", "inflow", pension_source="other", amount_basis="net",
+                               start_date="2060-01-01")])
+        tier = next(t for t in self.report("tax")["pension_stack"]["tiers"] if t["retire_age"] == 60)
+        other = next(p for p in tier["pipelines"] if p["key"] == "other")
+        self.assertEqual(tier["all_on_age"], 70)
+        for age, expected in ((60, 1_000_000), (69, 1_000_000), (70, 2_000_000), (90, 2_000_000)):
+            self.assertAlmostEqual(pension.monthly_at(other, age), Decimal(expected), places=6)
+
+    def test_a_fixed_annuity_that_falls_behind_the_target_later_still_needs_money_outside(self):
+        rows = [{"key": "insurance_annuity", "net_monthly": Decimal(2_000_000), "start_age": 60, "end_age": None,
+                 "start_shares": [(60, Decimal(1), 60, None)]}]
+        need = pension._outside_need(rows, Decimal(1_500_000), 60)
+        self.assertGreater(need["total"], 0)       # 200만 fixed covers 150만 at 60 but not after about 74.
+
+    def test_a_db_plan_pays_a_month_of_average_wage_per_year_of_service_from_an_irp(self):
+        household = dict(HOUSEHOLD, occupational_plan="db", occupational_institution="예시생명",
+                         occupational_average_wage=10_000_000, occupational_service_start=date(2015, 3, 9))
+        data = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="tax", household=household)
+        db = next(p for p in data["pension_stack"]["pipelines"] if p["key"] == "occupational")
+        self.assertEqual(db["service_months"], 417)                     # 2015-03-09 .. 2050-01-01 (60 for 1990).
+        self.assertEqual(db["severance"], Decimal(10_000_000) * 417 / 12)
+        twenty = tax.REAL_RETURN / (1 - (1 + tax.REAL_RETURN) ** -pension.ACCOUNT_PAYOUT_YEARS)
+        self.assertEqual(db["gross_monthly"], db["severance"] * twenty / 12)
+        self.assertEqual((db["start_age"], db["end_age"]), (60, 80))
+        # Severance-funded: retirement-income tax, outside the private-pension limit that raises the others' rate.
+        self.assertEqual(db["net_monthly"], db["gross_monthly"] * (1 - pension.TAX_FACTORS["occupational"]))
+        self.assertEqual(db["products"][0]["now_estimate"], Decimal(10_000_000) * 139 / 12)   # To 2026-10-18.
+        early = next(t for t in data["pension_stack"]["tiers"] if t["retire_age"] == 50)
+        db50 = next(p for p in early["pipelines"] if p["key"] == "occupational")
+        self.assertEqual(db50["start_age"], 55)                          # Waits in the IRP until 55, growing.
+        page = render(data)[1]
+        self.assertIn("예시생명 DB형 퇴직연금", page)
+
+    def test_the_letter_draws_the_charts_as_pngs_and_the_mail_carries_them_inline(self):
+        data = self.report("tax")
+        self.assertEqual(len(delivery.canonical_digest(data)), 64)           # The lineage digest takes the stack.
+        page = render(data)[1]
+        self.assertEqual(page.count('src="data:image/png;base64,'), 2)        # The donut and the age bars.
+        html, images = delivery.inline_images(page)
+        self.assertEqual(sorted(images), ["chart-1", "chart-2"])
+        self.assertNotIn("data:image/png", html)
+        self.assertIn('src="cid:chart-1"', html)
+        self.assertTrue(all(png[:4] == bytes([0x89]) + b"PNG" for png in images.values()))
+
+    def test_review_round_three_tiny_bars_tax_per_age_and_a_running_annuity(self):
+        # A payout of a thousand won beside a large one still draws.
+        rows = [{"age": a, "parts": {"national": Decimal(12_000_000), "irp": Decimal(12_000)},
+                 "total": Decimal(12_012_000)} for a in range(55, 91)]
+        png = pension_chart.age_bars(rows, [("national", "#0052ff"), ("irp", "#0a8f5c")], retire_age=55, focus_age=65)
+        self.assertEqual(png[:4], bytes([0x89]) + b"PNG")
+        # Two private pensions over the limit together: the high rate only while both pay.
+        rows = [{"key": "pension_savings", "gross_monthly": Decimal(1_000_000), "taxable_share": Decimal(1),
+                 "start_age": 55, "end_age": 65, "net_monthly": None},
+                {"key": "irp", "gross_monthly": Decimal(1_000_000), "taxable_share": Decimal(1),
+                 "start_age": 55, "end_age": 75, "net_monthly": None}]
+        pension._apply_tax(rows)
+        irp = rows[1]
+        self.assertEqual(pension.monthly_at(irp, 60), Decimal(1_000_000) * (1 - pension.PRIVATE_HIGH_TAX))
+        self.assertEqual(pension.monthly_at(irp, 65), Decimal(1_000_000) * (1 - pension.TAX_FACTORS["irp"]))
+        # A fixed won annuity already paying is not deflated for the years before today.
+        self.apply("r3", [flow("old", "pension_income", "1000000", "inflow", pension_source="other", amount_basis="net",
+                               start_date="2020-01-01", price_basis="nominal")])
+        other = next(p for p in self.report("tax")["pension_stack"]["pipelines"] if p["key"] == "other")
+        self.assertEqual(pension.monthly_at(other, 36), Decimal(1_000_000))          # 1990 client, 2026.
+        self.assertEqual(pension.monthly_at(other, 37), Decimal(1_000_000) / (1 + pension.INFLATION))
+
+    def test_a_birth_month_gives_the_age_in_full_years(self):
+        for birth, when, age in [((1991, 7), date(2057, 1, 3), 65), ((1991, None), date(2057, 1, 3), 66),
+                                 ((1991, 7), date(2056, 7, 1), 65), ((1991, 7), date(2056, 6, 30), 64)]:
+            with self.subTest(birth=birth, when=when):
+                self.assertEqual(pension.age_on(birth, when), age)
 
 
 class FinancialIncomeTests(unittest.TestCase):
@@ -793,7 +962,8 @@ class ReviewFixTests(Upgrade):
         paid = (1 + tax.REAL_RETURN) ** 14
         projected = (Decimal(30_000_000) * paid + Decimal(300_000) * 12 * (paid - 1) / tax.REAL_RETURN) * (1 + tax.REAL_RETURN) ** 5
         self.assertEqual((stack["payout_age"], savings["start_age"], stack["retirement_age"]), (55, 55, 50))
-        self.assertEqual(savings["gross_monthly"], projected * tax.WITHDRAWAL_RATE / 12)
+        twenty = tax.REAL_RETURN / (1 - (1 + tax.REAL_RETURN) ** -pension.ACCOUNT_PAYOUT_YEARS)
+        self.assertEqual(savings["gross_monthly"], projected * twenty / 12)
 
     def test_each_retirement_age_scales_the_national_pension_and_counts_the_years_without_a_pension(self):
         # The service's estimate assumes 420 months until age 60 (2050-08 for a client born in 1990).
@@ -802,7 +972,7 @@ class ReviewFixTests(Upgrade):
         undecided = {k: v for k, v in HOUSEHOLD.items() if k != "retirement_age"}
         data = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="tax", household=undecided)
         stack = data["pension_stack"]
-        self.assertEqual((stack["retirement_age"], stack["retirement_age_set"]), (60, False))
+        self.assertEqual((stack["retirement_age"], stack["retirement_age_set"]), (55, False))   # Default (2026-11-07).
         tiers = {t["retire_age"]: t for t in stack["tiers"]}
         national = {age: t["pipelines"][0]["net_monthly"] for age, t in tiers.items()}
         self.assertEqual(national, {60: Decimal(1_800_000), 55: Decimal(1_800_000) * 360 / 420,
@@ -827,7 +997,7 @@ class ReviewFixTests(Upgrade):
                 self.assertIsNone(narrative.check_block([text], [], payload))
         self.assertIsNotNone(narrative.check_block(["준비율 99%"], [], payload))
         page = render(data)[1]
-        for text in ("50·55·60세 세 경우로 계산", "연금 없는 기간", "5년(55세까지)", "연금 밖에서 준비할 돈", "60세 은퇴 기준"):
+        for text in ("50·55·60세 세 경우로 계산", "연금 없는 기간", "5년(55세까지)", "연금 밖에서 준비할 돈", "55세 은퇴 기준"):
             self.assertIn(text, page)
         # Both fields or neither, whole months, pension_income only.
         for bad in ({"contribution_months": "420"}, {"contribution_months": "420.5", "contribution_end": "2050-08-31"},):

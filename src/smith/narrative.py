@@ -719,12 +719,15 @@ def _stack_metrics(stack: dict[str, Any] | None) -> dict[str, Any] | None:
     contributions = stack["contributions"]
     return {"monthly_target_today_won": won(stack["target"]), "headline_retirement_age": stack["retirement_age"],
             "retirement_age_chosen_by_client": stack["retirement_age_set"],
-            "pipelines": [{"key": p["key"], "label": p["label"], "start_age": p["start_age"],
+            # A fixed-term pension account stops at end_age (None: for life); category is the pension family.
+            "pipelines": [{"key": p["key"], "label": p["label"], "category": p["category"], "start_age": p["start_age"],
+                           "end_age": p.get("end_age"),
                            "gross_monthly": won(p["gross_monthly"]), "net_monthly": won(p["net_monthly"]),
                            "nominal_monthly_at_start": won(p.get("nominal_monthly")),
                            "basis": p["basis"], "basis_text": p["basis_text"], "missing": p["missing"]}
                           for p in stack["pipelines"]],
             "total_net_monthly_known": won(stack["total_net"]), "readiness_ratio": f"{stack['ratio']:.4f}",
+            "net_monthly_after_fixed_term_pensions_end": won(stack["later_net"]), "fixed_term_pensions_end_age": stack["later_age"],
             "unknown_pipelines": stack["unknown"], "lower_bound": not stack["complete"],
             # Report design §30: the stack at each retirement age, and the contributions it assumes.
             "retirement_age_tiers": [

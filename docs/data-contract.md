@@ -91,6 +91,11 @@
 - 보험 보장금액은 자산이 아니다. 월 보험료는 cashflow(`insurance_premium`)로 입력한다.
   보장 적정성 자문이 필요해지면 순자산에 합산하지 않는 별도 coverage 레코드를 추가한다(미구현).
 - 국민연금 예상 수령액은 자산이 아니라 cashflow(`pension_income`)로 입력한다.
+- 연금 상품 조건(선택, `account_type`이 `pension_savings`·`irp`·`dc`·`insurance`인 asset만): `institution`(금융사), `opened_on`(가입일),
+  `contribution_end`(납입 종료일), `payout_start`·`payout_end`(연금 개시·수령 종료일, 종료가 없으면 종신, 종료는 개시 뒤),
+  `illustrated_annual_pension`(금융사·중앙노후준비지원센터 '내연금'의 예시연금액, 세전 연간·그해 금액). 연금 스택은 계좌의
+  수령 기간(`payout_end`−`payout_start`, 없으면 20년)에 걸쳐 나눠 받고 납입 종료일이 은퇴보다 이르면 그때 납입을 멈춘다고 계산하며,
+  레터 표에 가입 상품으로 보인다. 같은 계좌의 여러 펀드 레코드 중 한 건에만 적어도 된다.
 
 **liability**: `category`, `currency`, `outstanding_principal`(현재 잔여 원금), `annual_rate`,
 `rate_type`, `maturity`(선택), `repayment_method`, `credit_limit`(선택), `collateral_record_id`(선택)

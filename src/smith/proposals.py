@@ -1308,7 +1308,7 @@ def _retirement_track(facts: dict[str, Any], home: dict[str, Any] | None) -> Tra
         need = None  # The expected-pay share of a ceiling would understate what the pay covers: left out.
     return Track(
         "노후 준비", status,
-        f"월 {short_won(stack['target'])}(현재 가치) 목표에 4대 연금 세후 준비율은 은퇴 나이별로 {ratios}",
+        f"월 {short_won(stack['target'])}(현재 가치) 목표에 연금 세후 준비율은 은퇴 나이별로 {ratios}",
         ((f"연금 밖에서 은퇴할 때 갖고 있어야 할 돈은 {need_text}(오늘 돈 가치)입니다. " if need_text else "")
          + (f"{gaps[0]['retire_age']}세에 은퇴하면 첫 연금까지 {gaps[0]['years_without_pension']}년이 비어 그동안의 생활비가 "
             "모두 연금 밖의 돈입니다. " if gaps else "")

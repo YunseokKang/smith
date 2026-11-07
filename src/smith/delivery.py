@@ -6,9 +6,11 @@ is retried up to ledger.MAX_SEND_ATTEMPTS. If the PC was off, the latest due slo
 message that lists the missed slots, which are settled only once that message is (possibly) delivered;
 nothing is backfilled on the very first run.
 """
+import base64
 import dataclasses
 import hashlib
 import json
+import re
 import time
 import uuid
 from collections.abc import Callable
@@ -202,11 +204,28 @@ def publish(db: Path, *, recipient: str, credentials: tuple[str, str, str], now:
     # The proposals the message carried are recorded in the same transaction as its final status.
     shown = [snapshot(p) for p in data["advice"]["proposals"]]
     try:
-        message_id = sender(credentials, recipient=recipient, subject=subject, html=html, text=_text(subject))
+        mail_html, images = inline_images(html)
+        message_id = sender(credentials, recipient=recipient, subject=subject, html=mail_html, text=_text(subject),
+                            **({"images": images} if images else {}))
     except gmail.MailError as error:
         return _finish(db, report_id, "unknown" if error.uncertain else "failed", subject=subject, digest=digest,
                        error_code=error.code, shown=shown)
     return _finish(db, report_id, "sent", subject=subject, digest=digest, message_id=message_id, shown=shown)
+
+
+_DATA_PNG = re.compile(r'src="data:image/png;base64,([A-Za-z0-9+/=]+)"')
+
+
+def inline_images(html: str) -> tuple[str, dict[str, bytes]]:
+    """The report's embedded PNG charts as inline attachments: mail clients do not load `data:` images, so each
+    becomes `cid:chart-N` (the preview keeps the data URI). The digest is taken of the HTML as rendered."""
+    images: dict[str, bytes] = {}
+
+    def attach(match: re.Match[str]) -> str:
+        cid = f"chart-{len(images) + 1}"
+        images[cid] = base64.b64decode(match.group(1))
+        return f'src="cid:{cid}"'
+    return _DATA_PNG.sub(attach, html), images
 
 
 def _finish(db: Path, report_id: str, status: str, *, subject: str | None = None, digest: str | None = None,

@@ -18,13 +18,14 @@ collapsible <details> card (the hero, the proposals and a theme's opening sectio
 before their tables, opinions and checks are colour pills, and the mail ends with one line: the status
 reasons, data status and sources moved out of the mail into `system_notes` (for the e-mail answers).
 """
+import base64
 import re
 from decimal import ROUND_HALF_UP, Decimal
 from html import escape
 from typing import Any
 
 from smith.fmt import short_won as _short
-from smith import editions, korean, picks, principles, stress, tax
+from smith import editions, korean, pension, pension_chart, picks, principles, stress, tax
 from smith.holdings import STANCES
 from smith.proposals import Track
 from smith.realestate import MIN_BASIS
@@ -458,7 +459,9 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
     sections = [renderers[name]() for name in edition.sections if name not in edition.opening]
     if any(sections):
         bands.append(_band(CANVAS, "".join(sections), border=True))
-    bands.append(_band(SOFT, _footer(_system_warnings(data), week=_week_line(data), corrections=_corrections_line(data))))
+    notes = pension_notes(data.get("pension_stack")) if "pension_stack" in edition.opening + edition.sections else []
+    bands.append(_band(SOFT, _footer(_system_warnings(data), week=_week_line(data), corrections=_corrections_line(data),
+                                     notes=notes)))
     return _subject(data, status), _page(bands)
 
 
@@ -533,7 +536,7 @@ def _tiles(data: dict[str, Any], edition: editions.Edition) -> list[tuple[str, s
         stack = data.get("pension_stack")
         others = [] if stack is None else [t for t in _retirement_tiers(stack) if t["retire_age"] != stack["retirement_age"]]
         first = (("올해 연금 납입(예상)", _short(plan["savings_paid"] + plan["irp_paid"]), "연금저축 + IRP" + lower) if stack is None
-                 else ("노후 준비율(4대 연금 세후)", _pct(stack["ratio"], 0),
+                 else ("노후 준비율(연금 세후)", _pct(stack["ratio"], 0),
                        f"{stack['retirement_age']}세 은퇴 기준 · "
                        + " · ".join(f"{t['retire_age']}세 {_pct(t['ratio'], 0)}" for t in others)
                        + (f" · {len(stack['unknown'])}개 미상 제외" if stack["unknown"] else "")))
@@ -808,7 +811,11 @@ def _composition_bar(data: dict[str, Any], edition: editions.Edition | None) -> 
     title, segments, note = _hero_segments(data, None if edition is None else edition.tiles)
     if not segments:
         return ""
-    bar = _stacked(segments, on_dark=True)
+    colors = None
+    if edition is not None and edition.tiles == "tax":   # Family hues, the shortfall in neutral grey.
+        hue = {label: _FAMILY_SHADES[key][0] for key, label in pension.CATEGORIES}
+        colors = [hue.get(label, MUTED_BAR) for label, value, _ in segments if value is not None and value > 0]
+    bar = _stacked(segments, on_dark=True, colors=colors)
     if not bar:
         return ""
     foot = f'<div style="font-size:12px;color:{ON_DARK};margin-top:6px">{escape(note)}</div>' if note else ""
@@ -839,14 +846,15 @@ def _hero_segments(data: dict[str, Any], tiles: str | None) -> tuple[str, list[t
         stack = data.get("pension_stack")
         if stack is None:
             return "", [], ""
-        known = [p for p in stack["pipelines"] if p["net_monthly"] is not None]
-        segments = [(p["label"], p["net_monthly"], "") for p in known]
+        # One segment per pension family (공적·퇴직·개인·비과세), as in the stack card (user request 2026-11-07), each
+        # at the age every pension has started, the same reading as total_net (a fixed-term one may have ended).
+        head = next(t for t in stack["tiers"] if t["retire_age"] == stack["retirement_age"])
+        at = head["all_on_age"]
+        segments = [(label, sum((p["net_monthly"] if at is None else pension.monthly_at(p, at) for p in members
+                                 if p["net_monthly"] is not None), Decimal(0)), "")
+                    for _, label, members in _families(stack)]
+        segments = [s for s in segments if s[1] > 0]
         gap = stack["target"] - stack["total_net"]
-        if len(segments) + (gap > 0) > len(SEGMENTS):
-            # Five hues at most, and the fold-in "기타" would hide the shortfall: the two pension accounts share one.
-            accounts = [p for p in known if p["key"] in ("pension_savings", "irp")]
-            segments = [(p["label"], p["net_monthly"], "") for p in known if p not in accounts]
-            segments.insert(2, ("연금저축·IRP", sum((p["net_monthly"] for p in accounts), Decimal(0)), ""))
         if gap > 0:
             segments.append(("목표까지 부족", gap, ""))
         note = f"세후 월 수령액 합계 {_short(stack['total_net'])} / 목표 월 {_short(stack['target'])}"
@@ -871,18 +879,21 @@ def _hero_segments(data: dict[str, Any], tiles: str | None) -> tuple[str, list[t
     return f"자산의 구성 · {_short(composition.get('total'))}", segments, note
 
 
-def _stacked(segments: list[tuple[str, Decimal | None, str]], *, on_dark: bool = False) -> str:
+def _stacked(segments: list[tuple[str, Decimal | None, str]], *, on_dark: bool = False,
+             colors: list[str] | None = None) -> str:
     """One stacked bar with a legend: each segment in its fixed colour, a 2px gap between fills, the share
-    and an optional note beside each label. Unknown or zero segments are left out; nothing without a total."""
+    and an optional note beside each label. Unknown or zero segments are left out; nothing without a total.
+    `colors` (one per segment, all segments positive) replaces the palette, e.g. a family's shades."""
     rows = [(label, value, note) for label, value, note in segments if value is not None and value > 0]
-    if len(rows) > len(SEGMENTS):  # Hues are never cycled: the tail folds into one segment.
+    palette = colors or SEGMENTS
+    if colors is None and len(rows) > len(SEGMENTS):  # Hues are never cycled: the tail folds into one segment.
         rows = rows[:len(SEGMENTS) - 1] + [("기타", sum((v for _, v, _ in rows[len(SEGMENTS) - 1:]), Decimal(0)), "")]
     total = sum((value for _, value, _ in rows), Decimal(0))
     if not rows or not total:
         return ""
     surface = DARK if on_dark else CANVAS
     cells = "".join(f'<td style="width:{max(1, int(value / total * 100))}%;height:14px;font-size:0;line-height:0;'
-                    f'background:{SEGMENTS[i % len(SEGMENTS)]};border-right:2px solid {surface}">&nbsp;</td>'
+                    f'background:{palette[i % len(palette)]};border-right:2px solid {surface}">&nbsp;</td>'
                     for i, (_, value, _) in enumerate(rows))
     bar = (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-radius:100px;'
            f'overflow:hidden"><tr>{cells}</tr></table>')
@@ -893,7 +904,7 @@ def _stacked(segments: list[tuple[str, Decimal | None, str]], *, on_dark: bool =
     divider = f' <span style="color:{ink};margin-right:12px">|</span> '
     items = []
     for i, (label, value, note) in enumerate(rows):
-        dot = f'<span style="color:{SEGMENTS[i % len(SEGMENTS)]}">●</span> '
+        dot = f'<span style="color:{palette[i % len(palette)]}">●</span> '
         extra = f' <span style="font-family:{MONO}">({escape(note)})</span>' if note else ""
         items.append(f'<span style="display:inline-block;white-space:nowrap;margin:6px 12px 0 0;font-size:12px;color:{ink}">'
                      f'{dot}{escape(label)} <span style="font-family:{MONO}">{_pct(value / total, 0)}</span>{extra}</span>')
@@ -2331,37 +2342,143 @@ def _delta_pct(ratio: Decimal | None) -> str:
 
 def _pension_stack(data: dict[str, Any]) -> str:
     """The pension stack (report design §18.5): every pipeline's after-tax monthly payout against the monthly
-    retirement target, the readiness ratio, and what is still missing. The tax day's opening view."""
+    retirement target, the readiness ratio, and what is still missing. The tax day's opening view. Only the
+    point of each part is in the card; how it was computed goes to the letter's end (`pension_notes`, user review
+    2026-11-07)."""
     stack = data.get("pension_stack")
     if stack is None:
-        return _section("노후 현금흐름 준비율", "은퇴 후 월 생활비 목표(지금 물가 기준)를 알려 주시면 4대 연금을 합쳐 준비율을 보여 드립니다.", "")
+        return _section("노후 현금흐름 준비율", "은퇴 후 월 생활비 목표(지금 물가 기준)를 알려 주시면 연금을 모두 합쳐 준비율을 보여 드립니다.", "")
     target, head = stack["target"], stack["retirement_age"]
     tiers = _retirement_tiers(stack)
     # The two sentences the card keeps (report design §21): which ages, then each age's after-tax total and ratio.
     lead = ((f"{head}세 은퇴를 기준으로 계산했고 50·55·60세도 함께 보입니다." if stack["retirement_age_set"] else
-             f"은퇴 나이를 정하지 않으셔서 {'·'.join(str(t['retire_age']) for t in tiers)}세 세 경우로 계산했고, 아래 연금 표는 "
+             f"은퇴 나이를 정하지 않으셔서 {'·'.join(str(t['retire_age']) for t in tiers)}세 세 경우로 계산했고, 아래 그래프와 표는 "
              f"{head}세 기준입니다.")
             + f" 은퇴 후 월 <b>{_short(target)}</b>(현재 가치) 목표에 모든 연금이 나온 뒤의 세후 월 합계는 "
-            + ", ".join(f"{t['retire_age']}세 은퇴 <b>{_short(t['total_net'])}</b>({_pct(t['ratio'], 0)})" for t in tiers) + "입니다.")
+            + ", ".join(f"{t['retire_age']}세 은퇴 <b>{_short(t['total_net'])}</b>({_pct(t['ratio'], 0)})" for t in tiers)
+            + "입니다.")
+    if stack["later_net"] is not None:
+        lead += (f" 기간을 정해 받는 연금이 끝나는 {stack['later_age']}세부터는 세후 월 <b>{_short(stack['later_net'])}</b>"
+                 f"({_pct(stack['later_ratio'], 0)})로 줄어듭니다.")
     if stack["unknown"]:
         missing = [p for p in stack["pipelines"] if p["net_monthly"] is None]
         lead += (f" {', '.join(p['label'] for p in missing)}은 아직 수령액을 몰라 뺀 하한이며, 답장으로 알려 주시면 바로 반영합니다: "
                  + " ".join(f"{p['label']}는 {p['missing']}." for p in missing if p["missing"]))
-    rows = []
-    for p in stack["pipelines"]:
-        # A stated payout starts on a date; with only the birth year its age is approximate (review 2026-10-18).
-        start = ("-" if p["start_age"] is None else
-                 f"{p['start_date']:%Y.%m}(약 {p['start_age']}세)" if p.get("start_date") else f"{p['start_age']}세")
-        gross = _short(p["gross_monthly"])
-        if p.get("nominal_monthly") is not None:  # The insurer's own figure is a future amount: show both.
-            gross = f"{_short(p['gross_monthly'])}(현재 가치) · {p.get('start_year', '')}년 금액 {_short(p['nominal_monthly'])}"
-        basis = (("입력값" if p["basis_text"].startswith("알려 주신") else "추정") if p["net_monthly"] is not None
-                 else f"입력 필요: {p['missing']}")
-        rows.append([p["label"], start, gross, _short(p["net_monthly"]), basis])
     inner = (_tier_table(tiers) + _gauge(f"{head}세 은퇴 기준 목표 월 생활비 대비 준비율", stack["ratio"], "")
-             + _table(["연금", "개시", "월 예상(세전)", "세후", "근거"], rows) + _stack_note(stack))
-    return _section("노후 현금흐름 준비율: 4대 연금 스택", lead, inner,
+             + _pension_timeline(stack) + _family_table(stack))
+    return _section("노후 현금흐름 준비율: 연금 종류별 스택", lead, inner,
                     note=escape("준비율 " + " · ".join(f"{t['retire_age']}세 은퇴 {_pct(t['ratio'], 0)}" for t in tiers)))
+
+
+# One hue per pension family and lighter shades for the products in it (user request 2026-11-07), so the table,
+# the composition bar and the age chart read the same.
+_FAMILY_SHADES = {"public": ("#0052ff", "#6b9bff"), "occupational": ("#0a8f5c", "#5cbf94", "#9ad9bc"),
+                  "personal": ("#7c3aed", "#a78bfa", "#c4b5fd"), "tax_free": ("#b86e00", "#e0a64d"),
+                  "property": ("#c43d7a", "#e589b3")}
+# The card's short notes: larger and in body ink, not grey (user review 2026-11-07: grey was hard to read).
+_NOTE = f"font-size:14px;line-height:1.6;color:{BODY};margin:6px 0 14px"
+
+
+def _families(stack: dict[str, Any]) -> list[tuple[str, str, list[dict[str, Any]]]]:
+    """(family key, label, its pipelines) for all five families, held or not, in the fixed order."""
+    return [(key, label, [p for p in stack["pipelines"] if p["category"] == key]) for key, label in pension.CATEGORIES]
+
+
+def _pipeline_colors(stack: dict[str, Any]) -> dict[str, str]:
+    colors = {}
+    for key, _, members in _families(stack):
+        shades = _FAMILY_SHADES[key]
+        for i, p in enumerate(members):
+            colors[p["key"]] = shades[min(i, len(shades) - 1)]
+    return colors
+
+
+def _sub_label(p: dict[str, Any]) -> str:
+    """The product-level name inside its family (the family is said by the colour and the family row)."""
+    if p["key"] == "occupational":
+        return p["label"].removeprefix("퇴직연금(").removesuffix(")")
+    return {"irp": "IRP(개인형 퇴직연금)", "insurance_annuity": "변액연금보험"}.get(p["key"], p["label"])
+
+
+def _period(p: dict[str, Any]) -> str:
+    if p["start_age"] is None:
+        return "-"
+    start = f"{p['start_date']:%Y.%m} {p['start_age']}세" if p.get("start_date") else f"{p['start_age']}세"
+    return f"{start}~{p['end_age'] - 1}세" if p.get("end_age") else f"{start}~종신"
+
+
+def _product_text(p: dict[str, Any]) -> str:
+    """The client's products behind a pipeline by name only (provider and product; user review 2026-11-07: the
+    dates and the portal's illustration were too much for the table)."""
+    names = []
+    for item in p.get("products") or []:
+        provider, title = item.get("institution"), item.get("name")
+        names.append(" ".join(x for x in (None if provider and title and title.startswith(provider) else provider, title)
+                              if x))
+    if not any(names) and p["key"] == "isa":
+        return "아직 없음(Smith 가정)"
+    return ", ".join(n for n in names if n) or "-"
+
+
+def _family_table(stack: dict[str, Any]) -> str:
+    """Every pipeline under its family (공적·퇴직·개인·비과세·부동산 연금) with the client's product, the payout
+    period and the after-tax monthly figure; a family the household does not hold is one line naming its products."""
+    colors = _pipeline_colors(stack)
+    rows = []
+    for key, label, members in _families(stack):
+        if not members:
+            rows.append([Raw(f'<span style="color:{_FAMILY_SHADES[key][0]}">●</span> <b>{escape(label)}</b>'),
+                         f"가입 없음({pension.CATEGORY_EXAMPLES[key]})", "-", "-", "-"])
+            continue
+        for i, p in enumerate(members):
+            family = f"<b>{escape(label)}</b> › " if i == 0 else "└ "
+            basis = (("입력값" if p["basis_text"].startswith("알려 주신") else "추정") if p["net_monthly"] is not None
+                     else f"입력 필요: {p['missing']}")
+            rows.append([Raw(f'<span style="color:{colors[p["key"]]}">●</span> {family}{escape(_sub_label(p))}'),
+                         _product_text(p), _period(p), _short(p["net_monthly"]), basis])
+    return _table(["분류", "가입 상품", "수령 기간", "월 세후", "근거"], rows)
+
+
+def _pension_timeline(stack: dict[str, Any]) -> str:
+    """The public pension portal's chart in Smith's figures (user request 2026-11-07): the composition at the age
+    every pension has started as a donut, then one stacked bar per age with the yearly after-tax payout of each
+    pipeline in its family's shade (smith.pension_chart PNGs), and one line on where the payouts drop; empty
+    without a payout."""
+    rows = stack.get("timeline") or []
+    peak = max((r["total"] for r in rows), default=Decimal(0))
+    if not peak:
+        return ""
+    colors = _pipeline_colors(stack)
+    order = [p for _, _, members in _families(stack) for p in members if p["key"] in rows[0]["parts"]]
+    head = next(t for t in stack["tiers"] if t["retire_age"] == stack["retirement_age"])
+    focus = next((r for r in rows if r["age"] == head["all_on_age"]), max(rows, key=lambda r: r["total"]))
+    title = (f'<div style="font-size:15px;font-weight:600;color:{INK};margin:18px 0 8px">'
+             f'{focus["age"]}세 예상 연금 수령액(세후, 오늘 돈 가치): 연 {_short(focus["total"])} · 월 '
+             f'{_short(focus["total"] / 12)}</div>')
+    shown = [p for p in order if focus["parts"][p["key"]] > 0]
+    # PNGs drawn with Pillow (mail clients drop SVG): a data URI here, an inline attachment once sent.
+    ring = pension_chart.donut([(_sub_label(p), focus["parts"][p["key"]], colors[p["key"]]) for p in shown],
+                               center=f"월 {_short(focus['total'] / 12)}", caption=f"{focus['age']}세 세후")
+    bars = pension_chart.age_bars(rows, [(p["key"], colors[p["key"]]) for p in order],
+                                  retire_age=stack["retirement_age"], focus_age=focus["age"])
+    chart = "".join(f'<div style="margin:10px 0 4px"><img src="data:image/png;base64,{base64.b64encode(png).decode("ascii")}" '
+                    f'width="{pension_chart.WIDTH}" alt="{escape(alt)}" style="display:block;width:100%;'
+                    f'max-width:{pension_chart.WIDTH}px;height:auto"></div>'
+                    for png, alt in ((ring, f"{focus['age']}세 연금 구성"), (bars, "연령별 연간 연금 수령액")))
+    legend = " ".join(
+        f'<span style="white-space:nowrap;margin-right:12px"><b>{escape(label)}</b> '
+        + " ".join(f'<span style="color:{colors[p["key"]]}">●</span> {escape(_sub_label(p))}' for p in members
+                   if p["key"] in rows[0]["parts"]) + "</span>"
+        for _, label, members in _families(stack) if any(p["key"] in rows[0]["parts"] for p in members))
+    # The one thing the bars show: where the yearly income drops when the fixed-term pensions end.
+    by_age = {r["age"]: r for r in rows}
+    drop = head["later_age"]
+    ending = [_sub_label(p) for p in order if p.get("end_age") == drop]
+    note = (f"{stack['retirement_age']}세 은퇴 기준, 세후, 오늘 돈 가치입니다."
+            + (f" {drop}세에 {'·'.join(ending)}이 끝나 연 {_short(by_age[drop - 1]['total'])}에서 "
+               f"{_short(by_age[drop]['total'])}로 줄어듭니다." if drop in by_age and drop - 1 in by_age and ending else ""))
+    return (title + chart + f'<div style="font-size:13px;color:{INK};margin-top:6px;line-height:1.9">{legend}</div>'
+            + f'<div style="{_NOTE}">{escape(note)}</div>')
 
 
 def _retirement_tiers(stack: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2371,38 +2488,59 @@ def _retirement_tiers(stack: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _tier_table(tiers: list[dict[str, Any]]) -> str:
     """One row per retirement age: the years before the first pension, the after-tax total once every pension
-    has started, the ratio, and what must be held outside the pensions at retirement (today's won)."""
+    has started (and after the fixed-term ones end), the ratio, and what must be held outside the pensions at
+    retirement (today's won), with one line saying what that last figure is."""
+    later = any(t["later_net"] is not None for t in tiers)
     rows = []
     for t in tiers:
         gap = t["years_without_pension"]
         need = t["outside_need"]
         bound = need is not None and need["upper_bound"]
-        rows.append([f"{t['retire_age']}세", "-" if gap is None else f"{gap}년({t['first_income_age']}세까지)" if gap else "없음",
-                     _short(t["total_net"]) + (" 이상" if t["unknown"] else ""), _pct(t["ratio"], 0) + (" 이상" if t["unknown"] else ""),
-                     "미상" if need is None else ("최대 " if bound else "") + _short(need["total"])])
-    note = ("연금 없는 기간은 은퇴부터 첫 연금(55세부터 받는 연금 계좌, 65세 국민연금)까지입니다. 연금 밖에서 준비할 돈은 그 기간의 생활비와 "
-            "모든 연금이 나온 뒤에도 남는 부족분을 은퇴 시점의 오늘 돈 가치로 합한 것이며, 퇴직금·부동산은 넣지 않았습니다.")
+        more = " 이상" if t["unknown"] else ""
+        row = [f"{t['retire_age']}세", "-" if gap is None else f"{gap}년({t['first_income_age']}세까지)" if gap else "없음",
+               _short(t["total_net"]) + more, _pct(t["ratio"], 0) + more]
+        if later:
+            row.append("-" if t["later_net"] is None else f"{_short(t['later_net'])}{more}({t['later_age']}세~)")
+        rows.append(row + ["미상" if need is None else ("최대 " if bound else "") + _short(need["total"])])
+    note = "연금 밖에서 준비할 돈은 연금만으로 모자라는 생활비를 메우려고 은퇴할 때 갖고 있어야 할 돈(오늘 돈 가치)입니다."
     if any(t["unknown"] for t in tiers):
-        note += " 수령액을 모르는 연금은 0원으로 볼 수 없어, 합계와 준비율은 그 이상, 연금 밖에서 준비할 돈은 그 이하일 수 있는 최대치입니다."
-    if any(p["key"] == "isa" for t in tiers for p in t["pipelines"]):
-        note += " ISA 등 줄은 공제 밖 납입을 주택 이전에 쓰지 않고 노후까지 남긴다는 가정입니다."
-    return (_table(["은퇴 나이", "연금 없는 기간", "모든 연금 개시 후 세후 월", "준비율", "연금 밖에서 준비할 돈"], rows)
-            + f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin:4px 0 12px">{escape(note)}</div>')
+        note += " 수령액을 모르는 연금이 있어 실제보다 크게 잡힌 최대치입니다."
+    headers = ["은퇴 나이", "연금 없는 기간", "모든 연금 개시 후 세후 월", "준비율"] + (["기간 연금 끝난 뒤 세후 월"] if later else [])
+    return _table(headers + ["연금 밖에서 준비할 돈"], rows) + f'<div style="{_NOTE}">{escape(note)}</div>'
 
 
-def _stack_note(stack: dict[str, Any]) -> str:
-    """How the contributions were projected (report design §30): the credit split the tax proposal makes, and the
-    total with the current split beside it, so the two never read as a contradiction."""
+def pension_notes(stack: dict[str, Any] | None) -> list[str]:
+    """How the pension card was computed, for the letter's end (user review 2026-11-07: assumptions and fine detail
+    leave the card): the meaning of each column, the payout and tax assumptions, the families, the contribution
+    split, and why the public portal's chart differs."""
+    if stack is None:
+        return []
+    notes = ["연금 없는 기간은 은퇴부터 첫 연금(연금 계좌는 55세부터, 국민연금은 65세)까지입니다. 연금 밖에서 준비할 돈은 그 기간의 "
+             "생활비와, 모든 연금이 나온 뒤나 기간을 정한 연금이 끝난 뒤에도 남는 부족분을 은퇴 시점의 오늘 돈 가치로 합한 것이며 "
+             "부동산은 넣지 않았습니다."]
+    if any(p["key"] == "isa" for p in stack["pipelines"]):
+        notes.append("ISA 등 줄은 세액공제 한도를 넘는 납입을 주택 자금에 쓰지 않고 노후까지 남긴다는 Smith의 가정입니다.")
+    notes.append(f"연금저축·IRP·퇴직금은 계좌에 정한 수령 기간(정하지 않았으면 정부 '내연금'과 같은 {pension.ACCOUNT_PAYOUT_YEARS}년) "
+                 "동안 나눠 받는다고 보아 그 뒤에는 그래프에서 빠집니다. 국민연금은 물가만큼 오르므로 오늘 돈 가치로 평평합니다.")
+    for p in stack["pipelines"]:
+        if p.get("nominal_monthly") is not None:
+            notes.append(f"{_sub_label(p)}은 금액이 정해진 연금이라(약관상 연금기준금액 × 고정 지급률) 물가만큼 오르지 않습니다. "
+                         f"{p.get('start_year', '')}년 금액 월 {_short(p['nominal_monthly'])}은 오늘 돈 가치로 월 "
+                         f"{_short(p['net_monthly'])}이고, 받는 동안 해마다 물가만큼 가치가 줄어듭니다.")
+    notes.append("분류: 공적연금(국민연금), 퇴직연금(DB형·DC형·IRP), 개인연금(연금저축, 공제 밖 납입을 모으는 ISA 등), 비과세 "
+                 "연금(10년 이상 유지한 연금보험), 부동산 연금(주택연금·농지연금). IRP는 연금저축과 세액공제 한도를 함께 쓰지만 법으로는 "
+                 "퇴직연금이라 퇴직연금에만 넣었습니다.")
     c = stack["contributions"]
-    if not c["changed"] or stack["current_split"] is None:
-        return ""
-    now = c["current"]
-    text = (f"납입은 세액공제를 빠짐없이 받는 연금저축 월 {_short(c['pension_savings'])}, IRP 월 {_short(c['irp'])}으로 나누고"
-            + (f" 공제 밖 월 {_short(c['isa'])}은 ISA 등에 모은다고" if c["isa"] else "") + " 계산했습니다. "
-            f"지금처럼 연금저축 월 {_short(now['pension_savings'])}, IRP 월 {_short(now['irp'])}을 계속 넣으면 "
-            f"{stack['retirement_age']}세 은퇴 기준 세후 합계는 약 {_short(stack['current_split']['total_net'])}입니다. "
-            "공제받지 않은 납입 원금은 꺼낼 때 세금이 없어 그만큼 세금을 빼지 않았습니다.")
-    return f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin:8px 0 4px">{escape(text)}</div>'
+    if c["changed"] and stack["current_split"] is not None:
+        now = c["current"]
+        notes.append(f"앞으로의 납입은 세액공제를 빠짐없이 받는 연금저축 월 {_short(c['pension_savings'])}, IRP 월 {_short(c['irp'])}"
+                     + (f", 공제 밖 월 {_short(c['isa'])}은 ISA 등" if c["isa"] else "") + "으로 나눈다고 계산했습니다. 지금처럼 "
+                     f"연금저축 월 {_short(now['pension_savings'])}, IRP 월 {_short(now['irp'])}을 계속 넣으면 "
+                     f"{stack['retirement_age']}세 은퇴 기준 세후 합계는 약 {_short(stack['current_split']['total_net'])}입니다.")
+    notes.append("세후는 국민연금 약 3%, 퇴직금으로 받는 연금 약 3.5%(퇴직소득세 30% 감면), 연금저축·IRP 5.5%(한 해 1,500만 원을 넘는 "
+                 "해는 16.5%, 세액공제를 받지 않은 원금은 비과세), 연금보험 비과세를 가정했습니다. 중앙노후준비지원센터 '내연금' "
+                 "그래프는 세전이고 그해 금액이라 국민연금이 해마다 높아져 보입니다.")
+    return notes
 
 
 def _experiences(story: dict[str, Any]) -> str:
@@ -2584,18 +2722,24 @@ def _requests(requests: list[Any], full: bool, rest_where: str = "월요 보고"
     return _section("다음에 확인할 것", lead, "".join(rows))
 
 
-def _footer(warnings: list[str] | tuple[str, ...] = (), week: str = "", corrections: str = "") -> str:
+def _footer(warnings: list[str] | tuple[str, ...] = (), week: str = "", corrections: str = "",
+            notes: list[str] | tuple[str, ...] = ()) -> str:
     """One line (report design §18.1): what Smith never does, and that the reasons are a reply away. A problem
     with the report itself (stale data, no narrative) adds one warning line above it; a daily edition adds the
     week's plan (`week`, HTML) so a reader of one day knows where the other areas are (§27); `corrections` is the
-    Korean check's one line, printed so it can be read against the report itself (§34, user request 2026-10-27)."""
+    Korean check's one line, printed so it can be read against the report itself (§34, user request 2026-10-27);
+    `notes` are the day's calculation notes moved out of its cards (user review 2026-11-07). The footer reads in body
+    ink at 13px: grey small print was hard to read."""
     warn = ("" if not warnings else
             f'<div style="font-size:13px;line-height:1.6;color:{INK};margin-bottom:8px">▲ 확인 필요: '
             f'{escape(" · ".join(warnings))}. 자세한 사유는 이 메일에 답장으로 물어 주십시오.</div>')
-    guide = "" if not week else f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-bottom:6px">{week}</div>'
-    checked = ("" if not corrections else
-               f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-bottom:6px">{escape(corrections)}</div>')
-    return (f'<tr><td>{warn}{guide}{checked}<div style="font-size:12px;line-height:1.6;color:{MUTED}">Smith는 조회 전용 자문입니다(매매·이체·대출 '
+    small = f"font-size:13px;line-height:1.7;color:{BODY}"
+    basis = ("" if not notes else
+             f'<div style="{small};margin-bottom:12px"><div style="font-weight:600;margin-bottom:4px">계산 기준</div>'
+             + "".join(f'<div style="margin:0 0 4px">· {escape(n)}</div>' for n in notes) + "</div>")
+    guide = "" if not week else f'<div style="{small};margin-bottom:6px">{week}</div>'
+    checked = "" if not corrections else f'<div style="{small};margin-bottom:6px">{escape(corrections)}</div>'
+    return (f'<tr><td>{warn}{basis}{guide}{checked}<div style="{small}">Smith는 조회 전용 자문입니다(매매·이체·대출 '
             f'실행 없음). 세금·법령은 {tax.RULES_YEAR}년 기준으로 계산했으니 실행 전 현행 법령을 확인하십시오. 판단 근거는 답장으로 '
             '물어 주십시오.</div></td></tr>')  # The one law caveat of the mail (user decision 2026-11-02).
 
