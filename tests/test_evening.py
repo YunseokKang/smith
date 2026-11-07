@@ -98,6 +98,21 @@ class PrepAndTalkTests(unittest.TestCase):
         self.assertIn("조카 생일까지 8일 남았습니다. 선물이나 예약을 미리 알아보세요", texts)   # D-7 from tomorrow is 8 nights.
         self.assertEqual((data["evening_of"], data["product"], data["talk_kind"]), (TONIGHT, "evening", talk.kind_for(DAY)))
 
+    def test_tennis_tomorrow_puts_the_kit_on_tonight_s_list(self):
+        def tennis(title):
+            return agenda.Event("t", title, datetime(2026, 11, 20, 19, 0, tzinfo=SEOUL),
+                                datetime(2026, 11, 20, 21, 0, tzinfo=SEOUL), False, None, "", "default", True)
+        cases = (([tennis("저녁 테니스 레슨")], [], ["테니스 복장과 테니스화를 챙겨 두세요 (내일 저녁 테니스 레슨)"]),
+                 ([tennis("Tennis with team"), tennis("테니스 2부")], [], ["테니스 복장과 테니스화를 챙겨 두세요 (내일 Tennis with team)"]),
+                 ([], [agenda.Task("t", "테니스 라켓 줄 갈기", DAY, "", "내 할 일")],
+                  ["테니스 복장과 테니스화를 챙겨 두세요 (내일 테니스 라켓 줄 갈기)"]),
+                 (EVENTS, TASKS, []))
+        for events, tasks, expected in cases:
+            with self.subTest(expected=expected):
+                data = evening.assemble(daily.Inputs(None, events, tasks, BOOK, None, [], {}), day=DAY, tz="Asia/Seoul",
+                                        now=at(TONIGHT, 21), airways_sensitive=True)
+                self.assertEqual([p["text"] for p in data["prep"] if p["kind"] == "gear"], expected)
+
     def test_commute_windows_and_rest_day_hours(self):
         hourly = tuple(weather.Hour(h, t, p, "비" if h >= 19 else None, w)
                        for h, t, p, w in ((7, 2.0, 10, 3.0), (8, 3.0, 10, 9.5), (9, 5.0, 20, 4.0),

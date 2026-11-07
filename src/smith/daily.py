@@ -122,6 +122,8 @@ def collect(db: Path, config: dict[str, Any], *, now: datetime, day: date | None
                                                    days_ahead=AHEAD_DAYS)
         except datagokr.Error as error:
             failures["holidays"] = error.code
+    if book is not None:
+        book = _with_holidays(book, key, db, day, now, getter)
     events_today = None
     try:
         if horizon == "today":
@@ -131,6 +133,23 @@ def collect(db: Path, config: dict[str, Any], *, now: datetime, day: date | None
     notes = keep.load_all(db, thoughts=True)
     return Inputs(report, events, tasks, book, today_holiday, ahead, failures, events_today, notes, keep.used(keep.directory(db)),
                   weather_label, address_book, _carried_filings(db))
+
+
+def _with_holidays(book: people.Book, key: str | None, db: Path, day: date, now: datetime,
+                   getter: datagokr.Getter | None) -> people.Book:
+    """The book with the public holidays of the years its routine reminders can reach (FR-50 business-day rule).
+    Last of the merges, which rebuild Books. Without a key or an answer, the cached years serve; a year with
+    neither is left out and its routine days move past weekends only (the note says so)."""
+    reach = day + timedelta(days=people.routine_reach(book))
+    days, years = holidays.cached(holidays.path(db))
+    if key is not None:
+        for year in sorted(set(range(day.year, reach.year + 1)) - years):
+            try:
+                days |= {h.day for h in holidays.for_year(key, year, cache=holidays.path(db), now=now, getter=getter)}
+                years.add(year)
+            except datagokr.Error:
+                continue   # The holidays block already reports this source's failure.
+    return people.with_holidays(book, days, years)
 
 
 def _carried_filings(db: Path) -> list[tuple[datetime, dict[str, Any]]]:
@@ -153,6 +172,7 @@ def assemble(inputs: Inputs, *, day: date, tz: str, now: datetime, airways_sensi
     tasks = inputs.tasks or []
     book = inputs.book or people.parse({})
     ahead = inputs.holidays_ahead or []
+    due = people.reminders(book, day)
     return {
         "day": day, "weekday": WEEKDAYS_KO[day.weekday()], "tz": tz, "generated_at": now, "airways_sensitive": airways_sensitive,
         "holiday": None if inputs.holiday_today is None else inputs.holiday_today.name,
@@ -163,7 +183,9 @@ def assemble(inputs: Inputs, *, day: date, tz: str, now: datetime, airways_sensi
         "contacts": list(inputs.address_book),   # For the writer's per-person notes; never sent whole.
         "tasks": {"overdue": agenda.overdue(tasks, day), "due_today": agenda.due_today(tasks, day),
                   "overdue_total": sum(1 for t in tasks if t.due is not None and t.due < day)},
-        "reminders": people.reminders(book, day),
+        "reminders": [r for r in due if not people.is_routine(r.occurrence)],
+        # Monthly routines (FR-50): their own card, rendered by code only; labels and dates, no amounts, no model.
+        "routine_reminders": [r for r in due if people.is_routine(r.occurrence)],
         "upcoming": people.upcoming(book, day, AHEAD_DAYS),
         "holidays_ahead": ahead, "long_weekends": holidays.long_weekends(ahead, day),
         "finance_dates": sorted(finance_dates(day) + dividend_dates(inputs.filings, day), key=lambda f: f["date"]),
@@ -186,7 +208,8 @@ def _context_line(day: date, inputs: Inputs, advice: weather.Advice | None, even
     if advice is not None:
         parts += [advice.headline, *advice.items]
     parts += [e.title for e in events]
-    parts += [r.occurrence.label for r in people.reminders(inputs.book or people.parse({}), day)]
+    parts += [r.occurrence.label for r in people.reminders(inputs.book or people.parse({}), day)
+              if not people.is_routine(r.occurrence)]
     return " ".join(parts)
 
 

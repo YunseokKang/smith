@@ -98,6 +98,7 @@ def publish(db: Path, config: dict[str, Any], *, now: datetime, day: date, trigg
                               airways_sensitive=bool(config.get("daily", {}).get("airways_sensitive", False)))
         carried = carry_over(db, inputs.book, day)
         data["carried_reminders"] = carried
+        data["routine_reminders"] = unshown(db, data.get("routine_reminders", []))
         if modeler is not None:
             modeler(db, config, data, now, day)
         subject, html, text = daily_html.render(data)
@@ -116,7 +117,8 @@ def publish(db: Path, config: dict[str, Any], *, now: datetime, day: date, trigg
             ledger.record_daily_snapshot(conn, run_key=key, day=day, created_at=now, snapshot=snapshot(data, subject, carried))
     if not held:
         return {"status": "skipped", "run_key": key, "subject": subject, "error_code": "claim-lost"}
-    shown = [r.occurrence.key + f":D-{r.days_left}" for r in data["reminders"]] + [c["key"] for c in carried]
+    shown = ([r.occurrence.key + f":D-{r.days_left}" for r in data["reminders"] + data.get("routine_reminders", [])]
+             + [c["key"] for c in carried])
     thought = str((data.get("prose") or {}).get("thought_id") or "")
     images = daily_art.payload(daily_art.images_for(data))
     try:
@@ -135,7 +137,9 @@ def snapshot(data: dict[str, Any], subject: str, carried: list[dict[str, Any]]) 
     (for citations in a later reply) and the carried reminders. No HTML, no coordinates, no ids beyond news refs."""
     news = data.get("news") or []
     return {"version": 1, "day": data["day"].isoformat(), "subject": subject, "payload": daily.payload(data),
-            "prose": data.get("prose"), "carried": [{"label": c["label"], "date": c["date"].isoformat()} for c in carried],
+            # Routines (FR-50) stay out: the reply answers read this, and routines never reach a model.
+            "prose": data.get("prose"), "carried": [{"label": c["label"], "date": c["date"].isoformat()} for c in carried
+                                                    if not c.get("routine")],
             "news_links": {n.get("ref"): [n.get("source_title") or n.get("headline"), n.get("source_url")] for n in news if n.get("ref")}}
 
 
@@ -149,7 +153,8 @@ def carry_over(db: Path, book: people.Book | None, day: date) -> list[dict[str, 
         for item in people.reminders(book, then):
             if item.occurrence.on >= day:
                 candidates.append({"key": f"{item.occurrence.key}:D-{item.days_left}", "label": item.occurrence.label,
-                                   "date": item.occurrence.on, "missed_on": then, "milestone": item.occurrence.milestone})
+                                   "date": item.occurrence.on, "missed_on": then, "milestone": item.occurrence.milestone,
+                                   "routine": people.is_routine(item.occurrence)})
     if not candidates:
         return []
     with closing(ledger.connect(db)) as conn:   # Not read-only: the first run of a fresh ledger has no file yet.
@@ -157,6 +162,16 @@ def carry_over(db: Path, book: people.Book | None, day: date) -> list[dict[str, 
     # Today's own reminder for the same day supersedes a missed one (D-7 missed, D-0 today: say it once).
     today_keys = {r.occurrence.key for r in people.reminders(book, day)}
     return [c for c in candidates if c["key"] not in already and c["key"].rsplit(":D-", 1)[0] not in today_keys]
+
+
+def unshown(db: Path, due: list[people.Reminder]) -> list[people.Reminder]:
+    """Routine reminders no earlier mail carried. A routine's day can move when a substitute holiday is declared after
+    a reminder went out (FR-50); its key keeps the scheduled day, so the same D-N is found here and not said twice."""
+    if not due:
+        return []
+    with closing(ledger.connect(db)) as conn:   # Not read-only: the first run of a fresh ledger has no file yet.
+        already = ledger.shown_reminder_keys(conn, [f"{r.occurrence.key}:D-{r.days_left}" for r in due])
+    return [r for r in due if f"{r.occurrence.key}:D-{r.days_left}" not in already]
 
 
 def _mark_shown(db: Path, keys: list[str], day: date, run_id: str, thought: str = "") -> None:

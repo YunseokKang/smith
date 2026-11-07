@@ -4,7 +4,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from smith import people
+from smith import holidays, people
 from smith.config import local_time
 
 
@@ -12,7 +12,8 @@ def add_parser(sub: Any, default_db: Path) -> None:
     command = sub.add_parser("people", help="Family and friends' dates (data/people.json next to the ledger)")
     command.add_argument("action", choices=("check", "list", "today", "path", "add", "date"),
                          help="check: validate the file; list: the coming occurrences; today: what today's mail would "
-                              "remind; path: the file; add ID: a person; date ID: an anniversary, occasion or expiry")
+                              "remind; path: the file; add ID: a person; date ID: an anniversary, occasion, expiry or "
+                              "monthly routine")
     command.add_argument("id", nargs="?", help="add/date: a short id (lowercase, digits, dashes), such as father")
     command.add_argument("--label", help="add/date: how the mail names it, a relation word such as 아버지 (never a full name)")
     command.add_argument("--relation", default="", help="add: father, mother, spouse, sister, nephew, father-in-law, ...")
@@ -20,8 +21,10 @@ def add_parser(sub: Any, default_db: Path) -> None:
     command.add_argument("--lunar", help="add: lunar birthday as M-D (the day celebrated); date: the month-day is lunar",
                          nargs="?", const=True)
     command.add_argument("--year", type=int, help="add: birth year when --lunar is given; date: the first year, for 주년")
-    command.add_argument("--kind", choices=people.DATE_KINDS, help="date: anniversary, occasion or expiry")
-    command.add_argument("--on", help="date: MM-DD for a yearly date, YYYY-MM-DD for an expiry")
+    command.add_argument("--kind", choices=people.DATE_KINDS, help="date: anniversary, occasion, expiry or routine (monthly)")
+    command.add_argument("--on", help="date: MM-DD for a yearly date, YYYY-MM-DD for an expiry, the day (1-31) for a routine")
+    command.add_argument("--start", help="routine: first day it applies, YYYY-MM-DD")
+    command.add_argument("--until", help="routine: the day it lapses (reminded D-30, D-7, D-1), YYYY-MM-DD")
     command.add_argument("--remind", help="date: days before, comma-separated, such as 30,7")
     command.add_argument("--person", help="date: the person it belongs to (an id from people)")
     command.add_argument("--days", type=int, default=people.WINDOW_DAYS, help="list: window in days (default 400)")
@@ -37,7 +40,8 @@ def run(args: argparse.Namespace) -> int:
     try:
         if args.action in ("add", "date"):
             return _edit(args, file)
-        book = people.load(file)
+        # Routine days move past holidays the daily mail has cached (FR-50); this command does not fetch them.
+        book = people.with_holidays(people.load(file), *holidays.cached(holidays.path(args.db)))
     except people.PeopleError as error:
         print(f"people.json problem: {error}")
         return 2
@@ -115,6 +119,11 @@ def _date_entry(args: argparse.Namespace) -> dict[str, Any]:
     entry: dict[str, Any] = {"id": args.id, "label": args.label, "kind": args.kind}
     if args.kind == "expiry":
         entry["date"] = args.on
+    elif args.kind == "routine":
+        if not args.on.isdigit() and args.on not in ("last", "말일"):
+            raise people.PeopleError("a routine's --on is the day of the month, such as 21, or last")
+        entry["day"] = int(args.on) if args.on.isdigit() else "last"
+        entry.update({k: v for k, v in (("start", args.start), ("until", args.until)) if v})
     else:
         entry["month"], entry["day"] = _month_day(args.on)
         if args.year is not None:

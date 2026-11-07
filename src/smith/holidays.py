@@ -64,6 +64,18 @@ def around(key: str, day: date, *, cache: Path, now: datetime, getter: datagokr.
     return today, sorted(ahead, key=lambda h: h.day)
 
 
+def cached(cache: Path) -> tuple[set[date], set[int]]:
+    """(holiday dates, years they cover) from the cache alone, fresh or not; no network."""
+    stored = _read(cache)
+    days: set[date] = set()
+    years: set[int] = set()
+    for year, entry in stored.items():
+        if isinstance(entry, dict) and str(year).isdigit():
+            days |= {h.day for h in _parse(entry.get("days", []))}
+            years.add(int(year))
+    return days, years
+
+
 def is_rest_day(day: date, holiday: Holiday | None) -> bool:
     return holiday is not None or day.weekday() in WEEKEND
 

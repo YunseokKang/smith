@@ -24,6 +24,9 @@ REST_HOURS = (("오전 외출", 10, 12), ("오후 외출", 14, 18))
 ITEM_ACTIONS = {"우산": "우산을 현관에 꺼내 두세요", "외투(아침·저녁 쌀쌀)": "내일 입을 외투를 꺼내 두세요",
                 "물·양산": "물병과 양산을 챙겨 두세요", "마스크": "마스크를 가방에 넣어 두세요",
                 "마스크(기관지 기준)": "마스크를 가방에 넣어 두세요 (기관지 기준)"}
+# Gear for an activity in tomorrow's calendar or due tasks (user request 2026-11-07): words matched in a title,
+# case-insensitive, and what to pack tonight. One line per activity however many entries mention it.
+GEAR = ((("테니스", "tennis"), "테니스 복장과 테니스화를 챙겨 두세요"),)
 
 
 def target_day(config: dict[str, Any], now: datetime) -> date:
@@ -106,6 +109,7 @@ def prep(data: dict[str, Any]) -> list[dict[str, str]]:
             elif item == "우산" and forecast is not None and forecast.pop_max:
                 text += f" (강수확률 {forecast.pop_max}%)"
             items.append({"kind": "weather", "text": text})
+    items += gear_items(data)
     items += _agenda_items(data)
     for reminder in sorted(data["reminders"], key=lambda r: r.days_left):
         label = reminder.occurrence.label
@@ -115,6 +119,18 @@ def prep(data: dict[str, Any]) -> list[dict[str, str]]:
             items.append({"kind": "date", "text": f"{label}까지 {reminder.days_left + 1}일 남았습니다. 선물이나 예약을 미리 알아보세요"})
     items += [{"kind": "finance", "text": f"내일 {f['label']}"} for f in data["finance_dates"] if f["days"] == 0]
     return items[:MAX_PREP]
+
+
+def gear_items(data: dict[str, Any]) -> list[dict[str, str]]:
+    """What to pack for tomorrow's activities (`GEAR`), from the titles of tomorrow's events and of the tasks due
+    tomorrow; the matched entry is named so the reader sees why."""
+    titles = [e.title for e in data["events"]] + [t.title for t in data["tasks"]["due_today"]]
+    items = []
+    for words, action in GEAR:
+        hit = next((t for t in titles if any(w in t.lower() for w in words)), None)
+        if hit is not None:
+            items.append({"kind": "gear", "text": f"{action} (내일 {hit})"})
+    return items
 
 
 def _agenda_items(data: dict[str, Any]) -> list[dict[str, str]]:

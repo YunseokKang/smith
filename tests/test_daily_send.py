@@ -125,6 +125,19 @@ class SendTests(unittest.TestCase):
         self.assertEqual(result["status"], "sent")
         self.assertEqual(daily_send.carry_over(self.db, BOOK, after), [])                 # Said once.
 
+    def test_a_routine_reminder_is_not_repeated_when_a_new_holiday_moves_its_day(self):
+        raw = {"dates": [{"id": "probe", "label": "카드 출금", "kind": "routine", "day": 23}]}
+        before = people.with_holidays(people.parse(raw), [], [2026])
+        after = people.with_holidays(people.parse(raw), [date(2026, 11, 23)], [2026])   # Declared later.
+        sent = people.reminders(before, date(2026, 11, 16))
+        self.assertEqual([r.days_left for r in sent if people.is_routine(r.occurrence)], [7])
+        with closing(ledger.connect(self.db)) as conn:
+            ledger.record_reminders_shown(conn, ["routine:probe:2026-11-23:D-7"], shown_on=date(2026, 11, 16), run_id="r1")
+        moved = [r for r in people.reminders(after, date(2026, 11, 17)) if people.is_routine(r.occurrence)]
+        self.assertEqual([(r.occurrence.on, r.days_left) for r in moved], [(date(2026, 11, 24), 7)])
+        self.assertEqual(daily_send.unshown(self.db, moved), [])                       # Said on 11/16 already.
+        self.assertEqual(len(daily_send.unshown(self.db, people.reminders(after, date(2026, 11, 23)))), 1)   # D-1 is new.
+
     def test_missing_mail_setup_is_a_clean_failure(self):
         day = date(2026, 11, 20)
         result = daily_send.publish(self.db, CONFIG, now=at(day, 6, 1), day=day, trigger="scheduled", recipient=None,

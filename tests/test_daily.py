@@ -1,8 +1,10 @@
+import tempfile
 import unittest
 from datetime import date, datetime, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from smith import agenda, daily, daily_html, holidays, people, weather
+from smith import agenda, daily, daily_html, daily_send, holidays, people, weather
 
 TZ = "Asia/Seoul"
 DAY = date(2026, 11, 20)   # A Friday six days before the 2026-11-26 rate meeting.
@@ -46,6 +48,34 @@ class AssembleTests(unittest.TestCase):
         self.assertEqual(payload["reminders"][0]["milestone"], "돌")
         self.assertNotIn("37.", str(payload))                                  # No coordinates, no ids.
         self.assertNotIn("e1", str(payload["agenda"]))
+
+    def test_routines_get_their_own_card_and_stay_out_of_the_model_payload(self):
+        book = people.parse({"dates": [
+            {"id": "passport", "label": "여권 만료", "kind": "expiry", "date": "2026-12-20"},
+            {"id": "irp", "label": "IRP 납입", "kind": "routine", "day": 18, "until": "2026-12-21"},
+            {"id": "collect", "label": "주식 모으기", "kind": "routine", "day": 27}]})
+        # 11/18 is a Wednesday holiday here, 11/19 a Thursday holiday: the IRP day moves to Friday the 20th, today.
+        data = build(book=people.with_holidays(book, [date(2026, 11, 18), date(2026, 11, 19)], [2026]))
+        self.assertEqual([r.occurrence.label for r in data["reminders"]], ["여권 만료"])
+        self.assertEqual({(r.occurrence.label, r.days_left) for r in data["routine_reminders"]},
+                         {("IRP 납입", 0), ("주식 모으기", 7)})
+        self.assertNotIn("IRP", str(daily.payload(data)))                       # Code renders it; no model sees it.
+        _, html, text = daily_html.render(data)
+        self.assertIn("정기 일정", html)
+        self.assertIn("11/18(수)이 공휴일이라 다음 평일", html)
+        self.assertIn("- 정기 일정: IRP 납입 오늘", text)
+        # A missed routine reminder carried to this mail is shown, but the snapshot the replies read leaves it out.
+        carried = [{"key": "routine:collect:2026-11-27:D-7", "label": "주식 모으기", "date": date(2026, 11, 27),
+                    "missed_on": date(2026, 11, 19), "milestone": None, "routine": True}]
+        self.assertEqual(daily_send.snapshot(data, "s", carried)["carried"], [])
+
+    def test_routine_days_use_the_cached_holidays_without_a_key(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db = Path(folder) / "smith.db"
+            holidays.path(db).write_text('{"2026": {"fetched_at": "2020-01-01T00:00:00+00:00", '
+                                         '"days": [{"date": "20261225", "name": "기독탄신일"}]}}', encoding="utf-8")
+            book = daily._with_holidays(people.parse({}), None, db, date(2026, 11, 20), NOW, None)
+        self.assertEqual((book.closed, book.closed_years), (frozenset({date(2026, 12, 25)}), frozenset({2026})))
 
     def test_filings_the_finance_notes_carried_show_as_names_and_pay_dates_only(self):
         def dividend(number, pay, record="2026-09-30"):

@@ -38,7 +38,8 @@ def render(data: dict[str, Any], *, inline: bool = False) -> tuple[str, str, str
     images = daily_art.images_for(data)
     pictures = {cid: daily_art.source(cid, images, inline=inline) for cid in images}
     subject = _subject(data)
-    cards = [card for card in (_history(data, prose), _calendar(data, prose), _anniversaries(data, prose), _news(data, prose),
+    cards = [card for card in (_history(data, prose), _calendar(data, prose), _routines(data), _anniversaries(data, prose),
+                               _news(data, prose),
                                _sentence(prose, pictures.get("mood")), _tasks(data), _holidays(data), _finance(data)) if card]
     footer_lines = [FOOTER]
     if data["failures"]:
@@ -247,10 +248,10 @@ def _calendar(data: dict[str, Any], prose: dict[str, Any]) -> str:
 def _anniversaries(data: dict[str, Any], prose: dict[str, Any]) -> str:
     reminders: list[people.Reminder] = data["reminders"]
     upcoming: list[people.Occurrence] = data["upcoming"]
-    carried: list[dict[str, Any]] = data.get("carried_reminders") or []
+    carried = [c for c in data.get("carried_reminders") or [] if not c.get("routine")]
     if not reminders and not upcoming and not carried:
         return ""
-    ideas = {i.get("key"): i.get("idea") for i in prose.get("anniversaries", []) if isinstance(i, dict)}
+    ideas ={i.get("key"): i.get("idea") for i in prose.get("anniversaries", []) if isinstance(i, dict)}
     # One table, soonest first (user request 2026-10-25): a reminder day carries a pill, the rest a plain D-N.
     flagged = {r.occurrence.key: r for r in reminders}
     merged = {o.key: o for o in upcoming}
@@ -278,6 +279,39 @@ def _anniversaries(data: dict[str, Any], prose: dict[str, Any]) -> str:
     lead = ("오늘 챙길 날이 있습니다." if any(r.days_left == 0 for r in reminders) else
             "미리 준비하면 좋은 날입니다." if reminders or carried else "2주 안에 있는 날들입니다.")
     return _card("기념일", lead, _rows(["남은 날", "날", "날짜"], rows), accent=bool(reminders))
+
+
+def _routines(data: dict[str, Any]) -> str:
+    """Monthly routines (FR-50) on their reminder days, one row per date: D-7, D-1 and the day, and a standing order's
+    lapse on D-30, D-7 and D-1. Labels only; amounts and accounts stay in the client's bank app."""
+    due: list[people.Reminder] = data.get("routine_reminders") or []
+    carried = [c for c in data.get("carried_reminders") or [] if c.get("routine")]
+    if not due and not carried:
+        return ""
+    groups: dict[tuple[int, Any, bool], list[people.Occurrence]] = {}
+    for item in sorted(due, key=lambda r: (r.days_left, r.occurrence.kind, r.occurrence.label)):
+        lapse = item.occurrence.kind == "routine_end"
+        groups.setdefault((item.days_left, item.occurrence.on, lapse), []).append(item.occurrence)
+    rows: list[list[Any]] = []
+    shown = {r.occurrence.key for r in due}
+    for item in carried:   # A reminder from a morning whose mail never went out, said once.
+        if item["key"].rsplit(":D-", 1)[0] in shown:
+            continue
+        rows.append([Raw(_pill("지난 알림", "neutral")), Raw(f"<b>{escape(item['label'])}</b>"),
+                     f"{item['date']:%m/%d} ({WEEKDAY_SHORT[item['date'].weekday()]})"])
+    for (left, on, lapse), items in groups.items():
+        when = "오늘" if left == 0 else ("내일" if left == 1 else f"D-{left}")
+        pill = _pill(("만료 " if lapse else "") + when, "bad" if left <= 1 else "warn")
+        notes = sorted({o.note for o in items if o.note and not lapse})
+        body = "<br>".join(f"<b>{escape(o.label)}</b>" for o in items)
+        if lapse:
+            body += f'<div style="font-size:12px;color:{MUTED}">기간이 끝납니다. 이어 가려면 은행·증권 앱에서 연장하세요</div>'
+        body += "".join(f'<div style="font-size:12px;color:{MUTED}">{escape(n)}</div>' for n in notes)
+        rows.append([Raw(pill), Raw(body), f"{on:%m/%d} ({WEEKDAY_SHORT[on.weekday()]})"])
+    today = sum(1 for r in due if r.days_left == 0 and r.occurrence.kind == "routine")
+    lead = (f"오늘 정기 일정 {today}건이 있습니다. 출금 계좌 잔액을 확인하세요." if today
+            else "다가오는 정기 일정입니다. 1주일 전·하루 전·당일에 알립니다.")
+    return _card("정기 일정", lead, _rows(["남은 날", "항목", "날짜"], rows), accent=bool(today))
 
 
 def _news(data: dict[str, Any], prose: dict[str, Any]) -> str:
@@ -371,6 +405,8 @@ def _text(data: dict[str, Any], prose: dict[str, Any], subject: str) -> str:
         lines += [f"  이 분은: {name} · {line}" for _, name, line in about]
     for item in sorted(data["reminders"], key=lambda r: r.days_left):
         lines.append(f"- 기념일: {item.occurrence.label} {'오늘' if item.days_left == 0 else f'D-{item.days_left}'}")
+    for item in sorted(data.get("routine_reminders") or [], key=lambda r: r.days_left):
+        lines.append(f"- 정기 일정: {item.occurrence.label} {'오늘' if item.days_left == 0 else f'D-{item.days_left}'}")
     if data["tasks"]["overdue"]:
         lines.append(f"미완료 할 일 {data['tasks']['overdue_total']}건")
     lines += ["", "이 메일은 HTML 형식입니다. HTML을 지원하는 메일 앱에서 확인하시기 바랍니다."]

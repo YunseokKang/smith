@@ -111,5 +111,71 @@ class BookTests(unittest.TestCase):
             self.assertFalse(file.with_suffix(".json.tmp").exists())
 
 
+ROUTINES = {"dates": [
+    {"id": "transfer-a", "label": "가족 용돈 이체", "kind": "routine", "day": 21, "start": "2024-08-21", "until": "2027-01-21"},
+    {"id": "month-end", "label": "말일 납부", "kind": "routine", "day": "last"},
+    {"id": "later", "label": "새 적립", "kind": "routine", "day": 5, "start": "2027-02-01"},
+    {"id": "card", "label": "카드 출금", "kind": "routine", "day": 25},
+]}
+CHRISTMAS = date(2026, 12, 25)   # A Friday holiday in the synthetic holiday table.
+
+
+class RoutineTests(unittest.TestCase):
+    def setUp(self):
+        self.book = people.with_holidays(people.parse(ROUTINES), [CHRISTMAS], [2026, 2027])
+
+    def test_monthly_days_move_to_the_next_business_day_inside_start_and_until(self):
+        rows = people.occurrences(self.book, date(2026, 11, 1), 120)
+        on = {o.key: (o.on, o.note) for o in rows if o.kind == "routine"}
+        self.assertEqual(on["routine:transfer-a:2026-11-21"], (date(2026, 11, 23), "11/21(토)이 주말이라 다음 평일"))
+        self.assertEqual(on["routine:transfer-a:2026-12-21"], (date(2026, 12, 21), None))
+        self.assertNotIn("routine:transfer-a:2027-02-21", on)                     # None after until.
+        self.assertEqual(on["routine:card:2026-12-25"], (date(2026, 12, 28), "12/25(금)이 공휴일이라 다음 평일"))
+        self.assertEqual(on["routine:month-end:2026-11-30"], (date(2026, 11, 30), None))       # "last" = 말일.
+        self.assertEqual(on["routine:month-end:2027-01-31"][0], date(2027, 2, 1))              # Sunday 31st.
+        self.assertEqual([o.on for o in rows if o.label == "새 적립"], [date(2027, 2, 5)])         # Not before start.
+        lapse = [o for o in rows if o.kind == "routine_end"]
+        self.assertEqual([(o.on, o.label) for o in lapse], [(date(2027, 1, 21), "가족 용돈 이체 만료")])
+        self.assertEqual(people.upcoming(self.book, date(2026, 11, 15)), [])    # The quiet strip leaves routines out.
+        # A Saturday's transfer that moved to Monday shows in a window starting on that Monday.
+        self.assertIn("routine:transfer-a:2026-11-21", [o.key for o in people.occurrences(self.book, date(2026, 11, 23), 0)])
+        # Without holiday data the weekend rule still holds, and the note says the holidays were not known.
+        bare = {o.key: o for o in people.occurrences(people.parse(ROUTINES), date(2026, 12, 1), 31)}
+        self.assertEqual(bare["routine:card:2026-12-25"].on, CHRISTMAS)
+        self.assertEqual(bare["routine:card:2026-12-25"].note, "공휴일 자료 없음: 주말만 반영")
+        # Holidays must be known as far ahead as the longest routine reminder asks, plus the room a day can move.
+        self.assertEqual(people.routine_reach(self.book), 30 + people.SHIFT_MARGIN + 1)
+        longer = people.parse({"dates": [{"id": "r", "label": "x", "kind": "routine", "day": 1, "remind_days": [60]}]})
+        self.assertEqual(people.routine_reach(longer), 60 + people.SHIFT_MARGIN + 1)
+
+    def test_reminders_a_week_before_the_day_before_the_day_and_before_the_lapse(self):
+        cases = {date(2026, 11, 16): {("가족 용돈 이체", 7)}, date(2026, 11, 22): {("가족 용돈 이체", 1)},
+                 date(2026, 11, 23): {("가족 용돈 이체", 0)}, date(2026, 11, 21): set(),
+                 date(2026, 12, 22): {("가족 용돈 이체 만료", 30)},
+                 date(2027, 1, 14): {("가족 용돈 이체", 7), ("가족 용돈 이체 만료", 7)},
+                 date(2027, 1, 20): {("가족 용돈 이체", 1), ("가족 용돈 이체 만료", 1)},
+                 date(2027, 2, 14): set()}                                      # Lapsed: no more reminders.
+        for today, expected in cases.items():
+            with self.subTest(today=today):
+                found = {(r.occurrence.label, r.days_left) for r in people.reminders(self.book, today)
+                         if people.is_routine(r.occurrence) and r.occurrence.label.startswith("가족")}
+                self.assertEqual(found, expected)
+
+    def test_routine_validation(self):
+        cases = (({"id": "r", "label": "x", "kind": "routine"}, "day is required"),
+                 ({"id": "r", "label": "x", "kind": "routine", "day": 32}, "from 1 to 31"),
+                 ({"id": "r", "label": "x", "kind": "routine", "day": 1, "month": 2}, "not month"),
+                 ({"id": "r", "label": "x", "kind": "routine", "day": 1, "until": "2027-13-01"}, "until must be"),
+                 ({"id": "r", "label": "x", "kind": "routine", "day": 1, "start": "2027-01-02", "until": "2027-01-01"},
+                  "before start"),
+                 ({"id": "r", "label": "x", "kind": "expiry", "date": "2027-01-01", "until": "2027-02-01"},
+                  "belong to a routine"))
+        for raw, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaises(people.PeopleError) as caught:
+                    people.parse({"dates": [raw]})
+                self.assertIn(message, str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

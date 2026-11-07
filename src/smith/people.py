@@ -15,23 +15,36 @@ Rules the client chose (2026-10-25):
 
 What a model receives (`for_model`): the label (a relation word, never a full name), the occurrence date, days left,
 the milestone, and the age or 주년 only inside the gift window (D-30 and D-7), because the age is what a present fits.
+
+Routines (FR-50, user request 2026-11-07): things the client does every month on a fixed day — an automatic transfer,
+a stock-collecting purchase, a pension contribution. A day falling on a weekend or public holiday moves to the next
+business day, as the banks run it. Each occurrence reminds on D-7, D-1 and the (moved) day; a routine with an
+end date (`until`, a standing order's 이체기간) also reminds before it lapses (D-30, D-7, D-1). Routines carry a label
+only, never an account number or an amount, and the morning mail shows them in their own card, apart from the
+anniversaries; `upcoming` (the quiet 14-day strip and the reply windows) leaves them out so they do not crowd it.
 """
+import calendar
 import json
 import os
 import re
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
 from korean_lunar_calendar import KoreanLunarCalendar
 
-DATE_KINDS = ("anniversary", "occasion", "expiry")   # "birthday" occurrences derive from people.
+DATE_KINDS = ("anniversary", "occasion", "expiry", "routine")   # "birthday" occurrences derive from people.
+ROUTINE_KINDS = ("routine", "routine_end")   # A monthly occurrence, and the day its standing order lapses.
 MILESTONE_AGES = {61: "환갑", 70: "칠순", 80: "팔순", 90: "구순"}   # Korean age.
 ANNIVERSARY_MILESTONE_EVERY = 10
 REMIND_DEFAULT = (7, 0)
 REMIND_MILESTONE = (30, 7, 0)
 REMIND_EXPIRY = (30, 7)
+REMIND_ROUTINE = (7, 1, 0)       # The client's three points (2026-11-07): a week before, the day before, the day.
+REMIND_ROUTINE_END = (30, 7, 1)  # Time to renew a standing order before its last transfer.
+SHIFT_MARGIN = 15   # Days a routine can move past rest days (the longest Korean holiday run with weekends is ~10).
 GIFT_WINDOW = (30, 7)
 WINDOW_DAYS = 400
 ELDERS = ("father", "mother", "father-in-law", "mother-in-law", "grandfather", "grandmother")   # 생신, not 생일.
@@ -50,7 +63,9 @@ _ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 _FILE_KEYS = {"people", "dates", "occasions", "_note"}
 _PERSON_KEYS = {"id", "label", "relation", "birth"}
 _BIRTH_KEYS = {"calendar", "year", "month", "day"}
-_DATE_KEYS = {"id", "label", "kind", "month", "day", "year", "date", "lunar", "remind_days", "person_id", "disabled"}
+_DATE_KEYS = {"id", "label", "kind", "month", "day", "year", "date", "lunar", "remind_days", "person_id", "disabled",
+              "start", "until", "end_remind_days"}
+_ROUTINE_ONLY = {"start", "until", "end_remind_days"}
 MAX_LABEL = 20
 
 
@@ -76,22 +91,57 @@ class Person:
 
 @dataclass(frozen=True)
 class Dated:
-    """An anniversary or occasion kept every year, or an expiry that happens once."""
+    """An anniversary or occasion kept every year, an expiry that happens once, or a routine kept every month."""
     id: str
     label: str
     kind: str
-    month: int
+    month: int         # 0 for a routine (every month).
     day: int
     year: int | None   # Anniversary: the first year (for 주년); expiry: the year of its one date.
     lunar: bool
     remind_days: tuple[int, ...] | None
     person_id: str | None
+    start: date | None = None   # Routine: no occurrence before this day.
+    until: date | None = None   # Routine: none after it; the standing order lapses here (reminded by end_remind_days).
+    end_remind_days: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True)
 class Book:
     people: tuple[Person, ...]
     dates: tuple[Dated, ...]
+    # Public holidays for the business-day rule of routines (FR-50), and the years they are known for; a routine day
+    # in a year without data moves past weekends only, and says so. Attached last (`with_holidays`): merges rebuild Books.
+    closed: frozenset[date] = frozenset()
+    closed_years: frozenset[int] = frozenset()
+
+
+def with_holidays(book: Book, days: Iterable[date], years: Iterable[int]) -> Book:
+    """The book with public holidays known for `years`, so routine days move to the next business day."""
+    return replace(book, closed=book.closed | frozenset(days), closed_years=book.closed_years | frozenset(years))
+
+
+def routine_reach(book: Book) -> int:
+    """How many days ahead the holidays must be known for every routine reminder: the longest reminder (an entry may
+    ask for D-60) plus the room a day can move."""
+    asked = (d for item in book.dates if item.kind == "routine"
+             for d in (item.remind_days or ()) + (item.end_remind_days or ()))
+    return max([*REMIND_ROUTINE, *REMIND_ROUTINE_END, *asked]) + SHIFT_MARGIN + 1
+
+
+def business_day(on: date, book: Book) -> tuple[date, str | None]:
+    """The first weekday from `on` that is not a public holiday, with a note when it moved or the holidays are
+    unknown (banks run a standing order falling on a rest day on the next business day; user rule 2026-11-07)."""
+    moved = on
+    while moved.weekday() >= 5 or moved in book.closed:
+        moved += timedelta(days=1)
+    notes = []
+    if moved != on:
+        reason = "공휴일" if any(on + timedelta(days=i) in book.closed for i in range((moved - on).days)) else "주말"
+        notes.append(f"{on.month}/{on.day}({'월화수목금토일'[on.weekday()]})이 {reason}이라 다음 평일")
+    if not {on.year, moved.year} <= book.closed_years:
+        notes.append("공휴일 자료 없음: 주말만 반영")
+    return moved, " · ".join(notes) or None
 
 
 @dataclass(frozen=True)
@@ -161,14 +211,22 @@ def occurrences(book: Book, start: date, days: int = WINDOW_DAYS) -> list[Occurr
         if person.birth is not None:
             found.extend(_birthdays(person, start, end))
     for item in book.dates:
-        found.extend(_expiry(item, start, end) if item.kind == "expiry" else _yearly(item, start, end))
+        if item.kind == "expiry":
+            found.extend(_expiry(item, start, end))
+        elif item.kind == "routine":
+            found.extend(_monthly(item, start, end, book))
+        else:
+            found.extend(_yearly(item, start, end))
     return sorted(found, key=lambda o: (o.on, o.kind, o.label))
 
 
 def reminders(book: Book, today: date) -> list[Reminder]:
-    """The occurrences whose reminder falls on `today` (D-30, D-7 or the day, by kind)."""
+    """The occurrences whose reminder falls on `today` (D-30, D-7, D-1 or the day, by kind and entry)."""
+    # As far ahead as any entry asks to be reminded (an expiry may ask for D-60).
+    longest = max([*REMIND_MILESTONE, *REMIND_EXPIRY, *REMIND_ROUTINE_END,
+                   *(d for item in book.dates for d in (item.remind_days or ()) + (item.end_remind_days or ()))])
     found = []
-    for occurrence in occurrences(book, today, max(REMIND_MILESTONE + REMIND_EXPIRY) + 1):
+    for occurrence in occurrences(book, today, longest + 1):
         left = (occurrence.on - today).days
         if left in occurrence.remind_days:
             found.append(Reminder(occurrence, left))
@@ -176,8 +234,14 @@ def reminders(book: Book, today: date) -> list[Reminder]:
 
 
 def upcoming(book: Book, today: date, days: int = 14) -> list[Occurrence]:
-    """The quiet strip: everything within `days`, reminders or not."""
-    return occurrences(book, today, days)
+    """The quiet strip: everything within `days`, reminders or not, except routines (a month holds a dozen of them;
+    they are said on their reminder days only)."""
+    return [o for o in occurrences(book, today, days) if not is_routine(o)]
+
+
+def is_routine(occurrence: Occurrence) -> bool:
+    """Whether the occurrence is a monthly routine or its lapse, shown in the routine card rather than the dates."""
+    return occurrence.kind in ROUTINE_KINDS
 
 
 def for_model(found: list[Reminder]) -> list[dict[str, Any]]:
@@ -297,6 +361,30 @@ def _expiry(item: Dated, start: date, end: date) -> list[Occurrence]:
                        item.remind_days or REMIND_EXPIRY)]
 
 
+def _monthly(item: Dated, start: date, end: date, book: Book) -> list[Occurrence]:
+    """A routine's day in every month, moved to the next business day, that falls in `start`..`end`; its scheduled
+    day stays inside its own start..until. A day the month lacks (the 31st in April) is the month's last day, so 31
+    means 말일. The key keeps the scheduled day, so a substitute holiday declared later does not repeat a reminder.
+    Its lapse is one more occurrence on `until`."""
+    found = []
+    first = start - timedelta(days=SHIFT_MARGIN)   # A day scheduled before `start` may move into the window.
+    year, month = first.year, first.month
+    while date(year, month, 1) <= end:
+        scheduled = date(year, month, min(item.day, calendar.monthrange(year, month)[1]))
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+        if (item.start and scheduled < item.start) or (item.until and scheduled > item.until):
+            continue
+        on, note = business_day(scheduled, book)
+        if start <= on <= end:
+            found.append(Occurrence(f"routine:{item.id}:{scheduled.isoformat()}", on, "routine", item.label,
+                                    item.person_id, None, None, note, item.remind_days or REMIND_ROUTINE))
+    if item.until is not None and start <= item.until <= end:
+        found.append(Occurrence(f"routine_end:{item.id}:{item.until.isoformat()}", item.until, "routine_end",
+                                f"{item.label} 만료", item.person_id, None, None, "기간이 끝나는 날입니다. 이어 가려면 미리 연장하세요",
+                                item.end_remind_days or REMIND_ROUTINE_END))
+    return found
+
+
 def _list(raw: dict[str, Any], key: str) -> list[Any]:
     value = raw.get(key, [])
     if not isinstance(value, list):
@@ -371,15 +459,14 @@ def _dated(item: Any) -> Dated:
     lunar = item.get("lunar", False)
     if not isinstance(lunar, bool):
         raise PeopleError(f"{key}: lunar must be true or false")
-    remind = item.get("remind_days")
-    if remind is not None:
-        if (not isinstance(remind, list) or not remind
-                or any(isinstance(d, bool) or not isinstance(d, int) or not 0 <= d <= 365 for d in remind)):
-            raise PeopleError(f"{key}: remind_days must be a list of days before, such as [30, 7]")
-        remind = tuple(sorted(set(remind), reverse=True))
+    remind = _remind(key, item, "remind_days")
     person_id = item.get("person_id")
     if person_id is not None and not isinstance(person_id, str):
         raise PeopleError(f"{key}: person_id must be text")
+    if kind == "routine":
+        return _routine(key, label, item, remind, person_id)
+    if _ROUTINE_ONLY & set(item):
+        raise PeopleError(f"{key}: start, until and end_remind_days belong to a routine")
     if kind == "expiry":
         if lunar or "month" in item or "day" in item or "year" in item:
             raise PeopleError(f"{key}: an expiry takes one date (\"date\": \"YYYY-MM-DD\"), nothing else")
@@ -397,6 +484,39 @@ def _dated(item: Any) -> Dated:
     if not lunar:
         date(2000, month, day)
     return Dated(key, label, kind, month, day, year, lunar, remind, person_id)
+
+
+def _remind(key: str, item: dict[str, Any], field: str) -> tuple[int, ...] | None:
+    remind = item.get(field)
+    if remind is None:
+        return None
+    if (not isinstance(remind, list) or not remind
+            or any(isinstance(d, bool) or not isinstance(d, int) or not 0 <= d <= 365 for d in remind)):
+        raise PeopleError(f"{key}: {field} must be a list of days before, such as [30, 7]")
+    return tuple(sorted(set(remind), reverse=True))
+
+
+def _routine(key: str, label: str, item: dict[str, Any], remind: tuple[int, ...] | None,
+             person_id: str | None) -> Dated:
+    """A monthly routine: `day` of every month (1-31, or "last"), optional `start`/`until` dates (YYYY-MM-DD)."""
+    if item.get("lunar") or {"month", "year", "date"} & set(item):
+        raise PeopleError(f"{key}: a routine takes day (of the month) and optional start/until, not month, year or date")
+    if item.get("day") in ("last", "말일"):
+        item = dict(item, day=31)   # 31 already means the month's last day.
+    day = _int(key, item, "day", 1, 31, required=True)
+    assert day is not None
+    bounds = []
+    for name in ("start", "until"):
+        raw = item.get(name)
+        try:
+            bounds.append(None if raw is None else date.fromisoformat(str(raw)))
+        except ValueError:
+            raise PeopleError(f"{key}: {name} must be YYYY-MM-DD") from None
+    start, until = bounds
+    if start is not None and until is not None and until < start:
+        raise PeopleError(f"{key}: until is before start")
+    return Dated(key, label, "routine", 0, day, None, False, remind, person_id, start, until,
+                 _remind(key, item, "end_remind_days"))
 
 
 def _occasions(overrides: list[Any]) -> tuple[Dated, ...]:
