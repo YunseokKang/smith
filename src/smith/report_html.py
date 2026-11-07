@@ -132,9 +132,10 @@ def render_event(note: dict[str, Any]) -> tuple[str, str, str]:
             f'<div style="font-size:14px;line-height:1.5;color:{ON_DARK}">{note["as_of"]:%Y년 %m월 %d일 %H:%M} 기준 · '
             f'{escape(line)}</div></td></tr>' + _tile_grid(tiles))
     why = None if note["kind"] == "disclosure" else _event_research(note)   # A filing's reading sits on its own card.
-    body = (_opened(_section("무엇이 일어났고 우리 집에는", facts[0], facts[1], brief=None))
-            + (_opened(_section("왜 그랬나 (조사)", why[0], why[1], brief=None)) if why else "")
-            + _opened(_section("Smith의 입장", stance, "", brief=None)))
+    # Smith's stance leads (user review 2026-11-03): the reader wants the verdict first, then the figures, then the why.
+    body = (_opened(_section("Smith의 입장", stance, "", brief=None))
+            + _opened(_section("무엇이 일어났고 우리 집에는", facts[0], facts[1], brief=None))
+            + (_opened(_section("왜 그랬나", why[0], why[1], brief=None)) if why else ""))
     guide = "정기 보고와 별개로, 우리 집에 중요한 사건이 있는 날에만 보내는 안내입니다. 제안은 정기 보고에서만 드립니다."
     html = _page([_band(DARK, hero), _band(CANVAS, body, border=True), _band(SOFT, _footer((), week=guide))])
     text = (f"{subject}\n\n{title}\n{line}\n\n{_plain(facts[0])}\n\n{_plain(stance)}\n\n"
@@ -196,18 +197,22 @@ def _move_event(note: dict[str, Any]) -> tuple[str, str, str, list[tuple[str, st
     movers = note["movers"]
     top = movers[0] if movers else None
     by_market = note["by_market"]
-    markets = " · ".join(f"{label} {_signed_short(by_market[key])}" for key, label in (("KR", "한국 상장"), ("US", "미국 상장"))
-                         if key in by_market)
     subject = f"[Smith · 사건 안내] {note['day']:%m/%d} 보유 종목 {pct} ({_signed_short(change)})"
     line = f"{since:%m.%d %H:%M} 이후 {_signed_short(change)} · 시장 손익 {_signed_short(note['market'])} · 환율 {_signed_short(note['fx'])}"
     tiles = [("보유 종목 변동", _signed_short(change), f"{since:%m.%d %H:%M} 이후 · 평가액 {_short(note['start'])} 기준"),
-             ("변동률", pct, "시장 손익과 환율 효과"),
+             ("변동률", pct, "시장 손익과 환율 효과", ratio),
              ("가장 크게 움직인 종목", str(top["name"])[:12] if top else "-",
               f"{_signed_short(top['change'])} ({top['ratio'] * 100:+.1f}%)" if top else ""),
              ("스트레스 가정 대비", f"{note['stress_share'] * 100:.0f}%", "주식 30% 하락 가정의 비율")]
-    lead = (f"지난 점검({since:%m월 %d일 %H:%M}) 이후 보유 종목 평가액이 {_signed_short(change)}({pct}) 움직였습니다. 시장 손익이 "
-            f"{_signed_short(note['market'])}, 환율 효과가 {_signed_short(note['fx'])}입니다." + (f" {markets}." if markets else ""))
-    rows = [[str(m["name"]), _signed_short(m["change"]), f"{m['ratio'] * 100:+.1f}%"] for m in movers]
+    # Only the rates of change are coloured, gains green and losses red (user review 2026-11-03).
+    by_market_toned = " · ".join(f"{label} {_signed_short(by_market[key])}"
+                                 for key, label in (("KR", "한국 상장"), ("US", "미국 상장")) if key in by_market)
+    lead = (f"지난 점검({since:%m월 %d일 %H:%M}) 이후 보유 종목 평가액이 {_signed_short(change)}"
+            f"({_good_bad(ratio, pct)}) 움직였습니다. 시장 손익이 {_signed_short(note['market'])}, "
+            f"환율 효과가 {_signed_short(note['fx'])}입니다."
+            + (f" {by_market_toned}." if by_market_toned else ""))
+    rows = [[str(m["name"]), _signed_short(m["change"]),
+             Raw(_good_bad(m["ratio"], f"{m['ratio'] * 100:+.1f}%"))] for m in movers]
     stance = (f"하루 변동으로 매매하지 않습니다. 이번 변동은 Smith의 스트레스 테스트가 가정하는 주식 30% 하락의 "
               f"{note['stress_share'] * 100:.0f}%입니다. 정기 보고의 제안(분기 정리 일정, 날짜 있는 목표 자금의 이동)은 그대로이고, "
               "종목별 판단은 다음 화요 투자·시장 보고에서 다시 봅니다.")
@@ -348,22 +353,26 @@ def _filed_won(text: str | None) -> str:
     return _short(value).replace(".0억", "억")
 
 
+EVENT_WHY_LIMIT, EVENT_WHY_CHARS = 3, 110   # Findings and characters per finding in an event's "왜 그랬나".
+
+
 def _event_research(note: dict[str, Any]) -> tuple[str, str] | None:
     """The researched background of an event: each finding with its source link, dated, marked 공식 or 참고."""
     items = [i for i in note.get("items") or [] if not i.get("decision_source")]
     if not items:
         return (("원인 조사는 이번에 실패했습니다. 숫자는 Smith의 계산이며, 배경은 다음 정기 보고에서 다룹니다.", "")
                 if note.get("research_failed") else None)
-    lead = f"조사에서 확인한 배경 {len(items)}건입니다. 공식 출처는 '공식', 언론·기관 자료는 '참고'로 표시했습니다."
+    # Only what the reader needs (user review 2026-11-03): the few most relevant findings (official first), each a
+    # linked headline and its first sentence; the full detail stays in the source.
+    items = sorted(items, key=lambda i: i.get("tier") != "official")[:EVENT_WHY_LIMIT]
     rows = []
     for item in items:
-        official = item.get("tier") == "official"
+        gist = _first_sentence(item["detail"])
+        gist = gist if len(gist) <= EVENT_WHY_CHARS else gist[:EVENT_WHY_CHARS].rstrip() + "…"
         rows.append(f'<div style="margin:10px 0"><div style="font-size:14px;font-weight:600;line-height:1.5;color:{INK}">'
-                    f'<a href="{escape(item["source_url"])}" style="color:{INK};text-decoration:underline">{escape(item["headline"])}</a> '
-                    f'{_pill("공식" if official else "참고", "good" if official else "neutral")} '
-                    f'<span style="font-family:{MONO};font-size:12px;color:{MUTED}">{escape(item["published_on"])}</span></div>'
-                    f'<div style="font-size:13px;line-height:1.6;color:{BODY}">{escape(item["detail"])}</div></div>')
-    return lead, "".join(rows)
+                    f'<a href="{escape(item["source_url"])}" style="color:{INK};text-decoration:underline">{escape(item["headline"])}</a></div>'
+                    f'<div style="font-size:13px;line-height:1.6;color:{BODY}">{escape(gist)}</div></div>')
+    return "", "".join(rows)
 
 
 def system_notes(data: dict[str, Any]) -> list[str]:
@@ -915,12 +924,17 @@ class Raw(str):
     """A table cell that is already HTML (a pill); every other cell is escaped."""
 
 
-def _tile_grid(tiles: list[tuple[str, str, str]]) -> str:
-    def tile(title: str, value: str, sub: str) -> str:
+GOOD_ON_DARK, BAD_ON_DARK = "#4cd98a", "#ff6b78"   # Event notes: good news green, bad news red (user 2026-11-03), light for a dark tile.
+
+
+def _tile_grid(tiles: list[tuple[Any, ...]]) -> str:
+    """Tiles of (title, value, sub); a fourth item, a Decimal, colours the value green when good and red when bad."""
+    def tile(title: str, value: str, sub: str, tone: Decimal | None = None) -> str:
+        color = ON_DARK if not tone else GOOD_ON_DARK if tone > 0 else BAD_ON_DARK
         return (f'<td style="width:50%;padding:5px;vertical-align:top"><div style="border-radius:24px;padding:16px 18px;'
                 f'background:{DARK_RAISED}">'
                 f'<div style="font-size:12px;font-weight:600;color:{ON_DARK_SOFT}">{escape(title)}</div>'
-                f'<div style="font-family:{MONO};font-weight:500;font-size:22px;color:{ON_DARK};margin:8px 0 2px">'
+                f'<div style="font-family:{MONO};font-weight:500;font-size:22px;color:{color};margin:8px 0 2px">'
                 f'{escape(value)}</div>'
                 f'<div style="font-size:12px;color:{ON_DARK_SOFT}">{escape(sub)}</div></div></td>')
     # Two by two so the tiles stay readable on a phone.
@@ -1926,6 +1940,12 @@ def _benchmarks(ratio: Decimal | None, indices: list[dict[str, Any]], since: str
              f'{m["start_on"]:%m/%d} → {m["end_on"]:%m/%d} 종가 · {m["spec"].provider.upper()}') for m in indices)
     return (f'<tr><td><div style="font-size:13px;font-weight:700;color:{INK};margin:18px 0 4px">시장과 비교</div>'
             f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{rows}</table></td></tr>')
+
+
+def _good_bad(value: Decimal, text: str) -> str:
+    """An event note's signed figure: a gain is good news in green, a loss bad news in red (user 2026-11-03)."""
+    color = MUTED if not value else "#137333" if value > 0 else "#c5221f"
+    return f'<span style="font-family:{MONO};font-weight:700;color:{color}">{escape(text)}</span>'
 
 
 def _toned_text(value: Decimal, text: str) -> str:

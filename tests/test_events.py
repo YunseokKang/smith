@@ -110,10 +110,17 @@ class EventTests(unittest.TestCase):
         self.assertEqual([(o["status"], o["key"]) for o in outcomes], [("sent", "portfolio_move:2026-10-06:pm")])
         subject, html, text = self.sent[0]
         self.assertEqual(subject, "[Smith · 사건 안내] 10/06 보유 종목 -6.4% (-53만 원)")
-        for needle in ("가장 크게 움직인 종목", "삼성전자", "-40만 원", "VOO", "-13만 원", "한국 상장 -40만 원 · 미국 상장 -13만 원",
-                       "코스피 2.8% 하락", "참고", "스트레스 테스트가 가정하는 주식 30% 하락의 21%", "제안은 정기 보고에서만"):
+        for needle in ("가장 크게 움직인 종목", "삼성전자", "-40만 원", "VOO", "-13만 원", "한국 상장", "미국 상장",
+                       "코스피 2.8% 하락", "스트레스 테스트가 가정하는 주식 30% 하락의 21%", "제안은 정기 보고에서만"):
             self.assertIn(needle, html)
         self.assertIn("보유 종목 -6.4%", text)
+        # Smith's stance leads, then the figures, then the why (user review 2026-11-03); a loss is red, a gain green.
+        self.assertLess(html.index("Smith의 입장"), html.index("무엇이 일어났고"))
+        self.assertLess(html.index("무엇이 일어났고"), html.index("왜 그랬나"))
+        self.assertNotIn("왜 그랬나 (조사)", html)
+        self.assertIn('font-weight:700;color:#c5221f">-6.4%', html)         # Only the rates are coloured.
+        self.assertIn('color:#ff6b78;margin:8px 0 2px">-6.4%', html)
+        self.assertNotIn('">-53만 원</span>', html)
         # The next check measures from this one, so the same move is not an event again; the check is on record.
         self.assertEqual(self.check(T1 + timedelta(minutes=15), researcher), [])
         self.assertEqual(len(self.sent), 1)
