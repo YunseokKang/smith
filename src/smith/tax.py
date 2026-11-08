@@ -15,6 +15,7 @@ from typing import Any
 from smith.fmt import percent, short_won
 from smith.payload import LedgerView, base_amount, unrealized_gain, won
 from smith.records import Kind
+from smith.summary import recurring_active
 
 RULES_YEAR = 2026
 RULES_CHECKED = "2026-10-05"
@@ -132,9 +133,10 @@ def facts(view: LedgerView, today: date, household: dict[str, Any] | None) -> di
             per_month = Decimal(0)
             total = amount if date.fromisoformat(f["start_date"]).year == today.year else Decimal(0)
         else:
-            # An ended standing transfer still counts in this year's total, never in the monthly plan.
-            ended = bool(f.get("end_date")) and f["end_date"] < today.isoformat()
-            per_month = Decimal(0) if ended else amount / _MONTHS[f["frequency"]]
+            # An ended standing transfer still counts in this year's total, never in the monthly plan; nor does one
+            # that starts later (Codex review 2026-11-08: a 2040 transfer was split as if paid from today). The same
+            # reading as the pension stack's contributions.
+            per_month = amount / _MONTHS[f["frequency"]] if recurring_active(f, today) else Decimal(0)
             total = amount / _MONTHS[f["frequency"]] * _months_in_year(f, today.year)  # Paid and still due this year.
         contributions[kind] = contributions.get(kind, Decimal(0)) + total
         contributions[f"{kind}:monthly"] = contributions.get(f"{kind}:monthly", Decimal(0)) + per_month

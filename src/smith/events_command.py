@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from smith import ledger
-from smith.config import local_time
+from smith.config import local_time, report_extra_recipients
 
 
 def add_parser(sub: Any, default_db: Path) -> None:
@@ -59,7 +59,7 @@ def _check(args: argparse.Namespace, config: dict[str, Any], now: datetime) -> i
                             researcher=events.research_event, recipient=config.get("mail", {}).get("recipient"),
                             credentials=credentials.load_gmail(), secrets=credentials.all_secrets(),
                             dart_key=credentials.load_api_key("dart"), sec_contact=config.get("mail", {}).get("recipient"),
-                            interpreter=disclosure_insight.interpret)
+                            interpreter=disclosure_insight.interpret, also_to=report_extra_recipients(config))
     if not outcomes:
         print("No event found.")
     for outcome in outcomes:

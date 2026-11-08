@@ -41,7 +41,7 @@ from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import check_outbound, mask_identifiers
 from smith.report_data import build_report
 
-PROMPT_VERSION = "mail-answer-v17"  # v17: tax.realized_this_year; ask the client only what Smith cannot know (2026-11-03); v16: korean.STYLE (client style guide 2026-11-01); v15: public look-ups (FR-43); v14: narrative-v27 (natural Korean); v13: principles are consensus, not law.
+PROMPT_VERSION = "mail-answer-v18"  # v18: household_member_1 is the spouse (2026-11-08); v17: tax.realized_this_year; ask the client only what Smith cannot know (2026-11-03); v16: korean.STYLE (client style guide 2026-11-01); v15: public look-ups (FR-43); v14: narrative-v27 (natural Korean); v13: principles are consensus, not law.
 MODEL = headless.MODEL
 BUDGET_USD = "3.00"
 TIMEOUT_SECONDS = 600
@@ -140,7 +140,7 @@ the new research items (refs in lookup.refs; cite the ones you use) and dividend
 owner and account type (general: tax withheld; isa or pension: paid in full, taxed by the account's own rules): use
 its figures for how much and when, give total when there are several rows (null total: say it could not be summed and
 why), say the quantity basis (record_date: shares held on the record date in the ledger; report_date: the report's
-shares) and cite "tax" for the withholding. Rows of household_member_* are that member's, not the client's. not_held
+shares) and cite "tax" for the withholding. Rows of household_member_1 are the spouse's, not the client's. not_held
 lists declared share classes the client does not hold. refused or failed: say in one sentence that the look-up could
 not be done and why (lookup.reason), then answer what the input allows.
 
@@ -162,7 +162,8 @@ Hard rules (checked by code; a failing answer is rejected):
 - No certainty about prices, rates, returns, approvals or guarantees. Never state the client's legal
   home count as a fact.
 - Assets managed by Hermes (managed_by "hermes") are never to be sold or changed directly: say to discuss
-  them with Hermes. Assets of household_member_* are not the client's legal property.
+  them with Hermes. household_member_1 is the client's spouse (배우자): the household plans and the pension stack
+  count both, but that member's assets, pay and pensions are legally theirs, never the client's own.
 - household.expected_pay is pay not yet received (bonuses, share grants): never count it as money the client
   has, name its certainty when you use it, and give a goal figure with it only beside the one without it.
   Its after-tax amount is the year's final tax estimate, not the cash on payday; overdue items are

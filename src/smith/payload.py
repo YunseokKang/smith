@@ -109,7 +109,9 @@ def _aliases(view: LedgerView) -> dict[str, str]:
 def _owner_aliases(view: LedgerView) -> dict[str, str]:
     owners = sorted({record.owner_id for record in view.records} | set(view.summary.net_worth_by_owner))
     aliases = {"self": "self"} if "self" in owners else {}
-    others = (owner for owner in owners if owner != "self")
+    # The spouse ("partner", data contract) is always household_member_1: the prompts name that alias as the spouse
+    # (FR-51), so another owner sorting before it must not take the number.
+    others = sorted((owner for owner in owners if owner != "self"), key=lambda owner: (owner != "partner", owner))
     aliases.update({owner: f"household_member_{i}" for i, owner in enumerate(others, 1)})
     return aliases
 

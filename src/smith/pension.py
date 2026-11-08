@@ -19,7 +19,18 @@ RETIREMENT_TIERS. Contributions stop at retirement, private pension accounts pay
 national pension shrinks with the contribution months lost (its statement assumes paying until a stated month),
 and each tier says how many years pass without any pension and what the household must hold outside the
 pensions at retirement to reach the target (`outside_need`). The headline figures are the tier of
-[household] retirement_age, or 60 when it is not set.
+[household] retirement_age, or DEFAULT_PAYOUT_AGE when it is not set.
+
+The stack is the household's (user decision 2026-11-08): every member with cash flows or a pension account in
+the ledger (`owners`) gets the same pipelines from their own records and birth date ([household]
+partner_birth_year/partner_birth_month for `partner`), retires at the same age in every tier, and the rows are
+added against the one household target. Tax is applied per member, since each is a taxpayer. Every row carries
+`owner`, a unique `id` (the pipeline key, suffixed with the owner for anyone but the client) and, when the stack
+holds more than one member, an `owner_label` the letter appends to the pipeline name (`row_label`). Ages are the
+client's: a member born in another year has every age in their rows shifted onto the client's age axis (`_shift`,
+own ages kept in `own_start_age`/`own_end_age`), so the totals, the age chart and the gap outside the pensions add
+what is paid in the same year. A younger member's pay in the years between the client's retirement and their own
+is not counted (the stack never counts pay).
 
 Future contributions follow the split that earns the full pension credit (tax.credit_split): the same report
 proposes it, so the stack never assumes the opposite (review 2026-10-23); the part no credit covers is its own
@@ -35,6 +46,7 @@ from typing import Any
 
 from smith.payload import LedgerView, base_amount
 from smith.records import Kind
+from smith.summary import recurring_active
 from smith.tax import PENSION_SAVINGS_LIMIT, PENSION_TOTAL_LIMIT, REAL_RETURN, WITHDRAWAL_RATE
 
 # The headline retirement age when none is set: 55 (user decision 2026-11-07, "그래프는 55세 은퇴 기준"; was 60).
@@ -90,6 +102,33 @@ ACCOUNT_PAYOUT_YEARS = 20
 PLAN_AGE = 100
 OCCUPATIONAL_PLANS = {"db": "DB형", "dc": "DC형"}
 _TERM_FIELDS = ("institution", "opened_on", "contribution_end", "payout_start", "payout_end", "illustrated_annual_pension")
+OWNER_LABELS = {"self": "본인", "partner": "배우자"}
+# The local setting holding each member's birth year: only the client and the spouse have one ([household]).
+_BIRTH_KEYS = {"self": "birth_year", "partner": "partner_birth_year"}
+
+
+def owner_label(owner: str) -> str:
+    """A member's role word for the letter and the model: never the ledger's owner id, which is free text."""
+    return OWNER_LABELS.get(owner, "가구 구성원")
+# An owner joins the stack with any cash flow or an account of these types; property alone adds nothing to ask about.
+_PENSION_ACCOUNT_TYPES = ("pension_savings", "irp", "dc", "insurance")
+
+
+def owners(view: LedgerView) -> list[str]:
+    """The household members whose pensions the stack adds up: the client first, then every other owner with a
+    cash flow or a pension-type account in the ledger (user decision 2026-11-08)."""
+    found = {"self"}
+    for record in view.records:
+        if record.kind is Kind.CASHFLOW or (record.kind is Kind.ASSET
+                                            and record.fields.get("account_type") in _PENSION_ACCOUNT_TYPES):
+            found.add(record.owner_id)
+    return ["self"] + sorted(found - {"self"})
+
+
+def row_label(row: dict[str, Any]) -> str:
+    """The pipeline's name, with the member's role word when the stack holds more than one ("국민연금(배우자)")."""
+    who = row.get("owner_label")
+    return row["label"] if not who else f"{row['label']}({who})"
 
 
 def stack(view: LedgerView, household: dict[str, Any] | None, today: date,
@@ -99,12 +138,13 @@ def stack(view: LedgerView, household: dict[str, Any] | None, today: date,
     `plan` is tax.pension_plan: this year's contributions above the credit (tax-free when drawn) and the split
     future contributions follow. Without it the current standing transfers are projected as they are.
 
-    Keys: target, retirement_age (the headline tier), retirement_age_set, payout_age, age, tiers (one per age:
-    retire_age, pipelines, total_net, ratio, unknown, first_income_age, years_without_pension, all_on_age,
-    outside_need), and the headline tier's pipelines (key, label, start_age, gross_monthly, net_monthly, basis
-    stated/estimated/unknown, basis_text, missing, taxable_share), total_net (known pipelines only), ratio, unknown,
-    complete; contributions (the projected split and the current one), current_split (the headline tier's
-    pension-account rows with the current split, when the two differ), assumptions.
+    Keys: target, retirement_age (the headline tier), retirement_age_set, payout_age, age (the client's), owners
+    (owner, label, age per member), tiers (one per age: retire_age, pipelines, total_net, ratio, unknown (row ids),
+    first_income_age, years_without_pension, all_on_age, outside_need), and the headline tier's pipelines (key, id,
+    owner, owner_label, label, start_age, gross_monthly, net_monthly, basis stated/estimated/unknown, basis_text,
+    missing, taxable_share), total_net (known pipelines only), ratio, unknown, complete; contributions (the client's
+    projected split and the current one), current_split (the headline tier's client pension-account rows with the
+    current split, when the two differ), assumptions.
     """
     household = household or {}
     target = household.get("retirement_monthly_spend")
@@ -115,32 +155,42 @@ def stack(view: LedgerView, household: dict[str, Any] | None, today: date,
     age = None if birth is None else age_on(birth, today)
     chosen = household.get("retirement_age")
     headline = int(chosen) if chosen else DEFAULT_PAYOUT_AGE
-    stated = _stated(view, today)
-    contributions = _contribution_plan(view, today, plan)
     kind = household.get("occupational_plan")
     start = household.get("occupational_service_start")
     occupational = ({"type": kind, "institution": household.get("occupational_institution"),
                      "wage": household.get("occupational_average_wage"),
                      "service_start": date.fromisoformat(start) if isinstance(start, str) else start}
                     if kind in OCCUPATIONAL_PLANS else None)
-    tiers = [_tier(view, stated, contributions, age=age, birth=birth, retire=retire, target=target, today=today,
-                   occupational=occupational) for retire in sorted(set(RETIREMENT_TIERS) | {headline})]
+    # One entry per household member: their own statements, accounts, contributions and birth date. The credit
+    # split (`plan`) and the employer plan named in the local settings are the client's.
+    people = []
+    for owner in owners(view):
+        member_birth = born(household, owner)
+        people.append({"owner": owner, "label": owner_label(owner), "birth": member_birth,
+                       "age": None if member_birth is None else age_on(member_birth, today),
+                       "stated": _stated(view, today, owner),
+                       "contributions": _contribution_plan(view, today, plan if owner == "self" else None, owner),
+                       "occupational": occupational if owner == "self" else None})
+    contributions = people[0]["contributions"]
+    tiers = [_tier(view, people, retire=retire, target=target, today=today)
+             for retire in sorted(set(RETIREMENT_TIERS) | {headline})]
     head = next(t for t in tiers if t["retire_age"] == headline)
     current = None
     if contributions["changed"]:
         as_now = dict(contributions, **contributions["current"], isa=Decimal(0))
-        row = _tier(view, stated, as_now, age=age, birth=birth, retire=headline, target=target, today=today,
-                    occupational=occupational)
+        swapped = [dict(p, contributions=as_now) if p["owner"] == "self" else p for p in people]
+        row = _tier(view, swapped, retire=headline, target=target, today=today)
         current = {"total_net": row["total_net"], "ratio": row["ratio"],
-                   "pipelines": [p for p in row["pipelines"] if p["key"] in _ACCOUNTS]}
+                   "pipelines": [p for p in row["pipelines"] if p["key"] in _ACCOUNTS and p["owner"] == "self"]}
     return {"target": target, "retirement_age": headline, "retirement_age_set": bool(chosen),
             # Private pensions pay from 55 at the earliest, whatever the retirement age (review 2026-10-18).
             "payout_age": max(headline, PRIVATE_EARLIEST_AGE), "age": age, "tiers": tiers,
+            "owners": [{"owner": p["owner"], "label": p["label"], "age": p["age"]} for p in people],
             "pipelines": head["pipelines"], "total_net": head["total_net"], "ratio": head["ratio"],
             "first_end_age": head["first_end_age"], "later_age": head["later_age"], "later_net": head["later_net"],
             "later_ratio": head["later_ratio"],
             "unknown": head["unknown"], "complete": not head["unknown"], "contributions": contributions,
-            "current_split": current, "timeline": timeline(head), "assumptions": assumptions()}
+            "current_split": current, "timeline": timeline(head), "assumptions": assumptions(shared=len(people) > 1)}
 
 
 def timeline(tier: dict[str, Any], ages: range = TIMELINE_AGES) -> list[dict[str, Any]]:
@@ -151,11 +201,11 @@ def timeline(tier: dict[str, Any], ages: range = TIMELINE_AGES) -> list[dict[str
     (an insurer's fixed won amount, no inflation increase in its terms) loses INFLATION a year after its start, as
     the same won buys less (user review 2026-11-07). Unknown pipelines are left out.
 
-    Rows: age, parts ({pipeline key: yearly amount}, every known pipeline present), total."""
+    Rows: age, parts ({pipeline row id: yearly amount}, every known pipeline present), total."""
     known = [p for p in tier["pipelines"] if p["net_monthly"] is not None and p["start_age"] is not None]
     rows = []
     for age in ages:
-        parts = {p["key"]: monthly_at(p, age) * 12 for p in known}
+        parts = {p["id"]: monthly_at(p, age) * 12 for p in known}
         rows.append({"age": age, "parts": parts, "total": sum(parts.values(), Decimal(0))})
     return rows
 
@@ -191,22 +241,33 @@ def segments(row: dict[str, Any]) -> list[tuple[int | None, Decimal, int | None,
     return row.get("start_shares") or [(row["start_age"], Decimal(1), None, row.get("end_age"))]
 
 
-def _tier(view: LedgerView, stated: dict[str, list[Any]], contributions: dict[str, Any], *, age: int | None, birth: Any,
-          retire: int, target: Decimal, today: date, occupational: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Every pipeline for one retirement age, the after-tax total once all have started and the readiness ratio,
+def _tier(view: LedgerView, people: list[dict[str, Any]], *, retire: int, target: Decimal, today: date) -> dict[str, Any]:
+    """Every pipeline of every household member for one retirement age (all retire together, user decision
+    2026-11-08), the after-tax total once all have started and the readiness ratio against the household target,
     the years from retirement to the first pension, and what must be held outside the pensions at retirement."""
-    rows = [_pipeline(view, key, stated.get(key, []), age=age, birth=birth, retire=retire, contributions=contributions,
-                      today=today) for key in PIPELINES]
-    if contributions["isa"]:
-        rows.append(_isa(contributions, age=age, retire=retire))
-    rows += [_pipeline(view, key, records, age=age, birth=birth, retire=retire, contributions=contributions, today=today)
-             for key, records in sorted(stated.items()) if key not in PIPELINES]
-    if occupational and "occupational" not in stated:
-        rows.append(_employer_plan(occupational, retire=retire, birth=birth, today=today))
-    _apply_tax(rows)
+    rows = []
+    client = people[0]["birth"]
+    for person in people:
+        mine = _rows(view, person, retire=retire, today=today)
+        if client is None and person["owner"] != "self":
+            # Without the client's birth year there is no household axis to put a member's ages on: their payouts
+            # are unknown, never read as if both were the same age (Codex review 2026-11-08).
+            for row in mine:
+                _unplaceable(row, f"{owner_label('self')} 출생 연도(로컬 설정 [household] {_BIRTH_KEYS['self']})",
+                             "고객님 출생 연도가 없어 가구의 나이 축에 놓을 수 없음")
+        _apply_tax(mine)   # Each member is a taxpayer: the separate-taxation limit counts their own payouts.
+        # One time axis for the household: a member's ages become the client's age in the same year (Codex review
+        # 2026-11-08: a younger spouse's pension must not be added from the client's 65th year).
+        offset = 0 if client is None or person["birth"] is None else person["birth"][0] - client[0]
+        for row in mine:
+            _shift(row, offset)
+        rows += mine
+    shared = len(people) > 1
     for row in rows:
-        row.update(category=CATEGORY_OF.get(row["key"], "personal"))
-        row.setdefault("products", products(view, row["key"]))
+        row.update(category=CATEGORY_OF.get(row["key"], "personal"),
+                   id=row["key"] if row["owner"] == "self" else f"{row['key']}@{row['owner']}",
+                   owner_label=owner_label(row["owner"]) if shared else None)
+        row.setdefault("products", products(view, row["key"], row["owner"]))
     known = [r for r in rows if r["net_monthly"] is not None]
     # Every part's own start and end counts: a later payout of the same pipeline starts at its own age.
     starts = [start for r in known for start, _, _, _ in segments(r) if start is not None]
@@ -222,9 +283,48 @@ def _tier(view: LedgerView, stated: dict[str, list[Any]], contributions: dict[st
     return {"retire_age": retire, "pipelines": rows, "total_net": total, "ratio": total / target,
             "first_end_age": min(ends, default=None), "later_age": later_age, "later_net": later,
             "later_ratio": None if later is None else later / target,
-            "unknown": [r["key"] for r in rows if r["net_monthly"] is None], "first_income_age": first,
+            "unknown": [r["id"] for r in rows if r["net_monthly"] is None], "first_income_age": first,
             "years_without_pension": None if first is None else max(0, first - retire),
             "all_on_age": all_on, "outside_need": _outside_need(rows, target, retire)}
+
+
+def _rows(view: LedgerView, person: dict[str, Any], *, retire: int, today: date) -> list[dict[str, Any]]:
+    """One member's pipelines for a retirement age: the four always shown, the ISA row when the credit split
+    leaves contributions outside it, any other stated pipeline, and the employer plan named in the settings."""
+    stated, contributions, owner = person["stated"], person["contributions"], person["owner"]
+    args = dict(age=person["age"], birth=person["birth"], retire=retire, contributions=contributions, today=today,
+                owner=owner)
+    # The client's four pipelines are always shown (a missing one is asked for); another member gets the national
+    # pension (everyone employed has one to state) and only the accounts and policies they actually hold, so a
+    # product they do not have is not an unknown that turns the household total into a lower bound.
+    keys = [key for key in PIPELINES
+            if owner == "self" or key == "national" or stated.get(key) or _held(view, key, owner)]
+    rows = [_pipeline(view, key, stated.get(key, []), **args) for key in keys]
+    if contributions["isa"]:
+        rows.append(_isa(contributions, age=person["age"], retire=retire))
+    rows += [_pipeline(view, key, records, **args) for key, records in sorted(stated.items()) if key not in PIPELINES]
+    if person["occupational"] and "occupational" not in stated:
+        rows.append(_employer_plan(person["occupational"], retire=retire, birth=person["birth"], today=today))
+    for row in rows:
+        row["owner"] = owner
+        # A payout with no age to pay from cannot be added on the household's time axis: it is unknown, not a figure
+        # the totals silently leave out (Codex review 2026-11-08: the stack read as complete without it).
+        if row["start_age"] is None:
+            # The text reaches the model (narrative pension_stack.missing): a role word and a fixed setting key only,
+            # never the ledger's owner id (Codex review 2026-11-08).
+            key = _BIRTH_KEYS.get(owner)
+            _unplaceable(row, f"{owner_label(owner)} 출생 연도(로컬 설정{f' [household] {key}' if key else ''})",
+                         "출생 연도가 없어 받는 나이를 정할 수 없음")
+    return rows
+
+
+def _unplaceable(row: dict[str, Any], missing: str, why: str) -> None:
+    """Turn a payout that cannot be put on the household's age axis into an unknown one (a lower bound that asks
+    for `missing`), so no total silently leaves it out. A row already unknown is left as it is."""
+    if row["gross_monthly"] is None and row["net_monthly"] is None:
+        return
+    row.update(gross_monthly=None, net_monthly=None, nominal_monthly=None, stated_net=False, basis="unknown",
+               basis_text=f"{row['basis_text']} · {why}", missing=missing)
 
 
 def _employer_plan(plan: dict[str, Any], *, retire: int, birth: tuple[int, int | None] | None,
@@ -264,6 +364,33 @@ def _employer_plan(plan: dict[str, Any], *, retire: int, birth: tuple[int, int |
     return row
 
 
+def _shift(row: dict[str, Any], years: int) -> None:
+    """Move a member's row onto the client's age axis: the member is `years` younger (positive) or older, so every
+    age in the row (start, end, each stated part, the erosion start of a nominal part, the high-tax ages) moves by
+    that much. The member's own start and end ages stay in `own_start_age`/`own_end_age` for the table."""
+    row["own_start_age"], row["own_end_age"], row["age_offset"] = row["start_age"], row.get("end_age"), years
+    if not years:
+        return
+    for key in ("start_age", "end_age"):
+        if row.get(key) is not None:
+            row[key] += years
+    if row.get("start_shares"):
+        row["start_shares"] = [(None if start is None else start + years, share, None if erode is None else erode + years,
+                                None if end is None else end + years) for start, share, erode, end in row["start_shares"]]
+    if "high_ages" in row:
+        row["high_ages"] = frozenset(age + years for age in row["high_ages"])
+
+
+def _held(view: LedgerView, key: str, owner: str) -> bool:
+    """Whether a member holds the product behind a pipeline: an account of its type, or an annuity policy."""
+    if key in _ACCOUNTS:
+        return _has_account(view, _ACCOUNTS[key], owner)
+    if key == "insurance_annuity":
+        return any(r.kind is Kind.ASSET and r.owner_id == owner and r.fields["category"] == "insurance_surrender_value"
+                   for r in view.records)
+    return False
+
+
 def _service_months(start: date, end: date) -> int:
     """Whole months of service from `start` to `end` (a month counts once its day is reached)."""
     return max(0, (end.year - start.year) * 12 + end.month - start.month - (end.day < start.day))
@@ -293,13 +420,14 @@ def _outside_need(rows: list[dict[str, Any]], target: Decimal, retire: int) -> d
     gap = max(Decimal(0), target - sum((monthly_at(r, last) for r in known), Decimal(0)))
     lasting = gap * 12 / WITHDRAWAL_RATE / (1 + REAL_RETURN) ** (last - retire)
     return {"bridge": bridge, "lasting": lasting, "total": bridge + lasting,
-            "upper_bound": len(known) < len(rows), "unknown": [r["key"] for r in rows if r["net_monthly"] is None]}
+            "upper_bound": len(known) < len(rows), "unknown": [r["id"] for r in rows if r["net_monthly"] is None]}
 
 
-def _contribution_plan(view: LedgerView, today: date, plan: dict[str, Any] | None) -> dict[str, Any]:
+def _contribution_plan(view: LedgerView, today: date, plan: dict[str, Any] | None, owner: str = "self") -> dict[str, Any]:
     """Monthly contributions the projection uses: the credit split of `plan` (the report proposes it) or, without a
-    plan, the current standing transfers; this year's contributions no credit covers (tax-free when drawn)."""
-    current = {"pension_savings": _contributions(view, "pension_savings", today), "irp": _contributions(view, "irp", today)}
+    plan, the owner's current standing transfers; this year's contributions no credit covers (tax-free when drawn)."""
+    current = {"pension_savings": _contributions(view, "pension_savings", today, owner),
+               "irp": _contributions(view, "irp", today, owner)}
     found = {**current, "isa": Decimal(0), "current": current, "changed": False,
              "nontaxed_now": {"pension_savings": Decimal(0), "irp": Decimal(0)}}
     if plan is None or None in current.values():
@@ -311,19 +439,25 @@ def _contribution_plan(view: LedgerView, today: date, plan: dict[str, Any] | Non
 
 
 def _uncredited_yearly(contributions: dict[str, Any]) -> dict[str, Decimal]:
-    """The yearly contributions of a standing split that no credit covers, by account (pension savings first)."""
-    savings, irp = contributions["pension_savings"] * 12, contributions["irp"] * 12
-    room = max(Decimal(0), PENSION_TOTAL_LIMIT - min(savings, PENSION_SAVINGS_LIMIT))
-    return {"pension_savings": max(Decimal(0), savings - PENSION_SAVINGS_LIMIT), "irp": max(Decimal(0), irp - room)}
+    """The yearly contributions of a standing split that no credit covers, by account (pension savings first). An
+    account whose contribution could not be converted (None) leaves what depends on it at nothing uncredited, so
+    that payout is taxed in full (a lower bound), instead of failing the whole report (Codex review 2026-11-08)."""
+    savings, irp = contributions["pension_savings"], contributions["irp"]
+    found = {"pension_savings": Decimal(0) if savings is None else max(Decimal(0), savings * 12 - PENSION_SAVINGS_LIMIT),
+             "irp": Decimal(0)}
+    if savings is not None and irp is not None:
+        room = max(Decimal(0), PENSION_TOTAL_LIMIT - min(savings * 12, PENSION_SAVINGS_LIMIT))
+        found["irp"] = max(Decimal(0), irp * 12 - room)
+    return found
 
 
-def _stated(view: LedgerView, today: date) -> dict[str, list[Any]]:
-    """The client's own pension_income flows by pipeline (a future start is a stated payout, an ended one is
+def _stated(view: LedgerView, today: date, owner: str = "self") -> dict[str, list[Any]]:
+    """One member's pension_income flows by pipeline (a future start is a stated payout, an ended one is
     not); flows without a source count as "other"."""
     found: dict[str, list[Any]] = {}
     for record in view.records:
         f = record.fields
-        if record.kind is not Kind.CASHFLOW or f["category"] != "pension_income" or record.owner_id != "self":
+        if record.kind is not Kind.CASHFLOW or f["category"] != "pension_income" or record.owner_id != owner:
             continue
         if f.get("end_date") and f["end_date"] < today.isoformat():
             continue
@@ -332,7 +466,7 @@ def _stated(view: LedgerView, today: date) -> dict[str, list[Any]]:
 
 
 def _pipeline(view: LedgerView, key: str, records: list[Any], *, age: int | None, birth: Any, retire: int,
-              contributions: dict[str, Any], today: date) -> dict[str, Any]:
+              contributions: dict[str, Any], today: date, owner: str = "self") -> dict[str, Any]:
     label = LABELS.get(key, key)
     payout_age = max(retire, PRIVATE_EARLIEST_AGE)
     row = {"key": key, "label": label, "start_age": None, "gross_monthly": None, "net_monthly": None,
@@ -394,16 +528,16 @@ def _pipeline(view: LedgerView, key: str, records: list[Any], *, age: int | None
                    missing="국민연금공단 '내 연금 알아보기'의 예상 월 수령액(현재 가치)과 수령 개시 연령")
         return row
     if key in _ACCOUNTS:
-        assets = _assets(view, lambda f: f.get("account_type") == _ACCOUNTS[key])
+        assets = _assets(view, lambda f: f.get("account_type") == _ACCOUNTS[key], owner)
         contribution = contributions[key]
         row.update(assets_now=assets, monthly_contribution=contribution)
         if assets is None or contribution is None:
             row.update(basis_text="잔액이나 납입액을 원화로 환산하지 못함", missing="그 통화의 환율")
             return row
-        if not _has_account(view, _ACCOUNTS[key]):
+        if not _has_account(view, _ACCOUNTS[key], owner):
             row.update(basis_text="계좌가 없음", missing=f"{label} 계좌가 있다면 잔액과 월 납입액")
             return row
-        terms = _terms(products(view, key))
+        terms = _terms(products(view, key, owner))
         stop = None if age is None or terms["contribution_end"] is None else age_on(birth, terms["contribution_end"])
         row = _project(row, assets, contribution, age=age, retire=retire, start=payout_age,
                        nontaxed_now=contributions["nontaxed_now"][key],
@@ -413,16 +547,16 @@ def _pipeline(view: LedgerView, key: str, records: list[Any], *, age: int | None
             row["basis_text"] += ". 수령 기간이나 납입 종료일이 다른 계좌가 섞여 가장 긴 기간과 가장 늦은 종료일로 계산"
         return row
     if key == "insurance_annuity":
-        assets = _assets(view, lambda f: f["category"] == "insurance_surrender_value")
+        assets = _assets(view, lambda f: f["category"] == "insurance_surrender_value", owner)
         if assets is None:
             row.update(basis_text="해약환급금을 원화로 환산하지 못함", missing="그 통화의 환율")
             return row
-        if not any(r.kind is Kind.ASSET and r.owner_id == "self" and r.fields["category"] == "insurance_surrender_value"
+        if not any(r.kind is Kind.ASSET and r.owner_id == owner and r.fields["category"] == "insurance_surrender_value"
                    for r in view.records):
             row.update(basis_text="연금보험 레코드가 없음", missing="연금보험이 있다면 해약환급금 또는 보험사 예시표의 예상 월 연금액")
             return row
         row.update(assets_now=assets)
-        return _annuity(view, row, assets, age=age, payout_age=payout_age, today=today)
+        return _annuity(view, row, assets, age=age, payout_age=payout_age, today=today, owner=owner)
     row.update(basis_text="예상 수령액이 입력되지 않음", missing=f"{label}의 예상 월 수령액과 개시 시점")
     return row
 
@@ -449,20 +583,22 @@ def _project(row: dict[str, Any], assets: Decimal, contribution: Decimal, *, age
     share = Decimal(1) if not projected else max(Decimal(0), 1 - nontaxed / projected)
     payment = REAL_RETURN / (1 - (1 + REAL_RETURN) ** -years)   # Equal real instalments that empty the account.
     stop = f"{until}세(납입 종료일)" if until < retire else f"{retire}세 은퇴"
+    # No standing transfer into the account (a partner's account, say): the balance alone is projected and said so.
+    put = (f"지금 잔액에 월 {contribution / 10_000:,.0f}만 원을 {stop}까지 넣고" if contribution
+           else "지금 잔액만(월 납입 기록 없음)")
     row.update(gross_monthly=projected * payment / 12, start_age=start, end_age=start + years, basis="estimated",
                taxable_share=share, payout_years=years,
-               basis_text=f"지금 잔액에 월 {contribution / 10_000:,.0f}만 원을 {stop}까지 넣고 실질 연 "
-                          f"{REAL_RETURN * 100:.0f}%로 불려 {start}세부터 {years}년간 나눠 받는다고 본 추정")
+               basis_text=f"{put} 실질 연 {REAL_RETURN * 100:.0f}%로 불려 {start}세부터 {years}년간 나눠 받는다고 본 추정")
     return row
 
 
-def products(view: LedgerView, key: str) -> list[dict[str, Any]]:
-    """The client's products behind a pipeline with their stated terms (report design §18.5): the pension
+def products(view: LedgerView, key: str, owner: str = "self") -> list[dict[str, Any]]:
+    """One member's products behind a pipeline with their stated terms (report design §18.5): the pension
     accounts of its type, the annuity policies, or the national pension's statement."""
     if key == "national":
         return [{"institution": "국민연금공단", "name": "국민연금", "contribution_end": r.fields.get("contribution_end"),
                  "payout_start": r.fields["start_date"]} for r in view.records
-                if r.kind is Kind.CASHFLOW and r.owner_id == "self" and r.fields["category"] == "pension_income"
+                if r.kind is Kind.CASHFLOW and r.owner_id == owner and r.fields["category"] == "pension_income"
                 and r.fields.get("pension_source") == "national"]
     accept = ((lambda f: f.get("account_type") == _ACCOUNTS[key]) if key in _ACCOUNTS
               else (lambda f: f["category"] == "insurance_surrender_value") if key == "insurance_annuity" else None)
@@ -471,7 +607,7 @@ def products(view: LedgerView, key: str) -> list[dict[str, Any]]:
     found = []
     for record in view.records:
         f = record.fields
-        if record.kind is not Kind.ASSET or record.owner_id != "self" or not accept(f):
+        if record.kind is not Kind.ASSET or record.owner_id != owner or not accept(f):
             continue
         if any(f.get(name) for name in _TERM_FIELDS):
             found.append({"institution": f.get("institution"), "name": f.get("instrument_name"),
@@ -544,7 +680,7 @@ def _national_scale(records: list[Any], *, retire: int, birth: Any) -> tuple[Dec
 
 
 def _annuity(view: LedgerView, row: dict[str, Any], assets: Decimal, *, age: int | None, payout_age: int,
-             today: date) -> dict[str, Any]:
+             today: date, owner: str = "self") -> dict[str, Any]:
     """The insurer's annuity kept to maturity: the surrender value plus the premiums still due (net of the
     loading) at the real return until the payout age, or the guaranteed base (premiums plus simple interest,
     deflated) when that is higher, drawn at the withdrawal rate. Without a qualifying premium the surrender
@@ -554,7 +690,7 @@ def _annuity(view: LedgerView, row: dict[str, Any], assets: Decimal, *, age: int
         return row
     years = max(0, payout_age - age)
     payout = date(today.year + years, today.month, 1)
-    premiums = [r for r in view.records if r.kind is Kind.CASHFLOW and r.owner_id == "self"
+    premiums = [r for r in view.records if r.kind is Kind.CASHFLOW and r.owner_id == owner
                 and r.fields["category"] == "insurance_premium" and r.fields.get("end_date")
                 and r.fields["frequency"] == "monthly" and r.fields["end_date"] >= today.isoformat()]
     monthly = Decimal(0)
@@ -626,10 +762,12 @@ def _apply_tax(rows: list[dict[str, Any]]) -> None:
         row.update(tax_factor=factor, net_monthly=gross * (1 - factor * row["taxable_share"]), high_private_tax=False)
 
 
-def born(household: dict[str, Any]) -> tuple[int, int | None] | None:
-    """(birth year, birth month or None) from [household]; None without a birth year."""
-    year = household.get("birth_year")
-    return None if year is None else (int(year), household.get("birth_month"))
+def born(household: dict[str, Any], owner: str = "self") -> tuple[int, int | None] | None:
+    """(birth year, birth month or None) of a member from [household] (`birth_year`/`birth_month` for the client,
+    `partner_birth_year`/`partner_birth_month` for the spouse); None without a birth year or for any other member."""
+    key = _BIRTH_KEYS.get(owner)
+    year = None if key is None else household.get(key)
+    return None if year is None else (int(year), household.get(key.replace("_year", "_month")))
 
 
 def age_on(birth: tuple[int, int | None], when: date) -> int:
@@ -646,10 +784,10 @@ def national_pension_age(birth_year: int) -> int:
     return 65
 
 
-def _assets(view: LedgerView, accept: Any) -> Decimal | None:
+def _assets(view: LedgerView, accept: Any, owner: str = "self") -> Decimal | None:
     total = Decimal(0)
     for record in view.records:
-        if record.kind is Kind.ASSET and record.owner_id == "self" and accept(record.fields):
+        if record.kind is Kind.ASSET and record.owner_id == owner and accept(record.fields):
             value = base_amount(view, record)
             if value is None:
                 return None
@@ -657,20 +795,21 @@ def _assets(view: LedgerView, accept: Any) -> Decimal | None:
     return total
 
 
-def _has_account(view: LedgerView, account_type: str) -> bool:
-    return any(r.kind is Kind.ASSET and r.owner_id == "self" and r.fields.get("account_type") == account_type
+def _has_account(view: LedgerView, account_type: str, owner: str = "self") -> bool:
+    return any(r.kind is Kind.ASSET and r.owner_id == owner and r.fields.get("account_type") == account_type
                for r in view.records)
 
 
-def _contributions(view: LedgerView, account_type: str, today: date) -> Decimal | None:
-    """Monthly transfers into the client's accounts of this type (the same reading as the tax rules)."""
-    accounts = {r.record_id for r in view.records if r.kind is Kind.ASSET and r.owner_id == "self"
+def _contributions(view: LedgerView, account_type: str, today: date, owner: str = "self") -> Decimal | None:
+    """Monthly transfers into one member's accounts of this type (the same reading as the tax rules)."""
+    accounts = {r.record_id for r in view.records if r.kind is Kind.ASSET and r.owner_id == owner
                 and r.fields.get("account_type") == account_type}
     total = Decimal(0)
     for record in view.records:
         f = record.fields
+        # A transfer counts while it runs today: not one that ended, nor one that starts later (Codex review 2026-11-08).
         if record.kind is not Kind.CASHFLOW or f["category"] != "internal_transfer" or f.get("target_record_id") not in accounts \
-                or f["frequency"] not in _MONTHS or (f.get("end_date") and f["end_date"] < today.isoformat()):
+                or f["frequency"] not in _MONTHS or not recurring_active(f, today):
             continue
         amount = base_amount(view, record)
         if amount is None:
@@ -679,9 +818,12 @@ def _contributions(view: LedgerView, account_type: str, today: date) -> Decimal 
     return total
 
 
-def assumptions() -> list[str]:
+def assumptions(shared: bool = False) -> list[str]:
     tiers = "·".join(f"{age}세" for age in RETIREMENT_TIERS)
-    return [f"연금 스택: 국민연금 세후 {TAX_FACTORS['national'] * 100:.0f}% 차감, 연금저축·IRP 연금소득세 "
+    household = ([f"가구 합산: 배우자의 연금도 같은 나이에 함께 은퇴한다고 보고 본인 연금과 더해 한 목표(세후 월 생활비)에 견줌"
+                  f"(사용자 결정 2026-11-08). 연금소득세와 사적연금 연 {PRIVATE_SEPARATE_LIMIT / 10_000:,.0f}만 원 기준은 사람마다 따로 적용"]
+                 if shared else [])
+    return household + [f"연금 스택: 국민연금 세후 {TAX_FACTORS['national'] * 100:.0f}% 차감, 연금저축·IRP 연금소득세 "
             f"{TAX_FACTORS['irp'] * 100:.1f}%(과세 대상 사적연금이 연 {PRIVATE_SEPARATE_LIMIT / 10_000:,.0f}만 원 초과 시 "
             f"{PRIVATE_HIGH_TAX * 100:.1f}%), 세액공제를 받지 않은 납입 원금은 꺼낼 때 비과세(올해 이전 해의 공제 밖 납입은 "
             "모름: 과세로 본 하한), ISA 등 공제 밖 적립은 이익에만 9.9%, 연금보험 비과세 요건 충족 가정",

@@ -275,10 +275,13 @@ def _read(token: str, path: str, getter: Getter) -> dict[str, Any]:
 
 def send(credentials: tuple[str, str, str], *, recipient: str, subject: str, html: str, text: str,
          poster: Poster = post, thread_id: str | None = None, in_reply_to: str | None = None,
-         references: str | None = None, images: dict[str, bytes] | None = None) -> str:
+         references: str | None = None, images: dict[str, bytes] | None = None,
+         also_to: tuple[str, ...] | list[str] = ()) -> str:
     """Send one message to the configured recipient and return Gmail's message id.
 
     `images` are inline PNG attachments keyed by the cid the HTML references (`<img src="cid:weather">`).
+    `also_to` adds configured addresses to the same To line (the financial reports and event notes only,
+    config.report_extra_recipients): one message, one delivery state, one thread.
 
     Raises:
         MailError: with `uncertain=True` when the send request may have been accepted.
@@ -293,7 +296,7 @@ def send(credentials: tuple[str, str, str], *, recipient: str, subject: str, htm
     if status != 200 or not payload.get("access_token"):
         raise MailError("token-refresh-failed" if status != 400 else "login-required")
     message = EmailMessage()
-    message["To"] = recipient
+    message["To"] = ", ".join([recipient, *also_to])
     message["Subject"] = subject
     message[SMITH_HEADER] = "1"
     if in_reply_to:  # A reply stays in the client's thread.

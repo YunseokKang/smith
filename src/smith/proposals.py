@@ -1294,8 +1294,10 @@ def _retirement_track(facts: dict[str, Any], home: dict[str, Any] | None) -> Tra
     needs = [(t["retire_age"], t["outside_need"]) for t in tiers]
     need_text =", ".join(f"{a}세 {'최대 ' if n['upper_bound'] else ''}{short_won(n['total'])}" for a, n in needs if n is not None)
     gaps = [t for t in tiers if t["years_without_pension"]]
-    lower = (f" {', '.join(pension.LABELS.get(k, k) for k in stack['unknown'])}은 수령액을 몰라, 준비율은 그 이상이고 연금 밖에서 "
+    names = {p["id"]: pension.row_label(p) for p in stack["pipelines"]}
+    lower = (f" {', '.join(names.get(k, k) for k in stack['unknown'])}은 수령액을 몰라, 준비율은 그 이상이고 연금 밖에서 "
              "준비할 돈은 최대치입니다." if stack["unknown"] else "")
+    shared = "두 분 연금을 합친 " if len(stack.get("owners") or []) > 1 else ""
     home_goal = any(g["category"] == "home" and g["target_date"] > facts["today"] for g in facts["summary"].goals)
     share = future_income.retirement_share(facts["pay"], home=home, home_goal=home_goal)
     birth = facts["tax"]["birth_year"]
@@ -1308,7 +1310,7 @@ def _retirement_track(facts: dict[str, Any], home: dict[str, Any] | None) -> Tra
         need = None  # The expected-pay share of a ceiling would understate what the pay covers: left out.
     return Track(
         "노후 준비", status,
-        f"월 {short_won(stack['target'])}(현재 가치) 목표에 연금 세후 준비율은 은퇴 나이별로 {ratios}",
+        f"월 {short_won(stack['target'])}(세후, 현재 가치) 목표에 {shared}연금 세후 준비율은 은퇴 나이별로 {ratios}",
         ((f"연금 밖에서 은퇴할 때 갖고 있어야 할 돈은 {need_text}(오늘 돈 가치)입니다. " if need_text else "")
          + (f"{gaps[0]['retire_age']}세에 은퇴하면 첫 연금까지 {gaps[0]['years_without_pension']}년이 비어 그동안의 생활비가 "
             "모두 연금 밖의 돈입니다. " if gaps else "")

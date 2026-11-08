@@ -12,6 +12,7 @@ from typing import Any
 from smith import pension, product_review
 from smith.payload import LedgerView
 from smith.records import COMPENSATION_CATEGORIES, Kind
+from smith.summary import recurring_active
 
 PRIORITY_ORDER = {"must": 0, "should": 1, "nice": 2}
 _PENSION_ACCOUNTS = ("pension_savings", "irp")
@@ -35,7 +36,7 @@ def requests(view: LedgerView, household: dict[str, Any] | None,
     today = view.as_of.date()
     rules = (_cash_flows, _partner, _irregular_flows, _pension_paid, _unclassified, _cost_basis, _toss_cash,
              _pay_overdue, _expected_pay, _gross_salary, _surrender_values, _loan_terms, _acquisition, _residence, _retirement,
-             _marriage, _move_targets, _policy_links, _transfer_targets, _commitment)
+             _marriage, _move_targets, _policy_links, _transfer_targets, _commitment, _member_pension_contributions)
     found = [r for rule in rules if (r := rule(view, household, today)) is not None]
     stack = pension.stack(view, household, today) if pension_stack is None else pension_stack
     if stack is not None and stack["unknown"]:
@@ -47,12 +48,32 @@ def _pension_pipelines(stack: dict[str, Any]) -> Request:
     """A pipeline of the pension stack without a payout figure (report design §18.5): the stack is a lower
     bound until the client states it."""
     missing = [p for p in stack["pipelines"] if p["net_monthly"] is None]
-    names = ", ".join(p["label"] for p in missing)
+    names = ", ".join(pension.row_label(p) for p in missing)
     return Request("pension-pipelines", "should", f"{names}의 예상 월 수령액(현재 가치)과 수령 개시 시점",
                    "노후 현금흐름 준비율이 이 연금을 빼고 계산되어 실제보다 낮게 나옵니다. "
-                   + " ".join(f"{p['label']}: {p['missing']}." for p in missing if p["missing"]),
+                   + " ".join(f"{pension.row_label(p)}: {p['missing']}." for p in missing if p["missing"]),
                    "cashflow 레코드(category=pension_income, pension_source=national|insurance_annuity|pension_savings|irp, "
-                   "amount=월 예상 수령액, frequency=monthly, start_date=수령 개시일)")
+                   "amount=월 예상 수령액, frequency=monthly, start_date=수령 개시일; 배우자는 owner_id=partner)")
+
+
+def _member_pension_contributions(view: LedgerView, household: dict[str, Any], today: date) -> Request | None:
+    """A household member's pension account with no standing transfer recorded: the stack projects the balance
+    alone (user decision 2026-11-08), so the member's monthly contribution, or that there is none, is asked for."""
+    for owner in pension.owners(view)[1:]:
+        accounts = [r for r in _assets(view) if r.owner_id == owner
+                    and r.fields.get("account_type") in ("pension_savings", "irp")]
+        # The same reading as the stack's contributions: a recurring transfer running today (Codex review 2026-11-08:
+        # neither an ended transfer nor one that starts later is a contribution now).
+        targets = {r.fields.get("target_record_id") for r in _flows(view)
+                   if r.owner_id == owner and r.fields["category"] == "internal_transfer"
+                   and recurring_active(r.fields, today)}
+        missing = [r for r in accounts if r.record_id not in targets]
+        if missing:
+            who = pension.owner_label(owner)
+            return Request("member-pension-contributions", "should", f"{who} 연금 계좌 {len(missing)}건의 월 납입액(없으면 없음)",
+                           f"{who}의 연금저축·IRP에 들어가는 돈이 기록되지 않아 지금 잔액만으로 노후 수령액을 계산하고 있습니다.",
+                           f'owner_id "{owner}"의 cashflow 레코드(category=internal_transfer, target_record_id=그 계좌, amount=월 납입액)')
+    return None
 
 
 def _policy_links(view: LedgerView, household: dict[str, Any], today: date) -> Request | None:

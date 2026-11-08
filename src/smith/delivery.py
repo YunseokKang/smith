@@ -138,8 +138,12 @@ def publish(db: Path, *, recipient: str, credentials: tuple[str, str, str], now:
             missed: list[datetime], kind: str, sender: Sender = gmail.send, tz: str = DEFAULT_TIMEZONE,
             sync_failures: list[str] | None = None, narrator: Narrator | None = None,
             household: dict[str, Any] | None = None, lineage: dict[str, str | None] | None = None,
-            schedule: dict[str, Any] | None = None, since: datetime | None = None) -> dict[str, Any]:
+            schedule: dict[str, Any] | None = None, since: datetime | None = None,
+            also_to: list[str] | None = None) -> dict[str, Any]:
     """Claim, build, send and record one report. Returns the final run record fields.
+
+    `also_to` (config.report_extra_recipients, FR-51) puts the configured family addresses on the same message's To
+    line, and the footer says so and that only the client's own replies are answered.
 
     `lineage` carries the config hash and code version; with the ledger time, brief, model runs and a
     digest of the canonical report data they are stored on the run before sending. `schedule` is the
@@ -181,6 +185,7 @@ def publish(db: Path, *, recipient: str, credentials: tuple[str, str, str], now:
             narrator(data)
         # Lateness is judged at send time: the narrative stage can take many minutes after `now`.
         send_at = now + timedelta(seconds=time.monotonic() - started)
+        data["family_copy"] = bool(also_to)
         data["delivery_note"] = _delivery_note(None if slot is None else local_time(slot, tz),
                                                [local_time(m, tz) for m in missed], local_time(send_at, tz),
                                                [r for r in unresolved if r["report_id"] != report_id], tz,
@@ -206,7 +211,7 @@ def publish(db: Path, *, recipient: str, credentials: tuple[str, str, str], now:
     try:
         mail_html, images = inline_images(html)
         message_id = sender(credentials, recipient=recipient, subject=subject, html=mail_html, text=_text(subject),
-                            **({"images": images} if images else {}))
+                            **({"images": images} if images else {}), **({"also_to": list(also_to)} if also_to else {}))
     except gmail.MailError as error:
         return _finish(db, report_id, "unknown" if error.uncertain else "failed", subject=subject, digest=digest,
                        error_code=error.code, shown=shown)

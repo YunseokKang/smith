@@ -116,7 +116,8 @@ def render(data: dict[str, Any]) -> tuple[str, str]:
         sections += [_policy(data, story, full), _holdings(data, story, full)]
     sections.append(_requests(data.get("requests") or [], full))
     bands.append(_band(CANVAS, "".join(sections), border=True))
-    bands.append(_band(SOFT, _footer(_system_warnings(data), corrections=_corrections_line(data))))
+    bands.append(_band(SOFT, _footer(_system_warnings(data), corrections=_corrections_line(data),
+                                     shared=bool(data.get("family_copy")))))
     return _subject(data, status), _page(bands)
 
 
@@ -136,7 +137,7 @@ def render_event(note: dict[str, Any]) -> tuple[str, str, str]:
             + (_opened(_section("왜 그랬나", why[0], why[1], brief=None)) if why else ""))
     guide = "정기 보고와 별개로, 우리 집에 중요한 사건이 있는 날에만 보내는 안내입니다. 제안은 정기 보고에서만 드립니다."
     html = _page([_band(DARK, _event_hero(note, title, line, tiles)), _band(CANVAS, body, border=True),
-                  _band(SOFT, _footer((), week=guide))])
+                  _band(SOFT, _footer((), week=guide, shared=bool(note.get("family_copy"))))])
     text = (f"{subject}\n\n{title}\n{line}\n\n{_plain(facts[0])}\n\n{_plain(stance)}\n\n{PLAIN_TAIL}")
     return subject, html, text
 
@@ -274,7 +275,8 @@ def _disclosure_note(note: dict[str, Any]) -> tuple[str, str, str]:
              "보유 수량으로 정했고" + ("" if failed else ", 해석은 원문과 보도를 읽고 정리했습니다") + (". " if failed else ". ")
              + "매매 제안은 정기 보고에서만 드립니다.")
     html = _page([_band(DARK, _event_hero(note, title, line, tiles)), _band(CANVAS, body, border=True),
-                  _band(SOFT, _footer((), week=escape(guide), law=money is not None))])
+                  _band(SOFT, _footer((), week=escape(guide), law=money is not None,
+                                      shared=bool(note.get("family_copy"))))])
     rows = "\n".join(f"- {c['name']}: " + (f"{(c['reading'] or {}).get('thesis')} " if (c["reading"] or {}).get("thesis")
                                             else "") + f"할 일: {c['action'][0]}" for c in companies)
     text = f"{subject}\n\n{title}\n{line}\n\n{head + chr(10) if head else ''}{rows}\n\n{PLAIN_TAIL}"
@@ -629,7 +631,7 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
         bands.append(_band(CANVAS, "".join(sections), border=True))
     notes = pension_notes(data.get("pension_stack")) if "pension_stack" in edition.opening + edition.sections else []
     bands.append(_band(SOFT, _footer(_system_warnings(data), week=_week_line(data), corrections=_corrections_line(data),
-                                     notes=notes)))
+                                     notes=notes, shared=bool(data.get("family_copy")))))
     return _subject(data, status), _page(bands)
 
 
@@ -2519,10 +2521,13 @@ def _pension_stack(data: dict[str, Any]) -> str:
     target, head = stack["target"], stack["retirement_age"]
     tiers = _retirement_tiers(stack)
     # The two sentences the card keeps (report design §21): which ages, then each age's after-tax total and ratio.
+    shared = len(stack.get("owners") or []) > 1
     lead = ((f"{head}세 은퇴를 기준으로 계산했고 50·55·60세도 함께 보입니다." if stack["retirement_age_set"] else
              f"은퇴 나이를 정하지 않으셔서 {'·'.join(str(t['retire_age']) for t in tiers)}세 세 경우로 계산했고, 아래 그래프와 표는 "
              f"{head}세 기준입니다.")
-            + f" 은퇴 후 월 <b>{_short(target)}</b>(현재 가치) 목표에 모든 연금이 나온 뒤의 세후 월 합계는 "
+            # The household stack (user decision 2026-11-08): both members' pensions against one target.
+            + (" 배우자의 연금도 같은 나이에 함께 은퇴한다고 보고 더했습니다." if shared else "")
+            + f" 은퇴 후 {'가구 ' if shared else ''}월 <b>{_short(target)}</b>(세후, 현재 가치) 목표에 모든 연금이 나온 뒤의 세후 월 합계는 "
             + ", ".join(f"{t['retire_age']}세 은퇴 <b>{_short(t['total_net'])}</b>({_pct(t['ratio'], 0)})" for t in tiers)
             + "입니다.")
     if stack["later_net"] is not None:
@@ -2530,8 +2535,8 @@ def _pension_stack(data: dict[str, Any]) -> str:
                  f"({_pct(stack['later_ratio'], 0)})로 줄어듭니다.")
     if stack["unknown"]:
         missing = [p for p in stack["pipelines"] if p["net_monthly"] is None]
-        lead += (f" {', '.join(p['label'] for p in missing)}은 아직 수령액을 몰라 뺀 하한이며, 답장으로 알려 주시면 바로 반영합니다: "
-                 + " ".join(f"{p['label']}는 {p['missing']}." for p in missing if p["missing"]))
+        lead += (f" {', '.join(pension.row_label(p) for p in missing)}은 아직 수령액을 몰라 뺀 하한이며, 답장으로 알려 주시면 바로 "
+                 "반영합니다: " + " ".join(f"{pension.row_label(p)}는 {p['missing']}." for p in missing if p["missing"]))
     inner = (_tier_table(tiers) + _gauge(f"{head}세 은퇴 기준 목표 월 생활비 대비 준비율", stack["ratio"], "")
              + _pension_timeline(stack) + _family_table(stack))
     return _section("노후 현금흐름 준비율: 연금 종류별 스택", lead, inner,
@@ -2553,26 +2558,32 @@ def _families(stack: dict[str, Any]) -> list[tuple[str, str, list[dict[str, Any]
 
 
 def _pipeline_colors(stack: dict[str, Any]) -> dict[str, str]:
+    """A shade per pipeline row (by its id: a member's row of the same pipeline is its own, lighter shade)."""
     colors = {}
     for key, _, members in _families(stack):
         shades = _FAMILY_SHADES[key]
         for i, p in enumerate(members):
-            colors[p["key"]] = shades[min(i, len(shades) - 1)]
+            colors[p["id"]] = shades[min(i, len(shades) - 1)]
     return colors
 
 
 def _sub_label(p: dict[str, Any]) -> str:
-    """The product-level name inside its family (the family is said by the colour and the family row)."""
+    """The product-level name inside its family (the family is said by the colour and the family row), with the
+    member when the stack holds more than one ("IRP(개인형 퇴직연금)(배우자)")."""
     if p["key"] == "occupational":
-        return p["label"].removeprefix("퇴직연금(").removesuffix(")")
-    return {"irp": "IRP(개인형 퇴직연금)", "insurance_annuity": "변액연금보험"}.get(p["key"], p["label"])
+        name = p["label"].removeprefix("퇴직연금(").removesuffix(")")
+    else:
+        name = {"irp": "IRP(개인형 퇴직연금)", "insurance_annuity": "변액연금보험"}.get(p["key"], p["label"])
+    return pension.row_label(dict(p, label=name))
 
 
 def _period(p: dict[str, Any]) -> str:
-    if p["start_age"] is None:
+    """The payout period in the member's own ages (a spouse's row is shifted onto the client's axis elsewhere)."""
+    start_age, end_age = p.get("own_start_age", p["start_age"]), p.get("own_end_age", p.get("end_age"))
+    if start_age is None:
         return "-"
-    start = f"{p['start_date']:%Y.%m} {p['start_age']}세" if p.get("start_date") else f"{p['start_age']}세"
-    return f"{start}~{p['end_age'] - 1}세" if p.get("end_age") else f"{start}~종신"
+    start = f"{p['start_date']:%Y.%m} {start_age}세" if p.get("start_date") else f"{start_age}세"
+    return f"{start}~{end_age - 1}세" if end_age else f"{start}~종신"
 
 
 def _product_text(p: dict[str, Any]) -> str:
@@ -2602,7 +2613,7 @@ def _family_table(stack: dict[str, Any]) -> str:
             family = f"<b>{escape(label)}</b> › " if i == 0 else "└ "
             basis = (("입력값" if p["basis_text"].startswith("알려 주신") else "추정") if p["net_monthly"] is not None
                      else f"입력 필요: {p['missing']}")
-            rows.append([Raw(f'<span style="color:{colors[p["key"]]}">●</span> {family}{escape(_sub_label(p))}'),
+            rows.append([Raw(f'<span style="color:{colors[p["id"]]}">●</span> {family}{escape(_sub_label(p))}'),
                          _product_text(p), _period(p), _short(p["net_monthly"]), basis])
     return _table(["분류", "가입 상품", "수령 기간", "월 세후", "근거"], rows)
 
@@ -2617,17 +2628,18 @@ def _pension_timeline(stack: dict[str, Any]) -> str:
     if not peak:
         return ""
     colors = _pipeline_colors(stack)
-    order = [p for _, _, members in _families(stack) for p in members if p["key"] in rows[0]["parts"]]
+    order = [p for _, _, members in _families(stack) for p in members if p["id"] in rows[0]["parts"]]
     head = next(t for t in stack["tiers"] if t["retire_age"] == stack["retirement_age"])
     focus = next((r for r in rows if r["age"] == head["all_on_age"]), max(rows, key=lambda r: r["total"]))
+    shared = len(stack.get("owners") or []) > 1
     title = (f'<div style="font-size:15px;font-weight:600;color:{INK};margin:18px 0 8px">'
-             f'{focus["age"]}세 예상 연금 수령액(세후, 오늘 돈 가치): 연 {_short(focus["total"])} · 월 '
+             f'{focus["age"]}세 예상 연금 수령액({"두 분 합산, " if shared else ""}세후, 오늘 돈 가치): 연 {_short(focus["total"])} · 월 '
              f'{_short(focus["total"] / 12)}</div>')
-    shown = [p for p in order if focus["parts"][p["key"]] > 0]
+    shown = [p for p in order if focus["parts"][p["id"]] > 0]
     # PNGs drawn with Pillow (mail clients drop SVG): a data URI here, an inline attachment once sent.
-    ring = pension_chart.donut([(_sub_label(p), focus["parts"][p["key"]], colors[p["key"]]) for p in shown],
+    ring = pension_chart.donut([(_sub_label(p), focus["parts"][p["id"]], colors[p["id"]]) for p in shown],
                                center=f"월 {_short(focus['total'] / 12)}", caption=f"{focus['age']}세 세후")
-    bars = pension_chart.age_bars(rows, [(p["key"], colors[p["key"]]) for p in order],
+    bars = pension_chart.age_bars(rows, [(p["id"], colors[p["id"]]) for p in order],
                                   retire_age=stack["retirement_age"], focus_age=focus["age"])
     chart = "".join(f'<div style="margin:10px 0 4px"><img src="data:image/png;base64,{base64.b64encode(png).decode("ascii")}" '
                     f'width="{pension_chart.WIDTH}" alt="{escape(alt)}" style="display:block;width:100%;'
@@ -2635,9 +2647,9 @@ def _pension_timeline(stack: dict[str, Any]) -> str:
                     for png, alt in ((ring, f"{focus['age']}세 연금 구성"), (bars, "연령별 연간 연금 수령액")))
     legend = " ".join(
         f'<span style="white-space:nowrap;margin-right:12px"><b>{escape(label)}</b> '
-        + " ".join(f'<span style="color:{colors[p["key"]]}">●</span> {escape(_sub_label(p))}' for p in members
-                   if p["key"] in rows[0]["parts"]) + "</span>"
-        for _, label, members in _families(stack) if any(p["key"] in rows[0]["parts"] for p in members))
+        + " ".join(f'<span style="color:{colors[p["id"]]}">●</span> {escape(_sub_label(p))}' for p in members
+                   if p["id"] in rows[0]["parts"]) + "</span>"
+        for _, label, members in _families(stack) if any(p["id"] in rows[0]["parts"] for p in members))
     # The one thing the bars show: where the yearly income drops when the fixed-term pensions end.
     by_age = {r["age"]: r for r in rows}
     drop = head["later_age"]
@@ -2686,6 +2698,12 @@ def pension_notes(stack: dict[str, Any] | None) -> list[str]:
     notes = ["연금 없는 기간은 은퇴부터 첫 연금(연금 계좌는 55세부터, 국민연금은 65세)까지입니다. 연금 밖에서 준비할 돈은 그 기간의 "
              "생활비와, 모든 연금이 나온 뒤나 기간을 정한 연금이 끝난 뒤에도 남는 부족분을 은퇴 시점의 오늘 돈 가치로 합한 것이며 "
              "부동산은 넣지 않았습니다."]
+    if len(stack.get("owners") or []) > 1:
+        notes.append("두 분의 연금을 합쳤습니다. 배우자도 같은 나이에 함께 은퇴한다고 보았고, 목표 월 생활비는 가구 기준 세후 금액입니다. "
+                     "연금소득세와 사적연금 연 1,500만 원 기준은 사람마다 따로 적용했습니다. 배우자 연금 계좌에 월 납입 기록이 없으면 지금 "
+                     "잔액만 불린 값입니다."
+                     + (" 표와 그래프의 나이는 고객님 나이이며, 배우자 연금은 같은 해에 맞춰 옮겨 놓았습니다(수령 기간 칸은 배우자 본인 나이)."
+                        if any(p.get("age_offset") for p in stack["pipelines"]) else ""))
     if any(p["key"] == "isa" for p in stack["pipelines"]):
         notes.append("ISA 등 줄은 세액공제 한도를 넘는 납입을 주택 자금에 쓰지 않고 노후까지 남긴다는 Smith의 가정입니다.")
     notes.append(f"연금저축·IRP·퇴직금은 계좌에 정한 수령 기간(정하지 않았으면 정부 '내연금'과 같은 {pension.ACCOUNT_PAYOUT_YEARS}년) "
@@ -2891,14 +2909,15 @@ def _requests(requests: list[Any], full: bool, rest_where: str = "월요 보고"
 
 
 def _footer(warnings: list[str] | tuple[str, ...] = (), week: str = "", corrections: str = "",
-            notes: list[str] | tuple[str, ...] = (), law: bool = True) -> str:
+            notes: list[str] | tuple[str, ...] = (), law: bool = True, shared: bool = False) -> str:
     """One line (report design §18.1): what Smith never does, and that the reasons are a reply away. A problem
     with the report itself (stale data, no narrative) adds one warning line above it; a daily edition adds the
     week's plan (`week`, HTML) so a reader of one day knows where the other areas are (§27); `corrections` is the
     Korean check's one line, printed so it can be read against the report itself (§34, user request 2026-10-27);
     `notes` are the day's calculation notes moved out of its cards (user review 2026-11-07); `law` false leaves the tax
-    caveat out of a mail that computes no tax (a filing note without a dividend). The footer reads in body ink at
-    13px: grey small print was hard to read."""
+    caveat out of a mail that computes no tax (a filing note without a dividend); `shared` says the mail also went to
+    the configured family address and that only the client's own replies are answered (FR-51). The footer reads in
+    body ink at 13px: grey small print was hard to read."""
     warn = ("" if not warnings else
             f'<div style="font-size:13px;line-height:1.6;color:{INK};margin-bottom:8px">▲ 확인 필요: '
             f'{escape(" · ".join(warnings))}. 자세한 사유는 이 메일에 답장으로 물어 주십시오.</div>')
@@ -2909,8 +2928,9 @@ def _footer(warnings: list[str] | tuple[str, ...] = (), week: str = "", correcti
     guide = "" if not week else f'<div style="{small};margin-bottom:6px">{week}</div>'
     checked = "" if not corrections else f'<div style="{small};margin-bottom:6px">{escape(corrections)}</div>'
     caveat = f"세금·법령은 {tax.RULES_YEAR}년 기준으로 계산했으니 실행 전 현행 법령을 확인하십시오. " if law else ""
+    family = " 이 메일은 가족 주소로도 함께 보냅니다(답장 질문은 고객님 메일에서 보내신 것에만 답합니다)." if shared else ""
     return (f'<tr><td>{warn}{basis}{guide}{checked}<div style="{small}">Smith는 조회 전용 자문입니다(매매·이체·대출 '
-            f'실행 없음). {caveat}판단 근거는 답장으로 물어 주십시오.</div></td></tr>')  # The one law caveat (user decision 2026-11-02).
+            f'실행 없음). {caveat}판단 근거는 답장으로 물어 주십시오.{family}</div></td></tr>')  # The one law caveat (user decision 2026-11-02).
 
 
 def _corrections_line(data: dict[str, Any]) -> str:

@@ -94,6 +94,20 @@ class EventTests(unittest.TestCase):
         return events.check(self.db, config, now=now, reason="manual", sync=False, researcher=researcher,
                             sender=self.sender, recipient="me@example.com", credentials=("a", "b", "c"))
 
+    def test_the_family_copy_of_an_event_note_goes_on_the_same_message(self):
+        # FR-51: the configured family address gets the event notes too, on the same To line.
+        seen = []
+
+        def send(credentials, *, recipient, subject, html, text, also_to=()):
+            seen.append((recipient, list(also_to), html))
+            return "msg-1"
+        outcomes = events.check(self.db, CONFIG, now=T1, reason="manual", sync=False, sender=send,
+                                recipient="me@example.com", credentials=("a", "b", "c"), also_to=["family@example.com"])
+        self.assertEqual([o["status"] for o in outcomes], ["sent"])
+        (recipient, also, html), = seen
+        self.assertEqual((recipient, also), ("me@example.com", ["family@example.com"]))
+        self.assertIn("가족 주소로도 함께 보냅니다", html)
+
     def test_a_move_beyond_the_threshold_is_an_event_with_its_movers(self):
         with closing(ledger.connect_read_only(self.db)) as conn:
             move = events.measure_move(conn, T0, T1)

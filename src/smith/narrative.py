@@ -66,7 +66,7 @@ logger = logging.getLogger(__name__)
 # v32: no per-sentence law caveat; the footer says it once (user decision 2026-11-02); the check no longer asks for it.
 # v33: holdings[].week_change and index_moves; a holding that moved 10% or more opens its reason with why (2026-11-03).
 # v34: tax.realized_this_year, this year's sales with their estimated gains and the deduction left (2026-11-03).
-PROMPT_VERSION = "narrative-v34"
+PROMPT_VERSION = "narrative-v35"   # v35: household_member_1 is the spouse; the pension stack is the household's (2026-11-08).
 MODEL = headless.MODEL
 # A runaway guard, not a cost limit (flat-rate subscription): the markets day cost 4.39 USD on 2026-10-27 and, with a
 # payload a fifth larger, ran past 5.00 on 2026-11-03 (error_max_budget_usd), so that report went out without opinions.
@@ -280,7 +280,9 @@ Input JSON:
   sector_metrics.pension_insurance.insurance_review: premiums against income, the savings-type premiums
   and whether their tax-free maturity falls after the home move (a duration mismatch).
   sector_metrics.pension_insurance.pension_stack: every retirement pipeline (national pension, insurer's
-  annuity, pension savings, IRP) with its start age, gross and after-tax monthly payout in today's won, the
+  annuity, pension savings, IRP) of every member in `members` (the client "self" and, when present, the spouse
+  household_member_1: each pipeline's `owner` and `ref` say whose it is, and the household target counts both,
+  retiring at the same age) with its start age, gross and after-tax monthly payout in today's won, the
   basis (stated by the client, estimated by code, or unknown with what is missing), the monthly target and
   the readiness ratio over the known pipelines (a lower bound while any is unknown). The retirement age is
   undecided unless retirement_age_chosen_by_client: retirement_age_tiers gives the stack at 50, 55 and 60
@@ -457,9 +459,10 @@ Hard rules (checked by code; a block that breaks one is deleted):
 - Refs go only in refs arrays. Never write ref codes (R1, A3, N2 ...) in the prose; describe in words.
 - Never write that prices, rates or returns will certainly move, or that a loan or outcome is guaranteed.
 - Ownership: follow ownership_notes. Never state the client's legal home count or multi-home status as a
-  fact; write it conditionally ("세대 구성에 따라 …일 수 있습니다") and say it must be confirmed. Assets
-  of household_member_* are not the client's legal property. Assets managed by Hermes are not to be sold
-  or changed directly.
+  fact; write it conditionally ("세대 구성에 따라 …일 수 있습니다") and say it must be confirmed. Owner
+  household_member_1 is the client's spouse (배우자): the household plans together and the pension stack adds
+  both, but legal ownership and tax stay with that member, so never write the spouse's assets, pay or pensions
+  as the client's own. Assets managed by Hermes are not to be sold or changed directly.
 - If the input contains `rejected`, rewrite only those blocks so that they pass the rules; copy the other
   blocks from `previous_output` unchanged.
 - If the input contains `reader_notes`, a first reader who is not a finance professional marked passages of
@@ -605,7 +608,7 @@ def sector_metrics(view: Any, data: dict[str, Any]) -> dict[str, Any]:
                               "premium_to_income": ratio(pension["premium_to_income"]),
                               "surrender_values_known": pension["surrender_values_known"],
                               "insurance_review": _insurance_metrics(advice.get("insurance_review")),
-                              "pension_stack": _stack_metrics(data.get("pension_stack")),
+                              "pension_stack": _stack_metrics(view, data.get("pension_stack")),
                               "annuity_reviews": [_annuity_metrics(r, i) for i, r in enumerate(data.get("annuity_reviews") or [], 1)]},
         "stress": _stress_metrics(data["stress"]),
         "spending_room": _spending_metrics(advice.get("spending_room")),
@@ -712,15 +715,27 @@ def _annuity_metrics(r: dict[str, Any], number: int) -> dict[str, Any]:
             "assumptions": r["assumptions"]}
 
 
-def _stack_metrics(stack: dict[str, Any] | None) -> dict[str, Any] | None:
-    """The pension stack (report design §18.5) for the narrative; None without a retirement target."""
+def _pipeline_ref(view: Any, p: dict[str, Any]) -> str:
+    """A pipeline row's name in outbound data: the key, suffixed with the member's alias for anyone but the client."""
+    owner = p.get("owner", "self")
+    return p["key"] if owner == "self" else f"{p['key']}@{view.owner_aliases.get(owner, owner)}"
+
+
+def _stack_metrics(view: Any, stack: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The pension stack (report design §18.5, the household's since §41) for the narrative; None without a
+    retirement target. Members are named by their owner alias, never by name."""
     if stack is None:
         return None
     contributions = stack["contributions"]
+    refs = {p["id"]: _pipeline_ref(view, p) for p in stack["pipelines"]}
     return {"monthly_target_today_won": won(stack["target"]), "headline_retirement_age": stack["retirement_age"],
             "retirement_age_chosen_by_client": stack["retirement_age_set"],
+            # Every member whose pensions are in the stack; they retire at the same age in each tier.
+            "members": [{"owner": view.owner_aliases.get(m["owner"], m["owner"]), "age": m["age"]}
+                        for m in stack.get("owners", [])],
             # A fixed-term pension account stops at end_age (None: for life); category is the pension family.
-            "pipelines": [{"key": p["key"], "label": p["label"], "category": p["category"], "start_age": p["start_age"],
+            "pipelines": [{"ref": refs[p["id"]], "key": p["key"], "owner": view.owner_aliases.get(p["owner"], p["owner"]),
+                           "label": p["label"], "category": p["category"], "start_age": p["start_age"],
                            "end_age": p.get("end_age"),
                            "gross_monthly": won(p["gross_monthly"]), "net_monthly": won(p["net_monthly"]),
                            "nominal_monthly_at_start": won(p.get("nominal_monthly")),
@@ -728,7 +743,7 @@ def _stack_metrics(stack: dict[str, Any] | None) -> dict[str, Any] | None:
                           for p in stack["pipelines"]],
             "total_net_monthly_known": won(stack["total_net"]), "readiness_ratio": f"{stack['ratio']:.4f}",
             "net_monthly_after_fixed_term_pensions_end": won(stack["later_net"]), "fixed_term_pensions_end_age": stack["later_age"],
-            "unknown_pipelines": stack["unknown"], "lower_bound": not stack["complete"],
+            "unknown_pipelines": [refs.get(k, k) for k in stack["unknown"]], "lower_bound": not stack["complete"],
             # Report design §30: the stack at each retirement age, and the contributions it assumes.
             "retirement_age_tiers": [
                 {"retirement_age": t["retire_age"], "net_monthly_once_all_started": won(t["total_net"]),
@@ -737,7 +752,7 @@ def _stack_metrics(stack: dict[str, Any] | None) -> dict[str, Any] | None:
                  "held_outside_pensions_at_retirement": None if t["outside_need"] is None else won(t["outside_need"]["total"]),
                  # An unknown pension counts as nothing in it: then the figure is only a ceiling (review 2026-10-23).
                  "held_outside_is_upper_bound": None if t["outside_need"] is None else t["outside_need"]["upper_bound"],
-                 "pipelines_net_monthly": {p["key"]: won(p["net_monthly"]) for p in t["pipelines"]}}
+                 "pipelines_net_monthly": {_pipeline_ref(view, p): won(p["net_monthly"]) for p in t["pipelines"]}}
                 for t in stack["tiers"] if stack["age"] is None or t["retire_age"] > stack["age"]],
             "projected_monthly_contributions": {"pension_savings": won(contributions["pension_savings"]),
                                                 "irp": won(contributions["irp"]), "isa_or_similar": won(contributions["isa"])},
@@ -942,8 +957,8 @@ def _property_market(view: Any, data: dict[str, Any]) -> list[dict[str, Any]]:
 
 # Always sent: the ledger never records household registration, whatever owners it holds.
 OWNERSHIP_NOTES = [
-    'The client is owner alias "self". Assets of household_member_* are legally owned by that member, not by '
-    "the client.",
+    'The client is owner alias "self". household_member_1 is the client\'s spouse (배우자), whose assets, pay and '
+    "pensions are legally that member's, not the client's; the household plans with both (user decision 2026-11-08).",
     "The ledger does not record legal household registration (세대) or marital status, which decide home "
     "counts for tax and loan rules. Do not state the client's home count or multi-home status as a fact; "
     'write conditionally ("세대 구성에 따라") and say it must be confirmed.',

@@ -19,8 +19,10 @@ KNOWN_KEYS = {
     "advice": {"risk_preference", "include_alternatives", "require_macro_context"},
     "privacy": {"remove_personal_identifiers"},
     "reports": {"enabled", "weekdays", "time", "delivery", "editions"},
-    "mail": {"recipient", "answer_replies"},
-    "household": {"birth_year", "birth_month", "partner_birth_year", "retirement_monthly_spend", "marriage_registered", "cohabiting",
+    # report_extra_recipients: who also gets the financial reports and event notes (FR-51, user decision 2026-11-08).
+    "mail": {"recipient", "answer_replies", "report_extra_recipients"},
+    "household": {"birth_year", "birth_month", "partner_birth_year", "partner_birth_month", "retirement_monthly_spend",
+                  "marriage_registered", "cohabiting",
                   "annual_gross_salary", "retirement_age", "emergency_months",
                   "occupational_plan", "occupational_institution", "occupational_average_wage",
                   "occupational_service_start",
@@ -123,6 +125,13 @@ def load_config(path: Path) -> dict:
         raise ValueError("mail.recipient must be one email address")
     if not isinstance(mail.get("answer_replies", False), bool):
         raise ValueError("mail.answer_replies must be a boolean")
+    extra = mail.get("report_extra_recipients", [])
+    lowered = [a.lower() for a in extra if isinstance(a, str)] if isinstance(extra, list) else []
+    if (not isinstance(extra, list) or len(extra) > MAX_EXTRA_RECIPIENTS or not all(_is_email(a) for a in extra)
+            or len(set(lowered)) != len(extra)
+            or (extra and (not _is_email(mail.get("recipient")) or mail["recipient"].lower() in lowered))):
+        raise ValueError(f"mail.report_extra_recipients must be up to {MAX_EXTRA_RECIPIENTS} distinct addresses "
+                         "other than mail.recipient (which must be set)")
     _check_household(config.get("household", {}))
     _check_backup(config.get("backup", {}))
     _check_events(config.get("events", {}))
@@ -169,9 +178,10 @@ def _check_household(household: object) -> None:
         value = household.get(field)
         if value is not None and (not isinstance(value, int) or isinstance(value, bool) or not 1900 <= value <= 2100):
             raise ValueError(f"household.{field} must be a year")
-    month = household.get("birth_month")
-    if month is not None and (not isinstance(month, int) or isinstance(month, bool) or not 1 <= month <= 12):
-        raise ValueError("household.birth_month must be a month from 1 to 12")
+    for field in ("birth_month", "partner_birth_month"):
+        month = household.get(field)
+        if month is not None and (not isinstance(month, int) or isinstance(month, bool) or not 1 <= month <= 12):
+            raise ValueError(f"household.{field} must be a month from 1 to 12")
     plan = household.get("occupational_plan")
     if plan is not None and plan not in ("db", "dc"):
         raise ValueError('household.occupational_plan must be "db" or "dc"')
@@ -399,6 +409,16 @@ def _check_letter_slot(where: str, table: dict, default_day: str, default_time: 
             raise ValueError()
     except ValueError:
         raise ValueError(f"{where}.time must be HH:MM") from None
+
+
+MAX_EXTRA_RECIPIENTS = 3
+
+
+def report_extra_recipients(config: dict) -> list[str]:
+    """Who also receives the financial reports and the same-day event notes (FR-51, user decision 2026-11-08: the
+    spouse). Only those two products read it: the daily, evening, health, counsel and trade mails and every reply
+    go to `[mail] recipient` alone, and only the client's own replies are answered."""
+    return list((config.get("mail") or {}).get("report_extra_recipients") or [])
 
 
 def _is_email(value: object) -> bool:

@@ -74,6 +74,11 @@ class GmailTests(unittest.TestCase):
         self.assertEqual((message_id, message["To"], str(message["Subject"]), sent["auth"]),
                          ("msg-1", "me@example.com", "[Smith] 보고", "Bearer a-token"))
         self.assertEqual(message.get_body(("html",)).get_content().strip(), "<p>본문</p>")
+        # The financial reports' family copy (FR-51): the configured addresses join the same To line.
+        gmail.send(("cid", "secret", "r-token"), recipient="me@example.com", subject="s", html="h", text="t",
+                   poster=poster, also_to=["family@example.com"])
+        message = email.message_from_bytes(base64.urlsafe_b64decode(sent["raw"]), policy=policy.default)
+        self.assertEqual([a.addr_spec for a in message["To"].addresses], ["me@example.com", "family@example.com"])
 
         def dropped(url, body, headers):
             if url == gmail.TOKEN_URL:

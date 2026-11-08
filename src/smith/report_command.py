@@ -10,7 +10,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from smith import editions, ledger
-from smith.config import DEFAULT_TIMEZONE
+from smith.config import DEFAULT_TIMEZONE, report_extra_recipients
 from smith.narrative import PIPELINES
 from smith.report_data import build_report
 from smith import report_html
@@ -591,7 +591,8 @@ def _publish_once(args: argparse.Namespace) -> int:
                               slot=slot, missed=missed, kind=kind, tz=tz, sync_failures=sync_failures,
                               narrator=_narrator(args.db, publish_at, brief_id), household=profile(config),
                               lineage=lineage(args.config), schedule=config["reports"],
-                              since=args.since if args.action == "send-now" else None)
+                              since=args.since if args.action == "send-now" else None,
+                              also_to=report_extra_recipients(config))
     # The subject can carry an amount (net-worth change); the plain-text log gets only the run id and outcome.
     _say(args.db, f"Report {result['status']}: run {(result.get('report_id') or '-')[:8]} "
                   f"{result.get('error_code') or ''}".rstrip())
@@ -625,7 +626,7 @@ def _check_events(db: Path, config: dict[str, Any], now: datetime, *, reason: st
                                 dart_key=credentials.load_api_key("dart"),
                                 # The SEC asks for a contact in the User-Agent: the client's own address (user decision 2026-10-29).
                                 sec_contact=config.get("mail", {}).get("recipient"),
-                                interpreter=disclosure_insight.interpret)
+                                interpreter=disclosure_insight.interpret, also_to=report_extra_recipients(config))
         for outcome in outcomes:
             # The detail can be the subject (an amount): the log gets the key and the status only.
             _say(db, f"Event {outcome['key']}: {outcome['status']}"

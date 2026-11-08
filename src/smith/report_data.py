@@ -550,8 +550,9 @@ def _profile(household: dict[str, Any] | None, as_of: datetime) -> dict[str, Any
     """The part of the local household profile the narrative may see: age, not birth date."""
     if not household:
         return None
-    birth = household.get("birth_year")
+    birth, partner = household.get("birth_year"), household.get("partner_birth_year")
     return {"age": None if birth is None else as_of.year - int(birth),
+            "spouse_age": None if partner is None else as_of.year - int(partner),
             "marriage_registered": household.get("marriage_registered"), "cohabiting": household.get("cohabiting"),
             "retirement_monthly_spend": None if household.get("retirement_monthly_spend") is None
             else str(household["retirement_monthly_spend"]),

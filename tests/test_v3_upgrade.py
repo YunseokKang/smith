@@ -405,6 +405,154 @@ class PensionTests(Upgrade):
             self.apply("v7", [flow("bad2", "salary", "1", "inflow", price_basis="nominal")])
 
 
+    def test_the_partner_pensions_join_the_household_stack_against_one_target(self):
+        # User decision 2026-11-08: the spouse's pensions are added to the client's, both retiring at the same age.
+        alone = self.report("tax")["pension_stack"]
+        self.apply("family", [
+            flow("np-partner", "pension_income", "1000000", "inflow", owner="partner", pension_source="national",
+                 start_date="2055-03-01"),
+            rec("irp-partner", "asset", "partner", category="fund", account_type="irp", currency="KRW", value="10000000",
+                valuation_method="statement", liquidity="restricted"),
+            flow("salary-partner", "salary", "4000000", "inflow", owner="partner")])
+        household = dict(HOUSEHOLD, partner_birth_year=1990)
+        data = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="tax", household=household)
+        stack = data["pension_stack"]
+        self.assertEqual([m["label"] for m in stack["owners"]], ["본인", "배우자"])
+        self.assertEqual([m["age"] for m in stack["owners"]], [36, 36])
+        # The client's rows keep their ids; the partner's are suffixed, so charts and refs never collide. The partner
+        # gets the national pension and only the accounts they hold: no unknown row for a product they do not have.
+        self.assertEqual([p["id"] for p in stack["pipelines"]],
+                         list(pension.PIPELINES) + ["isa", "national@partner", "irp@partner"])
+        rows = {p["id"]: p for p in stack["pipelines"]}
+        self.assertEqual((rows["national@partner"]["net_monthly"], rows["national@partner"]["start_age"]),
+                         (Decimal(1_000_000) * Decimal("0.97"), 65))
+        self.assertEqual(pension.row_label(rows["national@partner"]), "국민연금(배우자)")
+        irp = rows["irp@partner"]
+        # No transfer into the partner's IRP is recorded: the balance alone grows to the payout age, and it says so.
+        self.assertEqual((irp["basis"], irp["monthly_contribution"]), ("estimated", Decimal(0)))
+        self.assertIn("지금 잔액만", irp["basis_text"])
+        twenty = tax.REAL_RETURN / (1 - (1 + tax.REAL_RETURN) ** -pension.ACCOUNT_PAYOUT_YEARS)
+        self.assertEqual(irp["gross_monthly"], Decimal(10_000_000) * (1 + tax.REAL_RETURN) ** 24 * twenty / 12)
+        # Tax is each member's own: the partner's IRP alone stays under the separate-taxation limit even though
+        # the client's accounts pass it.
+        self.assertFalse(irp["high_private_tax"])
+        self.assertTrue(rows["pension_savings"]["high_private_tax"])
+        self.assertEqual(stack["total_net"], alone["total_net"] + rows["national@partner"]["net_monthly"] + irp["net_monthly"])
+        self.assertEqual(stack["unknown"], ["national"])                                 # The client's own statement.
+        by_age = {r["age"]: r for r in stack["timeline"]}
+        self.assertEqual(by_age[65]["parts"]["national@partner"], Decimal(970_000) * 12)
+        self.assertEqual(by_age[64]["parts"]["national@partner"], 0)
+        self.assertIn("member-pension-contributions", [r.key for r in data["requests"]])
+        page = render(data)[1]
+        for text in ("국민연금(배우자)", "두 분 합산", "배우자의 연금도 같은 나이에"):
+            self.assertIn(text, page)
+        metrics = narrative.sector_metrics(data["view"], data)["pension_insurance"]["pension_stack"]
+        self.assertEqual([m["owner"] for m in metrics["members"]], ["self", "household_member_1"])
+        self.assertIn("national@household_member_1", [p["ref"] for p in metrics["pipelines"]])
+        self.assertNotIn("partner", json.dumps(metrics, ensure_ascii=False))
+        # Neither an ended transfer nor one that starts later is a contribution now (Codex review 2026-11-08): the
+        # request stays and the IRP is still projected from its balance until a running transfer exists.
+        self.apply("ended", [flow("to-irp-partner-old", "internal_transfer", "200000", owner="partner",
+                                  target_record_id="irp-partner", end_date="2025-12-31"),
+                             flow("to-irp-partner-later", "internal_transfer", "200000", owner="partner",
+                                  target_record_id="irp-partner", start_date="2040-01-01")])
+        data = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="tax", household=household)
+        self.assertIn("member-pension-contributions", [r.key for r in data["requests"]])
+        later = next(p for p in data["pension_stack"]["pipelines"] if p["id"] == "irp@partner")
+        self.assertEqual(later["monthly_contribution"], Decimal(0))
+        # The client's own credit split reads transfers the same way (Codex review 2026-11-08): an IRP transfer that
+        # starts in 2040 is not split as if it were paid from today.
+        self.apply("later-self", [flow("to-irp-later", "internal_transfer", "3000000", target_record_id="irp",
+                                       start_date="2040-01-01")])
+        data = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="tax", household=household)
+        self.assertEqual((data["tax_plan"]["irp_monthly"], data["pension_stack"]["contributions"]["isa"]),
+                         (Decimal(500_000), Decimal(50_000)))
+        self.apply("live", [flow("to-irp-partner", "internal_transfer", "200000", owner="partner", target_record_id="irp-partner")])
+        data = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="tax", household=household)
+        self.assertNotIn("member-pension-contributions", [r.key for r in data["requests"]])
+        irp = next(p for p in data["pension_stack"]["pipelines"] if p["id"] == "irp@partner")
+        self.assertEqual(irp["monthly_contribution"], Decimal(200_000))
+
+    def test_a_spouse_pension_without_a_birth_year_is_unknown_not_silently_left_out(self):
+        # Codex review 2026-11-08: with no partner_birth_year the spouse's stated pension has no age on the household
+        # axis; it must make the total a lower bound and ask for the birth year, not vanish from a "complete" total.
+        self.apply("family", [flow("np-partner", "pension_income", "1000000", "inflow", owner="partner",
+                                   pension_source="national", start_date="2060-03-01")])
+        data = self.report("tax")                                         # HOUSEHOLD has no partner_birth_year.
+        stack = data["pension_stack"]
+        national = next(p for p in stack["pipelines"] if p["id"] == "national@partner")
+        self.assertEqual((national["net_monthly"], national["basis"]), (None, "unknown"))
+        self.assertIn("partner_birth_year", national["missing"])
+        self.assertIn("national@partner", stack["unknown"])
+        self.assertFalse(stack["complete"])
+        request = next(r for r in data["requests"] if r.key == "pension-pipelines")
+        self.assertIn("국민연금(배우자)", request.title)
+        # Another member's ledger id is free text and may be a name: it never reaches the model, the spouse keeps
+        # alias 1 (the prompts call it the spouse), and that member has no birth-year setting to name (Codex review).
+        self.apply("other", [flow("np-other", "pension_income", "500000", "inflow", owner="kim-minsu",
+                                  pension_source="national", start_date="2060-01-01")],
+                   owners=("self", "partner", "kim-minsu"))
+        data = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="tax",
+                            household=dict(HOUSEHOLD, partner_birth_year=1990))
+        self.assertEqual(data["view"].owner_aliases["partner"], "household_member_1")
+        metrics = narrative.sector_metrics(data["view"], data)["pension_insurance"]["pension_stack"]
+        other = next(p for p in metrics["pipelines"] if p["owner"] == "household_member_2")
+        self.assertEqual(other["missing"], "가구 구성원 출생 연도(로컬 설정)")
+        self.assertNotIn("kim-minsu", json.dumps(metrics, ensure_ascii=False))
+
+    def test_without_the_client_birth_year_a_spouse_pension_is_unknown_and_an_unconverted_account_does_not_fail(self):
+        # Codex review 2026-11-08: (1) no client birth year means no household axis; the spouse's pension must not be
+        # added as if both were the same age. (2) An IRP contribution in a currency without a rate made the other
+        # account's tax-free share fail the whole report.
+        self.apply("family", [
+            flow("np-partner", "pension_income", "1000000", "inflow", owner="partner", pension_source="national",
+                 start_date="2060-03-01"),
+            rec("ps-partner", "asset", "partner", category="fund", account_type="pension_savings", currency="KRW",
+                value="10000000", valuation_method="statement", liquidity="restricted"),
+            flow("to-ps-partner", "internal_transfer", "300000", owner="partner", target_record_id="ps-partner"),
+            rec("irp-usd-partner", "asset", "partner", category="fund", account_type="irp", currency="USD", value="1000",
+                valuation_method="statement", liquidity="restricted"),
+            dict(flow("to-irp-usd", "internal_transfer", "100", owner="partner", target_record_id="irp-usd-partner"),
+                 currency="USD")])
+        no_client_birth = {k: v for k, v in HOUSEHOLD.items() if k != "birth_year"}
+        stack = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="tax",
+                             household=dict(no_client_birth, partner_birth_year=1995))["pension_stack"]
+        national = next(p for p in stack["pipelines"] if p["id"] == "national@partner")
+        self.assertEqual((national["net_monthly"], national["basis"]), (None, "unknown"))
+        self.assertIn("birth_year", national["missing"])
+        self.assertFalse(stack["complete"])
+        # With both birth years the report builds: the USD IRP is unknown (no rate), the KRW pension savings is not.
+        stack = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="tax",
+                             household=dict(HOUSEHOLD, partner_birth_year=1995))["pension_stack"]
+        rows = {p["id"]: p for p in stack["pipelines"]}
+        self.assertIsNone(rows["irp@partner"]["net_monthly"])
+        self.assertIsNotNone(rows["pension_savings@partner"]["net_monthly"])
+        self.assertEqual(rows["pension_savings@partner"]["monthly_contribution"], Decimal(300_000))
+
+    def test_a_spouse_born_in_another_year_is_added_in_the_same_calendar_year(self):
+        # Codex review 2026-11-08: a spouse five years younger gets their pension at their 65 (2060), which is the
+        # client's 70th year; the household chart and totals must add it from 70, not from the client's 65.
+        self.apply("family", [
+            flow("np-partner", "pension_income", "1000000", "inflow", owner="partner", pension_source="national",
+                 start_date="2060-03-01"),
+            rec("irp-partner", "asset", "partner", category="fund", account_type="irp", currency="KRW", value="10000000",
+                valuation_method="statement", liquidity="restricted")])
+        household = dict(HOUSEHOLD, partner_birth_year=1995)
+        stack = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="tax", household=household)["pension_stack"]
+        rows = {p["id"]: p for p in stack["pipelines"]}
+        national, irp = rows["national@partner"], rows["irp@partner"]
+        self.assertEqual((national["own_start_age"], national["start_age"], national["age_offset"]), (65, 70, 5))
+        # The spouse's IRP pays from their 60 to 80 (the retirement age, 60): the client's 65 to 85.
+        self.assertEqual((irp["own_start_age"], irp["own_end_age"], irp["start_age"], irp["end_age"]), (60, 80, 65, 85))
+        by_age = {r["age"]: r for r in stack["timeline"]}
+        self.assertEqual(by_age[69]["parts"]["national@partner"], 0)
+        self.assertEqual(by_age[70]["parts"]["national@partner"], Decimal(970_000) * 12)
+        self.assertEqual((by_age[64]["parts"]["irp@partner"], by_age[65]["parts"]["irp@partner"] > 0), (0, True))
+        self.assertEqual(stack["tiers"][-1]["all_on_age"], 70)                       # Every pension paying: 2060.
+        page = render(build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="tax", household=household))[1]
+        self.assertIn("2060.03 65세~종신", page)                                      # The table keeps the spouse's own age.
+        self.assertIn("배우자 연금은 같은 해에 맞춰", page)
+
     def test_the_age_chart_stacks_each_pipeline_from_its_start_to_its_end(self):
         data = self.report("tax")
         stack = data["pension_stack"]

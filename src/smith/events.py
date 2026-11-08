@@ -142,13 +142,15 @@ def check(db: Path, config: dict[str, Any], *, now: datetime, reason: str, sync:
           credentials: tuple[str, str, str] | None = None, secrets: list[str] | None = None,
           say: Callable[[str], None] = print, dart_key: str | None = None,
           dart_fetch: dart.Fetcher = dart.default_fetcher, sec_contact: str | None = None,
-          sec_fetch: Any = None, interpreter: Interpreter | None = None) -> list[dict[str, Any]]:
+          sec_fetch: Any = None, interpreter: Interpreter | None = None,
+          also_to: list[str] | None = None) -> list[dict[str, Any]]:
     """Look for events since the last check, retry the notes not delivered yet, and send what is due. Returns one
     outcome per event ({"key", "status", "detail"}). `sync` refreshes the holdings and the evidence first (after
     the morning report they are fresh already). `researcher` is None to skip the web research (previews, tests).
     `dart_key` (OpenDART) and `sec_contact` (the e-mail the SEC requires in the User-Agent) enable the disclosure note;
     `interpreter` (disclosure_insight.interpret) adds what each filing means, None to send the facts alone. Nothing is raised: a failure is recorded on the note and
-    retried at a later check inside its window."""
+    retried at a later check inside its window. `also_to` (config.report_extra_recipients, FR-51) adds the configured
+    family addresses to each note's To line."""
     if sync:
         _sync(db, say)
     today = local_time(now, config["app"]["timezone"]).date()
@@ -177,7 +179,7 @@ def check(db: Path, config: dict[str, Any], *, now: datetime, reason: str, sync:
                   if row["event_key"] not in seen]
     return [_deliver(db, config, event, detail, now=now, baseline=baseline, researcher=researcher, sender=sender,
                      recipient=recipient, credentials=credentials, secrets=secrets or [], dart_key=dart_key,
-                     dart_fetch=dart_fetch, interpreter=interpreter) for event, detail in found]
+                     dart_fetch=dart_fetch, interpreter=interpreter, also_to=also_to) for event, detail in found]
 
 
 def detect(conn: Any, config: dict[str, Any], now: datetime, baseline: datetime) -> list[tuple[Event, dict[str, Any]]]:
@@ -504,7 +506,8 @@ def _research_summary(found: dict[str, Any] | None) -> dict[str, Any] | None:
 def _deliver(db: Path, config: dict[str, Any], event: Event, detail: dict[str, Any] | None, *, now: datetime,
              baseline: datetime, researcher: Researcher | None, sender: Sender, recipient: str | None,
              credentials: tuple[str, str, str] | None, secrets: list[str], dart_key: str | None = None,
-             dart_fetch: dart.Fetcher = dart.default_fetcher, interpreter: Interpreter | None = None) -> dict[str, Any]:
+             dart_fetch: dart.Fetcher = dart.default_fetcher, interpreter: Interpreter | None = None,
+             also_to: list[str] | None = None) -> dict[str, Any]:
     """Claim, build, mark sending, send and record one note. `detail` is None for a note retried from the ledger."""
     window = (None if event.kind != "portfolio_move" or detail is None
               else {"from": baseline.isoformat(), "to": now.isoformat()})
@@ -554,7 +557,7 @@ def _deliver(db: Path, config: dict[str, Any], event: Event, detail: dict[str, A
     if note is None:
         advance("pending", "pending", error_code="unconfirmed")
         return {"key": event.key, "status": "pending", "detail": "unconfirmed"}
-    subject, html, text = report_html.render_event(note)
+    subject, html, text = report_html.render_event({**note, "family_copy": bool(also_to)})
     details = {**_details(note), **({"window": stored["window"]} if (stored or {}).get("window") else {})}
     if recipient is None or credentials is None:
         advance("pending", "failed", error_code="setup", subject=subject, details=details)
@@ -563,7 +566,8 @@ def _deliver(db: Path, config: dict[str, Any], event: Event, detail: dict[str, A
     if not advance("pending", "unknown", error_code="sending", subject=subject, details=details):
         return {"key": event.key, "status": "claim-lost", "detail": ""}
     try:
-        message_id = sender(credentials, recipient=recipient, subject=subject, html=html, text=text)
+        message_id = sender(credentials, recipient=recipient, subject=subject, html=html, text=text,
+                            **({"also_to": list(also_to)} if also_to else {}))
     except gmail.MailError as error:
         status = "unknown" if error.uncertain else "failed"
         advance("unknown", status, error_code=error.code)
