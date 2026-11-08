@@ -239,6 +239,90 @@ class PerspectiveTests(Upgrade):
         self.assertEqual(metrics["expected_pay_of"], "household_member_1")
         self.assertEqual({h["owner"] for h in metrics["homes"]}, {"self", "household_member_1"})
 
+    def test_the_life_day_shows_the_reader_s_own_month_then_the_household_s(self):
+        # Report design §42: the reader's own month first; the household's reserve, room, stress, goals and long-range
+        # tracks after. The home goal is the client's plan, so the spouse's letter names its owner 배우자분, and the
+        # requests (answered by the client who keeps the ledger) are not in the spouse's letter.
+        self.apply("family", [flow("salary-partner", "salary", "4000000", "inflow", owner="partner"),
+                              flow("living-partner", "living_expense", "1500000", owner="partner")])
+        household = dict(HOUSEHOLD, partner_birth_year=1990)
+        mine = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="life", household=household)
+        hers = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="life", household=household,
+                            audience="partner")
+        self.assertEqual((hers["own_month"]["inflow"], hers["own_month"]["discretionary"]),
+                         (Decimal(4_000_000), Decimal(1_500_000)))
+        self.assertEqual(mine["own_month"]["inflow"], Decimal(9_000_000))
+        self.assertEqual(mine["spending_split"]["inflow"], Decimal(13_000_000))          # The household's month.
+        self.assertEqual(mine["spending_split"], hers["spending_split"])
+        page, own_page = render(hers)[1], render(mine)[1]
+        order = [page.index(t) for t in ("나의 생활·목표", "우리 집 생활·목표")]
+        self.assertEqual(order, sorted(order))
+        self.assertIn("나의 월 수입", page)
+        self.assertIn("배우자분 자원", page)                                            # The client's plan, from her side.
+        self.assertIn("본인 자원", own_page)
+        self.assertNotIn("다음에 확인할 것", page)
+        self.assertIn("노후 준비", page)                                                # The long-range tracks band.
+        # The household's money (reserve, surplus, spending room) is proposed to both, under the household's group.
+        self.assertLess(page.index("우리 집 생활·목표"), page.index("두 분께 드리는 제안"))
+        self.assertNotIn("고객님께 드리는 제안", own_page[own_page.index("나의 생활·목표"):own_page.index("우리 집 생활·목표")])
+        metrics = narrative.sector_metrics(hers["view"], hers)
+        self.assertEqual(metrics["home_plan"]["plan_of"], "household_member_1")
+        self.assertEqual(metrics["own_month"]["income"], "4000000")
+        # Codex review 2026-11-08: an accepted household proposal (in progress) stays under the household's group.
+        room = self.proposal(mine, "spending-room")
+        accepted = {room.identity: {"status": "accepted", "figures": {k: str(v) for k, v in room.figures.items()}}}
+        with unittest.mock.patch("smith.ledger.active_proposals", return_value=accepted):
+            mine = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="life", household=household)
+        own_page = render(mine)[1]
+        self.assertIn("spending-room", [p.key for p in mine["advice"]["in_progress"]])
+        self.assertNotIn("진행 중", own_page[own_page.index("나의 생활·목표"):own_page.index("우리 집 생활·목표")])
+        self.assertIn("진행 중", own_page[own_page.index("우리 집 생활·목표"):])
+
+    def test_a_decided_proposal_renders_in_either_letter(self):
+        # Codex review 2026-11-08: the follow-up read a decision's time from a field the ledger never returns, so any
+        # letter showing a decided proposal failed to build; the spouse's decided key also kept its scope.
+        from datetime import timedelta
+
+        from smith import perspective
+        household = dict(HOUSEHOLD, partner_birth_year=1990)
+        hers = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="life", household=household,
+                            audience="partner")
+        mine = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="life", household=household)
+        shown = perspective.scoped([proposals.snapshot(p) for p in hers["advice"]["proposals"]], "partner")
+        ledger.record_proposals_shown(self.conn, report_id="her-letter", at=AT, shown=shown)
+        ledger.record_proposals_shown(self.conn, report_id="his-letter", at=AT,
+                                      shown=[proposals.snapshot(p) for p in mine["advice"]["proposals"]])
+        key = mine["advice"]["proposals"][0].key
+        for scoped in (key, perspective.PARTNER_SCOPE + key):
+            self.assertTrue(ledger.decide_proposal(self.conn, key=scoped, status="done", decided_at=AT + timedelta(hours=1)))
+        for who in ("self", "partner"):
+            data = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="life", household=household,
+                                audience=who)
+            self.assertEqual([e["key"] for e in data["advice"]["decided"]], [key])
+            page = render(data)[1]
+            self.assertIn("완료하셨습니다", page)
+            self.assertNotIn(perspective.PARTNER_SCOPE, page)
+
+    def test_the_spouse_s_retirement_track_never_takes_the_client_s_home_allocation(self):
+        # Codex review 2026-11-08: the home goal is the client's plan on the client's pay, so in the spouse's letter the
+        # spouse's own expected pay is not cut for it before the retirement note.
+        self.apply("pay", [rec("bonus-partner", "cashflow", "partner", category="bonus", direction="inflow",
+                               currency="KRW", amount="20000000", frequency="once", start_date="2027-03-01",
+                               certainty="expected", amount_basis="gross"),
+                           # Known national pensions: the retirement note then sizes the pay against a real need.
+                           flow("np-self", "pension_income", "1500000", "inflow", pension_source="national",
+                                start_date="2055-01-01"),
+                           flow("np-partner", "pension_income", "1000000", "inflow", owner="partner",
+                                pension_source="national", start_date="2055-03-01")])
+        household = dict(HOUSEHOLD, partner_birth_year=1990)
+        mine, hers = (build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="life", household=household,
+                                   audience=who) for who in ("self", "partner"))
+        track = next(t for t in hers["advice"]["strategy"] if t.name == "노후 준비")
+        self.assertNotIn("예정 소득은 모두 주택 목표에 필요해", track.detail)
+        self.assertIn("기준 시나리오의 예정 소득", track.detail)                          # All of hers, for retirement.
+        client = next(t for t in mine["advice"]["strategy"] if t.name == "노후 준비")
+        self.assertIn("주택 목표에 필요한 만큼을 먼저 쓰고", client.detail)                  # The client's plan as before.
+
     def test_the_markets_day_shows_the_reader_s_own_holdings_then_the_household_s(self):
         # Report design §42: the reader's holdings and proposals, the household's combined holdings with whose they are.
         self.apply("family", [rec("aapl-partner", "asset", "partner", category="stock", account_type="brokerage",
@@ -1169,8 +1253,9 @@ class MoveTests(Upgrade):
         self.assertLess(beta["spread_with_pay"], beta["spread"])                 # Expected pay closes part of it.
         self.assertEqual(plan["horizon"], date(2029, 10, 1))
         page = render(data)[1]
-        # A per-person property day (§42): the reader's own homes and proposals, then the household's move plan.
-        order = [page.index(t) for t in ("나의 부동산", "고객님께 드리는 제안", "우리 집 부동산",
+        # A per-person property day (§42): the reader's own homes, then the household's lease-return proposal (on the
+        # household's money, so "두 분께") and move plan.
+        order = [page.index(t) for t in ("나의 부동산", "우리 집 부동산", "두 분께 드리는 제안",
                                          "목표 단지 vs 보유 주택 2채 시세 스프레드")]
         self.assertEqual(order, sorted(order))
         self.assertIn("가 단지", page)

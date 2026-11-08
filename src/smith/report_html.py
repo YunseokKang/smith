@@ -25,7 +25,7 @@ from html import escape
 from typing import Any
 
 from smith.fmt import short_won as _short
-from smith import editions, korean, pension, pension_chart, picks, principles, stress, tax
+from smith import editions, korean, pension, pension_chart, picks, principles, proposals, stress, tax
 from smith.holdings import STANCES
 from smith.proposals import Track
 from smith.realestate import MIN_BASIS
@@ -590,7 +590,9 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
     bands = [_band(DARK, hero)]
     sectors = data["sectors"]
     renderers = {
-        "follow_up": lambda: _follow_up(advice), "change": lambda: _change(data),
+        "follow_up": lambda: _follow_up(advice, household=False if edition.personal else None),
+        "household_follow_up": lambda: _follow_up(advice, household=True),
+        "change": lambda: _change(data),
         "allocation": lambda: _allocation(data), "timeline": lambda: _timeline(data),
         "goals": lambda: _goals_brief(data), "future_income": lambda: _future_income(data, overview=True),
         "requests": lambda: (_requests(data.get("requests") or [], False, "생활·목표 보고") if overview
@@ -621,7 +623,13 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
         "my_debt": lambda: _my_debt(data, advice, sectors),
         "household_debt": lambda: _household_debt(sectors["debt"]),
         "my_real_estate": lambda: _my_real_estate(data),
+        # The reader's own month (§42); the household's month, reserve and room are in "spending" and "cash".
+        "my_month": lambda: _spending(None, data.get("own_month")),
     }
+    if data.get("audience", "self") != "self":
+        # The requests ask for what the ledger lacks, answered by the client who keeps it; the spouse's replies are not
+        # answered (§42.3), so that letter does not list them.
+        renderers["requests"] = lambda: ""
     if edition.personal:
         bands += _split_bands(data, edition, renderers, advice, story)
     else:
@@ -658,7 +666,13 @@ def _split_bands(data: dict[str, Any], edition: editions.Edition, renderers: dic
         return [_opened(part) if i == 0 else part for i, part in enumerate(p for p in parts if p)]
 
     mine = group(edition.personal)
-    proposals = (_proposals(advice, True, edition=edition) if advice["proposals"] or advice.get("undetermined") else "")
+    # The proposals on the reader's own money, and those on the household's (editions.HOUSEHOLD_PROPOSALS) under the
+    # household's group, so the two letters never each read the household's room as their own (sample 2026-11-08).
+    own = {**advice, "proposals": [p for p in advice["proposals"] if p.key not in editions.HOUSEHOLD_PROPOSALS]}
+    both = {**advice, "undetermined": [],
+            "proposals": [p for p in advice["proposals"] if p.key in editions.HOUSEHOLD_PROPOSALS]}
+    proposals = (_proposals(own, True, edition=edition) if own["proposals"] or advice.get("undetermined") else "")
+    household_proposals = _proposals(both, True, edition=edition, heading="두 분께 드리는 제안") if both["proposals"] else ""
     ours = group(edition.household)
     bands = [_band(CANVAS, _group_title(f"나의 {edition.label}", "고객님 명의의 계좌·집·대출·연금·보험만 봅니다.")
                    + "".join(mine[:1]) + proposals + "".join(mine[1:]), border=True)]
@@ -670,7 +684,10 @@ def _split_bands(data: dict[str, Any], edition: editions.Edition, renderers: dic
     lead = ("" if not shared else f'<tr><td style="padding:0 0 10px"><div style="font-size:15px;line-height:1.7;'
                                   f'color:{INK}">{escape(shared)}</div></td></tr>')
     bands.append(_band(CANVAS, _group_title(f"우리 집 {edition.household_label or edition.label}", "두 분을 합쳐 봅니다.")
-                       + lead + "".join(ours), border=True))
+                       + lead + household_proposals + "".join(ours), border=True))
+    # The long-range tracks (home move, lease return, retirement) are the household's: under its group.
+    if edition.strategy and advice["strategy"]:
+        bands.append(_band(DARK, _strategy(advice["strategy"], story.get("direction", ""))))
     return bands
 
 
@@ -899,6 +916,13 @@ def _tiles(data: dict[str, Any], edition: editions.Edition) -> list[tuple[str, s
         # Without an FX rate for some flow the monthly totals are partial: shown, but never as complete.
         partial = " · 일부 미상" if "cash_flow" in summary.incomplete_areas else ""
         months = "미상" if k["immediate_months"] is None else f'월 지출 {k["immediate_months"]:.1f}개월분'
+        month = data.get("own_month")
+        if edition.personal and month is not None:
+            # The reader's own month (§42): the household's month and reserve are in "우리 집 생활·목표".
+            return [("나의 월 수입", _short(month["inflow"]), "반복 수입"),
+                    ("나의 월 지출", _short(month["fixed"] + month["discretionary"]), "대출 상환·보험 포함"),
+                    ("나의 월 적립·투자", _short(month["transfers"]), "본인 계좌로 옮기는 돈"),
+                    ("나의 남는 돈", _short(month["left"]), f"가구가 즉시 쓸 수 있는 돈: {months}")]
         return [("월 수입", _short(summary.monthly_inflow), "반복 수입" + partial),
                 ("월 지출", _short(summary.monthly_outflow), "대출 상환·보험 포함" + partial),
                 ("월 적립·투자", _short(summary.monthly_transfers), "본인 계좌로 옮기는 돈" + partial),
@@ -1210,13 +1234,15 @@ def _hero_segments(data: dict[str, Any], tiles: str | None) -> tuple[str, list[t
         return (f"노후 월 현금흐름 준비({stack['retirement_age']}세 은퇴 기준)", segments,
                 note + (f" · 미상 {len(stack['unknown'])}개 제외" if stack["unknown"] else ""))
     if tiles == "life":
-        split = data.get("spending_split")
-        if split is None:
+        # A per-person life day (§42) shows the reader's own month in the hero; the household's follows below.
+        own = editions.personalized(data["kind"]) and data.get("own_month") is not None
+        split = data.get("own_month") if own else data.get("spending_split")
+        if split is None or not split["inflow"]:
             return "", [], ""
         segments = [("고정비", split["fixed"], ""), ("재량비", split["discretionary"], ""), ("적립·투자", split["transfers"], "")]
         if split["left"] > 0:
             segments.append(("남는 돈", split["left"], ""))
-        return f"이번 달 수입 {_short(split['inflow'])}의 쓰임", segments, ""
+        return f"{'나의 ' if own else ''}이번 달 수입 {_short(split['inflow'])}의 쓰임", segments, ""
     composition = data.get("composition") or {}
     groups = composition.get("groups") or []
     segments = []
@@ -1303,12 +1329,13 @@ def _tile_grid(tiles: list[tuple[Any, ...]]) -> str:
             f'cellspacing="0">{grid}</table></td></tr>')
 
 
-def _proposals(advice: dict[str, Any], full: bool, edition: editions.Edition | None = None) -> str:
+def _proposals(advice: dict[str, Any], full: bool, edition: editions.Edition | None = None,
+               heading: str = "고객님께 드리는 제안") -> str:
     """The proposal cards: why now, effect, risks, timing, what would change the judgement, certainty.
     Thursday cards are short but keep the certainty label. Judgements stopped by unknown inputs follow."""
     proposals = advice.get("proposals") or []
     themed = edition is not None and edition.key != "overview"
-    head = f'<tr><td>{_eyebrow("오늘의 제안" if themed else "이번 주 제안")}{_heading("고객님께 드리는 제안", size=28)}</td></tr>'
+    head = f'<tr><td>{_eyebrow("오늘의 제안" if themed else "이번 주 제안")}{_heading(heading, size=28)}</td></tr>'
     pending = _undetermined(advice)  # A daily edition carries only its own rules' pending judgements.
     if not proposals:
         # Never "no proposal is a judgement too" while a rule could not judge (review 2026-10-18).
@@ -1560,16 +1587,23 @@ def _tax(advice: dict[str, Any], data: dict[str, Any], full: bool) -> str:
     return _section("세금 관점 전략", lead, inner)
 
 
-def _follow_up(advice: dict[str, Any]) -> str:
-    """Proposals the client accepted (in progress) and earlier decisions (§10.6)."""
+def _follow_up(advice: dict[str, Any], *, household: bool | None = None) -> str:
+    """Proposals the client accepted (in progress) and earlier decisions (§10.6). A per-person letter splits them
+    like its proposals (`household`: only those on the household's money, or only the others; Codex review
+    2026-11-08: an accepted household spending room came back under "나의 …" in both letters)."""
     in_progress, decided = advice.get("in_progress") or [], advice.get("decided") or []
+    if household is not None:
+        in_progress = [p for p in in_progress if (p.key in editions.HOUSEHOLD_PROPOSALS) == household]
+        decided = [e for e in decided if (e["key"] in editions.HOUSEHOLD_PROPOSALS) == household]
     if not in_progress and not decided:
         return ""
     labels = {"declined": "보류하기로 하셨습니다", "done": "완료하셨습니다"}
     rows = [f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin:4px 0">· <b style="font-weight:600;color:{INK}">'
             f'진행 중</b> — {escape(p.title)}</div>' for p in in_progress]
     rows += [f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin:4px 0">· {escape(e["key"])}: '
-             f'{labels[e["status"]]}({(e["decided_at"] or "")[:10]})</div>' for e in decided]
+             # The ledger keeps a decision's time as `status_at` (Codex review 2026-11-08: the old field name crashed
+             # any letter with a decision on record).
+             f'{labels[e["status"]]}({(e.get("status_at") or "")[:10]})</div>' for e in decided]
     lead = "지난 보고에서 드린 제안의 진행 상황입니다. 수치가 크게 바뀌면 다시 말씀드립니다."
     return _section("지난 제안 점검", lead, "".join(rows))
 
@@ -1704,20 +1738,22 @@ def _timeline(data: dict[str, Any]) -> str:
 def _home_lead(home: dict[str, Any]) -> str:
     """The home goal in words: the household baseline first, the conservative tiers beside it (§17.3)."""
     gap = home["gap_baseline"]
+    # The client's plan in either letter (§42): the spouse's letter names the planner 배우자분 and the spouse 고객님.
+    planner, other = proposals.home_words(home)
     text = (f"주택 목표는 기준 시나리오에서 <b>{escape(home['baseline_label'])}</b> 기준으로 필요액의 "
             f"<b>{_pct(home['ratio_baseline'], 0)}</b>를 준비할 수 있고, "
             + (f"부족분은 약 <b>{_short(gap)}</b>입니다." if gap > 0 else f"필요액을 넘어 약 <b>{_short(-gap)}</b>이 남습니다.")
-            + f" 보수적으로 지금 있는 자산만 보면 본인 자원 {_pct(home['ratio_self'], 0)}")
+            + f" 보수적으로 지금 있는 자산만 보면 {planner} 자원 {_pct(home['ratio_self'], 0)}")
     if home.get("ratio_household") is not None:
-        text += f", 배우자 부동산 순자산을 더해 {_pct(home['ratio_household'], 0)}"
+        text += f", {other} 부동산 순자산을 더해 {_pct(home['ratio_household'], 0)}"
     text += "입니다. 집값 연 2%와 투자 수익 연 4%를 가정했습니다."
     after = home.get("after_tax")
     if after and after.get("case") == "exempt":
-        text += (f" 배우자 주택은 2년 보유·거주가 확인되어 팔 때 양도세를 1세대 1주택 비과세 기준 약 {_short(after['tax']['exempt'])}"
+        text += (f" {other} 주택은 2년 보유·거주가 확인되어 팔 때 양도세를 1세대 1주택 비과세 기준 약 {_short(after['tax']['exempt'])}"
                  f"(12억 원 초과분만 과세)으로 보며, 요건을 못 갖추면 약 {_short(after['tax']['general'])}입니다. 혼인신고를 하시면 혼인일부터 "
                  "10년 안에 이 집을 먼저 파는 순서가 안전합니다.")
     elif after:
-        text += (f" 배우자 주택을 팔아 쓰는 경우의 양도세는 1세대 1주택 비과세 요건을 갖추면 약 {_short(after['tax']['exempt'])}, 일반 "
+        text += (f" {other} 주택을 팔아 쓰는 경우의 양도세는 1세대 1주택 비과세 요건을 갖추면 약 {_short(after['tax']['exempt'])}, 일반 "
                  f"과세면 약 {_short(after['tax']['general'])}이며, 혼인신고 시점과 2년 거주 여부에 따라 갈립니다.")
     if home.get("pay_at_target") is None and home.get("pay_after_target") is None:
         pass
@@ -1729,17 +1765,18 @@ def _home_lead(home: dict[str, Any]) -> str:
 def _home_plan(home: dict[str, Any]) -> str:
     """Bars and the scenario table of the home goal: the household baseline, the conservative tiers and the
     client-only figures, with expected pay as its own column when there is any (§17.3)."""
+    planner, _ = proposals.home_words(home)
     bars = [("필요 자금(비용 포함)", home["required"], False),
             (f"가구 통합 기준({home['baseline_label']})", home["baseline"], True)]
     if home.get("available_household") is not None and home["available_household"] != home["baseline"]:
         bars.append(("가구 통합, 지금 있는 자산만", home["available_household"], False))
-    bars.append(("본인 자원만", home["available_self"], False))
+    bars.append((f"{planner} 자원만", home["available_self"], False))
     with_pay = any(s.get("expected_pay_at_target") not in (None, "0") for s in home["scenarios"])
     household = any(s.get("available_household") is not None for s in home["scenarios"])
     # One card per scenario, not a six-column table at 12px (user review 2026-11-02: readable on a phone).
     cards = []
     for s in home["scenarios"]:
-        parts = [("필요 자금(그때 집값·비용)", s["required_with_costs"]), ("본인 자원", s["available_self"])]
+        parts = [("필요 자금(그때 집값·비용)", s["required_with_costs"]), (f"{planner} 자원", s["available_self"])]
         if household:
             parts.append(("가구 통합", s["available_household"]))
         if with_pay and household:

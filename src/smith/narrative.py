@@ -66,7 +66,7 @@ logger = logging.getLogger(__name__)
 # v32: no per-sentence law caveat; the footer says it once (user decision 2026-11-02); the check no longer asks for it.
 # v33: holdings[].week_change and index_moves; a holding that moved 10% or more opens its reason with why (2026-11-03).
 # v34: tax.realized_this_year, this year's sales with their estimated gains and the deduction left (2026-11-03).
-PROMPT_VERSION = "narrative-v38"   # v38: the rates day per person (own loans), replies_answered; v37: one call per member (§42).
+PROMPT_VERSION = "narrative-v39"   # v39: property and life days per person (owners, own_month, plan_of); v38: rates (§42).
 MODEL = headless.MODEL
 # A runaway guard, not a cost limit (flat-rate subscription): the markets day cost 4.39 USD on 2026-10-27 and, with a
 # payload a fifth larger, ran past 5.00 on 2026-11-03 (error_max_budget_usd), so that report went out without opinions.
@@ -415,8 +415,13 @@ Write:
   stack: the combined readiness at each retirement age and what must be held outside the pensions; on the markets
   day: household_portfolio_facts; on the rates day: sector_metrics.household_debt, while sector_metrics.debt is the
   client's own loans; on the property day: the move plan, the household's in both letters, and the lease return,
-  with each home's `owner` and the plan's `expected_pay_of` saying whose they are). Write "두 분" or "우리 집"; the client's own accounts, pay and proposals are in the letter's
+  with each home's `owner` and the plan's `expected_pay_of` saying whose they are; on the household day: the
+  household's month (cash.spending_split), reserve, spending room and goals, while sector_metrics.own_month is the
+  client's own month and home_plan is the plan of `plan_of`, its partner_* figures the other member's home).
+  Write "두 분" or "우리 집"; the client's own accounts, pay and proposals are in the letter's
   own section, so do not repeat them here.
+- When home_plan.plan_of or move_plan.expected_pay_of is household_member_1, the home plan's expected pay
+  (bonuses, share grants) is the spouse's: say whose it is ("배우자분 성과급"), never as the client's own.
 - When `replies_answered` is false, this reader's replies are not answered: never ask the reader to tell, send or
   confirm anything to Smith ("알려 주시면"); say plainly what is not recorded and what it would change (for example
   "대출 시기가 기록되면 미리 갚는 비용을 계산합니다").
@@ -607,7 +612,9 @@ def sector_metrics(view: Any, data: dict[str, Any]) -> dict[str, Any]:
     household_debt = {} if not personal else {"household_debt": {
         "loans": len(s["debt"]["loans"]), "variable_rate_total": won(s["debt"]["variable_total"]),
         "monthly_interest_estimate": won(s["debt"]["monthly_interest_estimate"]),
-        "unused_credit_total": won(s["debt"].get("unused_credit"))}}
+        "unused_credit_total": won(s["debt"].get("unused_credit"))},
+        # The reader's own month beside the household's (cash.spending_split) on a per-person life day.
+        "own_month": _split_metrics(data.get("own_month"))}
     return {
         **household_debt,
         "cash": {"immediate": won(cash["immediate"]), "reserve_target": won(cash["reserve_target"]),
@@ -637,7 +644,7 @@ def sector_metrics(view: Any, data: dict[str, Any]) -> dict[str, Any]:
                         "lease_return_plan": _lease_metrics(view, (data.get("lease_plans") or [None])[0]),
                         "deals_stale_since": _stale_since(estate.get("deals_stale")),
                         "move_plan": _move_metrics(view, data.get("move_plan"))},
-        "home_plan": _home_metrics(data["kpis"]["home_progress"]),
+        "home_plan": _home_metrics(view, data["kpis"]["home_progress"]),
         "pension_insurance": {"restricted_total": won(pension["restricted_total"]),
                               "monthly_premiums": won(pension["monthly_premiums"]),
                               "premium_to_income": ratio(pension["premium_to_income"]),
@@ -826,15 +833,19 @@ def _lease_metrics(view: Any, plan: dict[str, Any] | None) -> dict[str, Any] | N
             "assumptions": {k: str(v) for k, v in plan["assumptions"].items()}}
 
 
-def _home_metrics(home: dict[str, Any] | None) -> dict[str, Any] | None:
-    """The home goal on the household baseline with the conservative tiers (report design §17.3)."""
+def _home_metrics(view: Any, home: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The home goal on the household baseline with the conservative tiers (report design §17.3). It is the
+    client's plan in either letter (§42): `plan_of` names whose resources `available_self` counts, and the
+    `partner_*` figures are the other member's home."""
     if home is None:
         return None
 
     def ratio(value: Decimal | None) -> str | None:
         return None if value is None else f"{value:.4f}"
     after = home.get("after_tax")
-    return {"target_date": home["target_date"].isoformat(), "required_with_costs": won(home["required"]),
+    owner = home.get("owner", "self")
+    return {"plan_of": view.owner_aliases.get(owner, owner),
+            "target_date": home["target_date"].isoformat(), "required_with_costs": won(home["required"]),
             "baseline": won(home["baseline"]), "baseline_counts": home["baseline_label"],
             "ratio_baseline": ratio(home["ratio_baseline"]), "gap_baseline": won(home["gap_baseline"]),
             "available_self": won(home["available_self"]), "ratio_self": ratio(home["ratio_self"]),

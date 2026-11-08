@@ -15,7 +15,7 @@ from smith import (cases, checklist, dividends, editions, evidence, fundamentals
                    tax)
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import LedgerView, base_amount, load_view, unrealized_gain
-from smith.records import TRANSFER_CATEGORIES, Kind, RecordInput, Status
+from smith.records import INFLOW_CATEGORIES, TRANSFER_CATEGORIES, Kind, RecordInput, Status
 from smith.summary import BASE_CURRENCY, DECIMAL_PRECISION, build_summary, recurring_active
 
 logger = logging.getLogger(__name__)
@@ -185,6 +185,8 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
             # The reader's own homes (report design §42): a per-person property day's "나의 부동산" and its hero.
             "own_real_estate": _own_estate(view, sectors["real_estate"]),
             "spending_split": _spending_split(view),
+            # The reader's own month (report design §42): a per-person life day's "나의 한 달" and its hero.
+            "own_month": _spending_split(view, owner="self"),
             "product_reviews": reviews,
             "research_regions": sorted({t["region"] for t in ((household or {}).get("targets") or {}).values()
                                         if t.get("region")}),
@@ -551,32 +553,43 @@ def _composition(view: LedgerView) -> dict[str, Any]:
     return {"groups": found, "total": total, "complete": complete}
 
 
-def _spending_split(view: LedgerView) -> dict[str, Any] | None:
+def _spending_split(view: LedgerView, owner: str | None = None) -> dict[str, Any] | None:
     """The month as fixed costs, discretionary spending, transfers to the client's own accounts and what is
     left (report design §18.6). A flow says which it is (`commitment`); otherwise loan payments, premiums,
-    housing costs and taxes are fixed and the rest discretionary. None when a flow could not be converted."""
+    housing costs and taxes are fixed and the rest discretionary. None when a flow could not be converted.
+    `owner` limits it to one member's own flows (a per-person life letter's "나의 한 달", report design §42), the
+    income and transfers then summed on the ledger summary's own rules."""
     summary = view.summary
     if "cash_flow" in summary.incomplete_areas:
         return None
     today = view.as_of.date()
-    fixed = discretionary = Decimal(0)
+    fixed = discretionary = inflow = transfers = Decimal(0)
     for record in view.records:
         f = record.fields
-        if record.kind is not Kind.CASHFLOW or f["direction"] != "outflow" or f["category"] in TRANSFER_CATEGORIES \
+        if record.kind is not Kind.CASHFLOW or (owner is not None and record.owner_id != owner) \
                 or f["frequency"] not in _MONTHS or not recurring_active(f, today):
             continue
         amount = base_amount(view, record)
         if amount is None:
             return None
         monthly = amount / _MONTHS[f["frequency"]]
+        if f["category"] in TRANSFER_CATEGORIES:
+            transfers += monthly
+            continue
+        if f["category"] in INFLOW_CATEGORIES:
+            inflow += monthly
+            continue
+        if f["direction"] != "outflow":
+            continue
         commitment = f.get("commitment") or ("fixed" if f["category"] in _FIXED_CATEGORIES else "discretionary")
         if commitment == "fixed":
             fixed += monthly
         else:
             discretionary += monthly
-    inflow = summary.monthly_inflow
-    return {"inflow": inflow, "fixed": fixed, "discretionary": discretionary, "transfers": summary.monthly_transfers,
-            "left": inflow - fixed - discretionary - summary.monthly_transfers,
+    if owner is None:
+        inflow, transfers = summary.monthly_inflow, summary.monthly_transfers
+    return {"inflow": inflow, "fixed": fixed, "discretionary": discretionary, "transfers": transfers,
+            "left": inflow - fixed - discretionary - transfers,
             "fixed_share": fixed / inflow if inflow else None,
             "discretionary_share": discretionary / inflow if inflow else None}
 

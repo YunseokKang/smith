@@ -58,7 +58,9 @@ def proposals_for(active: dict[str, dict[str, Any]], audience: str) -> dict[str,
     """The proposal history one letter reads: the client's own, or the spouse's under PARTNER_SCOPE (unprefixed)."""
     if audience == "self":
         return {identity: item for identity, item in active.items() if not identity.startswith(PARTNER_SCOPE)}
-    return {identity[len(PARTNER_SCOPE):]: item for identity, item in active.items() if identity.startswith(PARTNER_SCOPE)}
+    # The stored key carries the scope too: unprefixed like the identity, so a decision reads as the rule it is.
+    return {identity[len(PARTNER_SCOPE):]: {**item, **({"key": item["key"].removeprefix(PARTNER_SCOPE)} if "key" in item else {})}
+            for identity, item in active.items() if identity.startswith(PARTNER_SCOPE)}
 
 
 def scoped(shown: list[dict[str, Any]], audience: str) -> list[dict[str, Any]]:

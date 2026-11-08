@@ -1318,8 +1318,12 @@ def _retirement_track(facts: dict[str, Any], home: dict[str, Any] | None) -> Tra
     lower = (f" {', '.join(names.get(k, k) for k in stack['unknown'])}은 수령액을 몰라, 준비율은 그 이상이고 연금 밖에서 "
              "준비할 돈은 최대치입니다." if stack["unknown"] else "")
     shared = "두 분 연금을 합친 " if len(stack.get("owners") or []) > 1 else ""
-    home_goal = any(g["category"] == "home" and g["target_date"] > facts["today"] for g in facts["summary"].goals)
-    share = future_income.retirement_share(facts["pay"], home=home, home_goal=home_goal)
+    # The home goal is the client's plan, drawing on the client's pay (report design §42): in the spouse's letter it
+    # takes nothing of the spouse's pay, which then all counts for retirement (Codex review 2026-11-08: the client's
+    # allocation was applied to the spouse's pay).
+    own_plan = home is None or home.get("owner", "self") == "self"
+    home_goal = own_plan and any(g["category"] == "home" and g["target_date"] > facts["today"] for g in facts["summary"].goals)
+    share = future_income.retirement_share(facts["pay"], home=home if own_plan else None, home_goal=home_goal)
     birth = facts["tax"]["birth_year"]
     added = None if birth is None else tax.set_aside(share, int(birth) + head["retire_age"])
     need = head["outside_need"]
@@ -1362,20 +1366,28 @@ def _retirement_pay_note(share: list[Any] | None, added: Decimal | None, need: d
 def _home_tiers(home: dict[str, Any]) -> str:
     """The conservative tiers beside the baseline: the client alone, the household's existing assets, and the
     baseline after the partner's home-sale tax in both cases (report design §17.3)."""
-    text = f" 보수적으로 지금 있는 자산만 보면 본인 자원 {percent(home['ratio_self'], 0)}"
+    planner, other = home_words(home)
+    text = f" 보수적으로 지금 있는 자산만 보면 {planner} 자원 {percent(home['ratio_self'], 0)}"
     if home.get("ratio_household") is not None:
-        text += f", 배우자 부동산 순자산을 더해 {percent(home['ratio_household'], 0)}"
+        text += f", {other} 부동산 순자산을 더해 {percent(home['ratio_household'], 0)}"
     text += "입니다."
     after = home.get("after_tax")
     if after and after.get("case") == "exempt":
-        text += (f" 배우자 주택은 2년 보유·거주가 확인되어 팔 때 양도세를 비과세 기준 약 {short_won(after['tax']['exempt'])}으로 보아 "
+        text += (f" {other} 주택은 2년 보유·거주가 확인되어 팔 때 양도세를 비과세 기준 약 {short_won(after['tax']['exempt'])}으로 보아 "
                  f"준비 가능액은 약 {short_won(after['available']['exempt'])}이고, 요건을 못 갖추면 약 {short_won(after['tax']['general'])}을 "
                  f"내 약 {short_won(after['available']['general'])}입니다.")
     elif after:
-        text += (f" 배우자 주택을 팔아 쓰는 경우 양도세는 1세대 1주택 비과세 요건을 갖추면 약 {short_won(after['tax']['exempt'])}, 일반 "
+        text += (f" {other} 주택을 팔아 쓰는 경우 양도세는 1세대 1주택 비과세 요건을 갖추면 약 {short_won(after['tax']['exempt'])}, 일반 "
                  f"과세면 약 {short_won(after['tax']['general'])}이어서, 준비 가능액은 각각 약 {short_won(after['available']['exempt'])}과 "
                  f"{short_won(after['available']['general'])}입니다(혼인신고 시점과 2년 거주 여부에 따름).")
     return text
+
+
+def home_words(home: dict[str, Any]) -> tuple[str, str]:
+    """(the plan's owner, the other member) as the reader calls them (report design §42): the home goal is the
+    client's plan with the spouse's home in it, so the client's letter says "본인 … 배우자" and the spouse's letter,
+    where the plan is marked as the other member's (`owner`), says "배우자분 … 고객님"."""
+    return ("본인", "배우자") if home.get("owner", "self") == "self" else ("배우자분", "고객님")
 
 
 def _pay_note(home: dict[str, Any]) -> str:

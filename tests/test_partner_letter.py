@@ -54,7 +54,7 @@ class PartnerLetterTests(unittest.TestCase):
         self.assertIn("나의 세금·연금", html)
         self.assertEqual(self.publish()["error_code"], "already-sent")              # The same slot never twice.
         self.assertEqual(self.publish(trigger="manual")["status"], "sent")           # A manual send is its own run.
-        self.assertEqual(self.publish(kind="life")["error_code"], "not-personalized")
+        self.assertEqual(self.publish(kind="overview")["error_code"], "not-personalized")
         without = {**CONFIG, "mail": {"recipient": "me@example.com"}}
         self.assertEqual(self.publish(config=without)["error_code"], "no-partner-recipient")
         self.assertEqual(len(self.sent), 2)

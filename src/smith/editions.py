@@ -147,8 +147,16 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "places, dining, sport), write one or two `experiences` the client might enjoy this week, timely and of "
             "quality, matched to the preferences in client_memory, offered freely as choices, each with its refs. No "
             "market or policy news is researched for this theme; work from the household's numbers and the client's "
-            "statements."),
+            "statements.",
+            personal=("my_month", "follow_up", "experiences"),
+            household=("cash", "spending", "stress", "goals", "household_follow_up", "requests"),
+            household_label="생활·목표"),
 )}
+
+# Proposals on the household's money rather than one member's (report design §42): the reserve, the month's surplus
+# and spending room, the lease deposit. A per-person letter shows them under "우리 집 …" as 두 분께 드리는 제안, so two
+# letters never each read the same room as their own to spend (sample 2026-11-08).
+HOUSEHOLD_PROPOSALS = frozenset({"emergency-reserve", "surplus-plan", "spending-room", "lease-return"})
 
 # The weekly plan when [reports.editions] does not say otherwise.
 DEFAULT_PLAN = {"monday": "overview", "tuesday": "markets", "wednesday": "property", "thursday": "rates",
