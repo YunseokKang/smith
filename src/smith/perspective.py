@@ -18,6 +18,8 @@ from smith.payload import LedgerView, owner_aliases
 
 AUDIENCES = ("self", "partner")
 PARTNER_SCOPE = "partner:"
+# The spouse's letters' run state in daily_runs (smith.partner_letter), also read for what her letters already said.
+PARTNER_PRODUCT = "report-partner"
 # A member's own [household] facts, swapped with the client's when the letter is seen from that member (the
 # household's facts, such as the retirement target and the reserve, are shared and stay as they are).
 _OWN_KEYS = ("birth_year", "birth_month", "annual_gross_salary", "occupational_plan", "occupational_institution",

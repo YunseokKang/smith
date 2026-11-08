@@ -44,8 +44,8 @@ def add_parser(sub: Any, default_db: Path) -> None:
     report.add_argument("--audience", choices=("both", "self", "partner"), default="both",
                         help="whose letter: the client's (self), the spouse's own (partner), or both (default). "
                              "preview: both writes the spouse's letter beside the client's as <out>-partner.html for a "
-                             "split edition, sharing one narrative's household paragraph; send-now: the spouse's goes "
-                             "only for a split edition with [mail] partner_recipient")
+                             "split edition, each narrated by a call of its own; send-now: the spouse's goes only for a "
+                             "split edition with [mail] partner_recipient")
     report.add_argument("--db", type=Path, default=default_db)
     report.add_argument("--config", type=Path, default=Path("config/smith.local.toml"),
                         help="run-due/send-now: local config with schedule and [mail] recipient")
@@ -81,28 +81,25 @@ def run(args: argparse.Namespace) -> int:
             brief_id = researched["brief_id"] if researched["outcome"] == "success" else None
         if args.action == "compare":
             return _compare(args, now=now, kind=kind, tz=tz, config=config, brief_id=brief_id)
-        # Whose letters: the client's, and the spouse's for a per-person edition (report design §42); the spouse's
-        # shares the household paragraph of the client's narrative, so one narrative call serves both.
+        # Whose letters: the client's, and the spouse's for a per-person edition (report design §42), each narrated
+        # by a call of its own on its reader's side (user decision 2026-11-08: one call per person).
         narrate = bool(args.narrative or args.research or args.pipeline)
         shown = (["self"] if args.audience == "self" or not editions.personalized(kind) else
                  ["partner"] if args.audience == "partner" else ["self", "partner"])
-        built = {"self"} if narrate else set()
         with closing(ledger.connect_read_only(args.db)) as conn:
             letters = {audience: build_report(conn, as_of=now, known_at=now, baseline=args.since, kind=kind, tz=tz,
                                               household=profile(config) if config else None,
                                               schedule=(config or {}).get("reports"), audience=audience)
-                       for audience in dict.fromkeys(shown + sorted(built))}
+                       for audience in shown}
     except (sqlite3.Error, ledger.LedgerError) as error:
         print(f"Ledger error ({type(error).__name__}): not a readable Smith ledger.")
         return 1
     if narrate:
-        own = letters["self"]
-        _narrator(args.db, now, brief_id, args.pipeline or "single")(own)
-        print(f"Narrative ({own['narrative']['status']['pipeline']}): {own['narrative']['status']['outcome']}")
-    if "partner" in letters:
-        own = (letters.get("self") or {}).get("narrative") or {} if narrate else {}
-        letters["partner"]["narrative"] = {"status": {"outcome": "shared"}, "household": own.get("household") or "",
-                                           "holdings": own.get("holdings") or {}}
+        narrator = _narrator(args.db, now, brief_id, args.pipeline or "single")
+        for audience in shown:
+            narrator(letters[audience])
+            status = letters[audience]["narrative"]["status"]
+            print(f"Narrative ({status['pipeline']}{'' if audience == 'self' else ', the spouse'}): {status['outcome']}")
     out = args.out or Path("reports") / f"preview-{local:%Y%m%d-%H%M%S}.html"
     out.parent.mkdir(parents=True, exist_ok=True)
     for audience in shown:
@@ -360,8 +357,10 @@ def _narrator(db: Path, now: datetime, brief_id: str | None = None, pipeline: st
         narrative.narrate(db, data["view"], data, now=now, secrets=secrets, brief_id=brief_id, pipeline=pipeline,
                           first_reader=first_reader)
         status = data["narrative"]["status"]
+        # The spouse's letter is narrated by a call of its own (report design §42): its log lines say so.
+        which = data["kind"] if data.get("audience", "self") == "self" else f"{data['kind']}, partner"
         if status["outcome"] != "success":  # A report without its prose is worth a log line (BUG-2026-003).
-            _say(db, f"Narrative ({data['kind']}) {status['outcome']}: {status.get('error_code') or ''}")
+            _say(db, f"Narrative ({which}) {status['outcome']}: {status.get('error_code') or ''}")
             return
         if first_reader is None:
             status["reader"] = {"outcome": "unavailable", "error_code": missing}
@@ -369,7 +368,7 @@ def _narrator(db: Path, now: datetime, brief_id: str | None = None, pipeline: st
         if reading["outcome"] not in ("rewritten", "clear") or "fallback_from" in reading:
             why = reading.get("error_code") or (f"read by {reading['model']}, Codex {reading['fallback_from']}"
                                                 if "fallback_from" in reading else "")
-            _say(db, f"First reader ({data['kind']}) {reading['outcome']}: {why}".rstrip())
+            _say(db, f"First reader ({which}) {reading['outcome']}: {why}".rstrip())
     return narrate
 
 
@@ -625,7 +624,7 @@ def _publish_once(args: argparse.Namespace) -> int:
         if result.get("subject"):
             print(f"Subject: {result['subject']}")
     partner = _send_partner_letter(args, config, kind=kind, slot=slot, credentials=stored, explicit=only_partner,
-                                   shared={k: result.get(k) for k in ("household_story", "opinions", "snapshot_at")})
+                                   snapshot_at=result.get("snapshot_at"), brief_id=brief_id)
     if only_partner:
         # The spouse's letter alone (Codex review 2026-11-08): its own outcome is the command's.
         return 0 if partner is not None and partner["status"] == "sent" else 1
@@ -640,11 +639,12 @@ def _publish_once(args: argparse.Namespace) -> int:
 
 def _send_partner_letter(args: argparse.Namespace, config: dict[str, Any], *, kind: str, slot: datetime | None,
                          credentials: tuple[str, str, str] | None, explicit: bool,
-                         shared: dict[str, Any] | None = None) -> dict[str, Any] | None:
+                         snapshot_at: datetime | None = None, brief_id: str | None = None) -> dict[str, Any] | None:
     """The spouse's own letter of the same edition (report design §42), right after the client's; never raises.
     Only an edition already split goes, and only with `[mail] partner_recipient`; a manual send-now sends it with
-    the client's unless `--audience self` (or alone with `--audience partner`). Returns its outcome, None when it
-    does not apply or crashed."""
+    the client's unless `--audience self` (or alone with `--audience partner`). `snapshot_at` is the ledger time the
+    client's report was built on and `brief_id` its research. Returns its outcome, None when it does not apply or
+    crashed."""
     if args.action == "send-now" and args.audience == "self":
         return None
     if not partner_recipient(config) or not editions.personalized(kind):
@@ -654,21 +654,25 @@ def _send_partner_letter(args: argparse.Namespace, config: dict[str, Any], *, ki
     tz = config["app"]["timezone"]
     return _partner_publish(args.db, config, kind=kind, trigger="manual" if slot is None else "scheduled",
                             day=None if slot is None else slot.astimezone(ZoneInfo(tz)).date(), credentials=credentials,
-                            shared=shared)
+                            snapshot_at=snapshot_at, brief_id=brief_id)
 
 
 def _partner_publish(db: Path, config: dict[str, Any], *, kind: str, trigger: str, day: Any,
-                     credentials: tuple[str, str, str] | None, shared: dict[str, Any] | None = None) -> dict[str, Any] | None:
-    """One partner_letter.publish, logged; never raises (the spouse's letter never blocks the client's report).
-    `shared` is what the client's report hands on: the household paragraph, the opinions and its ledger time."""
+                     credentials: tuple[str, str, str] | None, snapshot_at: datetime | None = None,
+                     brief_id: str | None = None) -> dict[str, Any] | None:
+    """One partner_letter.publish with its own narrative call (user decision 2026-11-08: one per person), logged;
+    never raises (the spouse's letter never blocks the client's report). A retry has no `brief_id`: the narrative then
+    takes the newest brief on the same topics (narrative.pinned_brief)."""
     from smith import partner_letter
 
-    shared = shared or {}
+    now = datetime.now(timezone.utc)
+
+    def narrate(data: dict[str, Any]) -> None:
+        # Made only once the letter is claimed and built: the retry check runs every tick and is mostly a no-op.
+        _narrator(db, now, brief_id)(data)
     try:
-        outcome = partner_letter.publish(db, config, now=datetime.now(timezone.utc), kind=kind, trigger=trigger,
-                                         credentials=credentials, household=profile(config), day=day,
-                                         household_story=shared.get("household_story"), opinions=shared.get("opinions"),
-                                         snapshot_at=shared.get("snapshot_at"))
+        outcome = partner_letter.publish(db, config, now=now, kind=kind, trigger=trigger, credentials=credentials,
+                                         household=profile(config), day=day, narrator=narrate, snapshot_at=snapshot_at)
     except Exception as error:  # noqa: BLE001 - the spouse's letter must never block or fail the client's report.
         _say(db, f"Partner letter crashed: {type(error).__name__}")
         return None

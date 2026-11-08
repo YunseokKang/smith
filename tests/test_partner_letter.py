@@ -97,12 +97,12 @@ class PartnerLetterTests(unittest.TestCase):
         self.assertEqual((publish.call_args.kwargs["kind"], publish.call_args.kwargs["day"]), ("tax", date(2026, 11, 7)))
 
 
-    def test_the_letter_is_built_on_the_client_report_s_snapshot_and_a_retry_keeps_it(self):
-        # Codex review 2026-11-08: a ledger update between the client's report and the spouse's letter must not meet the
-        # opinions verified on the earlier snapshot; the letter is built at the client's ledger time, retries too.
+    def test_the_letter_narrates_itself_on_the_client_report_s_snapshot_and_a_retry_keeps_it(self):
+        # One narrative call per person (user decision 2026-11-08): the letter's narrator gets the spouse's side of the
+        # household, built at the ledger time of the client's report (Codex review 2026-11-08), on the retry too.
         from datetime import timedelta
 
-        from smith import gmail
+        from smith import gmail, narrative
         later = rec("msft-partner", "asset", "partner", category="stock", account_type="brokerage", currency="KRW",
                     value="9000000", valuation_method="market", liquidity="days", symbol="MSFT", market="US",
                     quantity="10", unit_price="900000", average_cost="500000", instrument_name="Microsoft")
@@ -111,30 +111,53 @@ class PartnerLetterTests(unittest.TestCase):
                "owners": [{"id": "partner"}], "records": [later]}
         with closing(ledger.connect(self.db)) as conn:
             ledger.apply_import(conn, parse_import(json.dumps(doc)), recorded_at=AT + timedelta(hours=1))
+        seen = []
+
+        def narrator(data):
+            seen.append((data["audience"], data["as_of"]))
+            narrative.attach(data, None, None, {"outcome": "skipped", "run_ids": ["n1"]})
+            data["narrative"]["household"] = "배우자 쪽 호출이 쓴 두 분 문단"
 
         def rejected(credentials, **kwargs):
             raise gmail.MailError("http-400")
         household = {"partner_birth_year": 1990, "birth_year": 1990}
         failed = partner_letter.publish(self.db, CONFIG, now=AT + timedelta(hours=2), kind="markets", trigger="scheduled",
                                         credentials=("a", "b", "c"), household=household, sender=rejected,
-                                        household_story="두 분 문단", snapshot_at=AT)
+                                        narrator=narrator, snapshot_at=AT)
         self.assertEqual(failed["status"], "failed")
         retried = partner_letter.publish(self.db, CONFIG, now=AT + timedelta(hours=3), kind="markets", trigger="scheduled",
-                                         credentials=("a", "b", "c"), household=household, sender=self.send)
+                                         credentials=("a", "b", "c"), household=household, sender=self.send,
+                                         narrator=narrator)
         self.assertEqual(retried["status"], "sent")
+        self.assertEqual(seen, [("partner", AT), ("partner", AT)])     # The spouse's side, the client's snapshot, twice.
         (_, _, html), = self.sent
         self.assertNotIn("Microsoft", html)            # Recorded after the client's report: not in this letter.
-        self.assertIn("두 분 문단", html)               # The kept paragraph travels with the retry.
-        # Settings changed before a retry: the paragraph written under the old ones is left out (Codex review).
-        failed = partner_letter.publish(self.db, CONFIG, now=AT + timedelta(hours=4), kind="tax", trigger="scheduled",
-                                        credentials=("a", "b", "c"), household=household, sender=rejected,
-                                        household_story="옛 목표 문단", snapshot_at=AT)
-        self.assertEqual(failed["status"], "failed")
-        changed = dict(household, retirement_monthly_spend=11_000_000)
-        self.assertEqual(partner_letter.publish(self.db, CONFIG, now=AT + timedelta(hours=5), kind="tax",
-                                                trigger="scheduled", credentials=("a", "b", "c"), household=changed,
-                                                sender=self.send)["status"], "sent")
-        self.assertNotIn("옛 목표 문단", self.sent[-1][2])
+        self.assertIn("배우자 쪽 호출이 쓴 두 분 문단", html)
+        with closing(ledger.connect_read_only(self.db)) as conn:
+            self.assertEqual(ledger.daily_snapshot(conn, retried["run_key"])["narrative_run_ids"], ["n1"])
+
+    def test_the_writer_reads_the_spouse_s_own_last_letters_and_not_the_client_s_memory(self):
+        # The spouse's next letter on the theme is told what the last ones said (report design §33, §42), and the
+        # client's memory, told from the client's side, stays out of that call.
+        from smith import narrative
+        verified = {"insights": [{"title": "금리 인하 신호", "body": "", "implication": ""}], "watch": [], "experiences": []}
+        with closing(ledger.connect(self.db)) as conn:
+            ledger.record_advice_run(conn, run_id="n1", created_at=AT,
+                                     use_case=narrative.FINAL_USE_CASE + narrative.PARTNER_USE_CASE,
+                                     question="markets", payload="{}", prompt_version="narrative-test", model="test",
+                                     cost_usd=None, outcome="success", error_code=None,
+                                     advice=json.dumps({"verified": verified}, ensure_ascii=False))
+
+        def narrator(data):
+            narrative.attach(data, None, None, {"outcome": "skipped", "run_ids": ["n1"]})
+        self.assertEqual(partner_letter.publish(self.db, CONFIG, now=AT, kind="markets", trigger="scheduled",
+                                                credentials=("a", "b", "c"), sender=self.send, narrator=narrator,
+                                                household={"partner_birth_year": 1990, "birth_year": 1990})["status"], "sent")
+        hers = {"kind": "markets", "audience": "partner", "as_of": AT, "advice": {"proposals": [], "strategy": []}}
+        told = narrative.previous_report(self.db, hers)
+        self.assertEqual((told["date"], [i["title"] for i in told["insights"]]), ("2026-11-07", ["금리 인하 신호"]))
+        self.assertIsNone(narrative.previous_report(self.db, dict(hers, audience="self")))   # The client's: none sent.
+        self.assertEqual(narrative.report_memory(self.db, hers)[0], [])
 
 
 class PersonalIncomeTests(unittest.TestCase):

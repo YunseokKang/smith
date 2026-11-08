@@ -448,22 +448,32 @@ class NarrativeTests(unittest.TestCase):
                 self.assertEqual(dropped, [f"holdings[0]:{reason}"])
         _, dropped = narrative.verify(dict(EMPTY, holdings=[opinion, dict(opinion, stance="hold")]), payload)
         self.assertEqual(dropped, ["holdings[1]:duplicate"])
-        # A per-person edition (report design §42): both members read the opinions and the household paragraph, so
-        # neither may say whose account it is; the same words pass on a day with one letter.
-        owned = dict(opinion, reason="배우자분 계좌의 " + opinion["reason"])
-        mixed = dict(EMPTY, holdings=[owned], household=block("두 분 가운데 배우자분의 주식이 더 많습니다."))
-        _, dropped = narrative.verify(mixed, dict(payload, per_person_letter=True))
-        self.assertEqual(sorted(dropped), ["holdings[0]:owner-word", "household:owner-word"])
-        _, dropped = narrative.verify(dict(EMPTY, holdings=[owned]), payload)
-        self.assertNotIn("holdings[0]:owner-word", dropped)
-        # A household paragraph that fails verification and is put back with a caveat is not shared (Codex review).
+        # Each per-person letter has a narrative of its own (report design §42), so a household paragraph that fails
+        # verification comes back with its caveat in the footer notes, like any other block of that letter.
         wrong = dict(EMPTY, household=block("두 분의 보유 주식은 9876억 원입니다."))
         with closing(ledger.connect(self.db)) as conn:
             ledger.record_research(conn, brief_id="h", created_at=AT, topics=[], outcome="success", model="fable",
                                    brief=brief["brief"])
         narrative.narrate(self.db, data["view"], data, now=AT, secrets=[], brief_id="h", executable=Path("claude.exe"),
                           runner=runner_returning(wrong))
-        self.assertEqual(data["narrative"]["household"], "")
+        self.assertIn("9876억", data["narrative"]["household"])
+        self.assertTrue(data["narrative"]["household_memo"])
+        # The spouse's letter keeps no block put back after failing verification (Codex review 2026-11-08): its caveat
+        # lives in footer notes the mail does not print, and the spouse's replies are not answered.
+        hers = dict(data, audience="partner")
+        doubtful = dict(wrong, holdings=[dict(opinion, stance="hold", reason="보유액은 9876억 원입니다.")])
+        narrative.narrate(self.db, hers["view"], hers, now=AT, secrets=[], brief_id="h", executable=Path("claude.exe"),
+                          runner=runner_returning(doubtful))
+        self.assertEqual((hers["narrative"]["household"], hers["narrative"]["household_memo"]), ("", ""))
+        self.assertNotIn("VOO", hers["narrative"]["holdings"])
+        self.assertNotIn("9876억", render(hers)[1])
+        # And its calls are audited apart: the client's latest report narrative (qa, a question naming no report) is
+        # never the spouse's (report design §42).
+        with closing(ledger.connect_read_only(self.db)) as conn:
+            mine = ledger.latest_advice(conn, use_case=narrative.FINAL_USE_CASE)
+            theirs = ledger.latest_advice(conn, use_case=narrative.FINAL_USE_CASE + narrative.PARTNER_USE_CASE)
+        self.assertIn("9876억", mine["content"]["verified"]["household"]["text"])
+        self.assertEqual(theirs["content"]["verified"]["household"]["text"], "")
         output = dict(EMPTY, portfolio=dict(block("주식은 넓게 나눠 담은 펀드 하나뿐이라 지금 구성을 유지하셔도 됩니다."),
                                             principles=["BUF-INDEX", "VAN-BALANCE"]), holdings=[opinion])
         with closing(ledger.connect(self.db)) as conn:

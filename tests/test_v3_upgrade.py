@@ -197,39 +197,23 @@ class PerspectiveTests(Upgrade):
         self.assertEqual(order, sorted(order))
         self.assertIn("나의 보유 종목 평가액", page)
         self.assertIn("두 분이 함께 가진 종목은 VOO", page)
-        # Codex review 2026-11-08: the household-wide opinions are checked again on the reader's own holdings. An add
-        # on her AAPL (above her own limit) gives way to the code's trim; her card's gain is hers alone.
-        add = {"stance": "add", "reason": "실적이 좋습니다.", "alternative": "", "reconsider": "", "memo": "",
-               "condition": "", "principles": [], "links": [], "by_code": False, "owner": "partner"}
-        shown = narrative.own_opinions(hers, {"AAPL": add, "VOO": dict(add, stance="hold")})
-        self.assertEqual((shown["AAPL"]["stance"], shown["AAPL"]["by_code"]), ("trim", True))
-        self.assertEqual(shown["VOO"]["stance"], "hold")
-        self.assertNotIn("005930", shown)                                              # The client's holding.
-        # A holding both members hold is opined on per member (Codex review 2026-11-08): each letter takes its own.
-        keys = {p["key"] for p in mine["narrative_holdings"]["positions"] if p["symbol"] == "VOO"}
-        self.assertEqual(keys, {"VOO@self", "VOO@household_member_1"})
-        per_member = {"VOO@self": dict(add, stance="hold", reason="고객 쪽", owner="self"), "VOO@household_member_1": dict(
-            add, stance="trim", reason="배우자 쪽")}
-        # An opinion written on the other member's position never shows under the reader's same plain key.
-        self.assertNotIn("VOO", narrative.own_opinions(hers, {"VOO": dict(add, stance="hold", owner="self")}))
-        self.assertEqual(narrative.own_opinions(mine, per_member)["VOO"]["reason"], "고객 쪽")
-        self.assertEqual(narrative.own_opinions(hers, per_member)["VOO"]["reason"], "배우자 쪽")
-        # An opinion put back after failing verification is not shown; a must-opine holding gets the code's instead.
-        caveated = {"VOO@household_member_1": dict(add, stance="hold", memo="원장이나 출처에서 확인되지 않은 수치가 있습니다"),
-                    "AAPL": dict(add, stance="hold", reason="9876억 원", memo="확인되지 않은 수치")}
-        shown = narrative.own_opinions(hers, caveated)
-        self.assertNotIn("VOO", shown)
-        self.assertEqual((shown["AAPL"]["by_code"], shown["AAPL"]["stance"]), (True, "trim"))
-        # Restored for a reason with no memo text (ref codes in the prose): the explicit mark keeps it out too.
-        restored, _ = narrative.restore(dict(narrative.with_blocks({}), holdings=[], proposal_notes=[], order=[],
-                                             insights=[], watch=[], experiences=[]),
-                                        ["holdings[0]:ref-in-prose"],
-                                        {"holdings": [{"symbol": "VOO@household_member_1", "stance": "hold",
-                                                       "reason": "R1에 따르면 보유액은 9876억 원입니다.", "alternative": "",
-                                                       "reconsider": "", "refs": [], "principles": []}]})
-        self.assertTrue(restored["holdings"][0]["restored"])
-        quiet = {"VOO@household_member_1": dict(add, stance="hold", memo="", restored=True)}
-        self.assertNotIn("VOO", narrative.own_opinions(hers, quiet))
+        # Each letter is narrated by a call of its own on its reader's side (user decision 2026-11-08): her payload
+        # holds her own positions and portfolio figures, the household's only for the household paragraph.
+        from smith.payload import won
+        payload = narrative.build_payload(hers["view"], hers, None)
+        self.assertTrue(payload["per_person_letter"])
+        self.assertEqual({h["symbol"] for h in payload["holdings"]}, {"AAPL", "VOO"})
+        self.assertTrue(next(h for h in payload["holdings"] if h["symbol"] == "AAPL")["above_concentration_limit"])
+        self.assertEqual(payload["portfolio_facts"]["total"], won(hers["own_holdings"]["total"]))
+        self.assertEqual(payload["household_portfolio_facts"]["total"], won(hers["holdings"]["total"]))
+        self.assertEqual({h["held_by"] for h in payload["household_portfolio_facts"]["largest"]
+                          if h["ticker"] == "VOO"}, {"both"})
+        self.assertNotIn("AAPL", {h["symbol"] for h in narrative.build_payload(mine["view"], mine, None)["holdings"]})
+        # Without a narrative her must-opine AAPL (above her own limit) gets the code's trim, on her own figures.
+        narrative.attach(hers, None, None, {"outcome": "failure"})
+        self.assertEqual((hers["narrative"]["holdings"]["AAPL"]["stance"], hers["narrative"]["holdings"]["AAPL"]["by_code"]),
+                         ("trim", True))
+        self.assertNotIn("005930", hers["narrative"]["holdings"])                       # The client's holding.
         own = report_html._own(hers)["sectors"]["securities"]
         self.assertEqual(own["unrealized_gain"], sum((p["unrealized_gain"] for p in hers["own_holdings"]["positions"]),
                                                      Decimal(0)))

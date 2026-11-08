@@ -25,7 +25,7 @@ from html import escape
 from typing import Any
 
 from smith.fmt import short_won as _short
-from smith import editions, korean, narrative, pension, pension_chart, picks, principles, stress, tax
+from smith import editions, korean, pension, pension_chart, picks, principles, stress, tax
 from smith.holdings import STANCES
 from smith.proposals import Track
 from smith.realestate import MIN_BASIS
@@ -612,10 +612,10 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
         "stress_summary": lambda: _stress_summary(data["stress"], sectors["real_estate"]),
         "experiences": lambda: _experiences(story),
         "my_pensions": lambda: _my_pensions(data), "household_tax": lambda: _household_tax(advice),
-        # The reader's own holdings and their week (report design §42), and the two of them together.
+        # The reader's own holdings and their week (report design §42), and the two of them together. The letter's
+        # own narrative call opined on the reader's own holdings (narrative.opined).
         "my_week": lambda: _holdings_week(_own(data), story),
-        "my_holdings": lambda: _holdings(_own(data), {**story, "holdings": narrative.own_opinions(
-            _own(data), story.get("holdings") or {})}, True, quantities=False),
+        "my_holdings": lambda: _holdings(_own(data), story, True, quantities=False),
         "household_holdings": lambda: _household_holdings(data),
     }
     if edition.personal:
@@ -661,7 +661,7 @@ def _split_bands(data: dict[str, Any], edition: editions.Edition, renderers: dic
     changes = _changes_outside(story, f"{edition.label} — 눈여겨볼 변화")
     if changes:
         bands.append(_band(CANVAS, changes, border=True))
-    # The household paragraph the narrative wrote once for both letters (§42), under the household's title.
+    # The household paragraph this letter's narrative wrote for its reader (§42), under the household's title.
     shared = story.get("household") or ""
     lead = ("" if not shared else f'<tr><td style="padding:0 0 10px"><div style="font-size:15px;line-height:1.7;'
                                   f'color:{INK}">{escape(shared)}</div></td></tr>')
@@ -1409,7 +1409,8 @@ def _system_notes(data: dict[str, Any], story: dict[str, Any], reasons: list[str
     piece of information goes (the JSON field or config key)."""
     notes = [f"상태 판정: {reason}" for reason in reasons]
     memos = []
-    for field, label in (("situation_memo", "판단"), ("direction_memo", "전략 방향"), ("portfolio_memo", "투자 전략")):
+    for field, label in (("situation_memo", "판단"), ("direction_memo", "전략 방향"), ("portfolio_memo", "투자 전략"),
+                         ("household_memo", "우리 집")):
         if story.get(field):
             memos.append(f"{label}: {story[field]}")
     memos += [f"변화 '{i['title']}': {i['memo']}" for i in story.get("insights") or [] if i.get("memo")]

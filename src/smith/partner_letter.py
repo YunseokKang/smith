@@ -3,21 +3,21 @@
 Each member gets a letter of their own: the reader's accounts ("나의 …") and the household's ("우리 집 …"), both
 calling the reader 고객님. The client's letter is the regular report (delivery.publish); this module sends the
 spouse's: the same edition built from the spouse's side (report_data.build_report audience "partner"), to
-`[mail] partner_recipient`, only for an edition already split (editions.personalized). No model is called for it:
-the reader's sections are computed by code (user decision 2026-11-08: the household narrative is written once).
+`[mail] partner_recipient`, only for an edition already split (editions.personalized). It is narrated by a call of
+its own on that side (user decision 2026-11-08: one narrative call per person), so its opinions, household
+paragraph and reasons are written for the spouse's own holdings and goals.
 
 It keeps its own run state in daily_runs (product PRODUCT, one run per edition and local day), so the client's
 report runs, their baselines, the reply answering and the client's proposal history never see it. The proposals it
 carried are recorded under the spouse's scope (smith.perspective). Replies to it are not answered.
 """
 import hashlib
-import json
 import logging
 import uuid
 from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from smith import delivery, editions, gmail, ledger, perspective, proposals
 from smith.config import local_time, partner_recipient
@@ -26,9 +26,11 @@ from smith.report_html import render
 
 logger = logging.getLogger(__name__)
 
-PRODUCT = "report-partner"
+PRODUCT = perspective.PARTNER_PRODUCT
 AUDIENCE = "partner"
-LEASE = timedelta(minutes=30)
+# Building takes the letter's own narrative stage (the writer, its repair and the first reader, about 25 minutes at
+# most), so a claim outlasts it and a second run does not take over a letter still being written.
+LEASE = timedelta(minutes=45)
 MAX_ATTEMPTS = 3
 
 
@@ -39,15 +41,15 @@ def run_key(kind: str, day: date) -> str:
 def publish(db: Path, config: dict[str, Any], *, now: datetime, kind: str, trigger: str,
             credentials: tuple[str, str, str] | None, household: dict[str, Any] | None,
             day: date | None = None, sender: delivery.Sender = gmail.send,
-            household_story: str | None = None, opinions: dict[str, Any] | None = None,
+            narrator: Callable[[dict[str, Any]], None] | None = None,
             snapshot_at: datetime | None = None) -> dict[str, Any]:
-    """Claim, build, send and record the spouse's letter of one edition. A scheduled letter is one per edition and
-    local `day`; a manual one always gets a fresh key. `household_story` is the household paragraph the client's
-    report narrated (both letters carry it); `opinions` are that narrative's holding opinions by position key (per
-    member, `holdings.per_owner`); `snapshot_at` is the ledger time the client's report was built and verified on,
-    and the spouse's letter is built on the same snapshot (Codex review 2026-11-08: a ledger update in between let a
-    verified opinion meet other figures). The paragraph and that time are kept with the run, so a retry rebuilds the
-    same snapshot; a retry goes without the opinions. Returns {"status", "run_key", "subject", "error_code"}."""
+    """Claim, build, narrate, send and record the spouse's letter of one edition. A scheduled letter is one per
+    edition and local `day`; a manual one always gets a fresh key. `narrator(data)` adds the letter's own verified
+    narrative in place (report_command._narrator; without one the letter keeps its code-written content).
+    `snapshot_at` is the ledger time the client's report was built on: the spouse's letter is built on the same
+    snapshot, so the household figures of the two letters agree (Codex review 2026-11-08). That time is kept with the
+    run, so a retry rebuilds the same snapshot, with the narrative ids for the next letter on the theme not to repeat
+    this one. Returns {"status", "run_key", "subject", "error_code"}."""
     recipient = partner_recipient(config)
     if recipient is None:
         return {"status": "skipped", "run_key": None, "subject": None, "error_code": "no-partner-recipient"}
@@ -64,33 +66,31 @@ def publish(db: Path, config: dict[str, Any], *, now: datetime, kind: str, trigg
         return {"status": "skipped", "run_key": key, "subject": None, "error_code": outcome}
     if credentials is None:
         return _finish(db, key, token, "building", "failed", error_code="no-mail-setup")
-    # The settings the paragraph was written with: a retry under changed settings (a new retirement target, say)
-    # leaves the old paragraph out rather than set it beside figures it no longer matches (Codex review 2026-11-08).
-    settings = hashlib.sha256(json.dumps(household or {}, sort_keys=True, default=str).encode("utf-8")).hexdigest()
     with closing(ledger.connect(db)) as conn:
-        if snapshot_at is not None:
+        kept = ledger.daily_snapshot(conn, key) or {}
+        if snapshot_at is None and kept.get("snapshot_at"):
+            snapshot_at = datetime.fromisoformat(kept["snapshot_at"])     # A retry: the first attempt's snapshot.
+        elif snapshot_at is not None:
             ledger.record_daily_snapshot(conn, run_key=key, day=day, created_at=now,
-                                         snapshot={"product": PRODUCT, "household_story": household_story or "",
-                                                   "snapshot_at": snapshot_at.isoformat(), "settings": settings})
-        else:
-            kept = ledger.daily_snapshot(conn, key) or {}
-            if kept.get("settings") == settings:
-                household_story = household_story or kept.get("household_story")
-            if kept.get("snapshot_at"):
-                snapshot_at = datetime.fromisoformat(kept["snapshot_at"])
+                                         snapshot={"product": PRODUCT, "snapshot_at": snapshot_at.isoformat()})
     at = snapshot_at or now
     try:
         with closing(ledger.connect_read_only(db)) as conn:
             data = build_report(conn, as_of=at, known_at=at, baseline=None, kind=kind, tz=tz, household=household,
                                 schedule=config.get("reports"), audience=AUDIENCE)
-        # No narrative of its own: only the household paragraph shared with the client's letter (§42).
-        data["narrative"] = {"status": {"outcome": "shared"}, "household": household_story or "",
-                             "holdings": opinions or {}}
+        if narrator is not None:
+            narrator(data)   # Its own call, on the spouse's side; a model failure leaves the code's content.
         subject, html = render(data)
     except Exception as error:  # noqa: BLE001 - any build failure releases the claim as a clean, retryable failure.
         return _finish(db, key, token, "building", "failed", error_code=f"build-{type(error).__name__}")
     digest = hashlib.sha256(html.encode("utf-8")).hexdigest()
+    status = (data.get("narrative") or {}).get("status") or {}
     with closing(ledger.connect(db)) as conn:
+        # The narrative this letter carries, by its audited runs (narrative.previous_report reads it for the next
+        # letter on the theme), and the snapshot it was built on, for a retry.
+        ledger.record_daily_snapshot(conn, run_key=key, day=day, created_at=now,
+                                     snapshot={"product": PRODUCT, "snapshot_at": at.isoformat(),
+                                               "narrative_run_ids": list(status.get("run_ids") or [])})
         # Committed before the request: a run that dies after Gmail accepted the mail never sends it again.
         held = ledger.advance_daily_run(conn, run_key=key, token=token, from_status="building", status="sending",
                                         subject=subject, html_sha256=digest)

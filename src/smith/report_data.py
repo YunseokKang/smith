@@ -148,8 +148,6 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     data = {"kind": kind, "audience": audience, "as_of": as_of, "baseline": baseline, "kpis": kpis, "schedule": schedule,
             "change": change, "timeline": _timeline(view, pay), "sectors": sectors, "holdings": review,
             "own_holdings": own,
-            # A per-person edition's narrative opines on each member's own positions (§42), once for both letters.
-            "narrative_holdings": holdings.per_owner(view, employer) if editions.personalized(kind) else None,
             "holding_quantity_changes": None if moved is None else quantity_changes(moved),
             "holding_price_moves": None if moved is None else price_moves(moved, baseline),
             "own_holding_quantity_changes": None if own_moved is None else quantity_changes(own_moved),

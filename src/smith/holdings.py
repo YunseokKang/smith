@@ -115,29 +115,6 @@ def review(view: LedgerView, employer_symbols: frozenset[str] | set[str] = froze
             "concentration_limit": CONCENTRATION_LIMIT}
 
 
-def per_owner(view: LedgerView, employer_symbols: frozenset[str] | set[str] = frozenset()) -> dict[str, Any]:
-    """Each member's own positions side by side, for the narrative of a per-person edition (report design §42): every
-    position carries its member's own share, value and concentration flags, and its `owner`. A position both members
-    hold appears once per member, its opinion key suffixed with the member's outbound alias ("VOO@self",
-    "VOO@household_member_1"), so each letter takes the opinion written on its reader's own holding (Codex review
-    2026-11-08: one opinion on the combined position carried one member's amounts into the other's letter). The
-    employer's stock is the client's only. `base_key` is the plain key the research topics use."""
-    owners = ["self"] + sorted({r.owner_id for r in view.records if r.kind is Kind.ASSET} - {"self"})
-    reviews = {owner: review(view, employer_symbols if owner == "self" else frozenset(), owner=owner) for owner in owners}
-    held: dict[str, int] = {}
-    for found in reviews.values():
-        for p in found["positions"]:
-            if not p["hermes"]:
-                held[p["key"]] = held.get(p["key"], 0) + 1
-    positions = []
-    for owner, found in reviews.items():
-        for p in found["positions"]:
-            shared = not p["hermes"] and held.get(p["key"], 0) > 1
-            positions.append({**p, "owner": owner, "base_key": p["key"],
-                              "key": f"{p['key']}@{view.owner_aliases.get(owner, owner)}" if shared else p["key"]})
-    return {"positions": positions}
-
-
 def concentration_plan(review: dict[str, Any]) -> dict[str, Any] | None:
     """How to bring every individual stock above the limit back under it (report design §17.4): the excess
     over the limit per holding, sold in TRIM_QUARTERS equal quarterly steps into the broad-index core, and the
