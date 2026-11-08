@@ -49,6 +49,7 @@ BASELINE_MAX = timedelta(days=4)        # A move is measured since the last chec
 BASELINE_DEFAULT = timedelta(days=1)    # ...and over one day when there has been no check yet.
 BOK_RESULT_TIME = time(11, 30)          # The decision is out by about 10:00, the press conference at 11:10.
 MAX_ATTEMPTS = 3                        # Unconfirmed or failed notes are retried this often, then skipped.
+READING_ATTEMPTS = 2                    # A disclosure note waits for its reading this often; the last attempt sends the facts alone.
 BUILDING = timedelta(minutes=30)        # A note claimed this recently is being built by another run (manual + scheduled).
 MODEL = headless.MODEL
 BUDGET_USD = "5.00"
@@ -90,6 +91,14 @@ Rules:
   so in gaps. Never guess a figure.
 - When `decision_wanted` is false, set every decision field to "none".
 - No investment advice and no reference to any household. Write Korean except the enumerated field values."""
+
+class ReadingFailed(Exception):
+    """A disclosure's reading failed on an attempt that may be retried: the note stays pending (code in `reason`)."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
 
 Researcher = Callable[..., dict[str, Any]]
 Sender = Callable[..., str]
@@ -204,9 +213,11 @@ def measure_move(conn: Any, t0: datetime, t1: datetime) -> dict[str, Any] | None
 def build_note(db: Path, event: Event, detail: dict[str, Any], *, now: datetime, baseline: datetime, tz: str,
                researcher: Researcher | None, secrets: list[str], dart_key: str | None = None,
                dart_fetch: dart.Fetcher = dart.default_fetcher,
-               interpreter: Interpreter | None = None) -> dict[str, Any] | None:
+               interpreter: Interpreter | None = None, final: bool = True) -> dict[str, Any] | None:
     """The note's data for one event, or None when a rate decision is not confirmed yet (neither the statistics
-    nor an official source have it). Research failures leave `research_failed` set; the figures still go out."""
+    nor an official source have it). Research failures leave `research_failed` set (and `research_error`, the safe
+    reason); the figures still go out. A disclosure's failed reading raises `ReadingFailed` instead while the note
+    has attempts left (`final` false): the facts alone go out only on the last attempt."""
     local = local_time(now, tz)
     with closing(ledger.connect_read_only(db)) as conn:
         view = load_view(conn, as_of=local, known_at=now)
@@ -214,32 +225,39 @@ def build_note(db: Path, event: Event, detail: dict[str, Any], *, now: datetime,
         if not dart_key and any(f.get("source") != "sec" for f in detail["filings"]):
             return None     # Kept pending: retried once the key is back.
         filings = disclosures.enrich(db, view, local, detail["filings"], key=dart_key, known_at=now, fetch=dart_fetch)
-        insight = None
+        insight, research_error = None, None
         if interpreter is not None:
             try:
                 insight = interpreter(filings, today=local.date(), secrets=secrets)
             except Exception as error:  # noqa: BLE001 - the facts still go out, said to be without the reading.
-                logger.warning("Disclosure reading failed for %s: %s", event.key, getattr(error, "code", type(error).__name__))
+                research_error = headless.describe_failure(error)
+                logger.warning("Disclosure reading failed for %s: %s", event.key, research_error)
+                # A rejected payload fails the same way again; anything else (limit, launch, timeout) may pass later.
+                if not final and not isinstance(error, PayloadRejected):
+                    raise ReadingFailed(research_error) from error
         for f in filings:
             f["insight"] = None if insight is None else insight["by_id"].get(f["rcept_no"])
         return {"kind": "disclosure", "key": event.key, "day": event.day, "as_of": local, "filings": filings,
                 "overview": "" if insight is None else insight["overview"],
                 "overview_unchecked": bool(insight and insight.get("overview_unchecked")),
                 "insight_sources": [] if insight is None else insight["sources"],
-                "research_failed": interpreter is not None and insight is None,
+                "research_failed": interpreter is not None and insight is None, "research_error": research_error,
                 "research": None if insight is None else {"items": len(insight["by_id"]), "cost_usd": insight["cost_usd"],
                                                           "prompt_version": insight["prompt_version"]}}
-    found = None
+    found, failure = None, None
     if researcher is not None:
         question, wanted = _question(event, local.date(), local_time(baseline, tz).date())
         try:
             found = researcher(question, decision_wanted=wanted, today=local.date(), secrets=secrets,
                                meeting=event.day if event.kind == "bok_decision" else None)
         except (headless.HeadlessError, PayloadRejected) as error:
-            logger.warning("Event research failed for %s: %s", event.key, getattr(error, "code", type(error).__name__))
-    if event.kind == "bok_decision":
-        return _bok_note(view, event, local, found, researched=researcher is not None)
-    return _move_note(event, detail, local, local_time(baseline, tz), found, researched=researcher is not None)
+            failure = headless.describe_failure(error)
+            logger.warning("Event research failed for %s: %s", event.key, failure)
+    note = (_bok_note(view, event, local, found, researched=researcher is not None) if event.kind == "bok_decision"
+            else _move_note(event, detail, local, local_time(baseline, tz), found, researched=researcher is not None))
+    if note is not None and failure:
+        note["research_error"] = failure
+    return note
 
 
 def preview(db: Path, config: dict[str, Any], kind: str, *, now: datetime, researcher: Researcher | None = None,
@@ -495,6 +513,7 @@ def _deliver(db: Path, config: dict[str, Any], event: Event, detail: dict[str, A
     with closing(ledger.connect(db)) as conn:
         token, outcome, stored = ledger.claim_event_note(conn, key=event.key, kind=event.kind, event_date=event.day, now=now,
                                                          lease=BUILDING, max_attempts=MAX_ATTEMPTS, details=claimed)
+        attempts = 0 if token is None else ledger.event_attempts(conn, event.key)
     if token is None:
         return {"key": event.key, "status": outcome, "detail": ""}
     advance = partial(_advance, db, event.key, token)
@@ -523,11 +542,15 @@ def _deliver(db: Path, config: dict[str, Any], event: Event, detail: dict[str, A
     try:
         note = build_note(db, event, detail or {}, now=at, baseline=baseline, tz=config["app"]["timezone"],
                           researcher=researcher, secrets=secrets, dart_key=dart_key, dart_fetch=dart_fetch,
-                          interpreter=interpreter)
+                          interpreter=interpreter, final=attempts >= READING_ATTEMPTS)
+    except ReadingFailed as error:
+        advance("pending", "pending", error_code=f"reading-{error.reason}"[:80])
+        return {"key": event.key, "status": "pending", "detail": f"reading failed ({error.reason}); retried at the next check"}
     except Exception as error:  # noqa: BLE001 - a failed note is recorded and retried, never raised into the scheduler.
-        logger.warning("Event note %s could not be built: %s", event.key, type(error).__name__)
-        advance("pending", "pending", error_code=f"build-{type(error).__name__}"[:80])
-        return {"key": event.key, "status": "pending", "detail": type(error).__name__}
+        reason = headless.describe_failure(error)
+        logger.warning("Event note %s could not be built: %s", event.key, reason)
+        advance("pending", "pending", error_code=f"build-{reason}"[:120])
+        return {"key": event.key, "status": "pending", "detail": reason}
     if note is None:
         advance("pending", "pending", error_code="unconfirmed")
         return {"key": event.key, "status": "pending", "detail": "unconfirmed"}
@@ -547,7 +570,7 @@ def _deliver(db: Path, config: dict[str, Any], event: Event, detail: dict[str, A
         return {"key": event.key, "status": status, "detail": error.code}
     if not advance("unknown", "sent", message_id=message_id):
         logger.warning("Event note %s was sent but its state could not be recorded; it stays unknown", event.key)
-    return {"key": event.key, "status": "sent", "detail": subject}
+    return {"key": event.key, "status": "sent", "detail": subject, "research_error": note.get("research_error")}
 
 
 def _advance(db: Path, key: str, token: str, from_status: str, status: str, **fields: Any) -> bool:
@@ -563,6 +586,8 @@ def _details(note: dict[str, Any]) -> dict[str, Any]:
         kept["decision"] = {k: v for k, v in note["decision"].items() if k in ("outcome", "rate_after", "rate_before",
                                                                                 "source", "vote_unanimous", "source_url")}
     kept["research"] = note.get("research")
+    if note.get("research_error"):      # Why the reading is missing, so a facts-only note can be traced afterwards.
+        kept["research_error"] = note["research_error"]
     if note.get("filings"):     # What was carried (smith.disclosures.seen), without the household's amounts.
         kept["filings"] = [{**{k: f[k] for k in ("rcept_no", "filed_on", "title", "corp_name", "corp_code", "category",
                                                   "symbols", "url")},

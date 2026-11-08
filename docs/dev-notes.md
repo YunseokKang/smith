@@ -397,3 +397,17 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
 - 해결: `narrative.BUDGET_USD`를 10.00으로 올렸다. 정액 구독이라 상한은 폭주 방지용일 뿐 비용 절감 장치가 아니다.
 - 예방: `advice_runs`의 `cost_usd`가 상한의 80%를 넘으면 다음 회차 전에 상한을 다시 본다. 실패 사유는 `report-runs.log`에는
   `exit-1`만 남으니 `advice_runs.advice.detail`에서 확인한다.
+
+### TS-039 공시 안내가 "공시 해석을 만들지 못해" 문구로 발송, 원인 기록 없음 (2026-11-06)
+
+- 증상: 11/06 07:15 공시 안내(SEC 8-K 1건)가 해석 없이 나갔다. 같은 시각대(11/05 20:46~11/06 낮)에 조사 `exit-1`, 서술 `PermissionError`,
+  배당 조사 `exit-1`, 질문 답변, 저녁 메일 `PermissionError`가 함께 실패했다. 같은 공시를 11/07에 다시 해석하면 51초에 성공했다(일시 실패).
+- 원인(추정): 호출 실패 사유가 `logger.warning`으로만 남는데 예약 실행(pythonw)에는 로그 핸들러가 없어 사유가 사라졌다.
+  `PermissionError`는 `headless.run`에서 임시 작업 폴더 정리(`TemporaryDirectory`)만이 감싸지 않은 채 던질 수 있는 예외이고,
+  Windows에서 CLI 자식 프로세스가 폴더를 쥐고 있으면 정답을 받고도 정리 단계에서 버려진다. `codex.py`는 이미 같은 옵션을 쓴다.
+  `exit-1` 쪽(한도·로그인 등 Claude 쪽 일시 오류)은 사유를 알 수 없었다.
+- 해결: `headless.run`이 `ignore_cleanup_errors=True`로 정리 오류를 무시한다. `headless.describe_failure`가 메시지 없이 예외 종류·OS 오류
+  번호·마지막 프레임(파일:줄)만 만들어, 사건 안내의 `error_code`·`details.research_error`·`report-runs.log`에 남긴다. 공시 해석이 실패하면
+  첫 시도에서는 보내지 않고(`pending`, `reading-…`) 다음 점검에서 한 번 더 시도하며, 두 번째 실패에만 사실만 보낸다.
+- 예방: 새 외부 호출은 실패 사유를 원장이나 `report-runs.log`에 남긴다. `logger`만으로는 예약 실행에서 보이지 않는다.
+

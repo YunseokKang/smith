@@ -3,7 +3,7 @@ import tempfile
 import unittest
 import urllib.parse
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from smith import dart, disclosures, events, ledger, report_html, sec
@@ -248,10 +248,20 @@ class DisclosureTests(unittest.TestCase):
         with closing(ledger.connect(self.db)) as conn:       # Forget the first note so the same filings go again.
             conn.execute("DELETE FROM event_notes")
             conn.commit()
-        events.check(self.db, CONFIG, now=later, reason="manual", sync=False, researcher=None, sender=self.sender,
-                     recipient="me@example.com", credentials=("a", "b", "c"), say=self.said.append, dart_key=KEY,
-                     dart_fetch=FakeDart(), interpreter=broken)
+        def check(at):
+            return events.check(self.db, CONFIG, now=at, reason="manual", sync=False, researcher=None, sender=self.sender,
+                                recipient="me@example.com", credentials=("a", "b", "c"), say=self.said.append,
+                                dart_key=KEY, dart_fetch=FakeDart(), interpreter=broken)
+        first = check(later)
+        self.assertEqual([o["status"] for o in first], ["pending"])       # The reading may come back: nothing goes yet.
+        self.assertEqual(self.sent, [])
+        self.assertIn("RuntimeError", first[0]["detail"])                  # The run log can say why (type and line).
+        second = check(later + timedelta(minutes=5))                       # The last attempt sends the facts alone.
+        self.assertEqual([o["status"] for o in second], ["sent"])
+        self.assertIn("RuntimeError", second[0]["research_error"])
         self.assertIn("공시 해석을 만들지 못해 사실만 전합니다", self.sent[0][1])
+        with closing(ledger.connect_read_only(self.db)) as conn:           # Traceable afterwards from the ledger.
+            self.assertIn("RuntimeError", ledger.event_notes(conn)[0]["details"]["research_error"])
 
     def test_a_failed_lookup_is_said_and_never_breaks_the_check(self):
         self.assertEqual(self.check(FakeDart(fail=True)), [])

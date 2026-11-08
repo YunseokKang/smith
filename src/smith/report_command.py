@@ -629,7 +629,8 @@ def _check_events(db: Path, config: dict[str, Any], now: datetime, *, reason: st
         for outcome in outcomes:
             # The detail can be the subject (an amount): the log gets the key and the status only.
             _say(db, f"Event {outcome['key']}: {outcome['status']}"
-                     + (f" ({outcome['detail']})" if outcome["status"] != "sent" and outcome.get("detail") else ""))
+                     + (f" ({outcome['detail']})" if outcome["status"] != "sent" and outcome.get("detail") else "")
+                     + (f" without the reading: {outcome['research_error']}" if outcome.get("research_error") else ""))
         if not outcomes:
             _say(db, f"Event check ({reason}): nothing", log=reason != "slot")
     except Exception as error:  # noqa: BLE001 - an event check must never block or fail a report run.

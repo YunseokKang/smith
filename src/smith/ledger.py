@@ -1474,6 +1474,12 @@ def claim_event_note(conn: sqlite3.Connection, *, key: str, kind: str, event_dat
     return token, "claimed", kept
 
 
+def event_attempts(conn: sqlite3.Connection, key: str) -> int:
+    """How many times the note has been claimed for building (this attempt included)."""
+    row = conn.execute("SELECT attempts FROM event_notes WHERE event_key = ?", (key,)).fetchone()
+    return 0 if row is None else row[0]
+
+
 def advance_event_note(conn: sqlite3.Connection, *, key: str, token: str, from_status: str, status: str,
                        error_code: str | None = None, subject: str | None = None, message_id: str | None = None,
                        details: dict[str, Any] | None = None) -> bool:

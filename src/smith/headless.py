@@ -48,6 +48,25 @@ class HeadlessError(Exception):
         self.code, self.detail = code, detail
 
 
+def describe_failure(error: BaseException) -> str:
+    """A short, safe account of why a call failed, for the ledger and the run log: the code of a HeadlessError, else
+    the exception type, its OS error numbers and the innermost frame (file:line). Never the exception message,
+    which can carry paths, payload text or secrets."""
+    if isinstance(error, HeadlessError):
+        return error.code if error.detail is None else f"{error.code}: {error.detail}"
+    parts = [type(error).__name__]
+    if isinstance(error, OSError):
+        numbers = [f"{name} {value}" for name, value in (("errno", error.errno), ("winerror", getattr(error, "winerror", None)))
+                   if value is not None]
+        parts.append(f" ({', '.join(numbers)})" if numbers else "")
+    frame = error.__traceback__
+    while frame is not None and frame.tb_next is not None:
+        frame = frame.tb_next
+    if frame is not None:
+        parts.append(f" at {Path(frame.tb_frame.f_code.co_filename).name}:{frame.tb_lineno}")
+    return "".join(parts)
+
+
 def find_claude() -> Path:
     """Locate the native Claude Code executable, never a cmd.exe launcher."""
     found = shutil.which("claude")
@@ -90,7 +109,10 @@ def run(prompt: str, *, system_prompt: str, schema: dict[str, Any], executable: 
         args += ["--model", model]
     env = {key: os.environ[key] for key in _ENV_KEEP if key in os.environ}
     env[HEADLESS_ENV] = "1"
-    with tempfile.TemporaryDirectory(prefix="smith-headless-") as workdir:
+    # ignore_cleanup_errors: on Windows the CLI's child processes can still hold the working directory when the call
+    # returns, and the cleanup's PermissionError discarded an otherwise valid answer (suspected 2026-11-06, when
+    # narrative, research and event calls failed with it). A leftover empty folder in the temp area is harmless.
+    with tempfile.TemporaryDirectory(prefix="smith-headless-", ignore_cleanup_errors=True) as workdir:
         # The system prompt goes in a file: inline it pushed the narrative command line past the Windows limit of
         # 32,767 characters and the launch failed with WinError 206 (property report, 2026-10-28).
         prompt_path = Path(workdir, SYSTEM_PROMPT_FILE)
