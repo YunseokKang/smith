@@ -448,6 +448,22 @@ class NarrativeTests(unittest.TestCase):
                 self.assertEqual(dropped, [f"holdings[0]:{reason}"])
         _, dropped = narrative.verify(dict(EMPTY, holdings=[opinion, dict(opinion, stance="hold")]), payload)
         self.assertEqual(dropped, ["holdings[1]:duplicate"])
+        # A per-person edition (report design §42): both members read the opinions and the household paragraph, so
+        # neither may say whose account it is; the same words pass on a day with one letter.
+        owned = dict(opinion, reason="배우자분 계좌의 " + opinion["reason"])
+        mixed = dict(EMPTY, holdings=[owned], household=block("두 분 가운데 배우자분의 주식이 더 많습니다."))
+        _, dropped = narrative.verify(mixed, dict(payload, per_person_letter=True))
+        self.assertEqual(sorted(dropped), ["holdings[0]:owner-word", "household:owner-word"])
+        _, dropped = narrative.verify(dict(EMPTY, holdings=[owned]), payload)
+        self.assertNotIn("holdings[0]:owner-word", dropped)
+        # A household paragraph that fails verification and is put back with a caveat is not shared (Codex review).
+        wrong = dict(EMPTY, household=block("두 분의 보유 주식은 9876억 원입니다."))
+        with closing(ledger.connect(self.db)) as conn:
+            ledger.record_research(conn, brief_id="h", created_at=AT, topics=[], outcome="success", model="fable",
+                                   brief=brief["brief"])
+        narrative.narrate(self.db, data["view"], data, now=AT, secrets=[], brief_id="h", executable=Path("claude.exe"),
+                          runner=runner_returning(wrong))
+        self.assertEqual(data["narrative"]["household"], "")
         output = dict(EMPTY, portfolio=dict(block("주식은 넓게 나눠 담은 펀드 하나뿐이라 지금 구성을 유지하셔도 됩니다."),
                                             principles=["BUF-INDEX", "VAN-BALANCE"]), holdings=[opinion])
         with closing(ledger.connect(self.db)) as conn:

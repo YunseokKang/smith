@@ -75,7 +75,9 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "the trend and flows, and its standing in its sector. The holding flagged employer_stock concentrates "
             "the client's human capital and financial assets in one company (double concentration): manage it "
             "first and most carefully, with the code's trim schedule (portfolio_facts.concentration_plan).",
-            opening=("week",)),
+            opening=("week",),
+            personal=("my_week", "my_holdings", "policy"), household=("household_holdings", "macro_brief"),
+            household_label="투자"),
     Edition("property", "부동산",
             "property", ("move_targets", "real_estate", "lease_plan"), ("lease-return",),
             ("housing_market", "housing_policy", "jeonse", "home_tax", "target_market"), False, False,

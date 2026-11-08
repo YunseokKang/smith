@@ -54,7 +54,7 @@ class PartnerLetterTests(unittest.TestCase):
         self.assertIn("나의 세금·연금", html)
         self.assertEqual(self.publish()["error_code"], "already-sent")              # The same slot never twice.
         self.assertEqual(self.publish(trigger="manual")["status"], "sent")           # A manual send is its own run.
-        self.assertEqual(self.publish(kind="markets")["error_code"], "not-personalized")
+        self.assertEqual(self.publish(kind="property")["error_code"], "not-personalized")
         without = {**CONFIG, "mail": {"recipient": "me@example.com"}}
         self.assertEqual(self.publish(config=without)["error_code"], "no-partner-recipient")
         self.assertEqual(len(self.sent), 2)
@@ -95,6 +95,46 @@ class PartnerLetterTests(unittest.TestCase):
             report_command._retry_partner_letter(self.db, CONFIG, AT + timedelta(hours=7))   # Past the window.
         self.assertEqual(publish.call_count, 1)
         self.assertEqual((publish.call_args.kwargs["kind"], publish.call_args.kwargs["day"]), ("tax", date(2026, 11, 7)))
+
+
+    def test_the_letter_is_built_on_the_client_report_s_snapshot_and_a_retry_keeps_it(self):
+        # Codex review 2026-11-08: a ledger update between the client's report and the spouse's letter must not meet the
+        # opinions verified on the earlier snapshot; the letter is built at the client's ledger time, retries too.
+        from datetime import timedelta
+
+        from smith import gmail
+        later = rec("msft-partner", "asset", "partner", category="stock", account_type="brokerage", currency="KRW",
+                    value="9000000", valuation_method="market", liquidity="days", symbol="MSFT", market="US",
+                    quantity="10", unit_price="900000", average_cost="500000", instrument_name="Microsoft")
+        later["effective_at"] = (AT + timedelta(hours=1)).isoformat()
+        doc = {"schema_version": 1, "import_id": "p3", "source": "manual", "mode": "patch", "as_of": later["effective_at"],
+               "owners": [{"id": "partner"}], "records": [later]}
+        with closing(ledger.connect(self.db)) as conn:
+            ledger.apply_import(conn, parse_import(json.dumps(doc)), recorded_at=AT + timedelta(hours=1))
+
+        def rejected(credentials, **kwargs):
+            raise gmail.MailError("http-400")
+        household = {"partner_birth_year": 1990, "birth_year": 1990}
+        failed = partner_letter.publish(self.db, CONFIG, now=AT + timedelta(hours=2), kind="markets", trigger="scheduled",
+                                        credentials=("a", "b", "c"), household=household, sender=rejected,
+                                        household_story="두 분 문단", snapshot_at=AT)
+        self.assertEqual(failed["status"], "failed")
+        retried = partner_letter.publish(self.db, CONFIG, now=AT + timedelta(hours=3), kind="markets", trigger="scheduled",
+                                         credentials=("a", "b", "c"), household=household, sender=self.send)
+        self.assertEqual(retried["status"], "sent")
+        (_, _, html), = self.sent
+        self.assertNotIn("Microsoft", html)            # Recorded after the client's report: not in this letter.
+        self.assertIn("두 분 문단", html)               # The kept paragraph travels with the retry.
+        # Settings changed before a retry: the paragraph written under the old ones is left out (Codex review).
+        failed = partner_letter.publish(self.db, CONFIG, now=AT + timedelta(hours=4), kind="tax", trigger="scheduled",
+                                        credentials=("a", "b", "c"), household=household, sender=rejected,
+                                        household_story="옛 목표 문단", snapshot_at=AT)
+        self.assertEqual(failed["status"], "failed")
+        changed = dict(household, retirement_monthly_spend=11_000_000)
+        self.assertEqual(partner_letter.publish(self.db, CONFIG, now=AT + timedelta(hours=5), kind="tax",
+                                                trigger="scheduled", credentials=("a", "b", "c"), household=changed,
+                                                sender=self.send)["status"], "sent")
+        self.assertNotIn("옛 목표 문단", self.sent[-1][2])
 
 
 class PersonalIncomeTests(unittest.TestCase):

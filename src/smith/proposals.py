@@ -598,10 +598,12 @@ def _glide(facts: dict[str, Any]) -> dict[str, Any] | None:
     that owner's stocks (holdings.glide_plan). A lease deposit belongs to the owner of the obligation and is
     net of a new tenant's deposit when enough recent contracts show the market level; the home goal is the
     client's (the home calculation is self-only) and is what liquid money must add to the home equity.
-    Another member's money is never assumed to pay the client's goal, nor the other way round."""
+    Another member's money is never assumed to pay the client's goal, nor the other way round, and since each member
+    gets their own letter (report design §42) only the reader's own needs are planned here: the other member's
+    lease is moved out of their stocks in their own letter."""
     needs = []
     for lease in facts["leases"]:
-        if lease["amount"] is None:
+        if lease["amount"] is None or lease["owner"] != "self":
             continue
         own = lease["amount"]
         if _planned_sale(lease) and lease["need"] is not None:
@@ -612,7 +614,8 @@ def _glide(facts: dict[str, Any]) -> dict[str, Any] | None:
         label = "전세보증금 반환" + ("" if lease["owner"] == "self" else "(가족 명의)")
         needs.append(holdings.Need(label, lease["due"], own, lease["owner"]))
     home = facts["kpis"]["home_progress"]
-    if home and home.get("from_liquid") is not None:
+    # The home move rests on the client's money: in the spouse's letter it is the other member's need (§42).
+    if home and home.get("from_liquid") is not None and home.get("owner", "self") == "self":
         needs.append(holdings.Need("주택 이전", home["target_date"], home["from_liquid"], "self"))
     return holdings.glide_plan(today=facts["today"], needs=needs, resources=facts["resources"])
 
@@ -657,7 +660,8 @@ def _goal_stocks_glide(facts: dict[str, Any]) -> Proposal | Undetermined | None:
                f"{short_won(tax.OVERSEAS_DEDUCTION)}을 넘으면 넘는 부분에 양도세 {percent(tax.OVERSEAS_RATE, 0)}가 붙으므로, 손실 종목이나 국내 종목부터 "
                "팔거나 해마다 공제 한도 안에서 나눠 파는 편이 세금에 유리합니다."),
         timing=f"{first['start']:%Y.%m}~{first['end']:%Y.%m}, 분기마다 {first['quarters']}번",
-        reconsider=("".join(dict.fromkeys(_GLIDE_RECONSIDER[s["label"]] for s in plan["steps"]))
+        # By the need's kind, whatever qualifier its label carries (a missing key once failed the whole report).
+        reconsider=("".join(dict.fromkeys(_GLIDE_RECONSIDER.get(s["label"].split("(")[0], "") for s in plan["steps"]))
                     + "월 여유 자금이 크게 달라지거나 주식 평가액이 크게 바뀌면 다시 계산합니다."),
         certainty=(f"계산(현재 평가액·현금흐름 유지 가정) + 가정(주가 {percent(plan['drawdown'], 0)} 하락 스트레스, "
                    "주택은 기준 시나리오)"),

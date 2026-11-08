@@ -172,6 +172,69 @@ class PerspectiveTests(Upgrade):
         self.assertIn("배우자분 명의 거주 주택을 판다면", page)
         self.assertIn("거주 주택을 지금 판다면", own_page)
 
+    def test_the_markets_day_shows_the_reader_s_own_holdings_then_the_household_s(self):
+        # Report design §42: the reader's holdings and proposals, the household's combined holdings with whose they are.
+        self.apply("family", [rec("aapl-partner", "asset", "partner", category="stock", account_type="brokerage",
+                                  currency="KRW", value="300000000", valuation_method="market", liquidity="days",
+                                  symbol="AAPL", market="US", quantity="1000", unit_price="300000", average_cost="150000",
+                                  instrument_name="Apple"),
+                              stock("voo-partner", "VOO", 10, 100_000, 90_000)])
+        self.apply("owner", [dict(rec("voo-p", "asset", "partner", category="stock", account_type="brokerage",
+                                      currency="KRW", value="1000000", valuation_method="market", liquidity="days",
+                                      symbol="VOO", market="KR", quantity="10", unit_price="100000", average_cost="90000",
+                                      instrument_name="VOO"))])
+        mine = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="markets", household=HOUSEHOLD)
+        hers = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="markets", household=HOUSEHOLD,
+                            audience="partner")
+        self.assertEqual({p["symbol"] for p in hers["own_holdings"]["positions"]}, {"AAPL", "VOO"})
+        self.assertNotIn("005930", {p["symbol"] for p in hers["own_holdings"]["positions"]})
+        self.assertEqual(mine["holdings"]["total"], hers["holdings"]["total"])          # One household, either side.
+        # Her AAPL is above the single-company limit of her own portfolio: the trim is hers, the client's is his.
+        self.assertIn("AAPL", [p["symbol"] for p in (hers["advice"]["concentration"] or {}).get("positions", [])])
+        self.assertNotIn("AAPL", [p["symbol"] for p in (mine["advice"]["concentration"] or {}).get("positions", [])])
+        page = render(hers)[1]
+        order = [page.index(t) for t in ("나의 투자·시장", "보유 종목 점검", "우리 집 투자", "두 분의 보유 종목")]
+        self.assertEqual(order, sorted(order))
+        self.assertIn("나의 보유 종목 평가액", page)
+        self.assertIn("두 분이 함께 가진 종목은 VOO", page)
+        # Codex review 2026-11-08: the household-wide opinions are checked again on the reader's own holdings. An add
+        # on her AAPL (above her own limit) gives way to the code's trim; her card's gain is hers alone.
+        add = {"stance": "add", "reason": "실적이 좋습니다.", "alternative": "", "reconsider": "", "memo": "",
+               "condition": "", "principles": [], "links": [], "by_code": False, "owner": "partner"}
+        shown = narrative.own_opinions(hers, {"AAPL": add, "VOO": dict(add, stance="hold")})
+        self.assertEqual((shown["AAPL"]["stance"], shown["AAPL"]["by_code"]), ("trim", True))
+        self.assertEqual(shown["VOO"]["stance"], "hold")
+        self.assertNotIn("005930", shown)                                              # The client's holding.
+        # A holding both members hold is opined on per member (Codex review 2026-11-08): each letter takes its own.
+        keys = {p["key"] for p in mine["narrative_holdings"]["positions"] if p["symbol"] == "VOO"}
+        self.assertEqual(keys, {"VOO@self", "VOO@household_member_1"})
+        per_member = {"VOO@self": dict(add, stance="hold", reason="고객 쪽", owner="self"), "VOO@household_member_1": dict(
+            add, stance="trim", reason="배우자 쪽")}
+        # An opinion written on the other member's position never shows under the reader's same plain key.
+        self.assertNotIn("VOO", narrative.own_opinions(hers, {"VOO": dict(add, stance="hold", owner="self")}))
+        self.assertEqual(narrative.own_opinions(mine, per_member)["VOO"]["reason"], "고객 쪽")
+        self.assertEqual(narrative.own_opinions(hers, per_member)["VOO"]["reason"], "배우자 쪽")
+        # An opinion put back after failing verification is not shown; a must-opine holding gets the code's instead.
+        caveated = {"VOO@household_member_1": dict(add, stance="hold", memo="원장이나 출처에서 확인되지 않은 수치가 있습니다"),
+                    "AAPL": dict(add, stance="hold", reason="9876억 원", memo="확인되지 않은 수치")}
+        shown = narrative.own_opinions(hers, caveated)
+        self.assertNotIn("VOO", shown)
+        self.assertEqual((shown["AAPL"]["by_code"], shown["AAPL"]["stance"]), (True, "trim"))
+        # Restored for a reason with no memo text (ref codes in the prose): the explicit mark keeps it out too.
+        restored, _ = narrative.restore(dict(narrative.with_blocks({}), holdings=[], proposal_notes=[], order=[],
+                                             insights=[], watch=[], experiences=[]),
+                                        ["holdings[0]:ref-in-prose"],
+                                        {"holdings": [{"symbol": "VOO@household_member_1", "stance": "hold",
+                                                       "reason": "R1에 따르면 보유액은 9876억 원입니다.", "alternative": "",
+                                                       "reconsider": "", "refs": [], "principles": []}]})
+        self.assertTrue(restored["holdings"][0]["restored"])
+        quiet = {"VOO@household_member_1": dict(add, stance="hold", memo="", restored=True)}
+        self.assertNotIn("VOO", narrative.own_opinions(hers, quiet))
+        own = report_html._own(hers)["sectors"]["securities"]
+        self.assertEqual(own["unrealized_gain"], sum((p["unrealized_gain"] for p in hers["own_holdings"]["positions"]),
+                                                     Decimal(0)))
+        self.assertIsNone(own["hermes"])
+
     def test_household_facts_swap_and_proposal_history_is_kept_apart(self):
         from smith import perspective
         household = {"birth_year": 1989, "birth_month": 8, "partner_birth_year": 1992, "occupational_plan": "db",

@@ -66,7 +66,7 @@ logger = logging.getLogger(__name__)
 # v32: no per-sentence law caveat; the footer says it once (user decision 2026-11-02); the check no longer asks for it.
 # v33: holdings[].week_change and index_moves; a holding that moved 10% or more opens its reason with why (2026-11-03).
 # v34: tax.realized_this_year, this year's sales with their estimated gains and the deduction left (2026-11-03).
-PROMPT_VERSION = "narrative-v35"   # v35: household_member_1 is the spouse; the pension stack is the household's (2026-11-08).
+PROMPT_VERSION = "narrative-v36"   # v36: the household paragraph of a per-person edition (§42); v35: household_member_1 is the spouse.
 MODEL = headless.MODEL
 # A runaway guard, not a cost limit (flat-rate subscription): the markets day cost 4.39 USD on 2026-10-27 and, with a
 # payload a fifth larger, ran past 5.00 on 2026-11-03 (error_max_budget_usd), so that report went out without opinions.
@@ -102,6 +102,7 @@ _BLOCK = lambda limit: {"type": "object", "additionalProperties": False, "requir
 NARRATIVE_SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False,
     # `experiences` is optional in the output: only the household theme writes it, and an absent list is empty.
+    # `household` is optional too: only a per-person edition writes it, and an absent block reads as empty.
     "required": ["situation", "direction", "portfolio", "order", "proposal_notes", "holdings", "insights", "watch"],
     # Length limits are about a quarter of the v13 ones (user review 2026-10-18, twice: the mails read long, then
     # "keep a quarter of this"); headless.prune trims at a sentence end, so a block over its limit loses its
@@ -109,12 +110,15 @@ NARRATIVE_SCHEMA: dict[str, Any] = {
     "properties": {
         "situation": _BLOCK(300),
         "direction": _BLOCK(220),
+        # The household paragraph of a per-person edition (report design §42): both members' letters carry it.
+        "household": _BLOCK(260),
         "portfolio": {"type": "object", "additionalProperties": False, "required": ["text", "refs", "principles"],
                       "properties": {"text": _TEXT(450), "refs": _REFS, "principles": _PRINCIPLE_IDS}},
         "holdings": {"type": "array", "maxItems": research.MAX_HOLDING_TOPICS, "items": {
             "type": "object", "additionalProperties": False,
             "required": ["symbol", "stance", "reason", "alternative", "reconsider", "refs", "principles"],
-            "properties": {"symbol": _TEXT(20), "stance": _TEXT(8), "reason": _TEXT(160), "alternative": _TEXT(120),
+            # 40: a per-person edition's key carries the member's alias ("VOO@household_member_1", §42).
+            "properties": {"symbol": _TEXT(40), "stance": _TEXT(8), "reason": _TEXT(160), "alternative": _TEXT(120),
                            "reconsider": _TEXT(100), "refs": _REFS, "principles": _PRINCIPLE_IDS}}},
         "order": {"type": "array", "maxItems": 12, "items": _TEXT(40)},
         "proposal_notes": {"type": "array", "maxItems": 3, "items": {
@@ -404,6 +408,12 @@ Write:
   numbers with the most important outside changes. The bottom line.
 - direction {text, refs}: one or two sentences on the long-range path (home move, lease deposit return,
   retirement) and whether a change of course is needed.
+- household {text, refs}: only when `per_person_letter` is true, else text "" and no refs. Both members receive
+  this paragraph in their own letters (each called 고객님 there), under "우리 집 …": 2 sentences on where the two of
+  them stand together on the day's theme, from the household-wide figures (for the pension stack: the combined
+  readiness at each retirement age and what must be held outside the pensions). Write "두 분" or "우리 집", never
+  "고객님", never one member's own accounts, pay or proposals (each letter shows those in its own section), and
+  no figure that belongs to one member alone.
 - order: the proposal keys in the order the client should act on them (most important first).
 - proposal_notes: at most 3, for the proposals where the research changes the picture most, one sentence of market or policy
   context with refs. At most one note per proposal key. Skip proposals with nothing to add. A proposal's
@@ -432,7 +442,11 @@ Write:
   would change the opinion. Prices are never certain: label target prices and estimates as forecasts. Code
   attaches add_condition to every add opinion, so do not repeat it. principles: the 1-3 principle ids the
   opinion applies (for example BUF-CIRCLE for a company the client may not understand, BUF-INDEX for a
-  broad fund). Opinions must agree with the policy: do not advise adding to a holding that breaches the
+  broad fund). When `per_person_letter` is true the holdings are each member's own positions (`owner` is the
+  member's alias; share, value, gain and must_opine are that member's own), a symbol both members hold appears once
+  per member with its own symbol value (ending in @alias), and each member reads, in their own letter, only the
+  opinions on their own entries: write one opinion per entry by its symbol value, on that entry's own figures, and
+  never say whose account or which member (고객님, 배우자분, 본인 명의, 아내, 남편; code rejects such an opinion). Opinions must agree with the policy: do not advise adding to a holding that breaches the
   single-company limit, and do not justify an opinion by a price forecast alone (BUF-NO-MACRO,
   BUF-MR-MARKET). A holding with must_opine true (above the limit, or the employer's stock) must get an
   opinion, written first and in the most depth: the double concentration, the trim schedule from
@@ -494,6 +508,8 @@ def build_payload(view: Any, data: dict[str, Any], brief: dict[str, Any] | None,
     if edition is None:
         return payload
     payload["edition_focus"] = edition.focus
+    # A per-person edition (report design §42) also gets the household paragraph both members' letters share.
+    payload["per_person_letter"] = bool(edition.personal)
     if edition.key != "markets":
         payload.update(holdings=[], holding_quantity_changes=None, index_moves=None, principles=[], policy_checks=[],
                        portfolio_facts=None)
@@ -877,15 +893,19 @@ def holdings_payload(view: Any, data: dict[str, Any]) -> dict[str, Any]:
 
     def ratio(value: Decimal | None) -> str | None:
         return None if value is None else f"{value:.4f}"
-    # "symbol" is the opinion key (symbol, or symbol.market when listed twice). A manual name is free text
-    # and stays local: the payload carries the provider's name or the ticker.
+    # "symbol" is the opinion key (symbol, or symbol.market when listed twice; a per-person edition's position both
+    # members hold also carries the member: "VOO@self", report design §42). A manual name is free text and stays
+    # local: the payload carries the provider's name or the ticker.
+    listed = (data.get("narrative_holdings") or review)["positions"]
     positions = [{"symbol": p["key"], "ticker": p["symbol"], "name": p["public_name"], "market": p["market"],
+                  **({"owner": view.owner_aliases.get(p["owner"], p["owner"])} if "owner" in p else {}),
                   "currency": p["currency"], "quantity": num(p["quantity"]), "unit_price": num(p["unit_price"]),
                   "average_cost": num(p["average_cost"]), "value": won(p["value"]), "share": ratio(p["share"]),
                   "return_on_cost": ratio(p["return_on_cost"]), "unrealized_gain": won(p["unrealized_gain"]),
                   "kind": principles.kind(p), "overseas_capital_gains_tax": p["overseas"],
                   "above_concentration_limit": p["concentrated"], "employer_stock": p.get("employer", False),
-                  "must_opine": p.get("must_opine", p["concentrated"]), "research_topic": refs.get(p["key"]),
+                  "must_opine": p.get("must_opine", p["concentrated"]),
+                  "research_topic": refs.get(p.get("base_key", p["key"])),
                   "add_condition": add_condition(data, p),
                   # The latest official quarter (fundamentals.py), all figures computed by code.
                   "fundamentals": fundamentals.summary((data.get("fundamentals") or {}).get(f"{p['market']}:{p['symbol']}"),
@@ -895,7 +915,7 @@ def holdings_payload(view: Any, data: dict[str, Any]) -> dict[str, Any]:
                                                   data["as_of"].date()),
                   # The week's price-and-FX change on the shares held (report design §39), markets day only.
                   "week_change": ratio(week.get((p["market"], p["symbol"])))}
-                 for p in review["positions"] if not p["hermes"] and p["key"] in refs]
+                 for p in listed if not p["hermes"] and p.get("base_key", p["key"]) in refs]
     plan = data["advice"].get("concentration")
     found, baseline = data.get("holding_quantity_changes"), data.get("baseline")
     # By ticker and market, like the research queries: a manual name is free text and stays local.
@@ -1163,7 +1183,7 @@ def apply_rewrites(current: dict[str, Any], paths: list[str], second: dict[str, 
     applied = []
     for path in dict.fromkeys(paths):
         if path in SCALAR_BLOCKS:
-            if path not in bad and second[path]["text"]:
+            if path not in bad and (second.get(path) or {}).get("text"):
                 out[path] = second[path]
                 applied.append(path)
             continue
@@ -1211,8 +1231,13 @@ MEMOS = {"no-source": "출처가 확인되지 않은 외부 사실이 들어 있
          "ungrounded-number": "원장이나 출처에서 확인되지 않은 수치가 있습니다"}
 # Blocks dropped for these reasons are never restored: they are unusable for the client.
 # Never restored from the raw output when the repair fails too: a repeat of last week's title would otherwise come
-# back unchecked and unchanged (Codex review 2026-10-27).
-UNUSABLE = ("duplicate", "invalid-holding", "add-over-limit", "missing-opinion", "internal-term", "repeats-last-report")
+# back unchecked and unchanged (Codex review 2026-10-27). An owner word in a block both members read would point at
+# the wrong person in one of the two letters (report design §42).
+UNUSABLE = ("duplicate", "invalid-holding", "add-over-limit", "missing-opinion", "internal-term", "repeats-last-report",
+            "owner-word")
+# Words that say whose account or which member: a shared block (a per-person edition's holding opinions and household
+# paragraph) reads in both members' letters, each calling the reader 고객님 (report design §42).
+OWNER_WORDS = re.compile(r"고객님|배우자|본인\s*명의|아내|남편|와이프")
 # Blocks dropped for these reasons come back without a memo when the repair leaves them: the wording is merely not as
 # natural as it could be, and the first reader still gets to mark them (report design §34).
 SOFT = ("unnatural-korean",)
@@ -1236,7 +1261,7 @@ def restore(verified: dict[str, Any], dropped: list[str], raw: dict[str, Any]) -
         # empty remainder stays dropped.
         fix = neutralize_law_tone if reason == "law-tone" else (lambda text: text)
         if path in SCALAR_BLOCKS:
-            block = raw[path]
+            block = raw.get(path) or dict(_EMPTY_BLOCK)
             text = fix(readable(block["text"]))
             if not text:
                 continue
@@ -1259,7 +1284,8 @@ def restore(verified: dict[str, Any], dropped: list[str], raw: dict[str, Any]) -
         if reason == "law-tone" and not any(item.get(name) for name in ("body", "reason", "context", "item", "why")):
             continue
         if reason not in SOFT:
-            item["memo"] = memo
+            # Marked explicitly: a reason without a memo text leaves the memo empty (Codex review 2026-11-08).
+            item["memo"], item["restored"] = memo, True
         out[field].append(item)
         if field == "proposal_notes":
             keys.add(item["key"])
@@ -1306,7 +1332,7 @@ def merge(first: dict[str, Any], first_dropped: list[str], repaired: dict[str, A
     for entry in first_dropped:
         path, reason, *detail = entry.split(":")
         if path in SCALAR_BLOCKS:
-            if repaired[path]["text"]:
+            if (repaired.get(path) or {}).get("text"):
                 merged[path] = repaired[path]
                 continue
             remaining.append(entry)
@@ -1400,7 +1426,7 @@ def _precise(written: str, value: Decimal) -> bool:
 
 def polish_output(output: dict[str, Any]) -> dict[str, Any]:
     """`polish` applied to every prose field of a verified narrative."""
-    out = dict(output)
+    out = with_blocks(output)
     for field in SCALAR_BLOCKS:
         out[field] = {**out[field], "text": polish(out[field]["text"])}
     for field in _LISTS:
@@ -1459,7 +1485,14 @@ _CERTAINTY = [re.compile(p) for p in (
 )]
 _HOME_COUNT = re.compile(r"(?:다주택|1주택|2주택|무주택)(?:자|가구|세대)?(?:이십니다|입니다|이므로|이기 때문|에 해당합니다)")
 _CONDITIONAL = ("따라", "경우", "수 있", "확인", "판정", "여부")
-SCALAR_BLOCKS = ("situation", "direction", "portfolio")
+SCALAR_BLOCKS = ("situation", "direction", "portfolio", "household")
+_EMPTY_BLOCK = {"text": "", "refs": []}
+
+
+def with_blocks(output: dict[str, Any]) -> dict[str, Any]:
+    """The output with every scalar block present: an optional block left out (`household` outside a per-person
+    edition, or an output written before it existed) reads as an empty block."""
+    return {**output, **{field: output.get(field) or dict(_EMPTY_BLOCK) for field in SCALAR_BLOCKS}}
 TAX_PROPOSALS = ("pension-credit", "overseas-harvest", "isa-open")  # Proposals computed by Smith's tax rules.
 # A daily edition's lists are cut in code too, not only asked for in the prompt (overview, other days).
 EDITION_LIMITS = {"insights": (2, 1), "watch": (2, 2), "experiences": (0, 2)}  # (overview, themed day)
@@ -1487,6 +1520,8 @@ _REASONS = {"unknown-ref": "cites a ref that is not in the input",
             "missing-opinion": "gives no opinion on a holding whose must_opine is true (above the single-company "
                                "limit or the employer's stock); write it, by its symbol",
             "ungrounded-number": "uses numbers (or signs) that are not in the input or its cited refs",
+            "owner-word": "says whose account or which member (고객님, 배우자분, 본인 명의, 아내, 남편) in a block both members "
+                          "read in their own letters; write about the holding itself, or about 두 분 together",
             "repeats-last-report": "repeats, by title, an insight, watch item or experience a recent report on this theme "
                                    "already gave (last_report, or a title under its earlier); write what is new, or leave "
                                    "it out",
@@ -1504,6 +1539,7 @@ def describe(problem: str) -> str:
 
 def verify(output: dict[str, Any], payload: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     """Check every block; return (verified output, dropped entries "path:reason[:detail]")."""
+    output = with_blocks(output)
     known_refs = _known_refs(payload)
     brief_items = {item["ref"]: item for item in (payload["brief"] or {}).get("items_untrusted", [])}
     official = {ref for ref, item in brief_items.items() if item.get("tier") == "official"}
@@ -1552,8 +1588,13 @@ def verify(output: dict[str, Any], payload: dict[str, Any]) -> tuple[dict[str, A
         return True
 
     result: dict[str, Any] = {}
+    shared = bool(payload.get("per_person_letter"))   # Both members read the opinions and the household paragraph.
     for field in SCALAR_BLOCKS:
         block = output[field]
+        if field == "household" and OWNER_WORDS.search(block["text"]):
+            dropped.append("household:owner-word")
+            result[field] = {**block, "text": "", "refs": []}
+            continue
         result[field] = block if check(field, [block["text"]], block["refs"]) else {**block, "text": "", "refs": []}
     held = {h["symbol"]: h for h in payload.get("holdings", [])}
     opinions, seen_symbols = [], set()
@@ -1563,6 +1604,8 @@ def verify(output: dict[str, Any], payload: dict[str, Any]) -> tuple[dict[str, A
             dropped.append(f"holdings[{i}]:invalid-holding")
         elif h["symbol"] in seen_symbols:
             dropped.append(f"holdings[{i}]:duplicate")
+        elif shared and OWNER_WORDS.search(" ".join((h["reason"], h["alternative"], h["reconsider"]))):
+            dropped.append(f"holdings[{i}]:owner-word")
         elif h["stance"] == "add" and position["above_concentration_limit"]:
             dropped.append(f"holdings[{i}]:add-over-limit")    # The policy forbids it; code, not the prompt, says so.
         elif (reason := _holding_source(h, position, brief_items)) is not None:
@@ -1903,7 +1946,7 @@ def attach(data: dict[str, Any], result: dict[str, Any] | None, brief: dict[str,
     links = _links(data, brief)
     # Even without a narrative (a failed or timed-out call) the holdings that must get an opinion get the code's:
     # the employer's stock never reads "의견 없음" (report design §17.4).
-    narrative: dict[str, Any] = {"status": status, "situation": "", "direction": "", "portfolio": "",
+    narrative: dict[str, Any] = {"status": status, "situation": "", "direction": "", "portfolio": "", "household": "",
                                  "holdings": _opinions(data, [], links) if "holdings" in data else {},
                                  "insights": [], "watch": [], "experiences": []}
     if result is not None:
@@ -1923,6 +1966,9 @@ def attach(data: dict[str, Any], result: dict[str, Any] | None, brief: dict[str,
         memos = result.get("memos", {})
         narrative.update(
             situation=out["situation"]["text"], direction=out["direction"]["text"],
+            # A household paragraph put back after failing verification carries a caveat only this letter could show:
+            # both letters share it, so it is left out instead (Codex review 2026-11-08).
+            household="" if "household" in memos else (out.get("household") or {}).get("text", ""),
             situation_memo=memos.get("situation", ""), direction_memo=memos.get("direction", ""),
             situation_links=[links[r] for r in out["situation"]["refs"] if r in links],
             portfolio=out["portfolio"]["text"], portfolio_memo=memos.get("portfolio", ""),
@@ -1943,7 +1989,7 @@ def _opinions(data: dict[str, Any], items: list[dict[str, Any]], links: dict[str
     precondition code computed for that holding. Hermes-managed positions never get an opinion. A holding
     that must get one (above the limit, or the employer's stock) and still has none after the repair gets
     the opinion code writes from the concentration plan (report design §17.4), marked `by_code`."""
-    positions = {p["key"]: p for p in data["holdings"]["positions"] if not p["hermes"]}
+    positions = {p["key"]: p for p in (data.get("narrative_holdings") or data["holdings"])["positions"] if not p["hermes"]}
     found = {}
     for h in items:
         position = positions.get(h["symbol"])
@@ -1952,12 +1998,51 @@ def _opinions(data: dict[str, Any], items: list[dict[str, Any]], links: dict[str
         own = h.get("memo") != MEMOS["other-holding-source"]
         found[h["symbol"]] = {
             "stance": h["stance"], "reason": h["reason"], "alternative": h["alternative"], "reconsider": h["reconsider"],
-            "memo": h.get("memo", ""), "condition": add_condition(data, position) if h["stance"] == "add" else "",
+            "memo": h.get("memo", ""), "restored": bool(h.get("restored")),
+            # Whose position the opinion was written on, in the ledger's own terms (a per-person edition, §42).
+            "owner": position.get("owner"),
+            "condition": add_condition(data, position) if h["stance"] == "add" else "",
             "principles": principles.cited(h.get("principles", [])),
             "links": [links[r] for r in h["refs"] if r in links] if own else [], "by_code": False}
-    for key, position in positions.items():
-        if position.get("must_opine") and key not in found:
-            found[key] = code_opinion(data, position)
+    # The code's opinions come from the concentration plan, which is the reader's own (report design §42): only the
+    # reader's own positions get one here, on the same scope as the plan (Codex review 2026-11-08).
+    own = data.get("own_holdings") or data["holdings"]
+    for position in own["positions"]:
+        if not position["hermes"] and position.get("must_opine") and position["key"] not in found:
+            found[position["key"]] = code_opinion(data, position)
+    return found
+
+
+def own_opinions(data: dict[str, Any], opinions: dict[str, Any]) -> dict[str, Any]:
+    """The opinions a letter shows on the reader's own holdings (report design §42). The narrative writes them once
+    over the household's holdings, so each is checked again on the reader's scope: an add on a holding above the
+    reader's own limit is dropped (the reader's trim proposal says the opposite), an add carries the precondition
+    from the reader's own facts, a code opinion made on another scope is made again, and every holding that must get
+    an opinion on the reader's own figures gets the code's (Codex review 2026-11-08)."""
+    own = data.get("own_holdings") or data["holdings"]
+    # A position both members hold was opined on per member, keyed with the reader's alias in the client's narrative;
+    # and every opinion names the member whose position it was written on, so a plain key that was the other
+    # member's then can never be taken for the reader's now (Codex review 2026-11-08).
+    reader = data.get("audience", "self")
+    tag = "self" if reader == "self" else "household_member_1"
+    found = {}
+    for position in own["positions"]:
+        if position["hermes"]:
+            continue
+        opinion = opinions.get(f"{position['key']}@{tag}") or opinions.get(position["key"])
+        if opinion and opinion.get("owner", "self" if reader == "self" else None) != reader:
+            opinion = None
+        # An opinion put back after failing verification (`restored`, whatever its memo says) is not shown in a
+        # per-person letter: its caveat would not travel with it to the other member's letter (Codex review 2026-11-08).
+        if opinion and (opinion.get("by_code") or opinion.get("restored") or opinion.get("memo")
+                        or (opinion["stance"] == "add" and position.get("concentrated"))):
+            opinion = None
+        if opinion and opinion["stance"] == "add":
+            opinion = {**opinion, "condition": add_condition(data, position)}
+        if opinion is None and position.get("must_opine"):
+            opinion = code_opinion(data, position)
+        if opinion:
+            found[position["key"]] = opinion
     return found
 
 
@@ -1976,9 +2061,13 @@ def code_opinion(data: dict[str, Any], position: dict[str, Any]) -> dict[str, An
                   + f"초과분 약 {short_won(excess)}을 {quarters}분기에 걸쳐 분기마다 약 {short_won(per_quarter)}씩 정리하는 것이 "
                     "Smith의 기준입니다.")
         stance = "trim"
-    else:
+    elif employer:
         reason = ("월급과 주식 보상이 나오는 회사의 주식이라 인적 자본과 금융 자산이 한 회사에 겹쳐 있습니다(이중 집중). 비중은 "
                   "한도 안이므로 유지하되, 앞으로 받는 자사주 보상은 받는 즉시 분산하는 원칙을 권합니다.")
+        stance = "hold"
+    else:
+        # Not in the plan and not the employer's: within the limit (never claim a double concentration that is not there).
+        reason = f"주식의 {position['share'] * 100:.0f}%로 한 종목 한도 {limit * 100:.0f}% 안이라 유지합니다."
         stance = "hold"
     return {"stance": stance, "reason": reason,
             "alternative": ("정리한 돈은 넓은 지수펀드(코어)로 옮기고, 세금은 종목의 시장별 규칙을 확인하십시오. "

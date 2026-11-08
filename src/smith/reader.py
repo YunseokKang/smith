@@ -143,12 +143,13 @@ them; a block that holds "- " or "1. " lines is already a list.
 """
 
 SECTIONS = {"situation": "이번 주 판단", "direction": "방향", "portfolio": "투자 전체 의견", "holdings": "종목 의견",
-            "proposal_notes": "제안 설명", "insights": "인사이트", "watch": "지켜볼 것", "experiences": "경험 추천"}
+            "proposal_notes": "제안 설명", "insights": "인사이트", "watch": "지켜볼 것", "experiences": "경험 추천",
+            "household": "우리 집 문단"}
 # The prose fields of each list item, in reading order (smith.narrative's schema).
 ITEM_FIELDS = {"holdings": ("reason", "alternative", "reconsider"), "proposal_notes": ("context",),
                "insights": ("title", "body", "implication"), "watch": ("item", "why"),
                "experiences": ("title", "body", "when")}
-SCALARS = ("situation", "direction", "portfolio")
+SCALARS = ("situation", "direction", "portfolio", "household")   # household: a per-person edition's (§42).
 
 # reader({"edition": {...} | None, "blocks": [...]}) -> {"notes", "raw_notes", "overall", "model", ...}
 Reader = Callable[[dict[str, Any]], dict[str, Any]]

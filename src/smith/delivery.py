@@ -203,14 +203,20 @@ def publish(db: Path, *, recipient: str, credentials: tuple[str, str, str], now:
         return {"report_id": report_id, "status": "skipped", "subject": subject, "error_code": "claim-lost"}
     # The proposals the message carried are recorded in the same transaction as its final status.
     shown = [snapshot(p) for p in data["advice"]["proposals"]]
+    # The household paragraph and the holding opinions of a per-person edition go on to the spouse's letter (report
+    # design §42): the narrative is written once, over the household's holdings.
+    story = data.get("narrative") or {}
+    # With the ledger time they were verified on, so the spouse's letter is built on the same snapshot (Codex review).
+    shared = {"household_story": story.get("household") or None, "opinions": story.get("holdings") or None,
+              "snapshot_at": now}
     try:
         mail_html, images = inline_images(html)
         message_id = sender(credentials, recipient=recipient, subject=subject, html=mail_html, text=_text(subject),
                             **({"images": images} if images else {}))
     except gmail.MailError as error:
-        return _finish(db, report_id, "unknown" if error.uncertain else "failed", subject=subject, digest=digest,
-                       error_code=error.code, shown=shown)
-    return _finish(db, report_id, "sent", subject=subject, digest=digest, message_id=message_id, shown=shown)
+        return {**_finish(db, report_id, "unknown" if error.uncertain else "failed", subject=subject, digest=digest,
+                          error_code=error.code, shown=shown), **shared}
+    return {**_finish(db, report_id, "sent", subject=subject, digest=digest, message_id=message_id, shown=shown), **shared}
 
 
 _DATA_PNG = re.compile(r'src="data:image/png;base64,([A-Za-z0-9+/=]+)"')

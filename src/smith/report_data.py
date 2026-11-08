@@ -70,13 +70,15 @@ def build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetim
         return _build_report(conn, as_of=local_time(as_of, tz), known_at=known_at,
                              baseline=None if baseline is None else local_time(baseline, tz), kind=kind,
                              household=perspective.household_for(household, audience), schedule=schedule,
-                             audience=audience)
+                             audience=audience, client_household=household)
 
 
 def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetime,
                   baseline: datetime | None, kind: str, household: dict[str, Any] | None,
-                  schedule: dict[str, Any] | None, audience: str = "self") -> dict[str, Any]:
-    view = perspective.as_seen_by(load_view(conn, as_of=as_of, known_at=known_at), audience)
+                  schedule: dict[str, Any] | None, audience: str = "self",
+                  client_household: dict[str, Any] | None = None) -> dict[str, Any]:
+    base = load_view(conn, as_of=as_of, known_at=known_at)
+    view = perspective.as_seen_by(base, audience)
     change = None if baseline is None else decompose(conn, baseline, as_of, known_at)
     salary = (household or {}).get("annual_gross_salary")
     pay = future_income.inflows(view, salary=None if salary is None else Decimal(salary))
@@ -85,7 +87,13 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     # already carried by the salary (report design §17.4), so they always get an opinion.
     employer = frozenset(s["symbol"] for s in expected["same_stock"] if s["symbol"])
     review = holdings.review(view, employer)
+    # The reader's own securities (report design §42): their proposals (concentration, the goal-stocks glide) and
+    # their "나의 투자" section; the household review above stays for the narrative and the household section.
+    own = holdings.review(view, employer, owner="self")
     kpis, sectors = _kpis(view, change, pay, household), _sectors(view, household)
+    # The home move is the client's goal on the client's resources plus the partner's property (§17.3): seen from
+    # the spouse it is still that plan, owned by the other member, never re-planned on the spouse's money (§42).
+    kpis["home_progress"] = _client_home(base, kpis["home_progress"], audience, client_household)
     # Official transactions matched to each property (local data; only derived figures leave this PC).
     market = realestate.analyze(ledger.load_deals(conn, since=as_of.date() - timedelta(days=400)), today=as_of.date())
     for prop in sectors["real_estate"]["properties"]:
@@ -109,7 +117,7 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     active = perspective.proposals_for(ledger.active_proposals(conn), audience)
     advice = proposals.build(view, kpis, sectors, active=active, household=household, pay=pay,
                              dividends=yearly_dividends,
-                             review=review, lease_plans=lease_plans, pension_stack=pension_stack)
+                             review=own, lease_plans=lease_plans, pension_stack=pension_stack)
     # The status badge stays household-wide: urgent proposals of every area, whatever today's theme.
     advice["household_urgent"] = [p.key for p in advice["proposals"] if p.priority == 1]
     # A daily edition carries only its own proposal rules and their pending judgements; each rule belongs
@@ -135,10 +143,17 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     edition = editions.of(kind)
     shows_holdings = kind == "monday" if edition is None else "holdings" in edition.sections
     moved = holding_changes(conn, baseline, as_of, known_at) if baseline is not None and shows_holdings else None
+    # The rows read the ledger itself, so their owner is the stored one: the reader's are the audience's (§42).
+    own_moved = None if moved is None else [row for row in moved if row["owner"] == audience]
     data = {"kind": kind, "audience": audience, "as_of": as_of, "baseline": baseline, "kpis": kpis, "schedule": schedule,
             "change": change, "timeline": _timeline(view, pay), "sectors": sectors, "holdings": review,
+            "own_holdings": own,
+            # A per-person edition's narrative opines on each member's own positions (§42), once for both letters.
+            "narrative_holdings": holdings.per_owner(view, employer) if editions.personalized(kind) else None,
             "holding_quantity_changes": None if moved is None else quantity_changes(moved),
             "holding_price_moves": None if moved is None else price_moves(moved, baseline),
+            "own_holding_quantity_changes": None if own_moved is None else quantity_changes(own_moved),
+            "own_holding_price_moves": None if own_moved is None else price_moves(own_moved, baseline),
             # The indices over the same week, for the panel's market comparison (report design §38): the closes before
             # each report's day, as a 06:00 report holds the previous session's prices.
             "index_moves": None if moved is None else evidence.index_moves(
@@ -185,6 +200,10 @@ def _edition_figures(data: dict[str, Any]) -> dict[str, Any]:
     listed = [p for p in data["holdings"]["positions"] if not p["hermes"]]
     gains = [p["unrealized_gain"] for p in listed]
     known = [g for g in gains if g is not None]
+    # The reader's own listed holdings, for a per-person markets day's hero (report design §42).
+    own = [p for p in data["own_holdings"]["positions"] if not p["hermes"]]
+    own_gains = [p["unrealized_gain"] for p in own]
+    own_known = [g for g in own_gains if g is not None]
     summary = data["view"].summary
     net = data["kpis"]["monthly_net"]
     # The official-trade estimate of the whole property line is known only when every property has enough
@@ -207,6 +226,9 @@ def _edition_figures(data: dict[str, Any]) -> dict[str, Any]:
         # Like the holdings section: a partial sum over the holdings whose cost is known, with the counts.
         "listed_gain": sum(known, Decimal(0)) if known else None,
         "listed_gain_counted": len(known), "listed_gain_missing": len(gains) - len(known),
+        "own_listed_count": len(own), "own_listed_value": _total(p["value"] for p in own) if own else None,
+        "own_listed_gain": sum(own_known, Decimal(0)) if own_known else None,
+        "own_listed_gain_counted": len(own_known), "own_listed_gain_missing": len(own_gains) - len(own_known),
         # What is left after spending and the transfers to the client's own savings and investment accounts.
         "monthly_left": None if net is None or "cash_flow" in summary.incomplete_areas else net - summary.monthly_transfers,
     }
@@ -278,7 +300,8 @@ def holding_changes(conn: sqlite3.Connection, t0: datetime, t1: datetime, known_
             start = (None if earlier is None or currency not in rates0
                      else Decimal(earlier.fields["value"]) * rates0[currency])
             end = None if later is None or currency not in rates1 else Decimal(later.fields["value"]) * rates1[currency]
-            rows.append({"record_id": record_id, "name": record.fields.get("instrument_name") or record.fields["symbol"],
+            rows.append({"record_id": record_id, "owner": record.owner_id,
+                         "name": record.fields.get("instrument_name") or record.fields["symbol"],
                          "symbol": record.fields["symbol"], "market": record.fields.get("market"),
                          "currency": currency, "hermes": record.fields.get("managed_by") == "hermes", "start": start, "end": end,
                          "quantity_start": _quantity(earlier), "quantity_end": _quantity(later),
@@ -641,6 +664,17 @@ def _kpis(view: LedgerView, change: dict[str, Any] | None, pay: list[future_inco
     return {"net_worth": summary.net_worth, "net_worth_change": None if change is None else change["total"],
             "monthly_net": monthly_net, "immediate": immediate, "immediate_months": months,
             "home_progress": home}
+
+
+def _client_home(base: LedgerView, home: dict[str, Any] | None, audience: str,
+                 household: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The home plan as the client's (report design §42): the reader's own when the reader is the client, else the
+    plan built from the unswapped ledger and the client's [household], marked as the other member's (`owner`)."""
+    if audience == "self":
+        return None if home is None else {**home, "owner": "self"}
+    salary = (household or {}).get("annual_gross_salary")
+    client = _home_progress(base, future_income.inflows(base, salary=None if salary is None else Decimal(salary)), household)
+    return None if client is None else {**client, "owner": audience}
 
 
 def _home_progress(view: LedgerView, pay: list[future_income.Inflow],

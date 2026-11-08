@@ -68,7 +68,8 @@ class Need:
     owner: str = "self"
 
 
-def review(view: LedgerView, employer_symbols: frozenset[str] | set[str] = frozenset()) -> dict[str, Any]:
+def review(view: LedgerView, employer_symbols: frozenset[str] | set[str] = frozenset(),
+           owner: str | None = None) -> dict[str, Any]:
     """Listed holdings, largest first, and portfolio figures. Lots of one instrument (market, symbol,
     currency) held in several accounts are one position; Hermes-managed lots stay apart. Shares are of all
     the securities Smith may give opinions on, including those without a symbol (`unlisted`); a total that
@@ -76,15 +77,19 @@ def review(view: LedgerView, employer_symbols: frozenset[str] | set[str] = froze
 
     `employer_symbols` are the stocks the client's pay comes in (future_income): holding them stacks the
     financial asset on the human capital already tied to that company, so they are flagged `employer` and,
-    like a holding above the limit, must always get an opinion (`must_opine`)."""
+    like a holding above the limit, must always get an opinion (`must_opine`).
+
+    `owner` limits the review to one member's own securities (a per-person letter's "나의 투자", report design §42),
+    shares then being of that member's portfolio; each position names the `owners` of its lots."""
+    assets = [r for r in view.records if r.kind is Kind.ASSET and (owner is None or r.owner_id == owner)]
     lots: dict[tuple[Any, ...], list[Any]] = {}
-    for record in sorted(view.records, key=lambda r: r.record_id):
+    for record in sorted(assets, key=lambda r: r.record_id):
         f = record.fields
-        if record.kind is Kind.ASSET and f.get("symbol"):
+        if f.get("symbol"):
             lots.setdefault((f.get("market"), f["symbol"], f["currency"], _hermes(record)), []).append(record)
     positions = [_position(view, records) for records in lots.values()]
     mine = [p for p in positions if not p["hermes"]]
-    unlisted = _sum(base_amount(view, r) for r in view.records if r.kind is Kind.ASSET and not r.fields.get("symbol")
+    unlisted = _sum(base_amount(view, r) for r in assets if not r.fields.get("symbol")
                     and r.fields["category"] in SECURITIES and r.fields["liquidity"] in TRADABLE and not _hermes(r))
     listed = _sum(p["value"] for p in mine)
     total = None if listed is None or unlisted is None else listed + unlisted
@@ -108,6 +113,29 @@ def review(view: LedgerView, employer_symbols: frozenset[str] | set[str] = froze
             "overseas_share": overseas / total if total and overseas is not None else None,
             "concentrated": [p["key"] for p in mine if p["concentrated"]],
             "concentration_limit": CONCENTRATION_LIMIT}
+
+
+def per_owner(view: LedgerView, employer_symbols: frozenset[str] | set[str] = frozenset()) -> dict[str, Any]:
+    """Each member's own positions side by side, for the narrative of a per-person edition (report design §42): every
+    position carries its member's own share, value and concentration flags, and its `owner`. A position both members
+    hold appears once per member, its opinion key suffixed with the member's outbound alias ("VOO@self",
+    "VOO@household_member_1"), so each letter takes the opinion written on its reader's own holding (Codex review
+    2026-11-08: one opinion on the combined position carried one member's amounts into the other's letter). The
+    employer's stock is the client's only. `base_key` is the plain key the research topics use."""
+    owners = ["self"] + sorted({r.owner_id for r in view.records if r.kind is Kind.ASSET} - {"self"})
+    reviews = {owner: review(view, employer_symbols if owner == "self" else frozenset(), owner=owner) for owner in owners}
+    held: dict[str, int] = {}
+    for found in reviews.values():
+        for p in found["positions"]:
+            if not p["hermes"]:
+                held[p["key"]] = held.get(p["key"], 0) + 1
+    positions = []
+    for owner, found in reviews.items():
+        for p in found["positions"]:
+            shared = not p["hermes"] and held.get(p["key"], 0) > 1
+            positions.append({**p, "owner": owner, "base_key": p["key"],
+                              "key": f"{p['key']}@{view.owner_aliases.get(owner, owner)}" if shared else p["key"]})
+    return {"positions": positions}
 
 
 def concentration_plan(review: dict[str, Any]) -> dict[str, Any] | None:
@@ -151,7 +179,8 @@ def _position(view: LedgerView, records: list[Any]) -> dict[str, Any]:
             "public_name": (first.get("instrument_name") or first["symbol"]) if public else first["symbol"],
             "market": first.get("market"), "currency": first["currency"], "quantity": quantity,
             "unit_price": price, "average_cost": cost, "value": _sum(base_amount(view, r) for r in records),
-            "lots": len(records), "return_on_cost": (price - cost) / cost if price is not None and cost else None,
+            "lots": len(records), "owners": sorted({r.owner_id for r in records}),
+            "return_on_cost": (price - cost) / cost if price is not None and cost else None,
             "unrealized_gain": _sum(unrealized_gain(view, r) for r in records),
             "overseas": _MARKET_OVERSEAS.get(first.get("market") or ""), "hermes": _hermes(records[0])}
 

@@ -25,7 +25,7 @@ from html import escape
 from typing import Any
 
 from smith.fmt import short_won as _short
-from smith import editions, korean, pension, pension_chart, picks, principles, stress, tax
+from smith import editions, korean, narrative, pension, pension_chart, picks, principles, stress, tax
 from smith.holdings import STANCES
 from smith.proposals import Track
 from smith.realestate import MIN_BASIS
@@ -612,6 +612,11 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
         "stress_summary": lambda: _stress_summary(data["stress"], sectors["real_estate"]),
         "experiences": lambda: _experiences(story),
         "my_pensions": lambda: _my_pensions(data), "household_tax": lambda: _household_tax(advice),
+        # The reader's own holdings and their week (report design §42), and the two of them together.
+        "my_week": lambda: _holdings_week(_own(data), story),
+        "my_holdings": lambda: _holdings(_own(data), {**story, "holdings": narrative.own_opinions(
+            _own(data), story.get("holdings") or {})}, True, quantities=False),
+        "household_holdings": lambda: _household_holdings(data),
     }
     if edition.personal:
         bands += _split_bands(data, edition, renderers, advice, story)
@@ -656,9 +661,55 @@ def _split_bands(data: dict[str, Any], edition: editions.Edition, renderers: dic
     changes = _changes_outside(story, f"{edition.label} — 눈여겨볼 변화")
     if changes:
         bands.append(_band(CANVAS, changes, border=True))
+    # The household paragraph the narrative wrote once for both letters (§42), under the household's title.
+    shared = story.get("household") or ""
+    lead = ("" if not shared else f'<tr><td style="padding:0 0 10px"><div style="font-size:15px;line-height:1.7;'
+                                  f'color:{INK}">{escape(shared)}</div></td></tr>')
     bands.append(_band(CANVAS, _group_title(f"우리 집 {edition.household_label or edition.label}", "두 분을 합쳐 봅니다.")
-                       + "".join(ours), border=True))
+                       + lead + "".join(ours), border=True))
     return bands
+
+
+def _own(data: dict[str, Any]) -> dict[str, Any]:
+    """The report data with the reader's own holdings, week and securities figures (unrealized gains, Hermes) in
+    place of the household's (report design §42; Codex review 2026-11-08: the card's gain total was the household's)."""
+    own = data.get("own_holdings") or data["holdings"]
+    listed = [p for p in own["positions"] if not p["hermes"]]
+    gains = [p["unrealized_gain"] for p in listed]
+    known = [g for g in gains if g is not None]
+    hermes = [p["value"] for p in own["positions"] if p["hermes"] and p["value"] is not None]
+    securities = {**data["sectors"]["securities"], "unrealized_gain": sum(known, Decimal(0)) if known else None,
+                  "unrealized_gain_counted": len(known), "unrealized_gain_missing": len(gains) - len(known),
+                  "hermes": sum(hermes, Decimal(0)) if hermes else None}
+    return dict(data, holdings=own, sectors={**data["sectors"], "securities": securities},
+                holding_price_moves=data.get("own_holding_price_moves"),
+                holding_quantity_changes=data.get("own_holding_quantity_changes"))
+
+
+def _household_holdings(data: dict[str, Any]) -> str:
+    """The two members' listed holdings together (report design §42): the largest by value with whose they are,
+    the shares of the combined portfolio, and the holdings both members hold. Hermes-managed lots stay out."""
+    review = data["holdings"]
+    listed = [p for p in review["positions"] if not p["hermes"] and p["value"] is not None]
+    if not listed:
+        return ""
+
+    def whose(p: dict[str, Any]) -> str:
+        owners = p.get("owners") or []
+        return "두 분" if len(owners) > 1 else "본인" if owners == ["self"] else "배우자"
+    top, rest = listed[:4], listed[4:]
+    segments = [(str(p["name"])[:12], p["value"], "") for p in top]
+    if rest:
+        segments.append((f"기타({len(rest)}종)", sum((p["value"] for p in rest), Decimal(0)), ""))
+    inner = _stacked(segments) + '<div style="height:8px"></div>'
+    inner += _table(["종목", "평가액", "비중", "보유"], [[_named(p), _short(p["value"]), _pct(p["share"]), whose(p)]
+                                                     for p in listed[:10]])
+    both = [str(p["name"]) for p in listed if len(p.get("owners") or []) > 1]
+    lead = (f"두 분이 가진 종목은 {len(listed)}개 {_short(review['total'])}이고, 가장 큰 종목({escape(str(listed[0]['name']))})이 "
+            f"<b>{_pct(review['top1_share'])}</b>, 상위 5개가 <b>{_pct(review['top5_share'])}</b>, 해외 상장 비중은 "
+            f"{_pct(review['overseas_share'])}입니다." + (f" 두 분이 함께 가진 종목은 {escape(', '.join(both))}입니다." if both else ""))
+    return _section("두 분의 보유 종목", lead, inner, brief=None,
+                    note=escape(f"{len(listed)}개 종목 · 상위 {min(len(listed), 10)}개"))
 
 
 def _group_title(title: str, note: str) -> str:
@@ -722,12 +773,14 @@ def _tiles(data: dict[str, Any], edition: editions.Edition) -> list[tuple[str, s
     def amount(value: Decimal | None) -> str:
         return "미상" if value is None else _short(value)
     if edition.tiles == "markets":
-        review = data["holdings"]
-        listed = [p for p in review["positions"] if not p["hermes"]]
+        # A per-person markets day (§42) shows the reader's own holdings in the hero; the household's follow below.
+        own = bool(edition.personal) and data.get("own_holdings") is not None
+        review, p, mine = (data["own_holdings"], "own_", "나의 ") if own else (data["holdings"], "", "")
+        listed = [x for x in review["positions"] if not x["hermes"]]
         top = listed[0]["name"] if listed else ""
-        partial = f" · 원가 아는 {f['listed_gain_counted']}개만" if f["listed_gain_missing"] else ""
-        return [("보유 종목 평가액", amount(f["listed_value"]), f"{f['listed_count']}개 종목 · Hermes 운용분 제외"),
-                ("미실현 손익", "미상" if f["listed_gain"] is None else _signed_short(f["listed_gain"]),
+        partial = f" · 원가 아는 {f[p + 'listed_gain_counted']}개만" if f[p + "listed_gain_missing"] else ""
+        return [(f"{mine}보유 종목 평가액", amount(f[p + "listed_value"]), f"{f[p + 'listed_count']}개 종목 · Hermes 운용분 제외"),
+                ("미실현 손익", "미상" if f[p + "listed_gain"] is None else _signed_short(f[p + "listed_gain"]),
                  "팔지 않아 확정되지 않은 손익" + partial),
                 ("해외 상장 비중", _pct(review["overseas_share"], 0), "보유 증권 전체 기준"),
                 ("가장 큰 종목 비중", _pct(review["top1_share"], 0), str(top)[:16])]
@@ -1060,12 +1113,14 @@ def _hero_segments(data: dict[str, Any], tiles: str | None) -> tuple[str, list[t
     """(title, segments, note) of the hero bar for a tile set: the balance sheet by kind and owner on the
     overview, the holdings on the markets day, the homes, the loans, the pension pipelines, the month."""
     if tiles == "markets":
-        listed = [p for p in data["holdings"]["positions"] if not p["hermes"] and p["value"] is not None]
+        own = editions.personalized(data["kind"]) and data.get("own_holdings") is not None
+        review = data["own_holdings"] if own else data["holdings"]
+        listed = [p for p in review["positions"] if not p["hermes"] and p["value"] is not None]
         top, rest = listed[:4], listed[4:]
         segments = [(str(p["name"])[:12], p["value"], "") for p in top]
         if rest:
             segments.append((f"기타({len(rest)}종)", sum((p["value"] for p in rest), Decimal(0)), ""))
-        return "보유 종목 구성(Hermes 운용분 제외)", segments, ""
+        return ("나의 " if own else "") + "보유 종목 구성(Hermes 운용분 제외)", segments, ""
     if tiles == "property":
         props = data["sectors"]["real_estate"]["properties"]
         return "부동산 평가액 구성", [(p["label"], p["value"], "") for p in props], ""

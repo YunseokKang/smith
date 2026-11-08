@@ -256,8 +256,9 @@ class Check:
 
 
 def policy(data: dict[str, Any]) -> list[Check]:
-    """The investment policy checks for this report, in the order the client should fix them."""
-    review = data["holdings"]
+    """The investment policy checks for this report, in the order the client should fix them: on the reader's own
+    holdings (report design §42), like the concentration proposal they back."""
+    review = data.get("own_holdings") or data["holdings"]
     positions = [p for p in review["positions"] if not p["hermes"]]
     if not positions and not review["unlisted"]:
         return []
