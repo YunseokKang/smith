@@ -19,13 +19,16 @@ KNOWN_KEYS = {
     "advice": {"risk_preference", "include_alternatives", "require_macro_context"},
     "privacy": {"remove_personal_identifiers"},
     "reports": {"enabled", "weekdays", "time", "delivery", "editions"},
-    # report_extra_recipients: who also gets the financial reports and event notes (FR-51, user decision 2026-11-08).
-    "mail": {"recipient", "answer_replies", "report_extra_recipients"},
+    # partner_recipient: the spouse's own financial letters and a copy of the event notes (FR-51, report design §42).
+    "mail": {"recipient", "answer_replies", "partner_recipient"},
     "household": {"birth_year", "birth_month", "partner_birth_year", "partner_birth_month", "retirement_monthly_spend",
-                  "marriage_registered", "cohabiting",
+                  "marriage_registered", "cohabiting", "partner_annual_gross_salary",
                   "annual_gross_salary", "retirement_age", "emergency_months",
                   "occupational_plan", "occupational_institution", "occupational_average_wage",
                   "occupational_service_start",
+                  # The spouse's employer plan, read like the client's for the household pension stack (§42).
+                  "partner_occupational_plan", "partner_occupational_institution", "partner_occupational_average_wage",
+                  "partner_occupational_service_start",
                   "emergency_months_confirmed"},
     "backup": {"dir", "keep"},
     # Same-day event notes (report design §29): the daily check time and the holdings' move that counts.
@@ -125,13 +128,10 @@ def load_config(path: Path) -> dict:
         raise ValueError("mail.recipient must be one email address")
     if not isinstance(mail.get("answer_replies", False), bool):
         raise ValueError("mail.answer_replies must be a boolean")
-    extra = mail.get("report_extra_recipients", [])
-    lowered = [a.lower() for a in extra if isinstance(a, str)] if isinstance(extra, list) else []
-    if (not isinstance(extra, list) or len(extra) > MAX_EXTRA_RECIPIENTS or not all(_is_email(a) for a in extra)
-            or len(set(lowered)) != len(extra)
-            or (extra and (not _is_email(mail.get("recipient")) or mail["recipient"].lower() in lowered))):
-        raise ValueError(f"mail.report_extra_recipients must be up to {MAX_EXTRA_RECIPIENTS} distinct addresses "
-                         "other than mail.recipient (which must be set)")
+    spouse = mail.get("partner_recipient")
+    if spouse is not None and (not _is_email(spouse) or not _is_email(mail.get("recipient"))
+                               or spouse.lower() == mail["recipient"].lower()):
+        raise ValueError("mail.partner_recipient must be one address other than mail.recipient (which must be set)")
     _check_household(config.get("household", {}))
     _check_backup(config.get("backup", {}))
     _check_events(config.get("events", {}))
@@ -182,19 +182,21 @@ def _check_household(household: object) -> None:
         month = household.get(field)
         if month is not None and (not isinstance(month, int) or isinstance(month, bool) or not 1 <= month <= 12):
             raise ValueError(f"household.{field} must be a month from 1 to 12")
-    plan = household.get("occupational_plan")
-    if plan is not None and plan not in ("db", "dc"):
-        raise ValueError('household.occupational_plan must be "db" or "dc"')
-    institution = household.get("occupational_institution")
-    if institution is not None and (not isinstance(institution, str) or not institution.strip()):
-        raise ValueError("household.occupational_institution must be non-empty text")
-    start = household.get("occupational_service_start")
-    if start is not None and not isinstance(start, date):
-        try:
-            date.fromisoformat(start)
-        except (TypeError, ValueError):
-            raise ValueError("household.occupational_service_start must be a date (YYYY-MM-DD)") from None
-    for field in ("retirement_monthly_spend", "annual_gross_salary", "occupational_average_wage"):
+    for prefix in ("", "partner_"):
+        plan = household.get(f"{prefix}occupational_plan")
+        if plan is not None and plan not in ("db", "dc"):
+            raise ValueError(f'household.{prefix}occupational_plan must be "db" or "dc"')
+        institution = household.get(f"{prefix}occupational_institution")
+        if institution is not None and (not isinstance(institution, str) or not institution.strip()):
+            raise ValueError(f"household.{prefix}occupational_institution must be non-empty text")
+        start = household.get(f"{prefix}occupational_service_start")
+        if start is not None and not isinstance(start, date):
+            try:
+                date.fromisoformat(start)
+            except (TypeError, ValueError):
+                raise ValueError(f"household.{prefix}occupational_service_start must be a date (YYYY-MM-DD)") from None
+    for field in ("retirement_monthly_spend", "annual_gross_salary", "partner_annual_gross_salary", "occupational_average_wage",
+                  "partner_occupational_average_wage"):
         amount = household.get(field)
         if amount is not None and (not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0):
             raise ValueError(f"household.{field} must be a positive whole number of won")
@@ -411,14 +413,11 @@ def _check_letter_slot(where: str, table: dict, default_day: str, default_time: 
         raise ValueError(f"{where}.time must be HH:MM") from None
 
 
-MAX_EXTRA_RECIPIENTS = 3
-
-
-def report_extra_recipients(config: dict) -> list[str]:
-    """Who also receives the financial reports and the same-day event notes (FR-51, user decision 2026-11-08: the
-    spouse). Only those two products read it: the daily, evening, health, counsel and trade mails and every reply
-    go to `[mail] recipient` alone, and only the client's own replies are answered."""
-    return list((config.get("mail") or {}).get("report_extra_recipients") or [])
+def partner_recipient(config: dict) -> str | None:
+    """The spouse's address (FR-51, report design §42, user decisions 2026-11-08): the spouse's own letter of each
+    per-person edition and a copy of the same-day event notes. Only those read it: the client's own reports, the
+    daily, evening, health, counsel and trade mails and every reply go to `[mail] recipient` alone."""
+    return (config.get("mail") or {}).get("partner_recipient")
 
 
 def _is_email(value: object) -> bool:

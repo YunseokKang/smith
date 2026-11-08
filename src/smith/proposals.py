@@ -164,17 +164,19 @@ def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
 
 
 def _income_guard(view: LedgerView, facts: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
-    """The financial-income figures (tax.financial_income_guard) per person, the client first: the threshold is
-    each person's own yearly interest and dividends (review 2026-10-18: a household total let the partner's money
-    raise, or an unconverted amount blank, the client's figure). For each owner with interest-bearing money or
-    expected pay: that owner's cash and deposits (unknown when one is unconverted), the CD rate as the
-    deposit-rate proxy, and that owner's base-scenario pay usable within GUARD_YEARS."""
+    """The reader's financial-income figures (tax.financial_income_guard): the threshold is each person's own yearly
+    interest and dividends (review 2026-10-18: a household total let the partner's money raise, or an unconverted
+    amount blank, the client's figure), and each person's letter carries their own (report design §42). With
+    interest-bearing money or expected pay: the reader's cash and deposits (unknown when one is unconverted), the
+    CD rate as the deposit-rate proxy, and the reader's base-scenario pay usable within GUARD_YEARS."""
     cd = facts["cd"]
     rate = None if cd is None else cd["value"] / 100
     today = facts["today"]
     horizon = date(today.year + GUARD_YEARS, today.month, min(today.day, 28))
     found = []
-    for owner in sorted({r.owner_id for r in view.records}, key=lambda o: (o != "self", o)):
+    # The reader's own figures only (report design §42): each person's letter carries that person's threshold, and a
+    # reader with no money of their own gets no figures rather than the other member's.
+    for owner in ("self",):
         amounts = [base_amount(view, r) for r in view.records if r.owner_id == owner and r.kind is Kind.ASSET
                    and r.fields.get("category") in ("cash", "deposit", "installment_savings")]
         pay = future_income.at_goal(facts["pay"], owner_id=owner, scenario="base", horizon=horizon, today=today,
@@ -709,20 +711,25 @@ def _concentration_trim(facts: dict[str, Any]) -> Proposal | Undetermined | None
 
 
 def insurance_review(facts: dict[str, Any]) -> dict[str, Any] | None:
-    """Premiums against income and the home date (report design §17.5): the share of monthly income, the
-    premiums large enough to be savings-type (SAVINGS_PREMIUM_MIN a month) with their tax-free maturity year,
-    and whether that maturity falls after the home move (a duration mismatch). None without premiums."""
-    pi = facts["sectors"]["pension_insurance"]
-    premiums, share = pi["monthly_premiums"], pi["premium_to_income"]
-    if not premiums:
-        return None
+    """The client's own premiums against the client's own income and the home date (report design §17.5, per person
+    since §42): the share of monthly income, the premiums large enough to be savings-type (SAVINGS_PREMIUM_MIN a
+    month) with their tax-free maturity year, and whether that maturity falls after the home move (a duration
+    mismatch). None without premiums of the client's own, or when one could not be converted."""
     home = facts["kpis"]["home_progress"]
     goal_year = None if home is None else home["target_date"].year
+    monthly_of = {"monthly": 1, "quarterly": 3, "annual": 12}
+    # The premiums still being paid (recurring and running today), as the household sector counted them.
+    flows = [(None if amount is None else amount / monthly_of[frequency], start)
+             for amount, frequency, start in facts["tax"]["premiums_running"]]
+    if not flows or any(monthly is None for monthly, _ in flows):
+        return None
+    premiums, income = sum((monthly for monthly, _ in flows), Decimal(0)), facts["tax"]["monthly_income"]
+    share = premiums / income if income else None
+    if not premiums:
+        return None
     savings = []
-    for amount, frequency, start in facts["tax"]["premiums"]:
-        monthly = None if amount is None or frequency not in ("monthly", "quarterly", "annual") else amount / {
-            "monthly": 1, "quarterly": 3, "annual": 12}[frequency]
-        if monthly is not None and monthly >= SAVINGS_PREMIUM_MIN:
+    for monthly, start in flows:
+        if monthly >= SAVINGS_PREMIUM_MIN:
             maturity = int(start[:4]) + SAVINGS_INSURANCE_YEARS
             savings.append({"monthly": monthly, "maturity_year": maturity,
                             "mismatch": goal_year is not None and maturity > goal_year})

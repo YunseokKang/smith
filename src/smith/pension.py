@@ -105,6 +105,9 @@ _TERM_FIELDS = ("institution", "opened_on", "contribution_end", "payout_start", 
 OWNER_LABELS = {"self": "본인", "partner": "배우자"}
 # The local setting holding each member's birth year: only the client and the spouse have one ([household]).
 _BIRTH_KEYS = {"self": "birth_year", "partner": "partner_birth_year"}
+# The prefix of a member's own [household] facts (employer plan, salary): none for the client, "partner_" for the
+# spouse (a letter seen from the spouse swaps the two, perspective.household_for).
+MEMBER_PREFIX = {"self": "", "partner": "partner_"}
 
 
 def owner_label(owner: str) -> str:
@@ -132,7 +135,7 @@ def row_label(row: dict[str, Any]) -> str:
 
 
 def stack(view: LedgerView, household: dict[str, Any] | None, today: date,
-          plan: dict[str, Any] | None = None) -> dict[str, Any] | None:
+          plan: dict[str, Any] | None = None, plans: dict[str, dict[str, Any]] | None = None) -> dict[str, Any] | None:
     """The pension stack against the monthly retirement target; None without a target (the track asks).
 
     `plan` is tax.pension_plan: this year's contributions above the credit (tax-free when drawn) and the split
@@ -155,22 +158,18 @@ def stack(view: LedgerView, household: dict[str, Any] | None, today: date,
     age = None if birth is None else age_on(birth, today)
     chosen = household.get("retirement_age")
     headline = int(chosen) if chosen else DEFAULT_PAYOUT_AGE
-    kind = household.get("occupational_plan")
-    start = household.get("occupational_service_start")
-    occupational = ({"type": kind, "institution": household.get("occupational_institution"),
-                     "wage": household.get("occupational_average_wage"),
-                     "service_start": date.fromisoformat(start) if isinstance(start, str) else start}
-                    if kind in OCCUPATIONAL_PLANS else None)
-    # One entry per household member: their own statements, accounts, contributions and birth date. The credit
-    # split (`plan`) and the employer plan named in the local settings are the client's.
+    # One entry per household member: their own statements, accounts, contributions, birth date, credit split
+    # (`plans`, each member's tax.pension_plan; `plan` alone is the client's) and employer plan, so a letter seen
+    # from either member states the same household figures (per-person letters, report design §42).
+    plans = {"self": plan, **(plans or {})}
     people = []
     for owner in owners(view):
         member_birth = born(household, owner)
         people.append({"owner": owner, "label": owner_label(owner), "birth": member_birth,
                        "age": None if member_birth is None else age_on(member_birth, today),
                        "stated": _stated(view, today, owner),
-                       "contributions": _contribution_plan(view, today, plan if owner == "self" else None, owner),
-                       "occupational": occupational if owner == "self" else None})
+                       "contributions": _contribution_plan(view, today, plans.get(owner), owner),
+                       "occupational": _occupational(household, owner)})
     contributions = people[0]["contributions"]
     tiers = [_tier(view, people, retire=retire, target=target, today=today)
              for retire in sorted(set(RETIREMENT_TIERS) | {headline})]
@@ -294,11 +293,14 @@ def _rows(view: LedgerView, person: dict[str, Any], *, retire: int, today: date)
     stated, contributions, owner = person["stated"], person["contributions"], person["owner"]
     args = dict(age=person["age"], birth=person["birth"], retire=retire, contributions=contributions, today=today,
                 owner=owner)
-    # The client's four pipelines are always shown (a missing one is asked for); another member gets the national
-    # pension (everyone employed has one to state) and only the accounts and policies they actually hold, so a
-    # product they do not have is not an unknown that turns the household total into a lower bound.
-    keys = [key for key in PIPELINES
-            if owner == "self" or key == "national" or stated.get(key) or _held(view, key, owner)]
+    # Every member gets the national pension (everyone employed has one to state) and only the accounts and policies
+    # they actually hold, so a product they do not have is not an unknown that turns the household total into a
+    # lower bound, and the stack reads the same from either member's letter (§42). A family nobody holds is still
+    # named in the letter's table ("가입 없음").
+    # An account the credit split puts money into is shown even before it is opened (Codex review 2026-11-08: the
+    # split's IRP share vanished from every projection when the member had no IRP yet).
+    keys = [key for key in PIPELINES if key == "national" or stated.get(key) or _held(view, key, owner)
+            or (key in _ACCOUNTS and contributions.get(key))]
     rows = [_pipeline(view, key, stated.get(key, []), **args) for key in keys]
     if contributions["isa"]:
         rows.append(_isa(contributions, age=person["age"], retire=retire))
@@ -325,6 +327,19 @@ def _unplaceable(row: dict[str, Any], missing: str, why: str) -> None:
         return
     row.update(gross_monthly=None, net_monthly=None, nominal_monthly=None, stated_net=False, basis="unknown",
                basis_text=f"{row['basis_text']} · {why}", missing=missing)
+
+
+def _occupational(household: dict[str, Any], owner: str) -> dict[str, Any] | None:
+    """A member's employer DB or DC plan from [household] (`occupational_*` for the client, `partner_occupational_*`
+    for the spouse); None when not named."""
+    prefix = MEMBER_PREFIX.get(owner)
+    kind = None if prefix is None else household.get(f"{prefix}occupational_plan")
+    if kind not in OCCUPATIONAL_PLANS:
+        return None
+    start = household.get(f"{prefix}occupational_service_start")
+    return {"type": kind, "institution": household.get(f"{prefix}occupational_institution"),
+            "wage": household.get(f"{prefix}occupational_average_wage"),
+            "service_start": date.fromisoformat(start) if isinstance(start, str) else start}
 
 
 def _employer_plan(plan: dict[str, Any], *, retire: int, birth: tuple[int, int | None] | None,
@@ -534,7 +549,8 @@ def _pipeline(view: LedgerView, key: str, records: list[Any], *, age: int | None
         if assets is None or contribution is None:
             row.update(basis_text="잔액이나 납입액을 원화로 환산하지 못함", missing="그 통화의 환율")
             return row
-        if not _has_account(view, _ACCOUNTS[key], owner):
+        opened = _has_account(view, _ACCOUNTS[key], owner)
+        if not opened and not contribution:
             row.update(basis_text="계좌가 없음", missing=f"{label} 계좌가 있다면 잔액과 월 납입액")
             return row
         terms = _terms(products(view, key, owner))
@@ -545,6 +561,8 @@ def _pipeline(view: LedgerView, key: str, records: list[Any], *, age: int | None
                        years=terms["years"], contribution_stop=stop)
         if terms["mixed"]:
             row["basis_text"] += ". 수령 기간이나 납입 종료일이 다른 계좌가 섞여 가장 긴 기간과 가장 늦은 종료일로 계산"
+        if not opened:
+            row["basis_text"] += ". 계좌가 아직 없어 0원에서 시작(세액공제 분할 제안대로 연다고 가정)"
         return row
     if key == "insurance_annuity":
         assets = _assets(view, lambda f: f["category"] == "insurance_surrender_value", owner)

@@ -22,7 +22,7 @@ delivery = "gmail"
 # Actual recipient and credentials belong in ignored local configuration:
 # [mail]
 # recipient = "me@example.com"
-# report_extra_recipients = ["family@example.com"]   # also gets the financial reports and event notes only (FR-51)
+# partner_recipient = "family@example.com"   # the spouse's own letter of each per-person edition, and the event notes
 
 # One short report a day, each on its own theme (src/smith/editions.py). A day left out here uses this
 # same default plan. "monday" / "thursday" are the original full report and short change check.
@@ -112,6 +112,7 @@ time = "18:00"
 # birth_month = 3                      # optional: pension start ages in full years (else the calendar-year age)
 # partner_birth_year = 1991            # the spouse (ledger owner "partner"): their pensions join the household stack
 # partner_birth_month = 5              # optional, as birth_month
+# partner_annual_gross_salary = 70000000  # the spouse's gross pay: their own letter's credit rate and pay tax
 # occupational_plan = "db"             # the employer's retirement plan, "db" or "dc" (the pension portal names it)
 # occupational_institution = "예시생명"  # its provider, shown in the pension table
 # occupational_average_wage = 8000000   # DB plan: the employer's average monthly wage (pay + bonuses / 12)

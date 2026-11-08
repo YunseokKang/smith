@@ -149,8 +149,8 @@ def check(db: Path, config: dict[str, Any], *, now: datetime, reason: str, sync:
     the morning report they are fresh already). `researcher` is None to skip the web research (previews, tests).
     `dart_key` (OpenDART) and `sec_contact` (the e-mail the SEC requires in the User-Agent) enable the disclosure note;
     `interpreter` (disclosure_insight.interpret) adds what each filing means, None to send the facts alone. Nothing is raised: a failure is recorded on the note and
-    retried at a later check inside its window. `also_to` (config.report_extra_recipients, FR-51) adds the configured
-    family addresses to each note's To line."""
+    retried at a later check inside its window. `also_to` ([config.partner_recipient], FR-51) adds the spouse to each
+    note's To line: the event notes stay one household note for both (report design §42)."""
     if sync:
         _sync(db, say)
     today = local_time(now, config["app"]["timezone"]).date()

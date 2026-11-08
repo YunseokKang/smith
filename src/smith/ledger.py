@@ -1004,6 +1004,18 @@ def proposal_events(conn: sqlite3.Connection, *, limit: int = 50) -> list[dict[s
     return [dict(zip(columns + ("key",), row)) for row in rows]
 
 
+def record_proposals_shown(conn: sqlite3.Connection, *, report_id: str, at: datetime, shown: list[dict[str, Any]]) -> None:
+    """Record the proposals a mail outside report_runs carried (the spouse's letter, report design §42), in one
+    transaction, with the same supersession rules as a report's."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        _record_shown(conn, report_id, at, shown)
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+
+
 def _record_shown(conn: sqlite3.Connection, report_id: str, at: datetime, shown: list[dict[str, Any]]) -> None:
     """Inside the caller's transaction: a renewed proposal (new identity or materially changed figures)
     supersedes the previous instance and starts a new one; otherwise the instance is shown again."""

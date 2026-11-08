@@ -29,15 +29,29 @@ def _man(value: Decimal) -> str:
     return f"{value / 10_000:,.0f}만"
 
 
+DONUT = 190                   # The ring's size (CSS pixels), whatever the number of parts.
+LEGEND_ROW = 44               # One legend entry: the name, and under it the share and yearly amount.
+
+
+def _fit(draw: ImageDraw.ImageDraw, text: str, font: object, room: float) -> str:
+    """`text` cut with an ellipsis to fit `room` pixels (a long product name must not run into the figures)."""
+    if draw.textlength(text, font=font) <= room:
+        return text
+    while text and draw.textlength(text + "…", font=font) > room:
+        text = text[:-1]
+    return text.rstrip(" (·") + "…"
+
+
 def donut(parts: list[tuple[str, Decimal, str]], *, center: str, caption: str) -> bytes:
-    """A donut of each part's share (label, yearly amount, colour) with the total in the hole and a legend of
-    label, share and yearly amount on the right. Zero parts are left out."""
+    """A donut of each part's share (label, yearly amount, colour) with the total in the hole and a legend on the
+    right: the name on one line and its share and yearly amount on the next, so a long name never runs into the
+    figures (user review 2026-11-08). The ring keeps one size; the legend sets the height. Zero parts are left out."""
     parts = [p for p in parts if p[1] > 0]
-    height = 40 + 30 * max(len(parts), 5)
+    height = max(DONUT + 32, 24 + LEGEND_ROW * len(parts))
     image = Image.new("RGB", (WIDTH * SCALE, height * SCALE), PAGE)
     draw = ImageDraw.Draw(image)
     total = sum((v for _, v, _ in parts), Decimal(0))
-    size, top = (height - 40) * SCALE, 20 * SCALE
+    size, top = DONUT * SCALE, (height - DONUT) * SCALE // 2
     box = (16 * SCALE, top, 16 * SCALE + size, top + size)
     angle = -90.0
     for _, value, color in parts:
@@ -51,14 +65,15 @@ def donut(parts: list[tuple[str, Decimal, str]], *, center: str, caption: str) -
     for text, font, dy in ((center, big, -11), (caption, small, 11)):
         width = draw.textlength(text, font=font)
         draw.text((cx - width / 2, cy + dy * SCALE - getattr(font, "size", 12) / 2), text, fill=INK if font is big else MUTED, font=font)
-    x = box[2] + 28 * SCALE
+    x = box[2] + 24 * SCALE
+    room = WIDTH * SCALE - 16 * SCALE - (x + 20 * SCALE)
+    first = (height * SCALE - LEGEND_ROW * SCALE * len(parts)) // 2
     for i, (label, value, color) in enumerate(parts):
-        y = top + (i * 30 + 6) * SCALE
+        y = first + i * LEGEND_ROW * SCALE + 2 * SCALE
         draw.rounded_rectangle((x, y + 3 * SCALE, x + 12 * SCALE, y + 15 * SCALE), radius=3 * SCALE, fill=color)
-        draw.text((x + 20 * SCALE, y), label, fill=INK, font=label_font)
+        draw.text((x + 20 * SCALE, y), _fit(draw, label, label_font, room), fill=INK, font=label_font)
         figure = f"{value / total * 100:.0f}% · 연 {_man(value)}"
-        draw.text((WIDTH * SCALE - 16 * SCALE - draw.textlength(figure, font=label_font), y), figure, fill=MUTED,
-                  font=label_font)
+        draw.text((x + 20 * SCALE, y + 19 * SCALE), figure, fill=MUTED, font=small)
     return _png(image)
 
 

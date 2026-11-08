@@ -43,17 +43,15 @@ class ConfigTests(unittest.TestCase):
                         load_config(path)
 
     def test_local_household_mail_and_property_sections_are_typed(self):
-        good = ('\n[mail]\nanswer_replies = true\nrecipient = "me@example.com"\nreport_extra_recipients = ["family@example.com"]\n'
+        good = ('\n[mail]\nanswer_replies = true\nrecipient = "me@example.com"\npartner_recipient = "family@example.com"\n'
                 '[household]\nbirth_year = 1990\nbirth_month = 3\nretirement_monthly_spend = 5000000\n'
                 'partner_birth_year = 1991\npartner_birth_month = 5\n'
                 'marriage_registered = false\nemergency_months = 3\n[backup]\ndir = "E:/smith-backups"\nkeep = 14\n'
                 '[properties.home]\nlawd_cd = "11110"\napt_name = "예시마을"\nexclusive_area_m2 = 59.9\n')
         bad = [('answer_replies = true', 'answer_replies = "yes"'), ('birth_year = 1990', 'birth_year = "1990"'),
-               ('["family@example.com"]', '"family@example.com"'), ('["family@example.com"]', '["not-an-address"]'),
-               ('["family@example.com"]', '["family@example.com", "FAMILY@example.com"]'),
-               ('["family@example.com"]', '["a@x.com", "b@x.com", "c@x.com", "d@x.com"]'),
-               ('["family@example.com"]', '["ME@example.com"]'),                   # The client is already the recipient.
-               ('recipient = "me@example.com"\n', ''),                             # Family copies need the client's address.
+               ('"family@example.com"', '["family@example.com"]'), ('"family@example.com"', '"not-an-address"'),
+               ('"family@example.com"', '"ME@example.com"'),                       # The client is already the recipient.
+               ('recipient = "me@example.com"\n', ''),                             # The spouse's needs the client's address.
                ('birth_month = 3', 'birth_month = 13'), ('partner_birth_month = 5', 'partner_birth_month = 0'),
                ('retirement_monthly_spend = 5000000', 'retirement_monthly_spend = 5000000.5'),
                ('marriage_registered = false', 'marriage_registered = "no"'),

@@ -89,7 +89,7 @@ def load_view(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetime) 
     view = LedgerView(as_of, summary, [s.record for s in states], rates, links, series, news,
                       record_sources={s.record.record_id: s.source for s in states}, sales=sales, sales_since=sales_since)
     view.aliases = _aliases(view)
-    view.owner_aliases = _owner_aliases(view)
+    view.owner_aliases = owner_aliases(view)
     sources = {row["source"] for row in summary.freshness} | {row["source"] for row in summary.sync}
     view.source_aliases = {source: f"S{i}" for i, source in enumerate(sorted(sources), 1)}
     return view
@@ -106,7 +106,8 @@ def _aliases(view: LedgerView) -> dict[str, str]:
     return aliases
 
 
-def _owner_aliases(view: LedgerView) -> dict[str, str]:
+def owner_aliases(view: LedgerView) -> dict[str, str]:
+    """Role-preserving outbound aliases: the client "self", the spouse household_member_1, any other owner after."""
     owners = sorted({record.owner_id for record in view.records} | set(view.summary.net_worth_by_owner))
     aliases = {"self": "self"} if "self" in owners else {}
     # The spouse ("partner", data contract) is always household_member_1: the prompts name that alias as the spouse

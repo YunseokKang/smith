@@ -14,7 +14,7 @@ from typing import Any
 
 from smith.fmt import percent, short_won
 from smith.payload import LedgerView, base_amount, unrealized_gain, won
-from smith.records import Kind
+from smith.records import COMPENSATION_CATEGORIES, INFLOW_CATEGORIES, Kind
 from smith.summary import recurring_active
 
 RULES_YEAR = 2026
@@ -103,18 +103,22 @@ def extra_pay_withholding(amount: Decimal, *, pay_before: Decimal | None) -> tup
 
 @dataclass(frozen=True)
 class Note:
-    """A tax strategy point that is not a single action: what the rule is and what it means here."""
+    """A tax strategy point that is not a single action: what the rule is and what it means here. `household` marks
+    a point about both members (marriage, gifts, the other member's home): a per-person letter shows it in the
+    household's group, never among the reader's own (report design §42)."""
     title: str
     body: str
     when: str
     certainty: str
+    household: bool = False
 
 
-def facts(view: LedgerView, today: date, household: dict[str, Any] | None) -> dict[str, Any]:
-    """Tax-relevant facts computed from the ledger and the local household profile."""
+def facts(view: LedgerView, today: date, household: dict[str, Any] | None, owner: str = "self") -> dict[str, Any]:
+    """Tax-relevant facts computed from the ledger and the local household profile, for one taxpayer (`owner`, the
+    client by default; the household pension stack reads each member's credit split, report design §42)."""
     household = household or {}
-    # Credits, limits and capital-gains netting are per taxpayer: only the client's own records count.
-    mine = [r for r in view.records if r.owner_id == "self"]
+    # Credits, limits and capital-gains netting are per taxpayer: only that taxpayer's own records count.
+    mine = [r for r in view.records if r.owner_id == owner]
     accounts = {r.record_id: r.fields.get("account_type") for r in mine if r.kind is Kind.ASSET}
     contributions: dict[str, Decimal] = {}
     unconverted = 0  # Pension assets or contributions without an FX rate: left out, and said so.
@@ -150,7 +154,7 @@ def facts(view: LedgerView, today: date, household: dict[str, Any] | None) -> di
     gains = [unrealized_gain(view, r) for r in us]
     known = [g for g in gains if g is not None]
     # This year's US sales seen in the broker sync share the yearly deduction (realized.sales: estimated prices).
-    sold = [sale for sale in view.sales if sale.owner_id == "self" and sale.market == "US"]
+    sold = [sale for sale in view.sales if sale.owner_id == owner and sale.market == "US"]
     return {
         "today": today, "year": today.year,
         "pension_savings_paid": contributions.get("pension_savings", Decimal(0)),
@@ -177,8 +181,15 @@ def facts(view: LedgerView, today: date, household: dict[str, Any] | None) -> di
                           **{k: (household.get("properties") or {}).get(r.record_id, {}).get(k)
                              for k in ("acquired_year", "acquired_price", "residence_years")}}
                          for r in view.records if r.kind is Kind.ASSET and r.fields["category"] == "real_estate"],
-        "premiums": [(base_amount(view, r), r.fields["frequency"], r.fields["start_date"]) for r in view.records
+        # The taxpayer's own premiums and recurring income: the insurance review weighs a person's policies against
+        # that person's pay, not the household's (§42: the spouse's pay diluted the share, and the spouse's letter
+        # showed the client's policy).
+        "premiums": [(base_amount(view, r), r.fields["frequency"], r.fields["start_date"]) for r in mine
                      if r.kind is Kind.CASHFLOW and r.fields["category"] == "insurance_premium"],
+        "premiums_running": [(base_amount(view, r), r.fields["frequency"], r.fields["start_date"]) for r in mine
+                             if r.kind is Kind.CASHFLOW and r.fields["category"] == "insurance_premium"
+                             and recurring_active(r.fields, today)],
+        "monthly_income": _monthly_income(view, mine, today),
         # Known amounts only; `pension_unconverted` > 0 makes every figure built on these a lower bound.
         "pension_assets": sum((a for a in pensions if a is not None), Decimal(0)),
         "pension_unconverted": unconverted,
@@ -203,6 +214,23 @@ def _lots(records: list[Any], gains: list[Decimal | None]) -> list[dict[str, Any
         lot["gain"] += gain
     return [lot for symbol, lot in sorted(found.items())
             if symbol not in unknown and lot["gain"] > 0 and lot["quantity"] > 0]
+
+
+def _monthly_income(view: LedgerView, records: list[Any], today: date) -> Decimal | None:
+    """One person's recurring income running today, monthly: the income categories only (a transfer between their
+    own accounts is not income, Codex review 2026-11-08), without pay not yet received or pensions not yet paying;
+    None when an amount could not be converted."""
+    total = Decimal(0)
+    for r in records:
+        f = r.fields
+        if (r.kind is not Kind.CASHFLOW or f["category"] not in INFLOW_CATEGORIES or f["category"] in COMPENSATION_CATEGORIES
+                or not recurring_active(f, today)):
+            continue
+        amount = base_amount(view, r)
+        if amount is None:
+            return None
+        total += amount / _MONTHS[f["frequency"]]
+    return total
 
 
 def _months_in_year(fields: dict[str, Any], year: int) -> int:
@@ -413,7 +441,7 @@ def notes(t: dict[str, Any], guards: list[tuple[str, dict[str, Any]]] = ()) -> l
              "반면 규제지역에서는 다주택 세대의 신규 주택담보대출이 막혀 있어, 새 집 매수·기존 집 매도·혼인신고의 순서에 따라 "
              "대출 가능 여부와 취득세가 달라질 수 있습니다. 또 2024~2026년에 혼인신고를 하면 두 분 각각 "
              f"{short_won(MARRIAGE_CREDIT)}의 혼인 세액공제(생애 1회)를 받을 수 있어, 올해 안에 신고하실지도 함께 따져 볼 만합니다."),
-            "주택 이전 계획을 정하기 전", "세법 기준(실행 전 세무사·은행 상담 권장)"))
+            "주택 이전 계획을 정하기 전", "세법 기준(실행 전 세무사·은행 상담 권장)", household=True))
     year = t["year"]
     for home in t["home_records"]:
         if home["value"] is None or not home["acquired_price"] or not home["acquired_year"]:
@@ -421,41 +449,46 @@ def notes(t: dict[str, Any], guards: list[tuple[str, dict[str, Any]]] = ()) -> l
         # Only the year is known, so count full years conservatively (the anniversary may not have passed).
         held = max(0, year - int(home["acquired_year"]) - 1)
         price, acquired = home["value"], Decimal(home["acquired_price"])
-        if home["owner"] == "self" and home["occupancy"] == "owner_occupied":
+        # The home the household lives in, then any other by its owner's confirmed residence; the reader is 고객님
+        # and the other member 배우자분 (a letter seen from the spouse swaps them, report design §42).
+        who = "고객님" if home["owner"] == "self" else "배우자분"
+        if home["occupancy"] == "owner_occupied":
             exempt = capital_gains(price, acquired, held=held, lived=held, one_home=True)
             general = capital_gains(price, acquired, held=held, lived=0, one_home=False)
             found.append(Note(
-                "거주 주택을 지금 판다면 예상 양도세",
+                "거주 주택을 지금 판다면 예상 양도세" if home["owner"] == "self" else "배우자분 명의 거주 주택을 판다면 예상 양도세",
                 (f"평가액 {short_won(price)}에 팔면 차익은 약 {short_won(exempt['gain'])}입니다. 1세대 1주택 비과세 요건을 "
                  f"갖추면 {short_won(HIGH_VALUE_HOME)}을 넘는 비율만큼만 과세되어 약 {short_won(exempt['total'])}"
                  f"(보유·거주 {held}년 가정, 장기보유특별공제 {percent(exempt['deduction_rate'], 0)}), 요건을 못 갖추면 약 "
                  f"{short_won(general['total'])}(지방소득세 포함)입니다. 세대의 주택 수, 정확한 취득일과 실제 거주 기간에 따라 "
                  "이 범위 안에서 달라지며, 보유·거주가 1년 늘 때마다 1주택 공제가 8%p씩 커집니다."),
-                "매도 시점을 정할 때", "계산(취득가·평가액 기준, 범위 추정) + 세법 기준"))
-        elif home["owner"] != "self" and (home.get("residence_years") or 0) >= 2:
+                "매도 시점을 정할 때", "계산(취득가·평가액 기준, 범위 추정) + 세법 기준", household=home["owner"] != "self"))
+        elif (home.get("residence_years") or 0) >= 2:
             # The client confirmed the residence (e-mail 2026-10-21): the exemption is the figure, the general
             # case the fallback, and the sale order under a marriage is what remains to plan.
             lived = capital_gains(price, acquired, held=held, lived=int(home["residence_years"]), one_home=True)
             not_lived = capital_gains(price, acquired, held=held, lived=0, one_home=False)
             found.append(Note(
-                "배우자분 주택은 2년 거주가 확인되어 비과세 기준으로 봅니다",
+                f"{who} 주택은 2년 거주가 확인되어 비과세 기준으로 봅니다",
                 (f"평가액 {short_won(price)}에 팔면 차익은 약 {short_won(lived['gain'])}입니다. {home['acquired_year']}년 취득 뒤 "
                  f"{home['residence_years']}년 이상 거주하셨다고 확인해 주셔서 1세대 1주택 비과세 기준(양도가액 {short_won(HIGH_VALUE_HOME)} "
                  f"초과분만 과세)으로 약 {short_won(lived['total'])}을 예상하고, 요건을 못 갖추면 약 {short_won(not_lived['total'])}"
                  f"(지방소득세 포함)입니다. 혼인신고를 하시면 혼인일부터 {MARRIAGE_MERGE_YEARS}년 안에 이 집을 먼저 파는 순서가 안전하고, "
-                 "혼인신고 전에는 각자 1주택으로 봅니다. 거주 요건은 소유자인 배우자분 세대의 거주로 따집니다."),
-                "주택 이전 순서를 정하기 전", "계산(취득가·평가액 기준, 거주 기간은 고객님 확인) + 세법 기준"))
-        elif home["owner"] != "self":
-            lived = capital_gains(price, acquired, held=held, lived=2, one_home=True)  # The partner's own tax.
+                 f"혼인신고 전에는 각자 1주택으로 봅니다. 거주 요건은 소유자인 {who} 세대의 거주로 따집니다."),
+                "주택 이전 순서를 정하기 전", "계산(취득가·평가액 기준, 거주 기간은 고객님 확인) + 세법 기준",
+                household=home["owner"] != "self"))
+        else:
+            lived = capital_gains(price, acquired, held=held, lived=2, one_home=True)  # The owner's own tax.
             not_lived = capital_gains(price, acquired, held=held, lived=0, one_home=False)
             found.append(Note(
-                "배우자분 주택은 2년 거주 여부에 따라 양도세가 크게 달라집니다",
+                f"{who} 주택은 2년 거주 여부에 따라 양도세가 크게 달라집니다",
                 (f"평가액 {short_won(price)}에 팔면 차익은 약 {short_won(not_lived['gain'])}입니다. 취득 당시({home['acquired_year']}년) "
                  "그 지역이 조정대상지역이었다면 1세대 1주택 비과세에 2년 거주가 필요합니다. 2년 이상 사셨다면 세금은 약 "
                  f"{short_won(lived['total'])}이지만, 거주하지 않아 비과세가 안 되면 약 {short_won(not_lived['total'])}"
                  "(지방소득세 포함)으로 커집니다. 어느 집을 먼저 팔지, 혼인신고를 언제 할지 정하기 전에 거주 이력을 확인해 두시는 것이 "
                  "중요합니다."),
-                "주택 이전 순서를 정하기 전", "계산(취득가·평가액 기준) + 세법 기준(세무사 확인 권장)"))
+                "주택 이전 순서를 정하기 전", "계산(취득가·평가액 기준) + 세법 기준(세무사 확인 권장)",
+                household=home["owner"] != "self"))
     for owner, value, occupancy in own:
         if value is not None and value > HIGH_VALUE_HOME and not any(
                 h["owner"] == "self" and h["acquired_price"] for h in t["home_records"]):
@@ -470,7 +503,7 @@ def notes(t: dict[str, Any], guards: list[tuple[str, dict[str, Any]]] = ()) -> l
             "혼인 전후 2년은 부모님 증여 공제가 커집니다",
             (f"혼인신고일 전후 2년 안에 부모님께 받는 증여는 기본 공제에 더해 {short_won(MARRIAGE_GIFT_EXTRA)}을 추가로 "
              "공제받을 수 있습니다. 주택 이전에 가족의 도움이 있다면, 그 시기를 혼인신고 일정과 맞추는 것이 세금상 유리합니다."),
-            "가족 지원 계획이 있을 때", "세법 기준"))
+            "가족 지원 계획이 있을 때", "세법 기준", household=True))
     for amount, frequency, start in t["premiums"]:
         monthly = None if amount is None or frequency not in _MONTHS else amount / _MONTHS[frequency]
         if monthly is not None and Decimal(500_000) <= monthly <= SAVINGS_INSURANCE_MONTHLY_CAP:

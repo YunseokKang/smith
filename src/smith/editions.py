@@ -39,6 +39,12 @@ class Edition:
     # Sections rendered open right under the hero, before the proposals: the day's single most important
     # view (the loan line-up on the rates day, the pension stack on the tax day, report design §18.1).
     opening: tuple[str, ...] = ()
+    # Per-person letters (report design §42, user decision 2026-11-08): the reader's own sections ("나의 …", with the
+    # proposals) and then the household's ("우리 집 …"). Empty until the edition is split; only a split edition is
+    # sent to the spouse.
+    personal: tuple[str, ...] = ()
+    household: tuple[str, ...] = ()
+    household_label: str = ""
 
 
 EDITIONS: dict[str, Edition] = {e.key: e for e in (
@@ -113,7 +119,9 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "Expected pay and share grants will lift interest and dividends toward the financial-income threshold: "
             "weigh every placement after tax and name the tax-advantaged route (ISA, pension accounts, the "
             "savings-insurance exemption, separately taxed bonds and infrastructure funds, the overseas capital-gains "
-            "regime) as a standing rule.", opening=("pension_stack",)),
+            "regime) as a standing rule.", opening=("pension_stack",),
+            personal=("my_pensions", "tax", "annuity_review"), household=("pension_stack", "household_tax", "pension"),
+            household_label="노후"),
     Edition("life", "생활·목표",
             "life", ("experiences", "cash", "spending", "stress", "goals", "follow_up", "requests"),
             ("emergency-reserve", "surplus-plan", "spending-room"),
@@ -146,6 +154,13 @@ KINDS = tuple(EDITIONS) + LEGACY
 def of(kind: str) -> Edition | None:
     """The edition of a report kind; None for the two original kinds (full Monday, short Thursday)."""
     return EDITIONS.get(kind)
+
+
+def personalized(kind: str) -> bool:
+    """Whether the edition is split into the reader's own and the household's sections (§42): only those go to the
+    spouse."""
+    edition = EDITIONS.get(kind)
+    return edition is not None and bool(edition.personal)
 
 
 def for_day(config: dict[str, Any] | None, day: date) -> str:

@@ -280,8 +280,8 @@ def send(credentials: tuple[str, str, str], *, recipient: str, subject: str, htm
     """Send one message to the configured recipient and return Gmail's message id.
 
     `images` are inline PNG attachments keyed by the cid the HTML references (`<img src="cid:weather">`).
-    `also_to` adds configured addresses to the same To line (the financial reports and event notes only,
-    config.report_extra_recipients): one message, one delivery state, one thread.
+    `also_to` adds configured addresses to the same To line (the event notes' copy to the spouse,
+    config.partner_recipient): one message, one delivery state, one thread.
 
     Raises:
         MailError: with `uncertain=True` when the send request may have been accepted.

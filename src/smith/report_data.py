@@ -11,7 +11,8 @@ from decimal import Decimal, localcontext
 from typing import Any
 
 from smith import (cases, checklist, dividends, editions, evidence, fundamentals, future_income, holdings, insiders, lease,
-                   ledger, move_plan, pension, picks, principles, product_review, proposals, realestate, stress, tax)
+                   ledger, move_plan, pension, perspective, picks, principles, product_review, proposals, realestate, stress,
+                   tax)
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import LedgerView, base_amount, load_view, unrealized_gain
 from smith.records import TRANSFER_CATEGORIES, Kind, RecordInput, Status
@@ -54,25 +55,28 @@ TIMELINE_YEARS = 5
 
 def build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetime,
                  baseline: datetime | None, kind: str, tz: str = DEFAULT_TIMEZONE,
-                 household: dict[str, Any] | None = None, schedule: dict[str, Any] | None = None) -> dict[str, Any]:
+                 household: dict[str, Any] | None = None, schedule: dict[str, Any] | None = None,
+                 audience: str = "self") -> dict[str, Any]:
     """Assemble report data. `baseline` is the previous report's time; None marks a first report.
 
     `as_of` is converted to the household timezone first, because calendar dates come from it.
     The whole build reads one ledger snapshot: an import landing mid-build cannot give the KPIs one
     ledger state and the change analysis or proposals another. `schedule` is the `[reports]` table
     (weekdays and editions), so a daily edition can say where the other areas are; None means the default plan.
+    `audience` "partner" builds the spouse's letter: the household seen from the spouse (smith.perspective).
     """
     with ledger.snapshot(conn), localcontext() as context:
         context.prec = DECIMAL_PRECISION  # The same precision policy as the summary (no rounded products).
         return _build_report(conn, as_of=local_time(as_of, tz), known_at=known_at,
                              baseline=None if baseline is None else local_time(baseline, tz), kind=kind,
-                             household=household, schedule=schedule)
+                             household=perspective.household_for(household, audience), schedule=schedule,
+                             audience=audience)
 
 
 def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetime,
                   baseline: datetime | None, kind: str, household: dict[str, Any] | None,
-                  schedule: dict[str, Any] | None) -> dict[str, Any]:
-    view = load_view(conn, as_of=as_of, known_at=known_at)
+                  schedule: dict[str, Any] | None, audience: str = "self") -> dict[str, Any]:
+    view = perspective.as_seen_by(load_view(conn, as_of=as_of, known_at=known_at), audience)
     change = None if baseline is None else decompose(conn, baseline, as_of, known_at)
     salary = (household or {}).get("annual_gross_salary")
     pay = future_income.inflows(view, salary=None if salary is None else Decimal(salary))
@@ -94,11 +98,16 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
                               property_drop=stress.PROPERTY_DROP)
     plan = tax.facts(view, as_of.date(), household)
     # The pension stack by retirement age (report design §30) follows the credit split the tax proposal makes, and
-    # the long-range retirement track reads the same stack, so the report states one retirement picture.
-    pension_stack = pension.stack(view, household, as_of.date(), plan=tax.pension_plan(plan))
+    # the long-range retirement track reads the same stack, so the report states one retirement picture. Each
+    # member's split is their own (§42), so the household figures are the same in either member's letter.
+    plans = {owner: tax.pension_plan(tax.facts(view, as_of.date(), household, owner=owner))
+             for owner in pension.owners(view) if owner != "self"}
+    pension_stack = pension.stack(view, household, as_of.date(), plan=tax.pension_plan(plan), plans=plans)
     # Each owner's yearly dividends from the dividend evidence as known at the report (FR-45).
     yearly_dividends = dividends.yearly(view, dividends.load(conn, known_at), as_of.date())
-    advice = proposals.build(view, kpis, sectors, active=ledger.active_proposals(conn), household=household, pay=pay,
+    # Each letter reads its own proposal history (the spouse's is scoped, smith.perspective).
+    active = perspective.proposals_for(ledger.active_proposals(conn), audience)
+    advice = proposals.build(view, kpis, sectors, active=active, household=household, pay=pay,
                              dividends=yearly_dividends,
                              review=review, lease_plans=lease_plans, pension_stack=pension_stack)
     # The status badge stays household-wide: urgent proposals of every area, whatever today's theme.
@@ -116,8 +125,9 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
         oldest = min(r.effective_at for r in repriced)
         advice["assumptions"].append(f"직접 입력한 계좌의 상장 주식 {len(repriced)}건은 같은 종목의 최신 토스 시세로 평가"
                                      f"(수량은 마지막 입력 기준, 가장 오래된 입력 {oldest:%Y-%m-%d})")
-    # The products the review team chose for a proposal that moves money (report design §26), sized here.
-    reviews = picks.load(conn, known_at)
+    # The products the review team chose for a proposal that moves money (report design §26), sized here. They were
+    # reviewed for the client's proposals: the spouse's letter carries none (§42).
+    reviews = picks.load(conn, known_at) if audience == "self" else {}
     advice["proposals"] = picks.attach(advice["proposals"], reviews, view.rates)
     advice["pending_products"] = picks.pending({p.key for p in advice["proposals"]}, reviews)  # Live, but no usable review yet: the card says so.
     # What was bought, sold or vested since last week's report on the theme (report design §32), for the reports
@@ -125,7 +135,7 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     edition = editions.of(kind)
     shows_holdings = kind == "monday" if edition is None else "holdings" in edition.sections
     moved = holding_changes(conn, baseline, as_of, known_at) if baseline is not None and shows_holdings else None
-    data = {"kind": kind, "as_of": as_of, "baseline": baseline, "kpis": kpis, "schedule": schedule,
+    data = {"kind": kind, "audience": audience, "as_of": as_of, "baseline": baseline, "kpis": kpis, "schedule": schedule,
             "change": change, "timeline": _timeline(view, pay), "sectors": sectors, "holdings": review,
             "holding_quantity_changes": None if moved is None else quantity_changes(moved),
             "holding_price_moves": None if moved is None else price_moves(moved, baseline),

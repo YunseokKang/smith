@@ -123,6 +123,72 @@ class Upgrade(unittest.TestCase):
         return next(p for p in data["advice"]["proposals"] if p.key == key)
 
 
+class PerspectiveTests(Upgrade):
+    def test_the_spouse_letter_is_the_household_seen_from_the_spouse(self):
+        # Report design §42 (user decisions 2026-11-08): the spouse's own pensions, credit room, overseas gains and
+        # proposals; the household figures the same as in the client's letter; the client's policy is not hers.
+        self.apply("family", [
+            flow("np-partner", "pension_income", "1000000", "inflow", owner="partner", pension_source="national",
+                 start_date="2055-03-01"),
+            rec("irp-partner", "asset", "partner", category="fund", account_type="irp", currency="KRW", value="10000000",
+                valuation_method="statement", liquidity="restricted"),
+            flow("salary-partner", "salary", "4000000", "inflow", owner="partner"),
+            rec("aapl-partner", "asset", "partner", category="stock", account_type="brokerage", currency="KRW",
+                value="3000000", valuation_method="market", liquidity="days", symbol="AAPL", market="US",
+                quantity="10", unit_price="300000", average_cost="150000", instrument_name="Apple")])
+        household = dict(HOUSEHOLD, partner_birth_year=1990)
+        mine = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="tax", household=household)
+        hers = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="tax", household=household,
+                            audience="partner")
+        self.assertEqual(mine["pension_stack"]["total_net"], hers["pension_stack"]["total_net"])
+        own = {p["id"] for p in hers["pension_stack"]["pipelines"] if p["owner"] == "self"}
+        self.assertEqual(own, {"national", "irp"})                               # Hers, seen as the reader's.
+        self.assertEqual(hers["tax_plan"]["irp_room"], tax.PENSION_TOTAL_LIMIT)  # Nothing paid in this year.
+        self.assertEqual(hers["tax_plan"]["us_positions"], 1)
+        keys = [p.key for p in hers["advice"]["proposals"]]
+        self.assertIn("overseas-harvest", keys)
+        self.assertNotIn("insurance-review", keys)                               # The client's premiums, not hers.
+        self.assertEqual(hers["view"].owner_aliases["partner"], "household_member_1")   # The client, from her side.
+        page, own_page = render(hers)[1], render(mine)[1]
+        for text in ("나의 세금·연금", "고객님 명의의 계좌·연금·보험만 봅니다", "우리 집 노후", "두 분을 합쳐 봅니다"):
+            self.assertIn(text, page)
+            self.assertIn(text, own_page)
+        self.assertIn("이 레터의 답장 질문에는 아직 답하지 않습니다", page)
+        self.assertNotIn("이 레터의 답장 질문에는", own_page)
+        # The credit split's share for an account not opened yet is projected from zero, not dropped (Codex review).
+        self.apply("savings-only", [rec("ps-partner", "asset", "partner", category="fund", account_type="pension_savings",
+                                        currency="KRW", value="0", valuation_method="statement", liquidity="restricted"),
+                                    flow("to-ps-partner", "internal_transfer", "900000", owner="partner",
+                                         target_record_id="ps-partner")])
+        split = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="tax", household=household,
+                             audience="partner")["pension_stack"]
+        contributions = split["contributions"]
+        self.assertEqual((contributions["pension_savings"], contributions["irp"]), (Decimal(500_000), Decimal(250_000)))
+        irp = next(p for p in split["pipelines"] if p["id"] == "irp")
+        self.assertEqual(irp["monthly_contribution"], Decimal(250_000))
+        self.assertIsNotNone(irp["net_monthly"])
+        # Her home is the one she owns but does not live in; the client's is the household's residence.
+        self.assertIn("고객님 주택은 2년 거주 여부에 따라", page)
+        self.assertIn("배우자분 명의 거주 주택을 판다면", page)
+        self.assertIn("거주 주택을 지금 판다면", own_page)
+
+    def test_household_facts_swap_and_proposal_history_is_kept_apart(self):
+        from smith import perspective
+        household = {"birth_year": 1989, "birth_month": 8, "partner_birth_year": 1992, "occupational_plan": "db",
+                     "retirement_monthly_spend": 1, "annual_gross_salary": 9}
+        seen = perspective.household_for(household, "partner")
+        self.assertEqual((seen["birth_year"], seen.get("birth_month"), seen["partner_birth_year"], seen["partner_birth_month"]),
+                         (1992, None, 1989, 8))
+        self.assertEqual((seen.get("occupational_plan"), seen["partner_occupational_plan"]), (None, "db"))
+        self.assertEqual((seen.get("annual_gross_salary"), seen["retirement_monthly_spend"]), (None, 1))
+        self.assertIs(perspective.household_for(household, "self"), household)
+        active = {"overseas-harvest": {"status": "open"}, "partner:overseas-harvest": {"status": "declined"}}
+        self.assertEqual(perspective.proposals_for(active, "self"), {"overseas-harvest": {"status": "open"}})
+        self.assertEqual(perspective.proposals_for(active, "partner"), {"overseas-harvest": {"status": "declined"}})
+        shown = perspective.scoped([{"key": "isa-open", "identity": "isa-open", "renewed": True, "figures": {}}], "partner")
+        self.assertEqual((shown[0]["key"], shown[0]["identity"]), ("partner:isa-open", "partner:isa-open"))
+
+
 class LayoutTests(Upgrade):
     def test_the_hero_names_the_action_and_the_composition_and_the_mail_ends_short(self):
         data = self.report("overview")
@@ -178,8 +244,12 @@ class LayoutTests(Upgrade):
         rates = render(self.report("rates"))[1]
         self.assertIn("<details open style", rates)
         self.assertLess(rates.index("부채·금리 현황 및 금리 변동 민감도"), rates.index("고객님께 드리는 제안"))
+        # The tax day is a per-person letter (report design §42, user decision 2026-11-08): the reader's own pensions
+        # and proposals first, then the household's pension stack.
         tax_page = render(self.report("tax"))[1]
-        self.assertLess(tax_page.index("노후 현금흐름 준비율"), tax_page.index("고객님께 드리는 제안"))
+        order = [tax_page.index(text) for text in ("나의 세금·연금", "나의 연금", "고객님께 드리는 제안", "우리 집 노후",
+                                                   "노후 현금흐름 준비율")]
+        self.assertEqual(order, sorted(order))
         self.assertIn("노후 준비율(연금 세후)", tax_page)
 
     def test_opinions_and_policy_checks_are_colour_pills(self):
@@ -680,9 +750,16 @@ class PensionTests(Upgrade):
         data = self.report("tax")
         self.assertEqual(len(delivery.canonical_digest(data)), 64)           # The lineage digest takes the stack.
         page = render(data)[1]
-        self.assertEqual(page.count('src="data:image/png;base64,'), 2)        # The donut and the age bars.
+        # The donut and the age bars, once for the reader's own pensions and once for the household's (user request
+        # 2026-11-08).
+        self.assertEqual(page.count('src="data:image/png;base64,'), 4)
+        self.assertLess(page.index("고객님 명의, 세후"), page.index("우리 집 노후"))
         html, images = delivery.inline_images(page)
-        self.assertEqual(sorted(images), ["chart-1", "chart-2"])
+        self.assertEqual(sorted(images), ["chart-1", "chart-2", "chart-3", "chart-4"])
+        # A long legend name is cut to its room, never run into the figures (user review 2026-11-08).
+        png = pension_chart.donut([("IRP(개인형 퇴직연금)(배우자) " * 3, Decimal(1_000_000), "#0a8f5c"),
+                                   ("국민연금", Decimal(2_000_000), "#0052ff")], center="월 25만 원", caption="65세 세후")
+        self.assertEqual(png[:4], bytes([0x89]) + b"PNG")
         self.assertNotIn("data:image/png", html)
         self.assertIn('src="cid:chart-1"', html)
         self.assertTrue(all(png[:4] == bytes([0x89]) + b"PNG" for png in images.values()))
@@ -744,8 +821,13 @@ class FinancialIncomePerPersonTests(Upgrade):
         note = next(n for n in data["advice"]["tax_notes"] if n.title.startswith("금융소득종합과세"))
         self.assertTrue(note.body.startswith("본인 명의로"))
         self.assertNotIn("9.3억", note.body)                                   # Never a household total.
-        self.assertIn("배우자 명의 현금·예금 가운데 원화로 환산하지 못한 금액", note.body)
         self.assertIn("본인 명의 현금·예금 3,000만 원의 이자", note.body)
+        # Each letter carries its reader's own threshold (report design §42): the spouse's figures are in hers.
+        self.assertNotIn("배우자 명의", note.body)
+        hers = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="tax", household=HOUSEHOLD,
+                            audience="partner")
+        note = next(n for n in hers["advice"]["tax_notes"] if n.title.startswith("금융소득종합과세"))
+        self.assertIn("본인 명의 현금·예금 가운데 원화로 환산하지 못한 금액", note.body)
 
 
 class FirstReviewTests(unittest.TestCase):

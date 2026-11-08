@@ -54,23 +54,6 @@ class DeliveryTests(unittest.TestCase):
         return delivery.publish(self.db, recipient="me@example.com", credentials=("a", "b", "c"), now=now,
                                 slot=slot, missed=list(missed), kind="monday", sender=self.sender(outcome))
 
-    def test_the_family_copy_goes_on_the_same_message_and_the_footer_says_so(self):
-        # FR-51 (user decision 2026-11-08): the configured family address joins the report's To line; one message.
-        seen = []
-
-        def send(credentials, *, recipient, subject, html, text, also_to=()):
-            seen.append((recipient, list(also_to), html))
-            return "msg-id"
-        result = delivery.publish(self.db, recipient="me@example.com", credentials=("a", "b", "c"), now=MON, slot=MON,
-                                  missed=[], kind="monday", sender=send, also_to=["family@example.com"])
-        self.assertEqual(result["status"], "sent")
-        (recipient, also, html), = seen
-        self.assertEqual((recipient, also), ("me@example.com", ["family@example.com"]))
-        self.assertIn("가족 주소로도 함께 보냅니다", html)
-        # Without it the sender is called as before (no extra keyword) and the footer says nothing.
-        self.publish(THU, THU)
-        self.assertNotIn("가족 주소로도", self.notes[-1])
-
     def test_slots_follow_the_configured_local_schedule(self):
         slots = delivery.slots_between(CONFIG["reports"], "Asia/Seoul", MON - timedelta(minutes=1), NEXT_MON)
         self.assertEqual(slots, [MON, THU, NEXT_MON])

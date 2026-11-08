@@ -116,8 +116,7 @@ def render(data: dict[str, Any]) -> tuple[str, str]:
         sections += [_policy(data, story, full), _holdings(data, story, full)]
     sections.append(_requests(data.get("requests") or [], full))
     bands.append(_band(CANVAS, "".join(sections), border=True))
-    bands.append(_band(SOFT, _footer(_system_warnings(data), corrections=_corrections_line(data),
-                                     shared=bool(data.get("family_copy")))))
+    bands.append(_band(SOFT, _footer(_system_warnings(data), corrections=_corrections_line(data))))
     return _subject(data, status), _page(bands)
 
 
@@ -612,27 +611,91 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
         "stress": lambda: _stress(data["stress"], sectors["real_estate"]),
         "stress_summary": lambda: _stress_summary(data["stress"], sectors["real_estate"]),
         "experiences": lambda: _experiences(story),
+        "my_pensions": lambda: _my_pensions(data), "household_tax": lambda: _household_tax(advice),
     }
-    # The theme's opening view (the loan line-up, the pension stack, the move targets) comes right under the
-    # hero and open; everything after the proposals is collapsed (report design §18.1).
-    opening = "".join(_opened(renderers[name]()) for name in edition.opening)
-    if opening:
-        bands.append(_band(CANVAS, opening, border=True))
-    if advice["proposals"] or advice.get("undetermined") or overview:
-        bands.append(_band(CANVAS, _proposals(advice, not overview, edition=edition), border=True))
-    title = "이번 주 눈여겨볼 변화" if overview else f"{edition.label} — 눈여겨볼 변화"
-    changes = _changes_outside(story, title)
+    if edition.personal:
+        bands += _split_bands(data, edition, renderers, advice, story)
+    else:
+        # The theme's opening view (the loan line-up, the pension stack, the move targets) comes right under the
+        # hero and open; everything after the proposals is collapsed (report design §18.1).
+        opening = "".join(_opened(renderers[name]()) for name in edition.opening)
+        if opening:
+            bands.append(_band(CANVAS, opening, border=True))
+        if advice["proposals"] or advice.get("undetermined") or overview:
+            bands.append(_band(CANVAS, _proposals(advice, not overview, edition=edition), border=True))
+        title = "이번 주 눈여겨볼 변화" if overview else f"{edition.label} — 눈여겨볼 변화"
+        changes = _changes_outside(story, title)
+        if changes:
+            bands.append(_band(CANVAS, changes, border=True))
+        if edition.strategy and advice["strategy"]:
+            bands.append(_band(DARK, _strategy(advice["strategy"], story.get("direction", ""))))
+        sections = [renderers[name]() for name in edition.sections if name not in edition.opening]
+        if any(sections):
+            bands.append(_band(CANVAS, "".join(sections), border=True))
+    shown = edition.opening + edition.sections + edition.household
+    notes = pension_notes(data.get("pension_stack")) if "pension_stack" in shown else []
+    bands.append(_band(SOFT, _footer(_system_warnings(data), week=_week_line(data), corrections=_corrections_line(data),
+                                     notes=notes, reader=data.get("audience", "self"))))
+    return _subject(data, status), _page(bands)
+
+
+def _split_bands(data: dict[str, Any], edition: editions.Edition, renderers: dict[str, Any], advice: dict[str, Any],
+                 story: dict[str, Any]) -> list[str]:
+    """A per-person letter's body (report design §42): "나의 …" (the reader's own accounts, with the proposals made to
+    the reader) and then "우리 집 …" (the two of them together). Each group's first section is open. Both letters
+    call the reader 고객님 (user decision 2026-11-08)."""
+    def group(names: tuple[str, ...]) -> list[str]:
+        parts = [renderers[name]() for name in names]
+        return [_opened(part) if i == 0 else part for i, part in enumerate(p for p in parts if p)]
+
+    mine = group(edition.personal)
+    proposals = (_proposals(advice, True, edition=edition) if advice["proposals"] or advice.get("undetermined") else "")
+    ours = group(edition.household)
+    bands = [_band(CANVAS, _group_title(f"나의 {edition.label}", "고객님 명의의 계좌·연금·보험만 봅니다.")
+                   + "".join(mine[:1]) + proposals + "".join(mine[1:]), border=True)]
+    changes = _changes_outside(story, f"{edition.label} — 눈여겨볼 변화")
     if changes:
         bands.append(_band(CANVAS, changes, border=True))
-    if edition.strategy and advice["strategy"]:
-        bands.append(_band(DARK, _strategy(advice["strategy"], story.get("direction", ""))))
-    sections = [renderers[name]() for name in edition.sections if name not in edition.opening]
-    if any(sections):
-        bands.append(_band(CANVAS, "".join(sections), border=True))
-    notes = pension_notes(data.get("pension_stack")) if "pension_stack" in edition.opening + edition.sections else []
-    bands.append(_band(SOFT, _footer(_system_warnings(data), week=_week_line(data), corrections=_corrections_line(data),
-                                     notes=notes, shared=bool(data.get("family_copy")))))
-    return _subject(data, status), _page(bands)
+    bands.append(_band(CANVAS, _group_title(f"우리 집 {edition.household_label or edition.label}", "두 분을 합쳐 봅니다.")
+                       + "".join(ours), border=True))
+    return bands
+
+
+def _group_title(title: str, note: str) -> str:
+    """The heading of a per-person letter's group (나의 … / 우리 집 …) and the one line saying whose figures follow."""
+    return (f'<tr><td style="padding:0 0 4px">{_heading(title, size=22)}'
+            f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin:0 0 6px">{escape(note)}</div></td></tr>')
+
+
+def _my_pensions(data: dict[str, Any]) -> str:
+    """The reader's own pensions (report design §42): their pipelines from the household stack, what they pay after
+    tax once every pension has started at the headline retirement age, and that share of the household's."""
+    stack = data.get("pension_stack")
+    if stack is None:
+        return ""
+    mine = [dict(p, owner_label=None) for p in stack["pipelines"] if p.get("owner", "self") == "self"]
+    if not mine:
+        return ""
+    head = next(t for t in stack["tiers"] if t["retire_age"] == stack["retirement_age"])
+    at = head["all_on_age"]
+    total = sum((p["net_monthly"] if at is None else pension.monthly_at(p, at) for p in mine
+                 if p["net_monthly"] is not None), Decimal(0))
+    share = total / stack["total_net"] if stack["total_net"] else None
+    lead = (f"고객님 명의 연금은 {len(mine)}개이고, {stack['retirement_age']}세 은퇴 기준 모든 연금이 나온 뒤 세후 월 "
+            f"<b>{_short(total)}</b>입니다" + (f"(우리 집 연금의 {_pct(share, 0)})" if share is not None else "") + ".")
+    missing = [p for p in mine if p["net_monthly"] is None]
+    if missing:
+        lead += f" {', '.join(_sub_label(p) for p in missing)}은 아직 수령액을 몰라 뺐습니다."
+    # The reader's own charts beside the household's (user request 2026-11-08), each pipeline in the household's colour.
+    colors = _pipeline_colors(stack)
+    known = [p for p in mine if p["net_monthly"] is not None and p["start_age"] is not None]
+    parts = [part for p in known for part in pension.segments(p)]
+    charts = _pension_charts(mine, pension.timeline({"pipelines": mine}), colors, retire_age=stack["retirement_age"],
+                             focus_age=max((start for start, _, _, _ in parts if start is not None), default=None),
+                             drop_age=max((end for _, _, _, end in parts if end is not None), default=None),
+                             whose="고객님 명의, ")
+    return _section("나의 연금", lead, charts + _family_table(dict(stack, pipelines=mine), colors), brief=None,
+                    note=escape(f"세후 월 {_short(total)}"))
 
 
 def _opened(section: str) -> str:
@@ -1343,9 +1406,25 @@ def _changes_outside(story: dict[str, Any], title: str = "이번 주 눈여겨�
     return f'<tr><td>{_eyebrow("놓치지 마실 변화", color="#ffffff", background=BLUE)}{_heading(title, size=26)}</td></tr>' + cards
 
 
+def _household_tax(advice: dict[str, Any]) -> str:
+    """The tax points about both members (marriage registration, gifts, the other member's home) in a per-person
+    letter's household group (report design §42); empty without any."""
+    notes = [n for n in advice.get("tax_notes") or [] if n.household]
+    if not notes:
+        return ""
+    inner = "".join(f'<div style="margin:6px 0 14px"><div style="font-size:15px;font-weight:600;color:{INK};'
+                    f'margin-bottom:4px">{escape(n.title)}</div><div style="font-size:14px;line-height:1.6;color:{BODY}">'
+                    f'{escape(_first_sentence(n.body))}</div></div>' for n in notes[:MAX_TAX_NOTES])
+    return _section("두 분의 세금: 혼인신고·주택·증여", "두 분이 함께 정할 세금 문제입니다.", inner, brief=None)
+
+
 def _tax(advice: dict[str, Any], data: dict[str, Any], full: bool) -> str:
-    """After-tax view: strategy notes (Monday) and the year-end settlement checklist (Q4, both editions)."""
+    """After-tax view: strategy notes (Monday) and the year-end settlement checklist (Q4, both editions). In a
+    per-person letter (§42) the household's notes go to `_household_tax` instead."""
     notes, rows = advice.get("tax_notes") or [], advice.get("tax_checklist") or []
+    edition = editions.of(data["kind"])
+    if edition is not None and "household_tax" in edition.household:
+        notes = [n for n in notes if not n.household]
     year_end = data["as_of"].month >= 10
     if not (full and notes) and not (year_end and rows):
         return ""
@@ -2594,15 +2673,16 @@ def _product_text(p: dict[str, Any]) -> str:
         provider, title = item.get("institution"), item.get("name")
         names.append(" ".join(x for x in (None if provider and title and title.startswith(provider) else provider, title)
                               if x))
-    if not any(names) and p["key"] == "isa":
+    if not any(names) and (p["key"] == "isa" or "계좌가 아직 없어" in p.get("basis_text", "")):
         return "아직 없음(Smith 가정)"
     return ", ".join(n for n in names if n) or "-"
 
 
-def _family_table(stack: dict[str, Any]) -> str:
+def _family_table(stack: dict[str, Any], colors: dict[str, str] | None = None) -> str:
     """Every pipeline under its family (공적·퇴직·개인·비과세·부동산 연금) with the client's product, the payout
-    period and the after-tax monthly figure; a family the household does not hold is one line naming its products."""
-    colors = _pipeline_colors(stack)
+    period and the after-tax monthly figure; a family the household does not hold is one line naming its products.
+    `colors` keeps the household's shades when the table shows one reader's pipelines."""
+    colors = colors or _pipeline_colors(stack)
     rows = []
     for key, label, members in _families(stack):
         if not members:
@@ -2619,46 +2699,60 @@ def _family_table(stack: dict[str, Any]) -> str:
 
 
 def _pension_timeline(stack: dict[str, Any]) -> str:
-    """The public pension portal's chart in Smith's figures (user request 2026-11-07): the composition at the age
-    every pension has started as a donut, then one stacked bar per age with the yearly after-tax payout of each
-    pipeline in its family's shade (smith.pension_chart PNGs), and one line on where the payouts drop; empty
-    without a payout."""
-    rows = stack.get("timeline") or []
+    """The public pension portal's chart in Smith's figures (user request 2026-11-07) for the whole household: the
+    composition at the age every pension has started, then the yearly payout by age; empty without a payout."""
+    head = next(t for t in stack["tiers"] if t["retire_age"] == stack["retirement_age"])
+    shared = len(stack.get("owners") or []) > 1
+    return _pension_charts(stack["pipelines"], stack.get("timeline") or [], _pipeline_colors(stack),
+                           retire_age=stack["retirement_age"], focus_age=head["all_on_age"], drop_age=head["later_age"],
+                           whose="두 분 합산, " if shared else "")
+
+
+def _pension_charts(pipelines: list[dict[str, Any]], rows: list[dict[str, Any]], colors: dict[str, str], *,
+                    retire_age: int, focus_age: int | None, drop_age: int | None, whose: str) -> str:
+    """A donut of the pipelines at `focus_age` (every pension started), one stacked bar per age with each pipeline's
+    yearly after-tax payout in its family's shade (smith.pension_chart PNGs), a legend by family and one line on where
+    the payouts drop at `drop_age`. Drawn for the household and for the reader's own pensions (user request
+    2026-11-08: "개인용, 가구용 2개로"), with the same colour per pipeline in both; empty without a payout."""
     peak = max((r["total"] for r in rows), default=Decimal(0))
     if not peak:
         return ""
-    colors = _pipeline_colors(stack)
-    order = [p for _, _, members in _families(stack) for p in members if p["id"] in rows[0]["parts"]]
-    head = next(t for t in stack["tiers"] if t["retire_age"] == stack["retirement_age"])
-    focus = next((r for r in rows if r["age"] == head["all_on_age"]), max(rows, key=lambda r: r["total"]))
-    shared = len(stack.get("owners") or []) > 1
+    families = _families({"pipelines": pipelines})
+    order = [p for _, _, members in families for p in members if p["id"] in rows[0]["parts"]]
+    focus = next((r for r in rows if r["age"] == focus_age), max(rows, key=lambda r: r["total"]))
     title = (f'<div style="font-size:15px;font-weight:600;color:{INK};margin:18px 0 8px">'
-             f'{focus["age"]}세 예상 연금 수령액({"두 분 합산, " if shared else ""}세후, 오늘 돈 가치): 연 {_short(focus["total"])} · 월 '
+             f'{focus["age"]}세 예상 연금 수령액({whose}세후, 오늘 돈 가치): 연 {_short(focus["total"])} · 월 '
              f'{_short(focus["total"] / 12)}</div>')
     shown = [p for p in order if focus["parts"][p["id"]] > 0]
     # PNGs drawn with Pillow (mail clients drop SVG): a data URI here, an inline attachment once sent.
-    ring = pension_chart.donut([(_sub_label(p), focus["parts"][p["id"]], colors[p["id"]]) for p in shown],
+    ring = pension_chart.donut([(_chart_label(p), focus["parts"][p["id"]], colors[p["id"]]) for p in shown],
                                center=f"월 {_short(focus['total'] / 12)}", caption=f"{focus['age']}세 세후")
-    bars = pension_chart.age_bars(rows, [(p["id"], colors[p["id"]]) for p in order],
-                                  retire_age=stack["retirement_age"], focus_age=focus["age"])
+    bars = pension_chart.age_bars(rows, [(p["id"], colors[p["id"]]) for p in order], retire_age=retire_age,
+                                  focus_age=focus["age"])
     chart = "".join(f'<div style="margin:10px 0 4px"><img src="data:image/png;base64,{base64.b64encode(png).decode("ascii")}" '
                     f'width="{pension_chart.WIDTH}" alt="{escape(alt)}" style="display:block;width:100%;'
                     f'max-width:{pension_chart.WIDTH}px;height:auto"></div>'
                     for png, alt in ((ring, f"{focus['age']}세 연금 구성"), (bars, "연령별 연간 연금 수령액")))
     legend = " ".join(
         f'<span style="white-space:nowrap;margin-right:12px"><b>{escape(label)}</b> '
-        + " ".join(f'<span style="color:{colors[p["id"]]}">●</span> {escape(_sub_label(p))}' for p in members
+        + " ".join(f'<span style="color:{colors[p["id"]]}">●</span> {escape(_chart_label(p))}' for p in members
                    if p["id"] in rows[0]["parts"]) + "</span>"
-        for _, label, members in _families(stack) if any(p["id"] in rows[0]["parts"] for p in members))
+        for _, label, members in families if any(p["id"] in rows[0]["parts"] for p in members))
     # The one thing the bars show: where the yearly income drops when the fixed-term pensions end.
     by_age = {r["age"]: r for r in rows}
-    drop = head["later_age"]
-    ending = [_sub_label(p) for p in order if p.get("end_age") == drop]
-    note = (f"{stack['retirement_age']}세 은퇴 기준, 세후, 오늘 돈 가치입니다."
-            + (f" {drop}세에 {'·'.join(ending)}이 끝나 연 {_short(by_age[drop - 1]['total'])}에서 "
-               f"{_short(by_age[drop]['total'])}로 줄어듭니다." if drop in by_age and drop - 1 in by_age and ending else ""))
+    ending = [_chart_label(p) for p in order if p.get("end_age") == drop_age]
+    note = (f"{retire_age}세 은퇴 기준, 세후, 오늘 돈 가치입니다."
+            + (f" {drop_age}세에 {'·'.join(ending)}이 끝나 연 {_short(by_age[drop_age - 1]['total'])}에서 "
+               f"{_short(by_age[drop_age]['total'])}로 줄어듭니다."
+               if drop_age in by_age and drop_age - 1 in by_age and ending else ""))
     return (title + chart + f'<div style="font-size:13px;color:{INK};margin-top:6px;line-height:1.9">{legend}</div>'
             + f'<div style="{_NOTE}">{escape(note)}</div>')
+
+
+def _chart_label(p: dict[str, Any]) -> str:
+    """A pipeline's short name for a chart legend ("IRP(배우자)"): the table carries the full product names."""
+    short = {"irp": "IRP", "insurance_annuity": "변액연금보험", "isa": "ISA 등"}.get(p["key"])
+    return _sub_label(p) if short is None else pension.row_label(dict(p, label=short))
 
 
 def _retirement_tiers(stack: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2909,7 +3003,7 @@ def _requests(requests: list[Any], full: bool, rest_where: str = "월요 보고"
 
 
 def _footer(warnings: list[str] | tuple[str, ...] = (), week: str = "", corrections: str = "",
-            notes: list[str] | tuple[str, ...] = (), law: bool = True, shared: bool = False) -> str:
+            notes: list[str] | tuple[str, ...] = (), law: bool = True, shared: bool = False, reader: str = "self") -> str:
     """One line (report design §18.1): what Smith never does, and that the reasons are a reply away. A problem
     with the report itself (stale data, no narrative) adds one warning line above it; a daily edition adds the
     week's plan (`week`, HTML) so a reader of one day knows where the other areas are (§27); `corrections` is the
@@ -2929,8 +3023,10 @@ def _footer(warnings: list[str] | tuple[str, ...] = (), week: str = "", correcti
     checked = "" if not corrections else f'<div style="{small};margin-bottom:6px">{escape(corrections)}</div>'
     caveat = f"세금·법령은 {tax.RULES_YEAR}년 기준으로 계산했으니 실행 전 현행 법령을 확인하십시오. " if law else ""
     family = " 이 메일은 가족 주소로도 함께 보냅니다(답장 질문은 고객님 메일에서 보내신 것에만 답합니다)." if shared else ""
+    # The spouse's own letter (§42): replies to it are not answered yet, so it does not invite them.
+    ask = ("이 레터의 답장 질문에는 아직 답하지 않습니다." if reader != "self" else "판단 근거는 답장으로 물어 주십시오.")
     return (f'<tr><td>{warn}{basis}{guide}{checked}<div style="{small}">Smith는 조회 전용 자문입니다(매매·이체·대출 '
-            f'실행 없음). {caveat}판단 근거는 답장으로 물어 주십시오.{family}</div></td></tr>')  # The one law caveat (user decision 2026-11-02).
+            f'실행 없음). {caveat}{ask}{family}</div></td></tr>')  # The one law caveat (user decision 2026-11-02).
 
 
 def _corrections_line(data: dict[str, Any]) -> str:

@@ -10,7 +10,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from smith import editions, ledger
-from smith.config import DEFAULT_TIMEZONE, report_extra_recipients
+from smith.config import DEFAULT_TIMEZONE, partner_recipient
 from smith.narrative import PIPELINES
 from smith.report_data import build_report
 from smith import report_html
@@ -41,6 +41,10 @@ def add_parser(sub: Any, default_db: Path) -> None:
                         help="preview/compare: research the web first (implies --narrative)")
     report.add_argument("--pipeline", choices=PIPELINES,
                         help="preview: how the narrative is written (default: single; team is the compare experiment)")
+    report.add_argument("--audience", choices=("both", "self", "partner"), default="both",
+                        help="preview: whose letter (self, or the spouse's own letter: partner; default self); "
+                             "send-now: the client's letter, the spouse's, or both (default; the spouse's goes only "
+                             "for a split edition with [mail] partner_recipient)")
     report.add_argument("--db", type=Path, default=default_db)
     report.add_argument("--config", type=Path, default=Path("config/smith.local.toml"),
                         help="run-due/send-now: local config with schedule and [mail] recipient")
@@ -76,13 +80,17 @@ def run(args: argparse.Namespace) -> int:
             brief_id = researched["brief_id"] if researched["outcome"] == "success" else None
         if args.action == "compare":
             return _compare(args, now=now, kind=kind, tz=tz, config=config, brief_id=brief_id)
+        audience = "partner" if args.audience == "partner" else "self"
         with closing(ledger.connect_read_only(args.db)) as conn:
             data = build_report(conn, as_of=now, known_at=now, baseline=args.since, kind=kind, tz=tz,
-                                household=profile(config) if config else None, schedule=(config or {}).get("reports"))
+                                household=profile(config) if config else None, schedule=(config or {}).get("reports"),
+                                audience=audience)
     except (sqlite3.Error, ledger.LedgerError) as error:
         print(f"Ledger error ({type(error).__name__}): not a readable Smith ledger.")
         return 1
-    if args.narrative or args.research or args.pipeline:
+    if audience == "partner" and (args.narrative or args.research or args.pipeline):
+        print("The spouse's letter has no narrative of its own (report design §42): --narrative ignored.")
+    elif args.narrative or args.research or args.pipeline:
         _narrator(args.db, now, brief_id, args.pipeline or "single")(data)
         print(f"Narrative ({data['narrative']['status']['pipeline']}): {data['narrative']['status']['outcome']}")
     subject, html = render(data)
@@ -262,6 +270,8 @@ PREPARE_AHEAD = timedelta(hours=1)
 # of a slot, never in the prepare hour or the send path, so a report is never delayed by it (review 2026-10-20).
 REVIEW_AHEAD = timedelta(hours=4)
 REVIEW_LEAD = timedelta(hours=2)
+# The spouse's letter of a scheduled report is retried on later runs this long after its slot (report design §42).
+PARTNER_RETRY_WINDOW = timedelta(hours=6)
 
 
 def target_regions(config: dict[str, Any] | None) -> tuple[str, ...]:
@@ -540,6 +550,8 @@ def _publish_once(args: argparse.Namespace) -> int:
                 _say(args.db, f"Answering questions crashed: {type(error).__name__}")
         _run_trades(args, config)
         if found is None:
+            # The spouse's letter of the last report, if it failed or was cut off after the client's went out (§42).
+            _retry_partner_letter(args.db, config, now)
             # Same-day event notes (report design §29): once a day after the check time, apart from the reports.
             _check_events(args.db, config, now, reason="slot", sync=True)
             _sync_dividends(args.db, config, now)   # Weekly, never while a report is due (FR-45).
@@ -587,17 +599,21 @@ def _publish_once(args: argparse.Namespace) -> int:
                   f"{researched.get('items', researched.get('error_code'))}")
     brief_id = researched["brief_id"] if researched["outcome"] == "success" else None
     publish_at = datetime.now(timezone.utc)
-    result = delivery.publish(args.db, recipient=recipient, credentials=stored, now=publish_at,
-                              slot=slot, missed=missed, kind=kind, tz=tz, sync_failures=sync_failures,
-                              narrator=_narrator(args.db, publish_at, brief_id), household=profile(config),
-                              lineage=lineage(args.config), schedule=config["reports"],
-                              since=args.since if args.action == "send-now" else None,
-                              also_to=report_extra_recipients(config))
-    # The subject can carry an amount (net-worth change); the plain-text log gets only the run id and outcome.
-    _say(args.db, f"Report {result['status']}: run {(result.get('report_id') or '-')[:8]} "
-                  f"{result.get('error_code') or ''}".rstrip())
-    if result.get("subject"):
-        print(f"Subject: {result['subject']}")
+    only_partner = args.action == "send-now" and args.audience == "partner"
+    result = {"status": "skipped", "report_id": None} if only_partner else delivery.publish(
+        args.db, recipient=recipient, credentials=stored, now=publish_at, slot=slot, missed=missed, kind=kind, tz=tz,
+        sync_failures=sync_failures, narrator=_narrator(args.db, publish_at, brief_id), household=profile(config),
+        lineage=lineage(args.config), schedule=config["reports"], since=args.since if args.action == "send-now" else None)
+    if not only_partner:
+        # The subject can carry an amount (net-worth change); the plain-text log gets only the run id and outcome.
+        _say(args.db, f"Report {result['status']}: run {(result.get('report_id') or '-')[:8]} "
+                      f"{result.get('error_code') or ''}".rstrip())
+        if result.get("subject"):
+            print(f"Subject: {result['subject']}")
+    partner = _send_partner_letter(args, config, kind=kind, slot=slot, credentials=stored, explicit=only_partner)
+    if only_partner:
+        # The spouse's letter alone (Codex review 2026-11-08): its own outcome is the command's.
+        return 0 if partner is not None and partner["status"] == "sent" else 1
     if result["status"] == "sent" and (config.get("backup") or {}).get("dir"):
         _backup_after_send(args.db, config["backup"])
     # The holdings and the evidence were just refreshed: look for events (the US session overnight) without syncing,
@@ -605,6 +621,62 @@ def _publish_once(args: argparse.Namespace) -> int:
     if args.action == "run-due":
         args.events_after_report = True
     return 0 if result["status"] in ("sent", "skipped") else 1
+
+
+def _send_partner_letter(args: argparse.Namespace, config: dict[str, Any], *, kind: str, slot: datetime | None,
+                         credentials: tuple[str, str, str] | None, explicit: bool) -> dict[str, Any] | None:
+    """The spouse's own letter of the same edition (report design §42), right after the client's; never raises.
+    Only an edition already split goes, and only with `[mail] partner_recipient`; a manual send-now sends it with
+    the client's unless `--audience self` (or alone with `--audience partner`). Returns its outcome, None when it
+    does not apply or crashed."""
+    if args.action == "send-now" and args.audience == "self":
+        return None
+    if not partner_recipient(config) or not editions.personalized(kind):
+        if explicit:
+            print("Partner letter not sent: [mail] partner_recipient is not set, or this edition is not split yet.")
+        return None
+    tz = config["app"]["timezone"]
+    return _partner_publish(args.db, config, kind=kind, trigger="manual" if slot is None else "scheduled",
+                            day=None if slot is None else slot.astimezone(ZoneInfo(tz)).date(), credentials=credentials)
+
+
+def _partner_publish(db: Path, config: dict[str, Any], *, kind: str, trigger: str, day: Any,
+                     credentials: tuple[str, str, str] | None) -> dict[str, Any] | None:
+    """One partner_letter.publish, logged; never raises (the spouse's letter never blocks the client's report)."""
+    from smith import partner_letter
+
+    try:
+        outcome = partner_letter.publish(db, config, now=datetime.now(timezone.utc), kind=kind, trigger=trigger,
+                                         credentials=credentials, household=profile(config), day=day)
+    except Exception as error:  # noqa: BLE001 - the spouse's letter must never block or fail the client's report.
+        _say(db, f"Partner letter crashed: {type(error).__name__}")
+        return None
+    if not str(outcome["error_code"] or "").startswith("already-"):
+        _say(db, f"Partner letter {outcome['status']}: {outcome['run_key'] or '-'} {outcome['error_code'] or ''}".rstrip())
+    return outcome
+
+
+def _retry_partner_letter(db: Path, config: dict[str, Any], now: datetime) -> None:
+    """The spouse's letter of the last scheduled report that went out or may have (sent or unknown), when the
+    letter failed or never ran (Codex review 2026-11-08: its retries must not hang on the client's slot, which is
+    settled once delivered or possibly delivered; the client's mail is never sent again here). Only within
+    PARTNER_RETRY_WINDOW of that slot; its claim refuses a letter already sent or possibly sent, and one out of
+    attempts."""
+    from smith import credentials
+
+    if not partner_recipient(config):
+        return
+    with closing(ledger.connect_read_only(db)) as conn:
+        runs = [r for r in ledger.report_runs(conn, limit=50)
+                if r["trigger"] == "scheduled" and r["status"] in ("sent", "unknown") and r.get("slot")]
+    last = max(runs, key=lambda r: r["slot"], default=None)
+    if last is None or not editions.personalized(last["kind"]):
+        return
+    slot = datetime.fromisoformat(last["slot"])
+    if now - slot > PARTNER_RETRY_WINDOW:
+        return
+    _partner_publish(db, config, kind=last["kind"], trigger="scheduled",
+                     day=slot.astimezone(ZoneInfo(config["app"]["timezone"])).date(), credentials=credentials.load_gmail())
 
 
 def _check_events(db: Path, config: dict[str, Any], now: datetime, *, reason: str, sync: bool) -> None:
@@ -626,7 +698,8 @@ def _check_events(db: Path, config: dict[str, Any], now: datetime, *, reason: st
                                 dart_key=credentials.load_api_key("dart"),
                                 # The SEC asks for a contact in the User-Agent: the client's own address (user decision 2026-10-29).
                                 sec_contact=config.get("mail", {}).get("recipient"),
-                                interpreter=disclosure_insight.interpret, also_to=report_extra_recipients(config))
+                                interpreter=disclosure_insight.interpret,
+                                also_to=[partner_recipient(config)] if partner_recipient(config) else None)
         for outcome in outcomes:
             # The detail can be the subject (an amount): the log gets the key and the status only.
             _say(db, f"Event {outcome['key']}: {outcome['status']}"
