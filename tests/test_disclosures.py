@@ -4,6 +4,7 @@ import unittest
 import urllib.parse
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 
 from smith import dart, disclosures, events, ledger, report_html, sec
@@ -89,13 +90,13 @@ class DisclosureTests(unittest.TestCase):
         outcomes = self.check(FakeDart())
         self.assertEqual([o["status"] for o in outcomes], ["sent"])
         subject, html = self.sent[0]
-        # Correction first, routine filing left out; 가상바이오's new shares and the bond follow by receipt number.
-        self.assertIn("보유 종목 공시 4건", subject)
-        self.assertNotIn("분기보고서", html)
+        # The company with money coming leads, by name and code's figure; what to do closes the subject.
         # The correction's 361 won: 400 shares in a general account (144,400 - 22,230) + 5 in an ISA (1,805) = 123,975.
-        self.assertIn("약 12만 원 입금 예정", subject)
+        self.assertIn("가상전자 배당 세후 약 12만 원 11/27 입금 · 외 1곳 · 할 일 없음", subject)
+        self.assertNotIn("분기보고서", html)
         self.assertIn("세전 146,205원", html)
-        self.assertIn("11/03 정정 공시로 바뀌었습니다", html)          # The original is shown, not counted.
+        self.assertIn("공시 3건", html)                                 # The original the correction replaced...
+        self.assertNotIn("20261102800020", html)                        # ...is neither shown nor counted.
         self.assertIn("기존 주주 지분이 약 10.0% 줄어듭니다", html)    # 100,000 / (900,000 + 100,000).
         self.assertIn("791,693주(발행 주식의 8.12%)", html)
         self.assertIn("사채 122억 원", html)
@@ -127,8 +128,8 @@ class DisclosureTests(unittest.TestCase):
             return original(url)
         self.check(call)
         subject, html = self.sent[0]
-        self.assertNotIn("정정 공시로 바뀌었습니다", html)          # June's correction does not touch September's decision.
-        self.assertIn("약 10만 원 입금 예정", subject)              # The 300-won September decision; June's was paid in August.
+        self.assertIn("20261102800020", html)                     # June's correction does not touch September's decision.
+        self.assertIn("배당 세후 약 10만 원", subject)              # The 300-won September decision; June's was paid in August.
 
     def test_the_first_claim_owns_a_filing_whatever_time_its_check_started(self):
         late, early = [{"rcept_no": "1"}, {"rcept_no": "2"}], [{"rcept_no": "1"}]
@@ -160,8 +161,80 @@ class DisclosureTests(unittest.TestCase):
                                                                                   "pay_dates": ["2026-11-27"]}}}
         note = {"kind": "disclosure", "key": "k", "day": NOW.date(), "as_of": NOW,
                 "filings": [filing("1", "가상전자", "100000"), filing("2", "가상바이오", None)]}
+        subject, html, _ = report_html.render_event(note)
+        self.assertIn("배당 세후 약 10만 원(미계산 1건 제외)", subject)
+        self.assertIn("미계산 1건 제외", html)                        # The tile says it too.
+
+    def test_the_note_says_what_to_do_and_the_main_takeaway_at_a_glance(self):
+        reading = {"verdict": "watch", "headline": "실적, 매출은 예상 위·로열티는 아래*", "thesis": "보유 이유는 그대로입니다.",
+                   "reaction": "시간외 -2.5%", "what_happened": "<script>x</script> 매출이 27% 늘었습니다.*",
+                   "meaning": "단기 변동입니다.", "watch": "2월 실적에서 로열티 확인.", "sources": ["https://news.example.com/a"],
+                   "unchecked_figures": True}
+
+        def sec_filing(number, title, category, insight):
+            return {"rcept_no": number, "corp_name": "ARMX", "corp_code": "CIK1", "display_name": "가상칩", "title": title,
+                    "category": category, "filed_on": "2026-11-04", "url": f"https://www.sec.gov/{number}.htm",
+                    "source": "sec", "figures": None, "household": None, "held_share": "0.04", "held_value": "9200000",
+                    "insight": insight}
+        rights = {"rcept_no": "9", "corp_name": "가상바이오", "corp_code": "00777777", "title": "주요사항보고서(유상증자결정)",
+                  "category": "dilution", "filed_on": "2026-11-04", "url": "https://dart.example/9", "household": None,
+                  "figures": {"type": "유상증자", "new_shares": "100", "shares_before": "900", "method": "주주배정후 실권주 일반공모",
+                              "dilution": "0.1"}, "held_share": "0.01", "held_value": "300000"}
+        note = {"kind": "disclosure", "key": "k", "day": NOW.date(), "as_of": NOW,
+                "filings": [sec_filing("a", "6-K · 해외 발행사 수시 보고", "corporate", reading),
+                            sec_filing("b", "6-K · 해외 발행사 수시 보고", "corporate", reading)]}
+        subject, html, text = report_html.render_event(note)
+        self.assertEqual(subject, "[Smith · 사건 안내] 11/03 가상칩 실적, 매출은 예상 위·로열티는 아래 · 할 일 없음")
+        self.assertEqual(html.count("매출이 27% 늘었습니다."), 1)        # Two filings of one company: one card.
+        self.assertNotIn("<script>", html)                               # The reading is untrusted text.
+        for piece in ("지켜볼 신호", "시간외 -2.5%", "약 920만 원", "증권 자산의 4.0%", "다음 확인", "자동 확인하지 못했습니다"):
+            self.assertIn(piece, html)
+        self.assertNotIn("세금·법령", html)                              # No tax was computed in this note.
+        self.assertIn("할 일: 없음", text)
+        note["filings"].append(rights)                                   # A rights offer asks the client to decide.
+        subject, html, _ = report_html.render_event(note)
+        self.assertTrue(subject.startswith("[Smith · 사건 안내] 11/03 가상바이오 유상증자, 지분 약 10.0% 희석"))
+        self.assertTrue(subject.endswith("· 외 1곳 · 할 일 1건"))
+        self.assertIn("유상증자에 청약할지 정하셔야 합니다", html)
+        rights.update(figures=None, figures_failed="network-error")     # Its method unread: to check, never "nothing".
+        subject, html, _ = report_html.render_event(note)
+        self.assertTrue(subject.endswith("할 일 1건"))
+        self.assertIn("주주배정(청약 대상)인지 공시 원문에서 확인해 주십시오", html)
+        reading["reaction"] = "발표 직후 시간외 -12.5%*"                 # Never cut: the figure and its mark stay.
+        _, html, _ = report_html.render_event({**note, "filings": note["filings"][:2]})
+        self.assertIn("발표 직후 시간외 -12.5%*", html)
+
+    def test_a_dividend_total_is_tied_to_a_date_only_when_it_is_paid_on_that_date(self):
+        def dividend(number, net, dates):
+            return {"rcept_no": number, "corp_name": "가상전자", "corp_code": "00999999", "title": "현금ㆍ현물배당결정",
+                    "category": "dividend", "filed_on": "2026-11-03", "url": "https://dart.example/" + number,
+                    "figures": {"cash": True, "per_share": {"common": "100"}, "kind": "분기배당", "record_date": "2026-09-30",
+                                "pay_date": dates[0] if dates else None},
+                    "household": {"items": [], "total": {"gross": net, "withheld": "0", "net": net, "pay_dates": dates}}}
+        note = {"kind": "disclosure", "key": "k", "day": NOW.date(), "as_of": NOW,
+                "filings": [dividend("1", "100000", ["2026-11-27"])]}
         subject, _, _ = report_html.render_event(note)
-        self.assertIn("세후 약 10만 원 입금 예정(미계산 1건 제외)", subject)
+        self.assertIn("가상전자 배당 세후 약 10만 원 11/27 입금", subject)
+        note["filings"].append(dividend("2", "200000", []))                # Another dividend, its pay date not set yet.
+        subject, html, _ = report_html.render_event(note)
+        self.assertIn("가상전자 배당 세후 약 30만 원 · 할 일 없음", subject)  # Not "30만 원 11/27 입금".
+        self.assertNotIn("11/27에 증권 계좌로", html)
+        self.assertIn("지급일 미정 1건", html)
+
+    def test_every_position_of_a_symbol_counts_in_what_we_hold(self):
+        from unittest import mock
+        positions = [{"symbol": "GADG", "hermes": False, "name": "가젯", "share": Decimal("0.3"), "value": Decimal("100000000")},
+                     {"symbol": "GADG", "hermes": False, "name": "가젯", "share": Decimal("0.01"), "value": Decimal("1000000")}]
+        raw = {"rcept_no": "a", "corp_name": "GADG", "corp_code": "CIK1", "title": "8-K · 실적 발표", "category": "earnings",
+               "filed_on": "2026-11-03", "url": "https://www.sec.gov/a", "source": "sec", "symbols": ["GADG"]}
+        with mock.patch.object(disclosures.holdings, "review", return_value={"positions": positions}):
+            item, = disclosures.enrich(self.db, None, NOW, [raw], key=KEY, known_at=NOW)
+        self.assertEqual((Decimal(item["held_value"]), Decimal(item["held_share"]), item["display_name"]),
+                         (Decimal("101000000"), Decimal("0.31"), "가젯"))
+        positions[1]["value"] = None                                       # One lot unknown: the whole is unknown.
+        with mock.patch.object(disclosures.holdings, "review", return_value={"positions": positions}):
+            item, = disclosures.enrich(self.db, None, NOW, [raw], key=KEY, known_at=NOW)
+        self.assertIsNone(item["held_value"])
 
     def test_overlapping_checks_carry_each_filing_once(self):
         first, second = [{"rcept_no": "1"}], [{"rcept_no": "1"}, {"rcept_no": "2"}]
@@ -186,10 +259,10 @@ class DisclosureTests(unittest.TestCase):
                                 sec_contact="me@example.com", sec_fetch=fake)          # No DART key: the US alone.
         self.assertEqual([o["status"] for o in outcomes], ["sent"])
         subject, html = self.sent[0]
-        self.assertIn("보유 종목 공시 2건 · GADG 희석 주의", subject)   # The dilutive issue leads; the insider form is left out.
+        self.assertIn("GADG 미등록 주식 발행", subject)   # The dilutive issue leads; the insider form is left out.
         self.assertIn("8-K · 미등록 주식 발행 · 경영진·이사 변경", html)
         self.assertIn("8-K · 실적 발표", html)
-        self.assertIn("SEC EDGAR", html)
+        self.assertIn("· SEC)", html)
         # Only the public ticker map and the company's filing list are asked for: nothing of the household travels.
         self.assertEqual({url for url, _ in fake.calls}, {sec.TICKERS, "https://data.sec.gov/submissions/CIK0001111111.json"})
         with closing(ledger.connect_read_only(self.db)) as conn:
@@ -227,18 +300,18 @@ class DisclosureTests(unittest.TestCase):
 
     def test_the_note_reads_what_each_filing_means_and_survives_a_failed_reading(self):
         def reading(filings, *, today, secrets):
-            return {"overview": "가상전자 배당은 유지, 가상바이오는 증자로 지분이 묽어집니다.", "sources": [],
-                    "cost_usd": "0.3", "prompt_version": "test",
-                    "by_id": {"20261103000050": {"signal": "caution", "market_message": "제3자배정 증자로 지분이 묽어집니다.",
-                                                 "investor_meaning": "단기 변동이 커질 수 있습니다.", "watch": "자금 용도 확인.",
-                                                 "sources": [], "unchecked_figures": True}}}
+            bio = {"verdict": "review", "headline": "제3자배정 증자로 지분 10% 희석", "thesis": "자금 용도가 밝혀지지 않았습니다.",
+                   "reaction": "", "what_happened": "제3자배정 증자로 지분이 묽어집니다.*", "meaning": "단기 변동이 커질 수 있습니다.",
+                   "watch": "자금 용도 확인.", "sources": [], "unchecked_figures": True}
+            return {"overview": "", "sources": [], "cost_usd": "0.3", "prompt_version": "test", "by_id": {"20261103000050": bio}}
         events.check(self.db, CONFIG, now=NOW, reason="manual", sync=False, researcher=None, sender=self.sender,
                      recipient="me@example.com", credentials=("a", "b", "c"), say=self.said.append, dart_key=KEY,
                      dart_fetch=FakeDart(), interpreter=reading)
-        _, html = self.sent[0]
-        for piece in ("가상전자 배당은 유지, 가상바이오는 증자로", "시장의 메시지", "나 같은 개인 투자자에게", "지켜볼 점",
-                      "주의", "기존 주주 지분이 약 10.0% 줄어듭니다",   # The code's figure stays beside the reading.
-                      "이 회사 비중은 약", "자동 확인되지 않았습니다"):
+        subject, html = self.sent[0]
+        self.assertIn("가상바이오 제3자배정 증자로 지분 10% 희석", subject)    # A reason to hold in question leads.
+        for piece in ("다시 볼 이유", "핵심", "우리에게", "다음 확인", report_html.REVIEW_NEXT,
+                      "기존 주주 지분이 약 10.0% 줄어듭니다",   # The code's figure stays beside the reading.
+                      "증권 자산의", "자동 확인하지 못했습니다"):
             self.assertIn(piece, html)
 
         def broken(filings, *, today, secrets):

@@ -123,18 +123,27 @@ def scan_us(view: Any, *, contact: str, today: date, now: datetime, cache: Path,
 def enrich(db: Path, view: Any, as_of: datetime, filings: list[dict[str, Any]], *, key: str, known_at: datetime,
            fetch: dart.Fetcher = dart.default_fetcher) -> list[dict[str, Any]]:
     """Each filing with its figures read by code ("figures") and what it means for this household ("household"), or
-    "figures_failed" with the reason when the filing could not be read (the title and link still go out)."""
-    # The client's weight in each company (share of the securities Smith opines on): code's, never the model's input.
-    weights = {p["symbol"]: p["share"] for p in holdings.review(view)["positions"] if not p["hermes"]}
+    "figures_failed" with the reason when the filing could not be read (the title and link still go out). Also the
+    client's weight in the company ("held_share"), the value held in won ("held_value") and the name the client knows
+    it by ("display_name": the broker's name of a US holding, CPNG as 쿠팡). All code's, never the model's input."""
+    # One symbol can be several positions (lots in two currencies or owners, review 2026-11-07): all of them count.
+    mine: dict[str, list[dict[str, Any]]] = {}
+    for p in holdings.review(view)["positions"]:
+        if not p["hermes"]:
+            mine.setdefault(p["symbol"], []).append(p)
     read = []
     for raw in filings:
-        held = [weights.get(s) for s in raw.get("symbols", [])]
-        share = None if not held or None in held else str(sum(held))
+        held = [p for s in raw.get("symbols", []) for p in mine.get(s, [None])]
+        known = bool(held) and None not in held
+        share = None if not known or any(p["share"] is None for p in held) else str(sum(p["share"] for p in held))
+        value = None if not known or any(p["value"] is None for p in held) else str(sum(p["value"] for p in held))
+        ours = {"held_share": share, "held_value": value,
+                "display_name": held[0]["name"] if raw.get("source") == "sec" and held and held[0] else raw["corp_name"]}
         if raw.get("source") == "sec":     # Named by its items and linked; the English text is not read by code.
-            read.append({**raw, "figures": None, "household": None, "figures_failed": None, "held_share": share})
+            read.append({**raw, "figures": None, "household": None, "figures_failed": None, **ours})
             continue
         f = dart.Filing(raw["rcept_no"], date.fromisoformat(raw["filed_on"]), raw["title"], raw["corp_name"])
-        item = {**raw, "url": f.url, "figures": None, "household": None, "figures_failed": None, "held_share": share}
+        item = {**raw, "url": f.url, "figures": None, "household": None, "figures_failed": None, **ours}
         try:
             if raw["category"] == "dividend":
                 item.update(_dividend(db, view, as_of, f, raw["symbols"], key=key, known_at=known_at, fetch=fetch))

@@ -123,25 +123,33 @@ def render(data: dict[str, Any]) -> tuple[str, str]:
 def render_event(note: dict[str, Any]) -> tuple[str, str, str]:
     """Return (subject, html, text) of an event note (report design §29): the hero names the event and what it
     means for the household in one line, four tiles carry the figures, then what happened and our numbers, the
-    researched why with its sources, and Smith's stance. Never a proposal: those belong to the regular reports."""
+    researched why with its sources, and Smith's stance. Never a proposal: those belong to the regular reports. A
+    disclosure note has its own layout (`_disclosure_note`)."""
+    if note["kind"] == "disclosure":
+        return _disclosure_note(note)
     subject, title, line, tiles, facts, stance = (_bok_event(note) if note["kind"] == "bok_decision"
-                                                  else _disclosure_event(note) if note["kind"] == "disclosure"
                                                   else _move_event(note))
-    hero = (f'<tr><td>{_eyebrow("SMITH · 사건 안내", color=ON_DARK, background=DARK_RAISED)}'
-            f'<div style="font-family:{SANS};font-weight:400;font-size:28px;line-height:1.15;letter-spacing:-0.8px;'
-            f'color:{ON_DARK};margin:4px 0 12px">{escape(title)}</div>'
-            f'<div style="font-size:14px;line-height:1.5;color:{ON_DARK}">{note["as_of"]:%Y년 %m월 %d일 %H:%M} 기준 · '
-            f'{escape(line)}</div></td></tr>' + _tile_grid(tiles))
-    why = None if note["kind"] == "disclosure" else _event_research(note)   # A filing's reading sits on its own card.
+    why = _event_research(note)
     # Smith's stance leads (user review 2026-11-03): the reader wants the verdict first, then the figures, then the why.
     body = (_opened(_section("Smith의 입장", stance, "", brief=None))
             + _opened(_section("무엇이 일어났고 우리 집에는", facts[0], facts[1], brief=None))
             + (_opened(_section("왜 그랬나", why[0], why[1], brief=None)) if why else ""))
     guide = "정기 보고와 별개로, 우리 집에 중요한 사건이 있는 날에만 보내는 안내입니다. 제안은 정기 보고에서만 드립니다."
-    html = _page([_band(DARK, hero), _band(CANVAS, body, border=True), _band(SOFT, _footer((), week=guide))])
-    text = (f"{subject}\n\n{title}\n{line}\n\n{_plain(facts[0])}\n\n{_plain(stance)}\n\n"
-            "이 안내는 HTML 형식입니다. HTML을 지원하는 메일 앱에서 확인하시기 바랍니다.")
+    html = _page([_band(DARK, _event_hero(note, title, line, tiles)), _band(CANVAS, body, border=True),
+                  _band(SOFT, _footer((), week=guide))])
+    text = (f"{subject}\n\n{title}\n{line}\n\n{_plain(facts[0])}\n\n{_plain(stance)}\n\n{PLAIN_TAIL}")
     return subject, html, text
+
+
+PLAIN_TAIL = "이 안내는 HTML 형식입니다. HTML을 지원하는 메일 앱에서 확인하시기 바랍니다."
+
+
+def _event_hero(note: dict[str, Any], title: str, line: str, tiles: list[tuple[Any, ...]]) -> str:
+    return (f'<tr><td>{_eyebrow("SMITH · 사건 안내", color=ON_DARK, background=DARK_RAISED)}'
+            f'<div style="font-family:{SANS};font-weight:400;font-size:28px;line-height:1.15;letter-spacing:-0.8px;'
+            f'color:{ON_DARK};margin:4px 0 12px">{escape(title)}</div>'
+            f'<div style="font-size:14px;line-height:1.5;color:{ON_DARK}">{note["as_of"]:%Y년 %m월 %d일 %H:%M} 기준 · '
+            f'{escape(line)}</div></td></tr>' + _tile_grid(tiles))
 
 
 def _plain(html: str) -> str:
@@ -226,81 +234,241 @@ _FILING_PILL = {"dividend": ("배당", "good"), "return": ("주주환원", "good
                 "earnings": ("실적", "neutral"), "risk": ("위험 신호", "bad"), "corporate": ("회사 변화", "neutral")}
 
 
-def _disclosure_event(note: dict[str, Any]) -> tuple[str, str, str, list[tuple[str, str, str]], tuple[str, str], str]:
-    """Material filings of the KR holdings (FR-44): one card per filing with the figures code read from it, the most
-    consequential kind first (what moves money or the stake before titles to read), newest first within a kind."""
+# The reading's verdict on the reason to hold (disclosure_insight.VERDICTS): the pill, and the short tile word.
+VERDICT_PILL = {"intact": ("보유 이유 그대로", "good"), "watch": ("지켜볼 신호", "warn"), "review": ("다시 볼 이유", "bad")}
+VERDICT_TILE = {"intact": "그대로", "watch": "지켜볼 신호", "review": "다시 봄"}
+_VERDICT_ORDER = ("review", "watch", "intact", None)
+REVIEW_NEXT = "다음 화요 투자·시장 보고에서 이 종목 판단을 다시 드립니다"
+_REACTION = re.compile(r"([+\-−])\s*(\d+(?:\.\d+)?)\s*%")
+
+
+def _disclosure_note(note: dict[str, Any]) -> tuple[str, str, str]:
+    """Material filings of the holdings (FR-44, report design §29) read at a glance (user request 2026-11-07: "딱 봤을
+    때 아 핵심만 잘 추렸구나, 내가 뭘 하면 되는구나"). The subject and the hero name the main company's takeaway and what
+    the client has to do; four tiles carry what to do, the reason to hold, what we hold and the money or the price
+    reaction; then Smith's judgement with the one thing to do per company, then one card per company (a results
+    release and its statements are one story). What to do is code's (a dividend arrives by itself, a rights offer asks
+    for a decision); the verdict and the prose are the reading's, escaped like any untrusted text."""
+    companies = _companies(note)
+    lead = companies[0]
+    more = f" · 외 {len(companies) - 1}곳" if len(companies) > 1 else ""
+    todo = [c for c in companies if c["action"][1]]
+    todo_text = "할 일 없음" if not todo else f"할 일 {len(todo)}건"
+    money = _dividend_tile(companies)
+    # The note's dividend total, said once: not again when the lead's headline is already code's dividend line.
+    paid = ("" if money is None or money[1] == "-" or lead["headline"].startswith("배당 세후") else
+            f" · 배당 세후 약 {money[1]}" + (f"(미계산 {money[3]}건 제외)" if money[3] else ""))
+    subject = (f"[Smith · 사건 안내] {note['day']:%m/%d} {lead['name']} {lead['headline'].replace('*', '')}"
+               f"{paid}{more} · {todo_text}")
+    title = f"{lead['name']} {lead['headline']}"
+    count = sum(len(c["filings"]) for c in companies)
+    line = f"{' · '.join(c['name'] for c in companies)[:40]} · 공시 {count}건 · {todo_text}"
+    tiles = [_todo_tile(companies, todo), _verdict_tile(companies), _held_tile(companies),
+             money[:3] if money else _risk_or_reaction_tile(companies)]
+    failed = note.get("research_failed") or not any(c["reading"] for c in companies)
+    head = ("이번에는 공시 해석을 만들지 못해 사실만 전합니다. 할 일과 우리 집 숫자는 Smith가 공시 원문과 보유 수량으로 "
+            "정했습니다." if failed else "")
+    body = (_opened(_section("판단과 할 일", escape(head), "".join(_judgement_row(c) for c in companies), brief=None))
+            + _opened(_section("무슨 일이 있었나", "", "".join(_company_card(c) for c in companies), brief=None)))
+    guide = ("보유 종목에 중요한 공시가 나온 날에만 보내는 안내입니다. 우리 집 숫자(배당·보유액)와 할 일은 Smith가 공시 원문과 "
+             "보유 수량으로 정했고" + ("" if failed else ", 해석은 원문과 보도를 읽고 정리했습니다") + (". " if failed else ". ")
+             + "매매 제안은 정기 보고에서만 드립니다.")
+    html = _page([_band(DARK, _event_hero(note, title, line, tiles)), _band(CANVAS, body, border=True),
+                  _band(SOFT, _footer((), week=escape(guide), law=money is not None))])
+    rows = "\n".join(f"- {c['name']}: " + (f"{(c['reading'] or {}).get('thesis')} " if (c["reading"] or {}).get("thesis")
+                                            else "") + f"할 일: {c['action'][0]}" for c in companies)
+    text = f"{subject}\n\n{title}\n{line}\n\n{head + chr(10) if head else ''}{rows}\n\n{PLAIN_TAIL}"
+    return subject, html, text
+
+
+def _companies(note: dict[str, Any]) -> list[dict[str, Any]]:
+    """The note's filings by company, the one that matters most first: something to do, then a reason to hold in
+    question, then the kind (money and the stake before titles to read), then the larger holding. A filing a
+    correction replaced is left out: the correction carries its figures (disclosures._supersede)."""
+    from smith.disclosure_insight import company_key   # Same key the reading was written under.
     newest = sorted(note["filings"], key=lambda f: (f["filed_on"], f["rcept_no"]), reverse=True)
-    filings = sorted(newest, key=lambda f: (_FILING_ORDER.index(f["category"]), bool(f.get("superseded"))))
-    companies = list(dict.fromkeys(f["corp_name"] for f in filings))
-    # A superseded filing has no household figures (disclosures._supersede): its correction carries them.
-    # Only what is still to come: a corrected dividend of an earlier quarter may already have been paid.
-    due = note["day"].isoformat()
-    totals = [f["household"]["total"] for f in filings if f["category"] == "dividend" and (f.get("household") or {}).get("total")
-              and all(d >= due for d in f["household"]["total"]["pay_dates"])]
-    net = sum((Decimal(t["net"]) for t in totals), Decimal(0)) if totals else None
-    # A cash dividend whose amount code could not compute is said, never summed as zero (review 2026-10-30).
-    uncounted = sum(1 for f in filings if f["category"] == "dividend" and not f.get("superseded")
-                    and (f.get("figures") or {}).get("cash") and not (f.get("household") or {}).get("total"))
-    pay = min((d for t in totals for d in t["pay_dates"]), default=None)
-    count = {c: sum(1 for f in filings if f["category"] == c) for c in _FILING_PILL}
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for f in [f for f in newest if not f.get("superseded")] or newest:
+        groups.setdefault(company_key(f), []).append(f)
+    found = []
+    for filings in groups.values():
+        filings.sort(key=lambda f: _FILING_ORDER.index(f["category"]))     # Stable: newest first within a kind.
+        reading = next((f["insight"] for f in filings if f.get("insight")), None)
+        dividend = _company_dividend(filings, note["day"])
+        first = filings[0]
+        found.append({"name": first.get("display_name") or first["corp_name"], "filings": filings, "reading": reading,
+                      "dividend": dividend, "headline": _headline(filings, reading, dividend),
+                      "action": _filing_todo(filings, reading, dividend), "share": first.get("held_share"),
+                      "value": first.get("held_value")})
+    return sorted(found, key=lambda c: (not c["action"][1], _VERDICT_ORDER.index((c["reading"] or {}).get("verdict")),
+                                        _FILING_ORDER.index(c["filings"][0]["category"]),
+                                        -Decimal(c["value"] or 0)))
+
+
+def _company_dividend(filings: list[dict[str, Any]], day: Any) -> dict[str, Any] | None:
+    """The company's cash dividends still to come (a corrected dividend of an earlier quarter may already be paid),
+    after tax: {"net" (None when none could be computed), "dates", "undated", "uncounted"}; None without one. A cash
+    dividend code could not compute is counted apart, never summed as zero (review 2026-10-30)."""
+    due = day.isoformat()
+    totals = [f["household"]["total"] for f in filings if f["category"] == "dividend"
+              and (f.get("household") or {}).get("total") and all(d >= due for d in f["household"]["total"]["pay_dates"])]
+    uncounted = sum(1 for f in filings if f["category"] == "dividend" and (f.get("figures") or {}).get("cash")
+                    and not (f.get("household") or {}).get("total"))
+    if not totals and not uncounted:
+        return None
+    return {"net": sum((Decimal(t["net"]) for t in totals), Decimal(0)) if totals else None,
+            "dates": sorted({d for t in totals for d in t["pay_dates"]}),
+            "undated": sum(1 for t in totals if not t["pay_dates"]), "uncounted": uncounted}
+
+
+def _md(day: str) -> str:
+    return f"{day[5:7]}/{day[8:10]}"
+
+
+def _one_pay_date(dividend: dict[str, Any]) -> str | None:
+    """The pay date of the whole amount, or None when the amount is paid on several dates or partly on none yet
+    (the whole sum is never tied to the first date, review 2026-11-07)."""
+    return dividend["dates"][0] if len(dividend["dates"]) == 1 and not dividend["undated"] else None
+
+
+def _headline(filings: list[dict[str, Any]], reading: dict[str, Any] | None, dividend: dict[str, Any] | None) -> str:
+    """The company's takeaway: the reading's headline, else code's (the dividend we receive, the dilution, the
+    filing's kind)."""
+    if reading and reading.get("headline"):
+        return reading["headline"]
+    if dividend and dividend["net"]:
+        day = _one_pay_date(dividend)
+        return f"배당 세후 약 {_short(dividend['net'])}" + (f" {_md(day)} 입금" if day else "")
+    for f in filings:
+        g = f.get("figures") or {}
+        if g.get("type") == "유상증자" and g.get("dilution"):
+            return f"유상증자, 지분 약 {Decimal(g['dilution']) * 100:.1f}% 희석"
     first = filings[0]
-    subject = (f"[Smith · 사건 안내] {note['day']:%m/%d} 보유 종목 공시 {len(filings)}건 · {first['corp_name']} "
-               f"{_FILING_PILL[first['category']][0]}"
-               + (f" · {'' if first['category'] == 'dividend' else '배당 '}세후 약 {_short(net)} 입금 예정"
-                  + (f"(미계산 {uncounted}건 제외)" if uncounted else "") if net else ""))
-    tiles = [("새 공시", f"{len(filings)}건", " · ".join(companies)[:24]),
-             ("배당 입금 예정", "-" if net is None else _short(net),
-              ("세후" + (f" · {pay[5:7]}/{pay[8:10]}" if pay else "")) + (f" · 미계산 {uncounted}건 제외" if uncounted else "")),
-             ("희석 주의", f"{count['dilution']}건", "유상증자·전환사채 등"),
-             ("위험 신호", f"{count['risk']}건", "소송·최대주주 변경 등")]
-    # What the filings mean together first (the client reads one paragraph, user request 2026-10-30), then how it was made.
-    how = ("공시마다 시장이 읽는 메시지와 개인 투자자에게 주는 의미를 Smith가 원문과 보도를 읽고 정리했습니다. "
-           if note.get("overview") else
-           "이번에는 공시 해석을 만들지 못해 사실만 전합니다. " if note.get("research_failed") else "")
-    lead = ((note.get("overview") + " " if note.get("overview") else "")
-            + ("(요약의 일부 수치는 출처 페이지에서 자동 확인되지 않았습니다.) " if note.get("overview_unchecked") else "")
-            + how + "국내 공시의 숫자와 우리 집 배당은 Smith가 전자공시 원문과 보유 수량으로 직접 계산했습니다.")
-    cards = "".join(_filing_card(f) for f in filings)
-    stance = ("공시 한 건으로 매매하지 않습니다. 배당은 지급일에 증권 계좌로 들어오고, 희석·위험 공시가 있는 종목은 다음 화요 "
-              "투자·시장 보고에서 다시 봅니다.")
-    line = f"{' · '.join(companies)[:40]} · 공시 {len(filings)}건"
-    return subject, f"보유 종목 공시 {len(filings)}건", line, tiles, (lead, cards), stance
+    return first["title"].split(" · ", 1)[-1] if first.get("source") == "sec" else f"{_FILING_PILL[first['category']][0]} 공시"
 
 
-_SIGNAL_PILL = {"positive": ("긍정 신호", "good"), "neutral": ("중립", "neutral"), "caution": ("주의", "warn")}
+def _filing_todo(filings: list[dict[str, Any]], reading: dict[str, Any] | None,
+                 dividend: dict[str, Any] | None) -> tuple[str, bool]:
+    """What the client has to do about the company's filings, decided by code, never by the reading: (text, whether
+    something is to be done). A rights offer to shareholders asks for a decision; a dividend arrives by itself; a
+    risk filing or a reason to hold in question goes to the next Tuesday report, where trade opinions belong."""
+    for f in filings:
+        g = f.get("figures") or {}
+        if g.get("type") == "유상증자" and "주주배정" in (g.get("method") or ""):
+            return "유상증자에 청약할지 정하셔야 합니다(청약 일정과 방법은 공시 원문)", True
+        # A rights issue whose method code could not read may be offered to us: unknown is not "nothing to do"
+        # (review 2026-11-07).
+        if f.get("source") != "sec" and "유상증자" in f["title"] and not (g.get("type") == "유상증자" and g.get("method")):
+            return "증자 방식을 읽지 못했습니다. 주주배정(청약 대상)인지 공시 원문에서 확인해 주십시오", True
+    parts = ["없음"]
+    if dividend and dividend["net"]:
+        day = _one_pay_date(dividend)
+        when = (f"{_md(day)}에" if day else "지급일마다" if dividend["dates"] else "지급일이 정해지면")
+        parts.append(f"배당 세후 약 {_short(dividend['net'])}은 {when} 증권 계좌로 들어옵니다")
+    if (reading or {}).get("verdict") == "review" or any(f["category"] == "risk" for f in filings):
+        parts.append(REVIEW_NEXT)
+    return " · ".join(parts), False
 
 
-def _filing_card(f: dict[str, Any]) -> str:
-    label, kind = _FILING_PILL[f["category"]]
-    insight = f.get("insight")
-    signal = "" if not insight else " " + _pill(*_SIGNAL_PILL[insight["signal"]])
-    reading = "" if not insight else "".join(
-        f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin:6px 0">'
-        f'<span style="font-weight:700;color:{INK}">{title}</span> {escape(insight[key])}</div>'
-        for title, key in (("시장의 메시지", "market_message"), ("나 같은 개인 투자자에게", "investor_meaning"),
-                           ("지켜볼 점", "watch")) if insight.get(key))
-    facts = _filing_text(f)
-    weight = (f" 고객님 증권 자산 중 이 회사 비중은 약 {Decimal(f['held_share']) * 100:.1f}%입니다."
-              if f.get("held_share") is not None and not f.get("superseded") else "")
-    if reading:   # The reading leads; the code's own facts (what we receive, our weight) follow in a quieter line.
-        main, extra = reading, ("" if facts.startswith(("미국 SEC에 낸 보고", "자세한 내용은")) else facts)
-    else:
-        main, extra = f'<div style="font-size:14px;line-height:1.6;color:{BODY}">{escape(facts)}</div>', ""
-    extra = (extra + weight).strip()
-    ours = (f'<div style="font-size:13px;line-height:1.6;color:{MUTED};margin-top:6px">{escape(extra)}</div>'
-            if extra else "")
-    notes = "해석의 일부 수치는 출처 페이지에서 자동 확인되지 않았습니다." if insight and insight.get("unchecked_figures") else ""
+def _todo_tile(companies: list[dict[str, Any]], todo: list[dict[str, Any]]) -> tuple[str, str, str]:
+    if todo:
+        return ("할 일", f"{len(todo)}건", f"{todo[0]['name']} 유상증자 "
+                + ("청약 결정" if todo[0]["action"][0].startswith("유상증자에 청약") else "방식 확인"))
+    if any((c["reading"] or {}).get("verdict") == "review" or REVIEW_NEXT in c["action"][0] for c in companies):
+        return ("할 일", "없음", "화요 보고에서 다시 판단")
+    return ("할 일", "없음", "배당은 자동 입금" if any(c["dividend"] for c in companies) else "지켜보기만 하면 됩니다")
+
+
+def _verdict_tile(companies: list[dict[str, Any]]) -> tuple[str, str, str]:
+    read = [c for c in companies if (c["reading"] or {}).get("verdict")]
+    if not read:
+        return ("보유 이유", "-", "해석을 받지 못함")
+    worst = min((c["reading"]["verdict"] for c in read), key=_VERDICT_ORDER.index)
+    return ("보유 이유", VERDICT_TILE[worst], " · ".join(c["name"] for c in read if c["reading"]["verdict"] == worst)[:24])
+
+
+def _held_tile(companies: list[dict[str, Any]]) -> tuple[str, str, str]:
+    values, shares = [c["value"] for c in companies], [c["share"] for c in companies]
+    if None in values:
+        return ("우리 보유", "-", "보유액을 모름")
+    weight = "" if None in shares else f"증권 자산의 {sum(Decimal(s) for s in shares) * 100:.1f}%"
+    sub = weight if len(companies) == 1 else f"{len(companies)}개 회사" + (f" · {weight}" if weight else "")
+    return ("우리 보유", f"약 {_short(sum(Decimal(v) for v in values))}", sub)
+
+
+def _dividend_tile(companies: list[dict[str, Any]]) -> tuple[str, str, str, int] | None:
+    """(title, value, sub, uncounted) of the dividends still to come, or None. The sub names the first pay date and
+    says when others differ or are not set yet (a real note of 2026-10-29 put SK하이닉스's undated dividend under
+    삼성전자's 11/27)."""
+    found = [c["dividend"] for c in companies if c["dividend"]]
+    if not found:
+        return None
+    nets = [d["net"] for d in found if d["net"] is not None]
+    dates = sorted({x for d in found for x in d["dates"]})
+    undated, uncounted = sum(d["undated"] for d in found), sum(d["uncounted"] for d in found)
+    sub = ("세후" + (f" · {_md(dates[0])}" + (" 외" if len(dates) > 1 else "") if dates else "")
+           + (f" · 지급일 미정 {undated}건" if undated else "") + (f" · 미계산 {uncounted}건 제외" if uncounted else ""))
+    return ("배당 입금 예정", _short(sum(nets, Decimal(0))) if nets else "-", sub, uncounted)
+
+
+def _risk_or_reaction_tile(companies: list[dict[str, Any]]) -> tuple[Any, ...]:
+    flagged = sum(1 for c in companies for f in c["filings"] if f["category"] in ("dilution", "risk"))
+    if flagged:
+        return ("희석·위험 공시", f"{flagged}건", "유상증자·전환사채·소송 등")
+    lead = companies[0]
+    reaction = (lead["reading"] or {}).get("reaction") or ""
+    if not reaction:
+        return ("주가 반응", "-", "보도에서 찾지 못함" if lead["reading"] else "해석을 받지 못함")
+    move = _REACTION.search(reaction)
+    tone = None if move is None else Decimal(move.group(2)) * (-1 if move.group(1) in "-−" else 1)
+    return ("주가 반응", reaction, lead["name"][:20], tone)     # Whole: a cut "-12.5%*" lost its figure and mark.
+
+
+def _label(title: str, text: str) -> str:
+    return (f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin-top:4px">'
+            f'<span style="font-weight:700;color:{INK}">{title}</span> {escape(text)}</div>')
+
+
+def _judgement_row(c: dict[str, Any]) -> str:
+    """One company: the verdict pill, the name and the one-sentence thesis; what to do; the next thing to check."""
+    r = c["reading"] or {}
+    pill = _pill(*VERDICT_PILL[r["verdict"]]) + " " if r.get("verdict") else ""
+    thesis = f" {escape(r['thesis'])}" if r.get("thesis") else ""
+    return (f'<div style="margin:0 0 16px"><div style="font-size:15px;line-height:1.6;color:{BODY}">{pill}'
+            f'<span style="font-weight:700;color:{INK}">{escape(c["name"])}</span>{thesis}</div>'
+            + _label("할 일", c["action"][0]) + (_label("다음 확인", r["watch"]) if r.get("watch") else "") + "</div>")
+
+
+_NO_FACTS = ("미국 SEC에 낸 보고", "자세한 내용은", "이 공시는")
+
+
+def _company_card(c: dict[str, Any]) -> str:
+    """One company: what we hold, the reading (what happened, what it means for us), the code's figures per filing,
+    the filings and the pages the reading used. A sentence marked "*" holds a figure no cited page confirmed."""
+    r = c["reading"]
+    held = ("" if c["value"] is None else f"우리 보유 약 {_short(Decimal(c['value']))}"
+            + ("" if c["share"] is None else f" · 증권 자산의 {Decimal(c['share']) * 100:.1f}%"))
+    reading = "" if not r else "".join(_label(title, r[key]) for title, key in (
+        ("핵심", "what_happened"), ("주가 반응", "reaction"), ("우리에게", "meaning")) if r.get(key))
+    facts = "".join(f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin-top:6px">'
+                    f'{_pill(*_FILING_PILL[f["category"]])} {escape(text)}</div>'
+                    for f in c["filings"] for text in (_filing_text(f),) if not text.startswith(_NO_FACTS))
+    if not reading and not facts:
+        facts = (f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin-top:6px">'
+                 + ("미국 SEC에 낸 보고(영문)입니다. 해석은 다음 화요 투자·시장 보고에서 드립니다." if c["filings"][0].get("source") == "sec"
+                    else "공시 원문에 숫자로 읽을 표가 없어 제목과 원문만 전합니다.") + "</div>")
+    filed = "".join(f'<div style="font-size:13px;line-height:1.6;color:{MUTED}">원문 · <a href="{escape(f["url"])}" '
+                    f'style="color:{MUTED};text-decoration:underline">{escape(f["title"])}</a> '
+                    f'({_md(f["filed_on"])} · {"SEC" if f.get("source") == "sec" else "전자공시"})</div>' for f in c["filings"])
     links = " · ".join(f'<a href="{escape(url)}" style="color:{MUTED}">근거 {n}</a>'
-                       for n, url in enumerate((insight or {}).get("sources") or [], 1))
-    footer = ("" if not notes and not links else
-              f'<div style="font-size:12px;color:{MUTED};margin-top:6px">{escape(notes)}{" " if notes and links else ""}'
-              f'{links}</div>')
+                       for n, url in enumerate((r or {}).get("sources") or [], 1))
+    notes = ("* 표시한 문장의 수치 일부는 출처 페이지에서 자동 확인하지 못했습니다. " if r and r.get("unchecked_figures") else "")
+    tail = ("" if not notes and not links else
+            f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-top:4px">{escape(notes)}{links}</div>')
     return (f'<div style="margin:12px 0;padding:14px 16px;border:1px solid {HAIRLINE};border-radius:16px">'
-            f'<div style="font-size:14px;font-weight:600;line-height:1.5;color:{INK}">{_pill(label, kind)}{signal} '
-            f'<a href="{escape(f["url"])}" style="color:{INK};text-decoration:underline">{escape(f["corp_name"])} · '
-            f'{escape(f["title"])}</a></div>'
-            f'<div style="font-family:{MONO};font-size:12px;color:{MUTED};margin:2px 0 6px">{escape(f["filed_on"])} · '
-            f'{"SEC EDGAR" if f.get("source") == "sec" else "전자공시"}</div>{main}{ours}{footer}</div>')
+            f'<div style="font-size:16px;font-weight:700;line-height:1.4;color:{INK}">{escape(c["name"])}</div>'
+            + (f'<div style="font-family:{MONO};font-size:12px;color:{MUTED};margin:2px 0 4px">{escape(held)}</div>' if held else "")
+            + f'{reading}{facts}<div style="margin-top:8px">{filed}</div>{tail}</div>')
 
 
 def _filing_text(f: dict[str, Any]) -> str:
@@ -2723,13 +2891,14 @@ def _requests(requests: list[Any], full: bool, rest_where: str = "월요 보고"
 
 
 def _footer(warnings: list[str] | tuple[str, ...] = (), week: str = "", corrections: str = "",
-            notes: list[str] | tuple[str, ...] = ()) -> str:
+            notes: list[str] | tuple[str, ...] = (), law: bool = True) -> str:
     """One line (report design §18.1): what Smith never does, and that the reasons are a reply away. A problem
     with the report itself (stale data, no narrative) adds one warning line above it; a daily edition adds the
     week's plan (`week`, HTML) so a reader of one day knows where the other areas are (§27); `corrections` is the
     Korean check's one line, printed so it can be read against the report itself (§34, user request 2026-10-27);
-    `notes` are the day's calculation notes moved out of its cards (user review 2026-11-07). The footer reads in body
-    ink at 13px: grey small print was hard to read."""
+    `notes` are the day's calculation notes moved out of its cards (user review 2026-11-07); `law` false leaves the tax
+    caveat out of a mail that computes no tax (a filing note without a dividend). The footer reads in body ink at
+    13px: grey small print was hard to read."""
     warn = ("" if not warnings else
             f'<div style="font-size:13px;line-height:1.6;color:{INK};margin-bottom:8px">▲ 확인 필요: '
             f'{escape(" · ".join(warnings))}. 자세한 사유는 이 메일에 답장으로 물어 주십시오.</div>')
@@ -2739,9 +2908,9 @@ def _footer(warnings: list[str] | tuple[str, ...] = (), week: str = "", correcti
              + "".join(f'<div style="margin:0 0 4px">· {escape(n)}</div>' for n in notes) + "</div>")
     guide = "" if not week else f'<div style="{small};margin-bottom:6px">{week}</div>'
     checked = "" if not corrections else f'<div style="{small};margin-bottom:6px">{escape(corrections)}</div>'
+    caveat = f"세금·법령은 {tax.RULES_YEAR}년 기준으로 계산했으니 실행 전 현행 법령을 확인하십시오. " if law else ""
     return (f'<tr><td>{warn}{basis}{guide}{checked}<div style="{small}">Smith는 조회 전용 자문입니다(매매·이체·대출 '
-            f'실행 없음). 세금·법령은 {tax.RULES_YEAR}년 기준으로 계산했으니 실행 전 현행 법령을 확인하십시오. 판단 근거는 답장으로 '
-            '물어 주십시오.</div></td></tr>')  # The one law caveat of the mail (user decision 2026-11-02).
+            f'실행 없음). {caveat}판단 근거는 답장으로 물어 주십시오.</div></td></tr>')  # The one law caveat (user decision 2026-11-02).
 
 
 def _corrections_line(data: dict[str, Any]) -> str:
