@@ -115,7 +115,10 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     yearly_dividends = dividends.yearly(view, dividends.load(conn, known_at), as_of.date())
     # Each letter reads its own proposal history (the spouse's is scoped, smith.perspective).
     active = perspective.proposals_for(ledger.active_proposals(conn), audience)
-    advice = proposals.build(view, kpis, sectors, active=active, household=household, pay=pay,
+    # The rate proposals (prepay, variable rate, refinance) weigh the reader's own loans, like the concentration
+    # weighs their own holdings (§42): the spouse's credit loan is the spouse's to repay, never the client's proposal.
+    own_debt = _debt_sector(view, owner="self")
+    advice = proposals.build(view, kpis, {**sectors, "debt": own_debt}, active=active, household=household, pay=pay,
                              dividends=yearly_dividends,
                              review=own, lease_plans=lease_plans, pension_stack=pension_stack)
     # The status badge stays household-wide: urgent proposals of every area, whatever today's theme.
@@ -147,7 +150,7 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     own_moved = None if moved is None else [row for row in moved if row["owner"] == audience]
     data = {"kind": kind, "audience": audience, "as_of": as_of, "baseline": baseline, "kpis": kpis, "schedule": schedule,
             "change": change, "timeline": _timeline(view, pay), "sectors": sectors, "holdings": review,
-            "own_holdings": own,
+            "own_holdings": own, "own_debt": own_debt,
             "holding_quantity_changes": None if moved is None else quantity_changes(moved),
             "holding_price_moves": None if moved is None else price_moves(moved, baseline),
             "own_holding_quantity_changes": None if own_moved is None else quantity_changes(own_moved),
@@ -176,8 +179,11 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
             "pension_stack": pension_stack,
             # What each insurer's annuity is worth on its own illustration (report design §19, FR-24).
             "annuity_reviews": product_review.annuity_reviews(view, household, as_of.date()),
-            "move_plan": move_plan.plan(view, sectors["real_estate"]["properties"], household, pay, today=as_of.date(),
-                                        horizon=_move_horizon(view, lease_plans), market=targets_market),
+            "move_plan": _household_move(base, view, sectors["real_estate"]["properties"], household, client_household,
+                                         pay, audience=audience, today=as_of.date(), lease_plans=lease_plans,
+                                         market=targets_market),
+            # The reader's own homes (report design §42): a per-person property day's "나의 부동산" and its hero.
+            "own_real_estate": _own_estate(view, sectors["real_estate"]),
             "spending_split": _spending_split(view),
             "product_reviews": reviews,
             "research_regions": sorted({t["region"] for t in ((household or {}).get("targets") or {}).values()
@@ -191,19 +197,8 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     return data
 
 
-def _edition_figures(data: dict[str, Any]) -> dict[str, Any]:
-    """The few sums the daily editions' headline tiles show beyond the sector data (report design §14). A
-    sum with an unknown part is unknown; the listed-holdings figures share one scope (not Hermes-managed)."""
-    props = data["sectors"]["real_estate"]["properties"]
-    listed = [p for p in data["holdings"]["positions"] if not p["hermes"]]
-    gains = [p["unrealized_gain"] for p in listed]
-    known = [g for g in gains if g is not None]
-    # The reader's own listed holdings, for a per-person markets day's hero (report design §42).
-    own = [p for p in data["own_holdings"]["positions"] if not p["hermes"]]
-    own_gains = [p["unrealized_gain"] for p in own]
-    own_known = [g for g in own_gains if g is not None]
-    summary = data["view"].summary
-    net = data["kpis"]["monthly_net"]
+def _property_figures(props: list[dict[str, Any]]) -> dict[str, Any]:
+    """The property sums of the headline tiles for some homes (all of them, or the reader's own)."""
     # The official-trade estimate of the whole property line is known only when every property has enough
     # recent trades; otherwise the gap to the ledger value cannot be stated (missing is not zero).
     estimates = [(p["market"] or {}).get("estimate") if p.get("market") else None for p in props]
@@ -220,6 +215,26 @@ def _edition_figures(data: dict[str, Any]) -> dict[str, Any]:
         "property_estimate_reference": _total(estimates) if props and not enough and thin else None,
         "property_estimate_thin": thin,
         "property_valuation": sorted({VALUATION_LABELS.get(p["valuation_method"], p["valuation_method"]) for p in props}),
+    }
+
+
+def _edition_figures(data: dict[str, Any]) -> dict[str, Any]:
+    """The few sums the daily editions' headline tiles show beyond the sector data (report design §14). A
+    sum with an unknown part is unknown; the listed-holdings figures share one scope (not Hermes-managed)."""
+    props = data["sectors"]["real_estate"]["properties"]
+    # The reader's own homes' figures, for a per-person property day's hero and "나의 부동산" (report design §42).
+    own_props = data["own_real_estate"]["properties"]
+    listed = [p for p in data["holdings"]["positions"] if not p["hermes"]]
+    gains = [p["unrealized_gain"] for p in listed]
+    known = [g for g in gains if g is not None]
+    # The reader's own listed holdings, for a per-person markets day's hero (report design §42).
+    own = [p for p in data["own_holdings"]["positions"] if not p["hermes"]]
+    own_gains = [p["unrealized_gain"] for p in own]
+    own_known = [g for g in own_gains if g is not None]
+    summary = data["view"].summary
+    net = data["kpis"]["monthly_net"]
+    return {
+        **_property_figures(props), **{f"own_{k}": v for k, v in _property_figures(own_props).items()},
         "listed_count": len(listed), "listed_value": _total(p["value"] for p in listed) if listed else None,
         # Like the holdings section: a partial sum over the holdings whose cost is known, with the counts.
         "listed_gain": sum(known, Decimal(0)) if known else None,
@@ -566,6 +581,41 @@ def _spending_split(view: LedgerView) -> dict[str, Any] | None:
             "discretionary_share": discretionary / inflow if inflow else None}
 
 
+def _household_move(base: LedgerView, view: LedgerView, properties: list[dict[str, Any]],
+                    household: dict[str, Any] | None, client_household: dict[str, Any] | None,
+                    pay: list[future_income.Inflow], *, audience: str, today: date, lease_plans: list[dict[str, Any]],
+                    market: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    """The move-up plan, the household's in either letter (report design §17.3, §42): seen from the spouse it is
+    still computed on the client's ledger, settings and expected pay (the one-home exemption of the client's own
+    residence reads the client as "self", and the pay closing the gap is the client's), so both letters state the
+    same plan. The homes keep the reader's labels and owners; `pay_owner` says whose pay it is in the reader's
+    terms ("partner" in the spouse's letter)."""
+    if audience == "self":
+        found = move_plan.plan(view, properties, household, pay, today=today, horizon=_move_horizon(view, lease_plans),
+                               market=market)
+        return None if found is None else {**found, "pay_owner": "self"}
+    salary = (client_household or {}).get("annual_gross_salary")
+    client_pay = future_income.inflows(base, salary=None if salary is None else Decimal(salary))
+    found = move_plan.plan(base, properties, client_household, client_pay, today=today,
+                           horizon=_move_horizon(base, lease_plans), market=market)
+    if found is None:
+        return None
+    swap = {audience: "self", "self": audience}
+    homes = [{**h, "owner": swap.get(h["owner"], h["owner"])} for h in found["homes"]]
+    return {**found, "homes": homes, "pay_owner": audience}
+
+
+def _own_estate(view: LedgerView, estate: dict[str, Any]) -> dict[str, Any]:
+    """The reader's own homes (report design §42), with their market figures, and their share of the reader's own
+    assets (unknown when an asset of theirs cannot be converted)."""
+    own = [p for p in estate["properties"] if p["owner"] == "self"]
+    assets = [base_amount(view, r) for r in view.records if r.kind is Kind.ASSET and r.owner_id == "self"]
+    total = None if any(a is None for a in assets) else sum(assets, Decimal(0))
+    value = _total(p["value"] for p in own)
+    share = value / total if total and value is not None else None
+    return {**estate, "properties": own, "share_of_assets": share}
+
+
 def _move_horizon(view: LedgerView, lease_plans: list[dict[str, Any]]) -> date:
     """When the move is planned: the nearest home goal, else the nearest lease deposit due, else two years."""
     today = view.as_of.date()
@@ -884,13 +934,15 @@ def _total(amounts: Iterable[Decimal | None]) -> Decimal | None:
     return total
 
 
-def _debt_sector(view: LedgerView) -> dict[str, Any]:
-    loans = [r for r in view.records if r.kind is Kind.LIABILITY]
+def _debt_sector(view: LedgerView, owner: str | None = None) -> dict[str, Any]:
+    """The loan line-up: every member's loans, or one member's own with `owner` (a per-person letter's "나의 금리·대출"
+    and the rate proposals, report design §42)."""
+    loans = [r for r in view.records if r.kind is Kind.LIABILITY and (owner is None or r.owner_id == owner)]
     variable = [r for r in loans if r.fields["rate_type"] in ("variable", "mixed")]
     variable_total = _total(base_amount(view, r) for r in variable)
     rows = [{"label": _liability_label(r), "category": r.fields["category"], "amount": base_amount(view, r),
              "rate": Decimal(r.fields["annual_rate"]), "rate_type": r.fields["rate_type"],
-             "maturity": r.fields.get("maturity"), "owner": r.owner_id,
+             "maturity": r.fields.get("maturity"), "owner": r.owner_id, "repayment": r.fields.get("repayment_method"),
              "credit_limit": _dec(r.fields.get("credit_limit"))} for r in loans]
     # A credit line with nothing drawn costs nothing and is a liquidity backstop, not a debt to repay
     # (user review 2026-10-18): the unused room is reported apart. Unknown when a drawn amount is unknown.
@@ -900,9 +952,18 @@ def _debt_sector(view: LedgerView) -> dict[str, Any]:
             # The month's interest change for each rate move, negative for a cut (RATE_SHOCKS runs both ways).
             "shocks": [{"shock": s, "monthly_change": None if variable_total is None else variable_total * s / 12}
                        for s in RATE_SHOCKS],
-            "monthly_interest_estimate": view.summary.monthly_loan_interest_estimate,
+            "monthly_interest_estimate": view.summary.monthly_loan_interest_estimate if owner is None
+            else _interest_estimate(view, loans),
             "unused_credit": unused if lines else None,
             "credit_lines": [{"label": l["label"], "limit": l["credit_limit"], "drawn": l["amount"]} for l in lines]}
+
+
+def _interest_estimate(view: LedgerView, loans: list[RecordInput]) -> Decimal:
+    """The month's interest of some loans, on the ledger summary's own rule: principal x annual rate / 12 for the
+    loans whose repayment the ledger records (summary._add_loan_interest)."""
+    counted = set(view.summary.interest_estimated_for)
+    amounts = [(base_amount(view, r), Decimal(r.fields["annual_rate"])) for r in loans if r.record_id in counted]
+    return sum((amount * rate / 12 for amount, rate in amounts if amount is not None), Decimal(0))
 
 
 def _fx_sensitivity(view: LedgerView) -> dict[str, Any] | None:

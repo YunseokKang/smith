@@ -471,7 +471,7 @@ def notes(t: dict[str, Any], guards: list[tuple[str, dict[str, Any]]] = ()) -> l
             found.append(Note(
                 f"{who} 주택은 2년 거주가 확인되어 비과세 기준으로 봅니다",
                 (f"평가액 {short_won(price)}에 팔면 차익은 약 {short_won(lived['gain'])}입니다. {home['acquired_year']}년 취득 뒤 "
-                 f"{home['residence_years']}년 이상 거주하셨다고 확인해 주셔서 1세대 1주택 비과세 기준(양도가액 {short_won(HIGH_VALUE_HOME)} "
+                 f"{home['residence_years']}년 이상 거주가 확인되어 1세대 1주택 비과세 기준(양도가액 {short_won(HIGH_VALUE_HOME)} "
                  f"초과분만 과세)으로 약 {short_won(lived['total'])}을 예상하고, 요건을 못 갖추면 약 {short_won(not_lived['total'])}"
                  f"(지방소득세 포함)입니다. 혼인신고를 하시면 혼인일부터 {MARRIAGE_MERGE_YEARS}년 안에 이 집을 먼저 파는 순서가 안전하고, "
                  f"혼인신고 전에는 각자 1주택으로 봅니다. 거주 요건은 소유자인 {who} 세대의 거주로 따집니다."),

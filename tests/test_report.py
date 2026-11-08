@@ -150,7 +150,8 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(proposals["lease-return"].figures["months"], Decimal(20))
         # 0.5%p lower market rate on the 400,000 won variable loan: about 167 won less interest a month.
         self.assertEqual(proposals["variable-rate"].figures["monthly_change"].quantize(Decimal(1)), Decimal(-167))
-        self.assertIn("이어가시는 것이 합리적", proposals["prepayment"].title)  # 5% loan > 2.5% x (1 - 15.4%).
+        # 5% loan > 2.5% x (1 - 15.4%); repaid at maturity, so the advice is to repay early from spare money.
+        self.assertIn("여유 자금이 생기면 원금을 먼저 줄이는 편이", proposals["prepayment"].title)
         subject, html = render(data)
         self.assertIn("제안 3건", subject)
         self.assertIn("대응 필요", subject)          # Act-now proposals: the status says so.
@@ -342,7 +343,7 @@ class ReportTests(unittest.TestCase):
         data = build_report(self.conn, as_of=later, known_at=later, baseline=None, kind="monday")
         prepayment = next(p for p in data["advice"]["proposals"] if p.key == "prepayment")
         self.assertEqual(prepayment.figures["loan_rate"], Decimal("0.06"))   # Not the largest (2%) loan.
-        self.assertIn("이어가시는 것이 합리적", prepayment.title)
+        self.assertIn("여유 자금이 생기면", prepayment.title)                    # A bullet loan: nothing prepaid now.
 
     def test_summary_amounts_are_exact_for_the_largest_importable_values(self):
         at = datetime(2026, 9, 3, tzinfo=timezone.utc)

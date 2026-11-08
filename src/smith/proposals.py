@@ -430,7 +430,7 @@ def _lease_sale(lease: dict[str, Any], plan: dict[str, Any]) -> Proposal:
                f"돌려드리고, {left}. 매도 시점과 두 집의 매도 순서를 {deadline:%Y년 %m월}까지 정해 두시길 권합니다."),
         why=(f"보증금 만기가 {months}개월 남았고, 고객님 계획은 만기에 맞춰 이 집을 파는 것입니다. "
              + (f"{sale['price_basis']} 기준 매도가에서 보증금과 담보대출, 양도세"
-                + ("(2년 보유·거주를 확인해 주셔서 1세대 1주택 비과세 기준, 12억 원 초과분만 과세)" if exempt_led else "(일반 과세)")
+                + ("(2년 보유·거주가 확인되어 1세대 1주택 비과세 기준, 12억 원 초과분만 과세)" if exempt_led else "(일반 과세)")
                 + f"를 빼면 {left}{exempt}." if priced else f"매도가나 담보대출을 환산하지 못해 {left}.")),
         effect=("매도 잔금일을 보증금 만기에 맞추면 고객님 돈 없이 보증금을 돌려드리고, 양도세가 적게 나오는 매도 순서를 미리 고를 수 "
                 "있습니다."),
@@ -999,7 +999,11 @@ def _prepayment(facts: dict[str, Any]) -> Proposal | Undetermined | None:
     example = Decimal(10_000_000)
     gap = rate - deposit
     verdict = "keep" if gap >= DECISION_MARGIN else "deposit" if gap <= -DECISION_MARGIN else "close"
-    titles = {"keep": f"{label} 원금을 미리 갚는 지금의 방식을 이어가시는 것이 합리적입니다.",
+    # A loan repaid at maturity in one sum has no prepayment running to keep (sample 2026-11-08: the spouse's credit
+    # loan read "keep prepaying as now"): the advice is to repay principal early from spare money.
+    bullet = loan.get("repayment") == "bullet"
+    titles = {"keep": (f"{label}은 만기에 한 번에 갚는 방식이니, 여유 자금이 생기면 원금을 먼저 줄이는 편이 예금보다 유리합니다."
+                       if bullet else f"{label} 원금을 미리 갚는 지금의 방식을 이어가시는 것이 합리적입니다."),
               "deposit": f"{label}을 미리 갚기보다 예금·채권에 두는 편이 나은지 점검하시길 권합니다.",
               "close": f"{label} 추가 상환과 예금의 차이가 작으니, 꺼내 쓸 수 있는 쪽을 우선하셔도 됩니다."}
     effects = {"keep": "확실한 이자 절감이 예금 이자보다 뚜렷하게 큽니다. 주식 투자는 기대수익이 더 높을 수 있지만 손실 "
@@ -1008,9 +1012,13 @@ def _prepayment(facts: dict[str, Any]) -> Proposal | Undetermined | None:
                "close": (f"차이가 {percent(DECISION_MARGIN, 1)}p보다 작아 어느 쪽도 뚜렷이 낫지 않습니다. 이럴 때는 필요할 때 "
                          "다시 꺼내 쓸 수 있는 예금이 더 유연합니다.")}
     return Proposal(
-        key="prepayment", priority=2 if verdict == "deposit" else 3, identity=f"prepayment:{verdict}",
+        # Which loan the decision is about (Codex review 2026-11-08): a decision on one loan never stands for another.
+        # A mortgage keeps the identity the rule always had, so the client's history on it carries on.
+        key="prepayment", priority=2 if verdict == "deposit" else 3,
+        identity=f"prepayment:{verdict}" if loan["category"] == "mortgage" else f"prepayment:{verdict}:{loan['category']}",
         watch=("loan_rate", "deposit_after_tax"), tolerance=Decimal("0.15"),
-        headline={"keep": f"{label} 원금 선상환 유지", "deposit": f"{label} 선상환 대신 예금 점검",
+        headline={"keep": f"{label} 여유 자금으로 원금 상환" if bullet else f"{label} 원금 선상환 유지",
+                  "deposit": f"{label} 선상환 대신 예금 점검",
                   "close": f"{label} 상환·예금 중 유연한 쪽"}[verdict],
         title=titles[verdict],
         why=(f"갚을 수 있는 대출 중 금리가 가장 높은 것은 {label}({percent(rate)})입니다. 대출을 갚으면 그만큼의 이자를 확실히 "
@@ -1020,7 +1028,8 @@ def _prepayment(facts: dict[str, Any]) -> Proposal | Undetermined | None:
         effect=effects[verdict],
         risks=("CD 91일물은 은행 간 단기 금리로, 실제 정기예금 금리와 다를 수 있습니다. 갚은 돈은 다시 꺼내 쓰기 어렵고, "
                "중도상환수수료는 대출 약정서를 확인하셔야 합니다. 비상금과 보증금 반환 자금을 먼저 확보하십시오."),
-        timing="매월(현행 유지)" if verdict == "keep" else "다음 대출 금리 재산정 전",
+        timing=("여유 자금이 생길 때(중도상환수수료 확인)" if verdict == "keep" and bullet else
+                "매월(현행 유지)" if verdict == "keep" else "다음 대출 금리 재산정 전"),
         reconsider=(f"세후 예금 금리와 대출 금리({percent(rate)})의 차이가 {percent(DECISION_MARGIN, 1)}p 안팎으로 바뀌거나, "
                     "보증금 반환 자금이 부족해 보이면 다시 판단합니다."),
         certainty="계산(현재 금리가 유지된다는 가정, 예금 금리는 근사)",
@@ -1359,7 +1368,7 @@ def _home_tiers(home: dict[str, Any]) -> str:
     text += "입니다."
     after = home.get("after_tax")
     if after and after.get("case") == "exempt":
-        text += (f" 배우자 주택은 2년 보유·거주를 확인해 주셔서 팔 때 양도세를 비과세 기준 약 {short_won(after['tax']['exempt'])}으로 보아 "
+        text += (f" 배우자 주택은 2년 보유·거주가 확인되어 팔 때 양도세를 비과세 기준 약 {short_won(after['tax']['exempt'])}으로 보아 "
                  f"준비 가능액은 약 {short_won(after['available']['exempt'])}이고, 요건을 못 갖추면 약 {short_won(after['tax']['general'])}을 "
                  f"내 약 {short_won(after['available']['general'])}입니다.")
     elif after:

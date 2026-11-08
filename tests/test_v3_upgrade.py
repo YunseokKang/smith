@@ -8,6 +8,7 @@ import json
 import re
 import tempfile
 import unittest
+import unittest.mock
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -150,7 +151,7 @@ class PerspectiveTests(Upgrade):
         self.assertNotIn("insurance-review", keys)                               # The client's premiums, not hers.
         self.assertEqual(hers["view"].owner_aliases["partner"], "household_member_1")   # The client, from her side.
         page, own_page = render(hers)[1], render(mine)[1]
-        for text in ("나의 세금·연금", "고객님 명의의 계좌·연금·보험만 봅니다", "우리 집 노후", "두 분을 합쳐 봅니다"):
+        for text in ("나의 세금·연금", "고객님 명의의 계좌·집·대출·연금·보험만 봅니다", "우리 집 노후", "두 분을 합쳐 봅니다"):
             self.assertIn(text, page)
             self.assertIn(text, own_page)
         self.assertIn("이 레터의 답장 질문에는 아직 답하지 않습니다", page)
@@ -171,6 +172,72 @@ class PerspectiveTests(Upgrade):
         self.assertIn("고객님 주택은 2년 거주 여부에 따라", page)
         self.assertIn("배우자분 명의 거주 주택을 판다면", page)
         self.assertIn("거주 주택을 지금 판다면", own_page)
+
+    def test_the_rates_day_weighs_the_reader_s_own_loans_then_the_household_s(self):
+        # Report design §42: the rate proposals weigh the reader's own loans (once the spouse's credit loan was in the
+        # ledger, it was the client's "highest-rate loan to prepay"), and the household card lists both, with whose.
+        self.apply("loan", [rec("credit-partner", "liability", "partner", category="credit_loan", currency="KRW",
+                                outstanding_principal="15000000", annual_rate="0.052", rate_type="fixed",
+                                repayment_method="bullet", maturity="2027-06-01"),
+                            flow("interest-partner", "loan_payment", "65000", owner="partner",
+                                 liability_record_id="credit-partner")])
+        mine = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="rates", household=HOUSEHOLD)
+        hers = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="rates", household=HOUSEHOLD,
+                            audience="partner")
+        self.assertIn("주택담보대출", self.proposal(mine, "prepayment").title)
+        self.assertNotIn("신용대출", self.proposal(mine, "prepayment").title)
+        self.assertIn("신용대출", self.proposal(hers, "prepayment").title)
+        # Her loan is repaid at maturity: nothing is being prepaid "as now" (sample 2026-11-08).
+        self.assertIn("여유 자금이 생기면", self.proposal(hers, "prepayment").title)
+        self.assertIn("지금의 방식을 이어가시는", self.proposal(mine, "prepayment").title)
+        # A decision is about one loan (Codex review 2026-11-08): the mortgage keeps the rule's original identity, a
+        # credit loan has its own, so an acceptance of one never marks the other as in progress.
+        self.assertEqual(self.proposal(mine, "prepayment").identity, "prepayment:keep")
+        self.assertEqual(self.proposal(hers, "prepayment").identity, "prepayment:keep:credit_loan")
+        accepted = {"prepayment:keep": {"status": "accepted", "figures": {"loan_rate": "0.052",
+                                                                          "deposit_after_tax": "0.0254"}}}
+        with unittest.mock.patch("smith.ledger.active_proposals", return_value={
+                "partner:" + k: v for k, v in accepted.items()}):
+            hers = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="rates", household=HOUSEHOLD,
+                                audience="partner")
+        self.assertIn("prepayment", [p.key for p in hers["advice"]["proposals"]])     # Still proposed, not in progress.
+        self.assertNotIn("refinance", [p.key for p in hers["advice"]["proposals"]])      # The mortgage is the client's.
+        self.assertEqual(hers["own_debt"]["monthly_interest_estimate"], Decimal("65000"))   # 1,500만 x 5.2% / 12.
+        self.assertEqual(len(mine["sectors"]["debt"]["loans"]), len(hers["sectors"]["debt"]["loans"]))   # One household.
+        page = render(hers)[1]
+        order = [page.index(t) for t in ("나의 금리·대출", "우리 집 금리·대출", "두 분의 대출")]
+        self.assertEqual(order, sorted(order))
+        self.assertIn("나의 월 이자(추정)", page)
+        self.assertIn("변동금리</b> 대출이 없어", page)                                  # Not "0원이 있습니다".
+        self.assertIn("배우자", page[page.index("두 분의 대출"):])
+        # The narrative of her call writes about her own loans; the household's total comes apart.
+        metrics = narrative.sector_metrics(hers["view"], hers)
+        self.assertEqual(metrics["debt"]["variable_rate_total"], "0")
+        self.assertEqual(metrics["household_debt"]["loans"], len(hers["sectors"]["debt"]["loans"]))
+
+    def test_the_property_day_shows_the_reader_s_own_homes_and_one_household_move_plan(self):
+        # Report design §42 (user decision 2026-11-08: the lease-return proposal in both letters). The move plan is
+        # the household's, computed on the client's side in either letter: the client's own residence keeps its
+        # exemption and the pay closing the gap is the client's, said so in the spouse's letter.
+        household = dict(HOUSEHOLD, partner_birth_year=1990)
+        mine = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="property", household=household)
+        hers = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="property", household=household,
+                            audience="partner")
+        self.assertEqual(mine["move_plan"]["proceeds"], hers["move_plan"]["proceeds"])
+        self.assertEqual(mine["move_plan"]["pay"], hers["move_plan"]["pay"])
+        self.assertEqual({h["record_id"]: h["owner"] for h in hers["move_plan"]["homes"]},
+                         {"home": "partner", "rental": "self"})                       # Owners in her terms.
+        self.assertEqual([p["record_id"] for p in hers["own_real_estate"]["properties"]], ["rental"])
+        self.assertEqual([p["record_id"] for p in mine["own_real_estate"]["properties"]], ["home"])
+        for data in (mine, hers):
+            self.assertIn("lease-return", [p.key for p in data["advice"]["proposals"]])  # In both letters.
+        page = render(hers)[1]
+        self.assertIn("나의 부동산 평가액", page)
+        self.assertIn("배우자분 예정 소득 반영 시", page)                               # The client's pay, said so.
+        self.assertNotIn("배우자분 예정 소득", render(mine)[1])
+        metrics = narrative.sector_metrics(hers["view"], hers)["real_estate"]["move_plan"]
+        self.assertEqual(metrics["expected_pay_of"], "household_member_1")
+        self.assertEqual({h["owner"] for h in metrics["homes"]}, {"self", "household_member_1"})
 
     def test_the_markets_day_shows_the_reader_s_own_holdings_then_the_household_s(self):
         # Report design §42: the reader's holdings and proposals, the household's combined holdings with whose they are.
@@ -202,6 +269,8 @@ class PerspectiveTests(Upgrade):
         from smith.payload import won
         payload = narrative.build_payload(hers["view"], hers, None)
         self.assertTrue(payload["per_person_letter"])
+        self.assertFalse(payload["replies_answered"])                                  # Her replies are not answered.
+        self.assertTrue(narrative.build_payload(mine["view"], mine, None)["replies_answered"])
         self.assertEqual({h["symbol"] for h in payload["holdings"]}, {"AAPL", "VOO"})
         self.assertTrue(next(h for h in payload["holdings"] if h["symbol"] == "AAPL")["above_concentration_limit"])
         self.assertEqual(payload["portfolio_facts"]["total"], won(hers["own_holdings"]["total"]))
@@ -1100,7 +1169,10 @@ class MoveTests(Upgrade):
         self.assertLess(beta["spread_with_pay"], beta["spread"])                 # Expected pay closes part of it.
         self.assertEqual(plan["horizon"], date(2029, 10, 1))
         page = render(data)[1]
-        self.assertLess(page.index("목표 단지 vs 보유 주택 2채 시세 스프레드"), page.index("고객님께 드리는 제안"))
+        # A per-person property day (§42): the reader's own homes and proposals, then the household's move plan.
+        order = [page.index(t) for t in ("나의 부동산", "고객님께 드리는 제안", "우리 집 부동산",
+                                         "목표 단지 vs 보유 주택 2채 시세 스프레드")]
+        self.assertEqual(order, sorted(order))
         self.assertIn("가 단지", page)
         self.assertIn("입력하신 참고 가격", page)
         # The trend chart: the target with both ends has two bars; the one without a past reads 자료 부족.

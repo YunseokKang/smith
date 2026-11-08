@@ -617,6 +617,10 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
         "my_week": lambda: _holdings_week(_own(data), story),
         "my_holdings": lambda: _holdings(_own(data), story, True, quantities=False),
         "household_holdings": lambda: _household_holdings(data),
+        # The reader's own loans and the two of them together (report design §42).
+        "my_debt": lambda: _my_debt(data, advice, sectors),
+        "household_debt": lambda: _household_debt(sectors["debt"]),
+        "my_real_estate": lambda: _my_real_estate(data),
     }
     if edition.personal:
         bands += _split_bands(data, edition, renderers, advice, story)
@@ -656,7 +660,7 @@ def _split_bands(data: dict[str, Any], edition: editions.Edition, renderers: dic
     mine = group(edition.personal)
     proposals = (_proposals(advice, True, edition=edition) if advice["proposals"] or advice.get("undetermined") else "")
     ours = group(edition.household)
-    bands = [_band(CANVAS, _group_title(f"나의 {edition.label}", "고객님 명의의 계좌·연금·보험만 봅니다.")
+    bands = [_band(CANVAS, _group_title(f"나의 {edition.label}", "고객님 명의의 계좌·집·대출·연금·보험만 봅니다.")
                    + "".join(mine[:1]) + proposals + "".join(mine[1:]), border=True)]
     changes = _changes_outside(story, f"{edition.label} — 눈여겨볼 변화")
     if changes:
@@ -710,6 +714,55 @@ def _household_holdings(data: dict[str, Any]) -> str:
             f"{_pct(review['overseas_share'])}입니다." + (f" 두 분이 함께 가진 종목은 {escape(', '.join(both))}입니다." if both else ""))
     return _section("두 분의 보유 종목", lead, inner, brief=None,
                     note=escape(f"{len(listed)}개 종목 · 상위 {min(len(listed), 10)}개"))
+
+
+def _my_debt(data: dict[str, Any], advice: dict[str, Any], sectors: dict[str, Any]) -> str:
+    """The reader's own loans (report design §42): the line-up, the rate sensitivity and the refinancing verdict on
+    the reader's own figures, the same card the rates day opens with."""
+    own = data.get("own_debt") or sectors["debt"]
+    if not own["loans"]:
+        return _section("나의 대출", "고객님 명의의 대출은 없습니다.", "")
+    return _debt(own, advice.get("refinance"), sectors["macro"].get("policy"))
+
+
+def _household_debt(debt: dict[str, Any]) -> str:
+    """Both members' loans together (report design §42): the total, the variable-rate part and the month's interest,
+    and each loan with whose it is. The reader's own sensitivity is in "나의 금리·대출"."""
+    loans = [l for l in debt["loans"] if l["amount"] is not None]
+    if not debt["loans"]:
+        return ""
+    total = _total_or_none(l["amount"] for l in debt["loans"])
+    # Each label already says whose the loan is ("신용대출(배우자)", report_data._liability_label).
+    lead = (f"두 분의 대출과 돌려줄 보증금은 {len(debt['loans'])}건 "
+            f"<b>{'미상' if total is None else _short(total)}</b>이고, 이 가운데 변동금리는 "
+            f"{'미상' if debt['variable_total'] is None else _short(debt['variable_total'])}, 월 이자는 약 "
+            f"{'미상' if debt['monthly_interest_estimate'] is None else _short(debt['monthly_interest_estimate'])}입니다.")
+    table = _table(["대출", "잔액", "금리", "방식"],
+                   [[l["label"], _short(l["amount"]), f"{l['rate'] * 100:.2f}%",
+                     RATE_TYPE_LABELS.get(l["rate_type"], l["rate_type"])] for l in loans])
+    return _section("두 분의 대출", lead, table, brief=None, note=escape(f"{len(debt['loans'])}건"))
+
+
+def _my_real_estate(data: dict[str, Any]) -> str:
+    """The reader's own homes (report design §42): the property card on the reader's homes, with their trade figures
+    and their share of the reader's own assets."""
+    own = data.get("own_real_estate")
+    if own is None:
+        return ""
+    if not own["properties"]:
+        return _section("나의 부동산", "고객님 명의의 부동산은 없습니다.", "")
+    figures = {k[len("own_"):]: v for k, v in (data.get("figures") or {}).items() if k.startswith("own_property")}
+    return _real_estate(own, figures)
+
+
+def _total_or_none(amounts: Any) -> Decimal | None:
+    """A sum that is unknown when any part is unknown (missing is not zero)."""
+    total = Decimal(0)
+    for amount in amounts:
+        if amount is None:
+            return None
+        total += amount
+    return total
 
 
 def _group_title(title: str, note: str) -> str:
@@ -785,7 +838,11 @@ def _tiles(data: dict[str, Any], edition: editions.Edition) -> list[tuple[str, s
                 ("해외 상장 비중", _pct(review["overseas_share"], 0), "보유 증권 전체 기준"),
                 ("가장 큰 종목 비중", _pct(review["top1_share"], 0), str(top)[:16])]
     if edition.tiles == "property":
-        estate = s["real_estate"]
+        # A per-person property day (§42) shows the reader's own homes in the hero; the household's follow below.
+        own = bool(edition.personal) and data.get("own_real_estate") is not None
+        estate, mine = (data["own_real_estate"], "나의 ") if own else (s["real_estate"], "")
+        if own:
+            f = {**f, **{k[len("own_"):]: v for k, v in f.items() if k.startswith("own_property")}}
         lease = next((t for t in data["timeline"] if t.get("category") == "lease_deposit_obligation"), None)
         basis = " · ".join(f.get("property_valuation") or []) or "원장 입력가"
         if f.get("property_estimate") is not None and f["property_value"] is not None:
@@ -793,13 +850,15 @@ def _tiles(data: dict[str, Any], edition: editions.Edition) -> list[tuple[str, s
         elif f.get("property_estimate_reference") is not None and f["property_value"] is not None:
             reference = f["property_estimate_reference"]
             basis += f" · 실거래 중간값 합계 {amount(reference)}({_signed_short(reference - f['property_value'])}, 참고)"
-        return [("부동산 평가액", amount(f["property_value"]), f"자산의 {_pct(estate['share_of_assets'], 0)} · 기준: {basis}"),
-                ("부동산 관련 부채", amount(f["property_debt"]), "담보대출·보증금 반환"),
+        return [(f"{mine}부동산 평가액", amount(f["property_value"]), f"자산의 {_pct(estate['share_of_assets'], 0)} · 기준: {basis}"),
+                (f"{mine}부동산 관련 부채", amount(f["property_debt"]), "담보대출·보증금 반환"),
                 ("돌려드릴 보증금", "-" if lease is None else amount(lease["amount"]),
                  "" if lease is None else f"{lease['date']:%Y.%m} 만기"),
                 ("최근 6개월 실거래", f"{f['property_trades_6m']}건", _deals_stale(estate) or "같은 단지·같은 면적")]
     if edition.tiles == "rates":
-        debt = s["debt"]
+        # A per-person rates day (§42) shows the reader's own loans in the hero; the household's follow below.
+        own = bool(edition.personal) and data.get("own_debt") is not None
+        debt, mine = (data["own_debt"], "나의 ") if own else (s["debt"], "")
         one = next((x for x in debt["shocks"] if x["shock"] == Decimal("0.01")), None)
         base = next((r for r in s["macro"]["evidence"] if r["spec"].series_id == "722Y001/0101000" and r["value"] is not None),
                     None)
@@ -808,8 +867,8 @@ def _tiles(data: dict[str, Any], edition: editions.Edition) -> list[tuple[str, s
         when = "" if base is None else f"{base['observed_on']:%m.%d} 기준"
         if meeting is not None:  # The rate-setting day matters more than the observation day (§28).
             when += (" · " if when else "") + ("오늘 금통위" if policy.get("meeting_today") else f"다음 금통위 {meeting:%m.%d}")
-        return [("변동금리 대출", "미상" if debt["variable_total"] is None else _short(debt["variable_total"]), "잔액"),
-                ("월 이자(추정)", "미상" if debt["monthly_interest_estimate"] is None
+        return [(f"{mine}변동금리 대출", "미상" if debt["variable_total"] is None else _short(debt["variable_total"]), "잔액"),
+                (f"{mine}월 이자(추정)", "미상" if debt["monthly_interest_estimate"] is None
                  else _short(debt["monthly_interest_estimate"]), "현재 금리 기준"),
                 ("금리 1%p 오르면", "-" if one is None or one["monthly_change"] is None
                  else "+" + _short(one["monthly_change"]), "월 이자 증가 · 내리면 같은 폭 감소"),
@@ -1122,14 +1181,16 @@ def _hero_segments(data: dict[str, Any], tiles: str | None) -> tuple[str, list[t
             segments.append((f"기타({len(rest)}종)", sum((p["value"] for p in rest), Decimal(0)), ""))
         return ("나의 " if own else "") + "보유 종목 구성(Hermes 운용분 제외)", segments, ""
     if tiles == "property":
-        props = data["sectors"]["real_estate"]["properties"]
-        return "부동산 평가액 구성", [(p["label"], p["value"], "") for p in props], ""
+        own = editions.personalized(data["kind"]) and data.get("own_real_estate") is not None
+        props = (data["own_real_estate"] if own else data["sectors"]["real_estate"])["properties"]
+        return ("나의 " if own else "") + "부동산 평가액 구성", [(p["label"], p["value"], "") for p in props], ""
     if tiles == "rates":
-        debt = data["sectors"]["debt"]
+        own = editions.personalized(data["kind"]) and data.get("own_debt") is not None
+        debt = data["own_debt"] if own else data["sectors"]["debt"]
         drawn = [(l["label"], l["amount"], "") for l in debt["loans"] if l["amount"]]
         unused = debt.get("unused_credit")
         note = f"미사용 한도 {_short(unused)}(마이너스통장)는 부채가 아니라 유사시 바로 쓸 수 있는 여유입니다." if unused else ""
-        return "부채 구성", drawn, note
+        return ("나의 " if own else "") + "부채 구성", drawn, note
     if tiles == "tax":
         stack = data.get("pension_stack")
         if stack is None:
@@ -1652,7 +1713,7 @@ def _home_lead(home: dict[str, Any]) -> str:
     text += "입니다. 집값 연 2%와 투자 수익 연 4%를 가정했습니다."
     after = home.get("after_tax")
     if after and after.get("case") == "exempt":
-        text += (f" 배우자 주택은 2년 보유·거주를 확인해 주셔서 팔 때 양도세를 1세대 1주택 비과세 기준 약 {_short(after['tax']['exempt'])}"
+        text += (f" 배우자 주택은 2년 보유·거주가 확인되어 팔 때 양도세를 1세대 1주택 비과세 기준 약 {_short(after['tax']['exempt'])}"
                  f"(12억 원 초과분만 과세)으로 보며, 요건을 못 갖추면 약 {_short(after['tax']['general'])}입니다. 혼인신고를 하시면 혼인일부터 "
                  "10년 안에 이 집을 먼저 파는 순서가 안전합니다.")
     elif after:
@@ -1743,7 +1804,7 @@ def _lease_plan(data: dict[str, Any]) -> str:
         pass
     elif sale["net_inflow"] is not None:
         lead += (f" 전세를 끼고 팔거나 만기에 맞춰 파는 경우에는 돈이 나가지 않고 약 {_short(-sale['cash_out'])}이 들어옵니다. "
-                 + (f"2년 보유·거주를 확인해 주셔서 1세대 1주택 비과세 기준이며, 요건을 못 갖추면 약 {_short(sale['net_inflow']['general'])}입니다."
+                 + (f"2년 보유·거주가 확인되어 1세대 1주택 비과세 기준이며, 요건을 못 갖추면 약 {_short(sale['net_inflow']['general'])}입니다."
                     if sale.get("tax_case") == "exempt" else
                     f"1세대 1주택 비과세 요건을 갖추면 약 {_short(sale['net_inflow']['exempt'])}입니다."))
     elif sale["cash_out"] is not None:
@@ -1896,10 +1957,13 @@ def _debt(debt: dict[str, Any], refinance: dict[str, Any] | None = None, policy:
     if debt["variable_total"] is None:
         lead = ("<b>변동금리</b>(몇 달마다 시장 금리에 맞춰 이자율이 바뀌는 방식) 대출 가운데 환율이 없어 원화로 바꾸지 못한 "
                 "대출이 있어, 합계와 금리 변동 시 이자 변화액을 계산하지 않았습니다.")
+    elif not debt["variable_total"]:
+        # Sample 2026-11-08: a reader with fixed-rate loans only read "변동금리 대출 0원이 있습니다".
+        lead = "<b>변동금리</b> 대출이 없어, 시장 금리가 움직여도 월 이자는 그대로입니다."
     else:
         lead = (f"<b>변동금리</b> 대출 <b>{_short(debt['variable_total'])}</b>"
                 + (f"은 금리가 1%p 오르면 월 이자가 약 <b>{_short(one['monthly_change'])}</b> 늘고, 1%p 내리면 그만큼 줄어듭니다."
-                   if one and debt["variable_total"] else "이 있습니다."))
+                   if one else "이 있습니다."))
     unused = debt.get("unused_credit")
     for line in debt.get("credit_lines", []):
         if line["drawn"] == 0:
@@ -1922,7 +1986,7 @@ def _debt(debt: dict[str, Any], refinance: dict[str, Any] | None = None, policy:
                    [[l["label"], _short(l["amount"]) + (f"(한도 {_short(l['credit_limit'])} 미사용)" if l.get("credit_limit") is not None
                                                         and l["amount"] == 0 else ""),
                      f"{l['rate'] * 100:.2f}%", RATE_TYPE_LABELS.get(l["rate_type"], l["rate_type"]),
-                     (l["maturity"] or "-")[:7].replace("-", ".")]
+                     l["maturity"][:7].replace("-", ".") if l["maturity"] else "-"]
                     for l in debt["loans"]])
     note = "" if one is None or not one["monthly_change"] else f"금리 ±1%p에 월 이자 ±{_short(one['monthly_change'])}"
     if refinance is not None and refinance["verdict"] != "unknown":
@@ -2596,9 +2660,11 @@ def _move_targets(data: dict[str, Any]) -> str:
         elif h["tax"] is not None:
             lead += (f" {h['label']}의 양도세는 일반 과세 약 {_short(h['tax']['general'])}, 비과세 요건 충족 시 약 "
                      f"{_short(h['tax']['exempt'])}입니다.")
+    # The plan is the household's, on the client's pay (§42): the spouse's letter says whose pay it is.
+    whose = "배우자분 " if plan.get("pay_owner") not in (None, "self") else ""
     if pay["base"] is not None:
-        lead += (f" 그때까지 받을 성과급·주식 보상은 확정·예상분 세후 약 <b>{_short(pay['base'])}</b>(확정분만 {_short(pay['adverse'])})이며, "
-                 "지급 전까지는 확정이 아닙니다.")
+        lead += (f" {'배우자분이 ' if whose else ''}그때까지 받을 성과급·주식 보상은 확정·예상분 세후 약 <b>{_short(pay['base'])}</b>(확정분만 "
+                 f"{_short(pay['adverse'])})이며, 지급 전까지는 확정이 아닙니다.")
     trends = {"widening": "벌어지는 중", "narrowing": "좁혀지는 중", "flat": "큰 변화 없음"}
     rows, bars = [], [("두 집 매도 순수익", pr["headline"], True)]
     for t in plan["targets"]:
@@ -2614,7 +2680,7 @@ def _move_targets(data: dict[str, Any]) -> str:
     if nearest is not None:
         # First (pre-review check 2026-10-18): the gap to the nearest target and what the expected pay closes of it
         # is the day's answer; the two-sentence lead used to stop before it.
-        pays = [f"예정 소득 반영 시 {_short(nearest['spread_with_pay'])}" if nearest["spread_with_pay"] is not None else "",
+        pays = [f"{whose}예정 소득 반영 시 {_short(nearest['spread_with_pay'])}" if nearest["spread_with_pay"] is not None else "",
                 f"확정분만 반영 시 {_short(nearest['spread_with_pay_adverse'])}" if nearest["spread_with_pay_adverse"] is not None else ""]
         pays = ", ".join(p for p in pays if p)
         lead = (f"필요 추가 자금이 가장 작은 곳은 <b>{escape(nearest['alias'])} · {escape(nearest['label'])}</b>으로 약 "
@@ -2622,7 +2688,7 @@ def _move_targets(data: dict[str, Any]) -> str:
                 + (", 세전 기준으로 6개월 전보다 차이가 " + trends[nearest["trend"]] + "입니다." if nearest["trend"] else "입니다.")
                 + " " + lead)
     lead += " 핵심 변수는 성과급·자사주 유입과 그 주가, 그리고 매도 순서에 따른 양도세입니다."
-    table = _table(["후보 단지", "시세(기준)", "6개월 전 대비", "필요 추가 자금", "예정 소득 반영 후", "추이(세전)"], rows)
+    table = _table(["후보 단지", "시세(기준)", "6개월 전 대비", "필요 추가 자금", f"{whose}예정 소득 반영 후", "추이(세전)"], rows)
     # The spread trend (user review 2026-10-18): each target's gap six months ago against now, both before tax.
     trend = _paired_bars([(f"{t['alias']} · {t['label']}", t["spread_6m_ago"], t["spread_before_tax"])
                           for t in plan["targets"] if not t["trend_hold"]])

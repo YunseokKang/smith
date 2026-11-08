@@ -66,7 +66,7 @@ logger = logging.getLogger(__name__)
 # v32: no per-sentence law caveat; the footer says it once (user decision 2026-11-02); the check no longer asks for it.
 # v33: holdings[].week_change and index_moves; a holding that moved 10% or more opens its reason with why (2026-11-03).
 # v34: tax.realized_this_year, this year's sales with their estimated gains and the deduction left (2026-11-03).
-PROMPT_VERSION = "narrative-v37"   # v37: one call per member's letter, on their own holdings (§42); v36: the household paragraph.
+PROMPT_VERSION = "narrative-v38"   # v38: the rates day per person (own loans), replies_answered; v37: one call per member (§42).
 MODEL = headless.MODEL
 # A runaway guard, not a cost limit (flat-rate subscription): the markets day cost 4.39 USD on 2026-10-27 and, with a
 # payload a fifth larger, ran past 5.00 on 2026-11-03 (error_max_budget_usd), so that report went out without opinions.
@@ -413,8 +413,13 @@ Write:
   client's own (each member gets one, written for them); this paragraph opens its "우리 집 …" section: 2 sentences
   on where the two of them stand together on the day's theme, from the household-wide figures (for the pension
   stack: the combined readiness at each retirement age and what must be held outside the pensions; on the markets
-  day: household_portfolio_facts). Write "두 분" or "우리 집"; the client's own accounts, pay and proposals are in
-  the letter's own section, so do not repeat them here.
+  day: household_portfolio_facts; on the rates day: sector_metrics.household_debt, while sector_metrics.debt is the
+  client's own loans; on the property day: the move plan, the household's in both letters, and the lease return,
+  with each home's `owner` and the plan's `expected_pay_of` saying whose they are). Write "두 분" or "우리 집"; the client's own accounts, pay and proposals are in the letter's
+  own section, so do not repeat them here.
+- When `replies_answered` is false, this reader's replies are not answered: never ask the reader to tell, send or
+  confirm anything to Smith ("알려 주시면"); say plainly what is not recorded and what it would change (for example
+  "대출 시기가 기록되면 미리 갚는 비용을 계산합니다").
 - order: the proposal keys in the order the client should act on them (most important first).
 - proposal_notes: at most 3, for the proposals where the research changes the picture most, one sentence of market or policy
   context with refs. At most one note per proposal key. Skip proposals with nothing to add. A proposal's
@@ -510,6 +515,9 @@ def build_payload(view: Any, data: dict[str, Any], brief: dict[str, Any] | None,
     # A per-person edition (report design §42) is narrated once per member, each call on the reader's own holdings,
     # and also writes the household paragraph of its "우리 집 …" section.
     payload["per_person_letter"] = bool(edition.personal)
+    if edition.personal:
+        # The spouse's replies are not answered (report design §42.3): that letter never asks for one (sample 2026-11-08).
+        payload["replies_answered"] = data.get("audience", "self") == "self"
     if edition.personal and edition.key == "markets":
         payload["household_portfolio_facts"] = _household_portfolio(data["holdings"])
     if edition.key != "markets":
@@ -587,13 +595,21 @@ def sector_metrics(view: Any, data: dict[str, Any]) -> dict[str, Any]:
     """Each area's deterministic indicators (report design §4.3), as computed for the report's charts.
     Ratios are decimal strings; unknown values stay None."""
     s = data["sectors"]
-    cash, debt, securities = s["cash"], s["debt"], s["securities"]
+    # A per-person edition's call writes about the reader's own loans (report design §42); the household's total
+    # comes apart for the household paragraph.
+    personal = editions.personalized(data["kind"]) and data.get("own_debt") is not None
+    cash, debt, securities = s["cash"], data["own_debt"] if personal else s["debt"], s["securities"]
     estate, pension = s["real_estate"], s["pension_insurance"]
 
     def ratio(value: Decimal | None) -> str | None:
         return None if value is None else f"{value:.4f}"
     advice = data["advice"]
+    household_debt = {} if not personal else {"household_debt": {
+        "loans": len(s["debt"]["loans"]), "variable_rate_total": won(s["debt"]["variable_total"]),
+        "monthly_interest_estimate": won(s["debt"]["monthly_interest_estimate"]),
+        "unused_credit_total": won(s["debt"].get("unused_credit"))}}
     return {
+        **household_debt,
         "cash": {"immediate": won(cash["immediate"]), "reserve_target": won(cash["reserve_target"]),
                  "reserve_gap": won(cash["reserve_gap"]),
                  "emergency_months_assumption": str(cash["emergency_months_assumption"]),
@@ -616,6 +632,7 @@ def sector_metrics(view: Any, data: dict[str, Any]) -> dict[str, Any]:
                        "hermes_managed": won(securities["hermes"])},
         "real_estate": {"share_of_assets": ratio(estate["share_of_assets"]),
                         "properties": [{"ref": view.aliases.get(p["record_id"]), "loan_to_value": ratio(p["ltv"]),
+                                        "owner": view.owner_aliases.get(p["owner"], p["owner"]),
                                         "valuation_basis": p.get("valuation_method")} for p in estate["properties"]],
                         "lease_return_plan": _lease_metrics(view, (data.get("lease_plans") or [None])[0]),
                         "deals_stale_since": _stale_since(estate.get("deals_stale")),
@@ -691,7 +708,10 @@ def _move_metrics(view: Any, plan: dict[str, Any] | None) -> dict[str, Any] | No
     def ratio(value: Decimal | None) -> str | None:
         return None if value is None else f"{value:.4f}"
     return {"horizon": plan["horizon"].isoformat(),
-            "homes": [{"ref": view.aliases.get(h["record_id"]), "price": won(h["price"]), "price_basis": h["price_basis"],
+            # The household's plan in either letter (§42): whose each home is, and whose expected pay closes the gap.
+            "expected_pay_of": view.owner_aliases.get(plan.get("pay_owner", "self"), plan.get("pay_owner", "self")),
+            "homes": [{"ref": view.aliases.get(h["record_id"]), "owner": view.owner_aliases.get(h["owner"], h["owner"]),
+                       "price": won(h["price"]), "price_basis": h["price_basis"],
                        "secured_loans": won(h["loans"]), "lease_deposit": won(h["deposits"]),
                        "net_before_tax": won(h["before_tax"]),
                        "capital_gains_tax": None if h["tax"] is None else {k: won(v) for k, v in h["tax"].items()},

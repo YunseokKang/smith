@@ -91,7 +91,9 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "spread between its cost and the net proceeds of selling both homes, whether that spread widened or "
             "narrowed over six months, and how much of it the expected pay (by certainty) and the employer stock's "
             "price could close; from it, propose the order of selling the two homes (tax cases per home), the loan "
-            "room and the tax moves, conditionally.", opening=("move_targets",)),
+            "room and the tax moves, conditionally.", opening=("move_targets",),
+            personal=("my_real_estate",), household=("move_targets", "lease_plan", "real_estate"),
+            household_label="부동산"),
     Edition("rates", "금리·대출",
             "rates", ("debt", "macro"), ("prepayment", "variable-rate", "refinance"),
             ("mortgage", "rates", "household_policy"), False, False,
@@ -102,7 +104,8 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "market average on new bank mortgages (sector_metrics.debt.refinance: keep, or review a refinancing with the fee paid back in "
             "the stated months), whether extra repayment beats saving, and the policy-rate outlook. A credit line "
             "with nothing drawn (sector_metrics.debt.unused_credit_lines) costs nothing and is liquidity room, never "
-            "a loan to repay.", opening=("debt",)),
+            "a loan to repay.", opening=("debt",),
+            personal=("my_debt",), household=("household_debt", "macro"), household_label="금리·대출"),
     Edition("tax", "세금·연금",
             "tax", ("tax", "annuity_review", "pension"), ("pension-credit", "overseas-harvest", "isa-open", "insurance-review"),
             ("pension_tax", "home_tax"), False, False,
