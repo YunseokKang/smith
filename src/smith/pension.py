@@ -44,6 +44,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
+from smith.fmt import short_won
 from smith.payload import LedgerView, base_amount
 from smith.records import Kind
 from smith.summary import recurring_active
@@ -98,7 +99,8 @@ CATEGORY_EXAMPLES = {"public": "국민연금·공무원연금 등", "occupationa
 # A pension account with no payout end is paid over this many years: the public pension portal's assumption
 # for an account without a set period, used so Smith and the portal read the same (user decision 2026-11-07).
 ACCOUNT_PAYOUT_YEARS = 20
-# The age a fixed won annuity's erosion is followed to before the shortfall is held level (outside_need).
+# The money outside the pensions covers the shortfall until this age, nothing after (outside_need; user decision
+# 2026-11-09).
 PLAN_AGE = 100
 OCCUPATIONAL_PLANS = {"db": "DB형", "dc": "DC형"}
 _TERM_FIELDS = ("institution", "opened_on", "contribution_end", "payout_start", "payout_end", "illustrated_annual_pension")
@@ -412,30 +414,64 @@ def _service_months(start: date, end: date) -> int:
 
 
 def _outside_need(rows: list[dict[str, Any]], target: Decimal, retire: int) -> dict[str, Decimal] | None:
-    """What the household must hold outside the pensions at retirement, in today's won, to live on the target:
-    each year's shortfall until the last pipeline starts or a fixed-term one ends (`bridge`), and the lasting
-    shortfall after that drawn at the withdrawal rate (`lasting`), both discounted to the retirement age at the
-    real return. Every stated part's own start and end bounds the years walked, and with a fixed won annuity the
-    walk goes on to PLAN_AGE, since its value keeps falling (Codex review 2026-11-07). None when a known pipeline
-    has no start age (the timeline is unknown). With a pipeline whose payout is unknown the figure counts it as
-    nothing and is only an upper bound (`upper_bound`, review 2026-10-23: unknown is not zero)."""
+    """What the household must hold outside the pensions at retirement, in today's won, to live on the target until
+    PLAN_AGE: each year's shortfall from the retirement age to the year before PLAN_AGE, discounted to the
+    retirement age at the real return (the money is kept invested while the shortfall is drawn). Nothing is kept for
+    the years after PLAN_AGE (user decision 2026-11-09: "100세 이후 몫은 필요없어"; it used to add the lasting
+    shortfall drawn at the withdrawal rate). None when a known pipeline has no start age (the timeline is unknown).
+    With a pipeline whose payout is unknown the figure counts it as nothing and is only an upper bound
+    (`upper_bound`, review 2026-10-23: unknown is not zero).
+
+    `phases` is the monthly shortfall by age span, cut where a pension starts or ends (the client's wording, mail of
+    2026-11-09): from, to (exclusive; the last span ends at PLAN_AGE), and the lowest and highest month in it."""
     known = [r for r in rows if r["net_monthly"] is not None]
     if any(r["start_age"] is None for r in known):
         return None
+    gaps = {year: max(Decimal(0), target - sum((monthly_at(r, year) for r in known), Decimal(0)))
+            for year in range(retire, PLAN_AGE)}
+    total = sum((gap * 12 / (1 + REAL_RETURN) ** (year - retire) for year, gap in gaps.items()), Decimal(0))
     parts = [part for r in known for part in segments(r)]
-    last = max([retire] + [start for start, _, _, _ in parts if start is not None]
-               + [end for _, _, _, end in parts if end is not None])
-    # A fixed won annuity keeps losing value: follow the years to PLAN_AGE before the income is held level.
-    if any(erode is not None for _, _, erode, _ in parts):
-        last = max(last, PLAN_AGE)
-    bridge = Decimal(0)
-    for year in range(retire, last):
-        income = sum((monthly_at(r, year) for r in known), Decimal(0))
-        bridge += max(Decimal(0), target - income) * 12 / (1 + REAL_RETURN) ** (year - retire)
-    gap = max(Decimal(0), target - sum((monthly_at(r, last) for r in known), Decimal(0)))
-    lasting = gap * 12 / WITHDRAWAL_RATE / (1 + REAL_RETURN) ** (last - retire)
-    return {"bridge": bridge, "lasting": lasting, "total": bridge + lasting,
+    cuts = sorted({age for start, _, _, end in parts for age in (start, end) if age is not None and retire < age < PLAN_AGE})
+    bounds = [retire] + cuts + [PLAN_AGE]
+    phases = [{"from": start, "to": end, "low": min(gaps[y] for y in range(start, end)),
+               "high": max(gaps[y] for y in range(start, end))}
+              for start, end in zip(bounds, bounds[1:]) if start < end]
+    return {"total": total, "phases": phases,
             "upper_bound": len(known) < len(rows), "unknown": [r["id"] for r in rows if r["net_monthly"] is None]}
+
+
+def need_words(tier: dict[str, Any], target: Decimal) -> str | None:
+    """What must be held outside the pensions at one retirement age, in the client's wording (mail of 2026-11-09):
+    the monthly shortfall by age span, the assumption that savings and investments outside the pensions cover it,
+    how that money is drawn and until when, the retirement age, then the amount. None when the timeline is unknown."""
+    need = tier["outside_need"]
+    if need is None:
+        return None
+    retire = tier["retire_age"]
+    if need["total"] <= 0:
+        return f"{retire}세에 은퇴하면 연금만으로 목표 생활비 월 {short_won(target)}을 채워, 연금 밖에서 따로 준비할 돈이 없습니다."
+    spans = ", ".join(f"{_ages(p)} {_monthly(p['low'], p['high'])}" for p in need["phases"] if p["high"] > 0)
+    ceiling = "최대 " if need["upper_bound"] else ""
+    text = (f"{retire}세에 은퇴하면 목표 생활비 월 {short_won(target)} 가운데 연금이 채우지 못하는 부족분은 {spans}입니다. "
+            f"이 부족분을 연금을 뺀 예금·투자 자산으로 충당한다고 가정하면, 그 돈을 실질 연 {REAL_RETURN * 100:.0f}%로 굴리며 "
+            f"{PLAN_AGE}세까지 꺼내 쓸 때 {retire}세 은퇴 기준 {ceiling}약 {short_won(need['total'])}(오늘 돈 가치)이 필요합니다.")
+    if need["upper_bound"]:
+        text += " 수령액을 모르는 연금을 0으로 본 최대치입니다."
+    return text
+
+
+def _ages(phase: dict[str, Any]) -> str:
+    if phase["to"] == PLAN_AGE:   # The sentence then says the money is drawn until PLAN_AGE.
+        return f"{phase['from']}세 이후"
+    return f"{phase['from']}세" if phase["to"] - phase["from"] == 1 else f"{phase['from']}~{phase['to'] - 1}세"
+
+
+def _monthly(low: Decimal, high: Decimal) -> str:
+    """A month's shortfall over a span: one figure when it barely moves, else the range in 10만 원 steps."""
+    lo, hi = (int((v / 100_000).quantize(Decimal(1))) * 10 for v in (low, high))
+    if hi - lo < 10:
+        return f"월 약 {short_won((low + high) / 2)}"
+    return f"월 약 {lo:,}만~{hi:,}만 원"
 
 
 def _contribution_plan(view: LedgerView, today: date, plan: dict[str, Any] | None, owner: str = "self") -> dict[str, Any]:
@@ -851,7 +887,7 @@ def assumptions(shared: bool = False) -> list[str]:
             f"은퇴 때(계좌의 납입 종료일이 더 이르면 그때)까지 넣고 수령 개시까지 실질 연 {REAL_RETURN * 100:.0f}%로 불려, 계좌에 "
             f"정한 수령 기간(없으면 정부 '내연금'과 같은 {ACCOUNT_PAYOUT_YEARS}년) 동안 같은 실질 금액으로 나눠 받는다고 가정. "
             "납입액은 오늘 돈 가치로 고정(물가만큼 늘려 넣는다는 뜻)",
-            f"연금 밖에서 준비할 돈: 은퇴부터 마지막 연금이 시작되거나 기간이 정해진 연금이 끝날 때까지 해마다의 부족분과 그 뒤 계속되는 부족분(연 "
-            f"{WITHDRAWAL_RATE * 100:.0f}% 인출 기준)을 실질 연 {REAL_RETURN * 100:.0f}%로 은퇴 시점까지 할인한 오늘 돈 가치",
+            f"연금 밖에서 준비할 돈: 은퇴부터 {PLAN_AGE}세가 될 때까지 해마다의 부족분(목표 생활비 - 연금)을 실질 연 "
+            f"{REAL_RETURN * 100:.0f}%로 은퇴 시점까지 할인한 오늘 돈 가치({PLAN_AGE}세 이후 몫은 넣지 않음, 사용자 결정 2026-11-09)",
             f"연금보험: 납입 기간 끝까지 보험료를 내고 해지하지 않으며 사업비 {ANNUITY_LOADING * 100:.0f}%, 납입보험료 연 "
             f"{GUARANTEE_SIMPLE_RATE * 100:.0f}% 단리 최저보증(물가 {INFLATION * 100:.0f}%로 현재 가치 환산, 약관 확인 필요) 가정"]

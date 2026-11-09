@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from smith import (adviser, editions, fundamentals, future_income, headless, holdings, insiders, korean, ledger, memory,
-                   perspective, principles, reader, research, stress, tax)
+                   pension, perspective, principles, reader, research, stress, tax)
 from smith.fmt import short_won
 from smith.payload import PayloadRejected, build_context, check_outbound, won
 from smith.proposals import Proposal
@@ -66,7 +66,7 @@ logger = logging.getLogger(__name__)
 # v32: no per-sentence law caveat; the footer says it once (user decision 2026-11-02); the check no longer asks for it.
 # v33: holdings[].week_change and index_moves; a holding that moved 10% or more opens its reason with why (2026-11-03).
 # v34: tax.realized_this_year, this year's sales with their estimated gains and the deduction left (2026-11-03).
-PROMPT_VERSION = "narrative-v40"   # v40: the overview per person, whose pay; v39: property and life days per person (§42).
+PROMPT_VERSION = "narrative-v41"   # v41: the money needed outside the pensions in the client's wording; v40: the overview per person, whose pay; v39: property and life days per person (§42).
 MODEL = headless.MODEL
 # A runaway guard, not a cost limit (flat-rate subscription): the markets day cost 4.39 USD on 2026-10-27 and, with a
 # payload a fifth larger, ran past 5.00 on 2026-11-03 (error_max_budget_usd), so that report went out without opinions.
@@ -294,7 +294,13 @@ Input JSON:
   (contributions stop at retirement, pension accounts pay from 55, the national pension shrinks with the
   contribution months lost), the years without any pension and what must be held outside the pensions at
   retirement (a ceiling when held_outside_is_upper_bound: say "최대"). Never write one retirement age as if it
-  were the client's plan; compare the ages. The projection
+  were the client's plan; compare the ages. Whenever you state what must be held outside the pensions, write it the
+  way the client asked (mail of 2026-11-09): the monthly shortfall against the target by age span
+  (monthly_shortfall_by_age), the assumption that savings and investments outside the pensions cover it, how that
+  money is drawn (kept at the 3% real return while the shortfall is drawn, until age 100; nothing is kept for after
+  100), the retirement age, then the amount. held_outside_in_clients_words is the code's sentence for each age: use
+  it or its figures. Never describe the amount as a 4% withdrawal: it is not one, and the client could not follow
+  "연 4% 인출을 가정해". The projection
   assumes the credit-maximizing split (projected_monthly_contributions; the part no credit covers kept in an ISA
   or similar), the same split the tax proposal makes; headline_net_with_current_contributions is the total if
   the client keeps contributing as now.
@@ -798,6 +804,12 @@ def _stack_metrics(view: Any, stack: dict[str, Any] | None) -> dict[str, Any] | 
                  "held_outside_pensions_at_retirement": None if t["outside_need"] is None else won(t["outside_need"]["total"]),
                  # An unknown pension counts as nothing in it: then the figure is only a ceiling (review 2026-10-23).
                  "held_outside_is_upper_bound": None if t["outside_need"] is None else t["outside_need"]["upper_bound"],
+                 # What makes up that figure (the client's question 2026-11-09): the monthly shortfall by age span,
+                 # drawn until pension.PLAN_AGE and nothing after.
+                 "monthly_shortfall_by_age": None if t["outside_need"] is None else [
+                     {"from_age": p["from"], "until_age": p["to"] - 1, "low": won(p["low"]), "high": won(p["high"])}
+                     for p in t["outside_need"]["phases"]],
+                 "held_outside_in_clients_words": pension.need_words(t, stack["target"]),
                  "pipelines_net_monthly": {_pipeline_ref(view, p): won(p["net_monthly"]) for p in t["pipelines"]}}
                 for t in stack["tiers"] if stack["age"] is None or t["retire_age"] > stack["age"]],
             "projected_monthly_contributions": {"pension_savings": won(contributions["pension_savings"]),

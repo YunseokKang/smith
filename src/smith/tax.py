@@ -609,5 +609,5 @@ def assumptions() -> list[str]:
             f"연금계좌 공제율 {percent(CREDIT_RATE_HIGH, 1)}(총급여 5,500만 원 초과 가정)",
             f"해외주식 양도세 {percent(OVERSEAS_RATE, 0)}, 기본공제 연 {short_won(OVERSEAS_DEDUCTION)}, 원화 손익은 현재 환율 기준 근사",
             "올해 실현한 해외주식 이익: 토스 동기화에서 보유 수량이 줄어든 종목을 매도로 보고, 매도 직전 시세로 추정(체결가 아님)",
-            f"은퇴 필요 자금: 현재 가치 월 생활비, 실질 수익률 연 {percent(REAL_RETURN, 0)}, 인출률 연 {percent(WITHDRAWAL_RATE, 0)}, 국민연금 제외",
+            f"은퇴 필요 자금(연금 밖): 현재 가치 월 생활비 목표에서 연금을 뺀 부족분을 100세까지, 실질 수익률 연 {percent(REAL_RETURN, 0)}",
             "양도세 추정: 원장 평가액에 판다고 가정, 누진세율·장기보유특별공제·기본공제 250만 원 반영, 필요경비 제외"]

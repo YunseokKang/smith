@@ -15,6 +15,7 @@ from pathlib import Path
 
 from smith import editions, evidence, ledger, narrative, pension, proposals, report_html, research, tax
 from smith.config import load_config
+from smith.fmt import short_won
 from smith.importer import parse_import
 from smith.records import ImportBatch, ImportRejected, Observation
 from smith.report_data import build_report
@@ -981,6 +982,36 @@ class PensionTests(Upgrade):
         need = pension._outside_need(rows, Decimal(1_500_000), 60)
         self.assertGreater(need["total"], 0)       # 200만 fixed covers 150만 at 60 but not after about 74.
 
+    def test_the_money_outside_the_pensions_is_spelled_out_by_age_span(self):
+        # The client's wording (mail of 2026-11-09): shortfall by age span, who covers it, how it is drawn, the age.
+        rows = [{"key": "national", "net_monthly": Decimal(1_000_000), "start_age": 65, "end_age": None},
+                {"key": "irp", "net_monthly": Decimal(2_000_000), "start_age": 55, "end_age": 75}]
+        target = Decimal(5_000_000)
+        need = pension._outside_need(rows, target, 55)
+        self.assertEqual([(p["from"], p["to"], p["low"], p["high"]) for p in need["phases"]],
+                         [(55, 65, 3_000_000, 3_000_000), (65, 75, 2_000_000, 2_000_000), (75, 100, 4_000_000, 4_000_000)])
+        # Each year's shortfall until 100, kept at the real return; nothing for after 100 (user decision 2026-11-09).
+        gap = {**{y: 3_000_000 for y in range(55, 65)}, **{y: 2_000_000 for y in range(65, 75)},
+               **{y: 4_000_000 for y in range(75, 100)}}
+        self.assertEqual(need["total"], sum(Decimal(g) * 12 / (1 + tax.REAL_RETURN) ** (y - 55) for y, g in gap.items()))
+        words = pension.need_words({"retire_age": 55, "outside_need": need}, target)
+        self.assertIn("목표 생활비 월 500만 원 가운데 연금이 채우지 못하는 부족분은 55~64세 월 약 300만 원, "
+                      "65~74세 월 약 200만 원, 75세 이후 월 약 400만 원입니다.", words)
+        self.assertIn("연금을 뺀 예금·투자 자산으로 충당한다고 가정하면, 그 돈을 실질 연 3%로 굴리며 100세까지 꺼내 쓸 때 55세 은퇴 "
+                      f"기준 약 {short_won(need['total'])}(오늘 돈 가치)이 필요합니다.", words)
+        self.assertNotIn("4%", words)
+        covered = pension._outside_need(rows, Decimal(1_000_000), 55)
+        self.assertEqual(pension.need_words({"retire_age": 55, "outside_need": covered}, Decimal(1_000_000)),
+                         "55세에 은퇴하면 연금만으로 목표 생활비 월 100만 원을 채워, 연금 밖에서 따로 준비할 돈이 없습니다.")
+
+    def test_a_shortfall_that_moves_within_a_span_reads_as_a_range(self):
+        rows = [{"key": "insurance_annuity", "net_monthly": Decimal(2_000_000), "start_age": 60, "end_age": None,
+                 "start_shares": [(60, Decimal(1), 60, None)]}]
+        need = pension._outside_need(rows, Decimal(3_000_000), 60)
+        self.assertEqual(len(need["phases"]), 1)          # One span from 60: the fixed annuity buys less each year.
+        words = pension.need_words({"retire_age": 60, "outside_need": need}, Decimal(3_000_000))
+        self.assertRegex(words, r"60세 이후 월 약 100만~\d{3}만 원입니다")
+
     def test_a_db_plan_pays_a_month_of_average_wage_per_year_of_service_from_an_irp(self):
         household = dict(HOUSEHOLD, occupational_plan="db", occupational_institution="예시생명",
                          occupational_average_wage=10_000_000, occupational_service_start=date(2015, 3, 9))
@@ -1474,7 +1505,7 @@ class ReviewFixTests(Upgrade):
         self.assertGreater(tiers[50]["outside_need"]["total"], tiers[55]["outside_need"]["total"])
         # The first five years after a retirement at 50 are paid entirely from outside the pensions.
         first_years = sum(Decimal(5_500_000) * 12 / (1 + tax.REAL_RETURN) ** y for y in range(5))
-        self.assertGreater(tiers[50]["outside_need"]["bridge"], first_years)
+        self.assertGreater(tiers[50]["outside_need"]["total"], first_years)
         # The e-mail answer flagged the readiness ratio it quoted as unverified (2026-10-23): every tier's ratio,
         # written as a percent, is now grounded in the inputs.
         from smith import narrative

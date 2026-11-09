@@ -1332,10 +1332,13 @@ def _retirement_track(facts: dict[str, Any], home: dict[str, Any] | None) -> Tra
               else "unknown" if need["upper_bound"] else "attention")
     if need is not None and need["upper_bound"]:
         need = None  # The expected-pay share of a ceiling would understate what the pay covers: left out.
+    # The headline age spelled out in the client's wording (mail of 2026-11-09), then every age's amount.
+    words = pension.need_words(head, stack["target"])
     return Track(
         "노후 준비", status,
         f"월 {short_won(stack['target'])}(세후, 현재 가치) 목표에 {shared}연금 세후 준비율은 은퇴 나이별로 {ratios}",
-        ((f"연금 밖에서 은퇴할 때 갖고 있어야 할 돈은 {need_text}(오늘 돈 가치)입니다. " if need_text else "")
+        ((f"{words} " if words else "")
+         + (f"연금 밖에서 준비할 돈은 은퇴 나이별로 {need_text}입니다. " if need_text else "")
          + (f"{gaps[0]['retire_age']}세에 은퇴하면 첫 연금까지 {gaps[0]['years_without_pension']}년이 비어 그동안의 생활비가 "
             "모두 연금 밖의 돈입니다. " if gaps else "")
          + "연금 계좌는 납입이 은퇴 때 멈추고 55세부터 받으며, 국민연금은 줄어든 가입 기간만큼 줄여 계산했습니다(퇴직금·부동산 제외)."

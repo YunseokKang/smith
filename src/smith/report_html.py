@@ -2821,7 +2821,8 @@ def _pension_stack(data: dict[str, Any]) -> str:
         missing = [p for p in stack["pipelines"] if p["net_monthly"] is None]
         lead += (f" {', '.join(pension.row_label(p) for p in missing)}은 아직 수령액을 몰라 뺀 하한이며, 답장으로 알려 주시면 바로 "
                  "반영합니다: " + " ".join(f"{pension.row_label(p)}는 {p['missing']}." for p in missing if p["missing"]))
-    inner = (_tier_table(tiers) + _gauge(f"{head}세 은퇴 기준 목표 월 생활비 대비 준비율", stack["ratio"], "")
+    head_tier = next((t for t in tiers if t["retire_age"] == head), None)
+    inner = (_tier_table(tiers, None if head_tier is None else pension.need_words(head_tier, target)) + _gauge(f"{head}세 은퇴 기준 목표 월 생활비 대비 준비율", stack["ratio"], "")
              + _pension_timeline(stack) + _family_table(stack))
     return _section("노후 현금흐름 준비율: 연금 종류별 스택", lead, inner,
                     note=escape("준비율 " + " · ".join(f"{t['retire_age']}세 은퇴 {_pct(t['ratio'], 0)}" for t in tiers)))
@@ -2965,10 +2966,11 @@ def _retirement_tiers(stack: dict[str, Any]) -> list[dict[str, Any]]:
     return [t for t in stack["tiers"] if stack["age"] is None or t["retire_age"] > stack["age"]]
 
 
-def _tier_table(tiers: list[dict[str, Any]]) -> str:
+def _tier_table(tiers: list[dict[str, Any]], words: str | None = None) -> str:
     """One row per retirement age: the years before the first pension, the after-tax total once every pension
     has started (and after the fixed-term ones end), the ratio, and what must be held outside the pensions at
-    retirement (today's won), with one line saying what that last figure is."""
+    retirement (today's won), with a note saying what that last figure is: the headline age spelled out in the
+    client's wording (`words`, pension.need_words; mail of 2026-11-09) when given."""
     later = any(t["later_net"] is not None for t in tiers)
     rows = []
     for t in tiers:
@@ -2981,8 +2983,8 @@ def _tier_table(tiers: list[dict[str, Any]]) -> str:
         if later:
             row.append("-" if t["later_net"] is None else f"{_short(t['later_net'])}{more}({t['later_age']}세~)")
         rows.append(row + ["미상" if need is None else ("최대 " if bound else "") + _short(need["total"])])
-    note = "연금 밖에서 준비할 돈은 연금만으로 모자라는 생활비를 메우려고 은퇴할 때 갖고 있어야 할 돈(오늘 돈 가치)입니다."
-    if any(t["unknown"] for t in tiers):
+    note = words or "연금 밖에서 준비할 돈은 연금만으로 모자라는 생활비를 메우려고 은퇴할 때 갖고 있어야 할 돈(오늘 돈 가치)입니다."
+    if any(t["unknown"] for t in tiers) and not words:
         note += " 수령액을 모르는 연금이 있어 실제보다 크게 잡힌 최대치입니다."
     headers = ["은퇴 나이", "연금 없는 기간", "모든 연금 개시 후 세후 월", "준비율"] + (["기간 연금 끝난 뒤 세후 월"] if later else [])
     return _table(headers + ["연금 밖에서 준비할 돈"], rows) + f'<div style="{_NOTE}">{escape(note)}</div>'
@@ -2994,9 +2996,9 @@ def pension_notes(stack: dict[str, Any] | None) -> list[str]:
     split, and why the public portal's chart differs."""
     if stack is None:
         return []
-    notes = ["연금 없는 기간은 은퇴부터 첫 연금(연금 계좌는 55세부터, 국민연금은 65세)까지입니다. 연금 밖에서 준비할 돈은 그 기간의 "
-             "생활비와, 모든 연금이 나온 뒤나 기간을 정한 연금이 끝난 뒤에도 남는 부족분을 은퇴 시점의 오늘 돈 가치로 합한 것이며 "
-             "부동산은 넣지 않았습니다."]
+    notes = ["연금 없는 기간은 은퇴부터 첫 연금(연금 계좌는 55세부터, 국민연금은 65세)까지입니다. 연금 밖에서 준비할 돈은 은퇴부터 "
+             f"{pension.PLAN_AGE}세가 될 때까지 해마다 연금으로 모자라는 생활비를 은퇴 시점의 오늘 돈 가치로 합한 것이며, "
+             f"{pension.PLAN_AGE}세 이후 몫과 부동산은 넣지 않았습니다."]
     if len(stack.get("owners") or []) > 1:
         notes.append("두 분의 연금을 합쳤습니다. 배우자도 같은 나이에 함께 은퇴한다고 보았고, 목표 월 생활비는 가구 기준 세후 금액입니다. "
                      "연금소득세와 사적연금 연 1,500만 원 기준은 사람마다 따로 적용했습니다. 배우자 연금 계좌에 월 납입 기록이 없으면 지금 "
