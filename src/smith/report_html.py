@@ -625,6 +625,7 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
         "my_real_estate": lambda: _my_real_estate(data),
         # The reader's own month (§42); the household's month, reserve and room are in "spending" and "cash".
         "my_month": lambda: _spending(None, data.get("own_month")),
+        "my_overview": lambda: _my_overview(data),
     }
     if data.get("audience", "self") != "self":
         # The requests ask for what the ledger lacks, answered by the client who keeps it; the spouse's replies are not
@@ -651,9 +652,19 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
             bands.append(_band(CANVAS, "".join(sections), border=True))
     shown = edition.opening + edition.sections + edition.household
     notes = pension_notes(data.get("pension_stack")) if "pension_stack" in shown else []
+    reader = data.get("audience", "self")
     bands.append(_band(SOFT, _footer(_system_warnings(data), week=_week_line(data), corrections=_corrections_line(data),
-                                     notes=notes, reader=data.get("audience", "self"))))
+                                     notes=notes, reader=reader,
+                                     doubtful=_doubtful(data, story) if reader != "self" else ())))
     return _subject(data, status), _page(bands)
+
+
+def _doubtful(data: dict[str, Any], story: dict[str, Any]) -> list[str]:
+    """The parts of a letter put back after failing verification, by the name the reader sees (report design §42.4;
+    collected when the narrative is attached, narrative._doubtful_parts). The client's letter keeps these caveats in
+    the system notes its e-mail answers read; the spouse's replies are not answered, so that letter names them at its
+    end (user decision 2026-11-08)."""
+    return list(story.get("doubtful") or [])
 
 
 def _split_bands(data: dict[str, Any], edition: editions.Edition, renderers: dict[str, Any], advice: dict[str, Any],
@@ -671,12 +682,14 @@ def _split_bands(data: dict[str, Any], edition: editions.Edition, renderers: dic
     own = {**advice, "proposals": [p for p in advice["proposals"] if p.key not in editions.HOUSEHOLD_PROPOSALS]}
     both = {**advice, "undetermined": [],
             "proposals": [p for p in advice["proposals"] if p.key in editions.HOUSEHOLD_PROPOSALS]}
-    proposals = (_proposals(own, True, edition=edition) if own["proposals"] or advice.get("undetermined") else "")
-    household_proposals = _proposals(both, True, edition=edition, heading="두 분께 드리는 제안") if both["proposals"] else ""
+    full = edition.key != "overview"   # The overview carries every proposal briefly, pointing to its themed day.
+    proposals = (_proposals(own, full, edition=edition) if own["proposals"] or advice.get("undetermined") else "")
+    household_proposals = (_proposals(both, full, edition=edition, heading="두 분께 드리는 제안") if both["proposals"]
+                           else "")
     ours = group(edition.household)
     bands = [_band(CANVAS, _group_title(f"나의 {edition.label}", "고객님 명의의 계좌·집·대출·연금·보험만 봅니다.")
                    + "".join(mine[:1]) + proposals + "".join(mine[1:]), border=True)]
-    changes = _changes_outside(story, f"{edition.label} — 눈여겨볼 변화")
+    changes = _changes_outside(story, "이번 주 눈여겨볼 변화" if edition.key == "overview" else f"{edition.label} — 눈여겨볼 변화")
     if changes:
         bands.append(_band(CANVAS, changes, border=True))
     # The household paragraph this letter's narrative wrote for its reader (§42), under the household's title.
@@ -758,6 +771,35 @@ def _household_debt(debt: dict[str, Any]) -> str:
                    [[l["label"], _short(l["amount"]), f"{l['rate'] * 100:.2f}%",
                      RATE_TYPE_LABELS.get(l["rate_type"], l["rate_type"])] for l in loans])
     return _section("두 분의 대출", lead, table, brief=None, note=escape(f"{len(debt['loans'])}건"))
+
+
+def _my_overview(data: dict[str, Any]) -> str:
+    """The reader's own side of the household at a glance (report design §42): net worth, assets by kind, loans, the
+    month and the expected pay, all in the reader's name; the household's whole picture follows under "우리 집"."""
+    # Unknown when one of the reader's assets or liabilities has no FX rate (report_data._own_net_worth).
+    worth = data.get("own_net_worth")
+    groups = [(g["label"], g["by_owner"].get("self")) for g in (data.get("composition") or {}).get("groups") or []]
+    groups = [(label, value) for label, value in groups if value]
+    loans = (data.get("own_debt") or {}).get("loans") or []
+    owed = _total_or_none(l["amount"] for l in loans) if loans else Decimal(0)
+    month = data.get("own_month")
+    coming = [i for i in (data.get("future_income") or {}).get("items") or []
+              if i.owner_id == "self" and not i.overdue and i.certainty in ("confirmed", "expected")]
+    pay = _total_or_none(i.net for i in coming) if coming else None
+    lead = (f"고객님 명의 순자산은 <b>{_short(worth)}</b>입니다." if worth is not None else
+            "고객님 명의 자산·부채 가운데 원화로 환산하지 못한 것이 있어 순자산은 <b>미상</b>입니다.")
+    if groups:
+        lead += (" 자산은 " if worth is not None else " 환산된 자산만 보면 ") \
+            + ", ".join(f"{escape(label)} {_short(value)}" for label, value in groups) + "입니다."
+    rows = [["순자산", "미상" if worth is None else _short(worth)],
+            ["대출과 돌려줄 보증금", "미상" if owed is None else _short(owed)]]
+    if month is not None and month["inflow"]:
+        rows += [["월 수입", _short(month["inflow"])], ["월 남는 돈(지출·적립 뒤)", _short(month["left"])]]
+    if coming:
+        rows.append(["앞으로 받을 성과급·주식 보상(확정·예상, 세후)", "미상" if pay is None else _short(pay)])
+    chart = _stacked([(label, value, "") for label, value in groups]) if groups else ""
+    return _section("나의 자산 한눈에", lead, chart + _table(["항목", "금액"], rows),
+                    note=escape("" if worth is None else f"순자산 {_short(worth)}"))
 
 
 def _my_real_estate(data: dict[str, Any]) -> str:
@@ -1171,7 +1213,8 @@ def _overview_tiles(data: dict[str, Any]) -> list[tuple[str, str, str]]:
             ("월 여유 현금흐름", _short(k["monthly_net"]), "수입 − 지출"),
             ("즉시 쓸 수 있는 돈", _short(k["immediate"]), months),
             ("주택 목표 준비율(가구 통합)", "미상" if home is None else _pct(home["ratio_baseline"], 0),
-             "" if home is None else f'{home["target_date"]:%Y.%m} · 본인만 {_pct(home["ratio_self"], 0)}')]
+             "" if home is None else
+             f'{home["target_date"]:%Y.%m} · {proposals.home_words(home)[0]}만 {_pct(home["ratio_self"], 0)}')]
 
 
 def _composition_bar(data: dict[str, Any], edition: editions.Edition | None) -> str:
@@ -1874,11 +1917,14 @@ def _future_income(data: dict[str, Any], *, overview: bool = False) -> str:
     lead = (f"앞으로 받을 성과급·주식 보상은 세후 추정 {', '.join(parts) or '<b>0원</b>'}입니다. 받기 전까지는 순자산에 넣지 않고, "
             "계획에서는 보수적으로 볼 때 확정분만, 기준 계획에서는 예상분까지"
             + (", 낙관적으로 볼 때 불확실분까지" if sure["possible"] != 0 else "") + " 셉니다.")
+    # The spouse's replies are not answered (§42.3): that letter says what is missing without asking for it.
+    asks = data.get("audience", "self") == "self"
     if found.get("overdue"):
-        lead += (f" 지급 예정일이 지났는데 받았다는 기록이 없는 항목 {len(found['overdue'])}건은 계획에서 뺐습니다. 받으셨는지 "
-                 "알려 주시면 실제 지급일과 과세 금액으로 기록하겠습니다.")
+        lead += (f" 지급 예정일이 지났는데 받았다는 기록이 없는 항목 {len(found['overdue'])}건은 계획에서 뺐습니다."
+                 + (" 받으셨는지 알려 주시면 실제 지급일과 과세 금액으로 기록하겠습니다." if asks else ""))
     if found.get("assumed_tax"):
-        lead += " 세전 기본 연봉을 몰라 세금은 가정 세율로 계산한 항목이 있습니다. 연봉을 알려 주시면 더 정확해집니다."
+        lead += (" 세전 기본 연봉을 몰라 세금은 가정 세율로 계산한 항목이 있습니다."
+                 + (" 연봉을 알려 주시면 더 정확해집니다." if asks else ""))
     if found.get("prior_unknown"):
         lead += (" 같은 해에 먼저 받는 보상의 세전 금액이나 환율을 몰라, 뒤에 받는 보상의 세율 구간을 정할 수 없어 세후를 "
                  "계산하지 않은 항목이 있습니다(미상).")
@@ -3162,18 +3208,24 @@ def _requests(requests: list[Any], full: bool, rest_where: str = "월요 보고"
 
 
 def _footer(warnings: list[str] | tuple[str, ...] = (), week: str = "", corrections: str = "",
-            notes: list[str] | tuple[str, ...] = (), law: bool = True, shared: bool = False, reader: str = "self") -> str:
+            notes: list[str] | tuple[str, ...] = (), law: bool = True, shared: bool = False, reader: str = "self",
+            doubtful: list[str] | tuple[str, ...] = ()) -> str:
     """One line (report design §18.1): what Smith never does, and that the reasons are a reply away. A problem
     with the report itself (stale data, no narrative) adds one warning line above it; a daily edition adds the
     week's plan (`week`, HTML) so a reader of one day knows where the other areas are (§27); `corrections` is the
     Korean check's one line, printed so it can be read against the report itself (§34, user request 2026-10-27);
     `notes` are the day's calculation notes moved out of its cards (user review 2026-11-07); `law` false leaves the tax
     caveat out of a mail that computes no tax (a filing note without a dividend); `shared` says the mail also went to
-    the configured family address and that only the client's own replies are answered (FR-51). The footer reads in
-    body ink at 13px: grey small print was hard to read."""
+    the configured family address and that only the client's own replies are answered (FR-51); `doubtful` names the
+    parts of the spouse's letter kept with a verification caveat (user decision 2026-11-08: at the letter's end, not
+    under each paragraph). The footer reads in body ink at 13px: grey small print was hard to read."""
     warn = ("" if not warnings else
             f'<div style="font-size:13px;line-height:1.6;color:{INK};margin-bottom:8px">▲ 확인 필요: '
             f'{escape(" · ".join(warnings))}. 자세한 사유는 이 메일에 답장으로 물어 주십시오.</div>')
+    if doubtful:
+        warn += (f'<div style="font-size:13px;line-height:1.6;color:{INK};margin-bottom:8px">▲ 자동 점검: '
+                 f'{escape(", ".join(doubtful))}에는 출처나 수치를 다 확인하지 못한 내용이 있습니다. 실행 전에 한 번 더 '
+                 "확인하시길 권합니다.</div>")
     small = f"font-size:13px;line-height:1.7;color:{BODY}"
     basis = ("" if not notes else
              f'<div style="{small};margin-bottom:12px"><div style="font-weight:600;margin-bottom:4px">계산 기준</div>'

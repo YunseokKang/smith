@@ -64,7 +64,10 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "average instead or say the band is unconfirmed or withheld (the letter of 2026-11-02 did both). When "
             "change_since_last_report is present, brief the week's change in two figures with its dates: market prices, "
             "FX and revaluations applied to what the household held (market_and_valuation, \"시장·평가 변동\") and what "
-            "moved in or out (net_inflow); never let a market loss hide behind new entries in a single total."),
+            "moved in or out (net_inflow); never let a market loss hide behind new entries in a single total.",
+            personal=("my_overview", "follow_up"),
+            household=("change", "timeline", "stress_summary", "future_income", "household_follow_up", "requests"),
+            household_label="종합"),
     Edition("markets", "투자·시장",
             "markets", ("holdings", "policy", "macro_brief"), ("goal-stocks-glide", "concentration-trim"),
             ("us_stocks", "kr_stocks", "rates"), True, False,

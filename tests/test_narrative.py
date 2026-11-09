@@ -458,22 +458,28 @@ class NarrativeTests(unittest.TestCase):
                           runner=runner_returning(wrong))
         self.assertIn("9876억", data["narrative"]["household"])
         self.assertTrue(data["narrative"]["household_memo"])
-        # The spouse's letter keeps no block put back after failing verification (Codex review 2026-11-08): its caveat
-        # lives in footer notes the mail does not print, and the spouse's replies are not answered.
-        hers = dict(data, audience="partner")
+        # The spouse's letter keeps a block put back after failing verification too, and names it at the letter's end
+        # (user decision 2026-11-08, (나): not under the paragraph), since that reader's replies are not answered.
+        hers = dict(data, audience="partner", kind="markets")       # Only a split edition goes to the spouse.
         doubtful = dict(wrong, holdings=[dict(opinion, stance="hold", reason="보유액은 9876억 원입니다.")])
         narrative.narrate(self.db, hers["view"], hers, now=AT, secrets=[], brief_id="h", executable=Path("claude.exe"),
                           runner=runner_returning(doubtful))
-        self.assertEqual((hers["narrative"]["household"], hers["narrative"]["household_memo"]), ("", ""))
-        self.assertNotIn("VOO", hers["narrative"]["holdings"])
-        self.assertNotIn("9876억", render(hers)[1])
+        self.assertIn("9876억", hers["narrative"]["household"])
+        self.assertTrue(hers["narrative"]["holdings"]["VOO"]["memo"])
+        page = render(hers)[1]
+        caveat = page[page.index("▲ 자동 점검"):]
+        self.assertIn("우리 집 문단", caveat)
+        self.assertIn("종목 의견(", caveat)
+        self.assertLess(page.index(hers["narrative"]["household"][:10]), page.index("▲ 자동 점검"))  # At the end.
+        self.assertNotIn("▲ 자동 점검", render(data)[1])                       # The client's: system notes as before.
         # And its calls are audited apart: the client's latest report narrative (qa, a question naming no report) is
         # never the spouse's (report design §42).
         with closing(ledger.connect_read_only(self.db)) as conn:
             mine = ledger.latest_advice(conn, use_case=narrative.FINAL_USE_CASE)
             theirs = ledger.latest_advice(conn, use_case=narrative.FINAL_USE_CASE + narrative.PARTNER_USE_CASE)
-        self.assertIn("9876억", mine["content"]["verified"]["household"]["text"])
-        self.assertEqual(theirs["content"]["verified"]["household"]["text"], "")
+        reasons = {who: [h["reason"] for h in found["content"]["verified"]["holdings"]]
+                   for who, found in (("client", mine), ("spouse", theirs))}
+        self.assertEqual((reasons["client"], reasons["spouse"]), ([], ["보유액은 9876억 원입니다."]))   # Each its own call.
         output = dict(EMPTY, portfolio=dict(block("주식은 넓게 나눠 담은 펀드 하나뿐이라 지금 구성을 유지하셔도 됩니다."),
                                             principles=["BUF-INDEX", "VAN-BALANCE"]), holdings=[opinion])
         with closing(ledger.connect(self.db)) as conn:

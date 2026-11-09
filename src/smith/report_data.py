@@ -5,6 +5,7 @@ Every number a report shows is computed here from one ledger snapshot (see docs/
 """
 import logging
 import sqlite3
+from dataclasses import replace
 from collections.abc import Iterable
 from datetime import date, datetime, timedelta
 from decimal import Decimal, localcontext
@@ -80,8 +81,7 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     base = load_view(conn, as_of=as_of, known_at=known_at)
     view = perspective.as_seen_by(base, audience)
     change = None if baseline is None else decompose(conn, baseline, as_of, known_at)
-    salary = (household or {}).get("annual_gross_salary")
-    pay = future_income.inflows(view, salary=None if salary is None else Decimal(salary))
+    pay = _household_pay(view, household)
     expected = future_income.review(view, pay)
     # The stocks the client's pay arrives in are the employer's: holding them doubles the concentration
     # already carried by the salary (report design §17.4), so they always get an opinion.
@@ -184,6 +184,7 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
                                          market=targets_market),
             # The reader's own homes (report design §42): a per-person property day's "나의 부동산" and its hero.
             "own_real_estate": _own_estate(view, sectors["real_estate"]),
+            "own_net_worth": _own_net_worth(view),
             "spending_split": _spending_split(view),
             # The reader's own month (report design §42): a per-person life day's "나의 한 달" and its hero.
             "own_month": _spending_split(view, owner="self"),
@@ -618,6 +619,15 @@ def _household_move(base: LedgerView, view: LedgerView, properties: list[dict[st
     return {**found, "homes": homes, "pay_owner": audience}
 
 
+def _own_net_worth(view: LedgerView) -> Decimal | None:
+    """The reader's own net worth (the overview's "나의 자산 한눈에", report design §42.9), None when one of the reader's
+    assets or liabilities cannot be converted: a partial sum is never stated as the figure (Codex review 2026-11-08)."""
+    mine = [r for r in view.records if r.owner_id == "self" and r.kind in (Kind.ASSET, Kind.LIABILITY)]
+    if any(base_amount(view, r) is None for r in mine):
+        return None
+    return view.summary.net_worth_by_owner.get("self", Decimal(0))
+
+
 def _own_estate(view: LedgerView, estate: dict[str, Any]) -> dict[str, Any]:
     """The reader's own homes (report design §42), with their market figures, and their share of the reader's own
     assets (unknown when an asset of theirs cannot be converted)."""
@@ -725,6 +735,21 @@ def _kpis(view: LedgerView, change: dict[str, Any] | None, pay: list[future_inco
     return {"net_worth": summary.net_worth, "net_worth_change": None if change is None else change["total"],
             "monthly_net": monthly_net, "immediate": immediate, "immediate_months": months,
             "home_progress": home}
+
+
+def _household_pay(view: LedgerView, household: dict[str, Any] | None) -> list[future_income.Inflow]:
+    """Every member's expected pay, each taxed on that member's own stated salary (report design §42). The pay
+    model applies the salary to "self" only, so the other member's pay is computed from that member's side
+    (`partner_annual_gross_salary`) and handed back under their owner id (Codex review 2026-11-08: it took the assumed
+    rate, and the two letters stated different after-tax pay for the same grant)."""
+    def salary(key: str) -> Decimal | None:
+        value = (household or {}).get(key)
+        return None if value is None else Decimal(value)
+    own = [i for i in future_income.inflows(view, salary=salary("annual_gross_salary")) if i.owner_id != "partner"]
+    other = perspective.as_seen_by(view, "partner")
+    theirs = [replace(i, owner_id="partner") for i in future_income.inflows(other, salary=salary("partner_annual_gross_salary"))
+              if i.owner_id == "self"]
+    return sorted(own + theirs, key=lambda i: (i.paid_on, i.record_id))
 
 
 def _client_home(base: LedgerView, home: dict[str, Any] | None, audience: str,

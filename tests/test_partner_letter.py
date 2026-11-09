@@ -54,7 +54,7 @@ class PartnerLetterTests(unittest.TestCase):
         self.assertIn("나의 세금·연금", html)
         self.assertEqual(self.publish()["error_code"], "already-sent")              # The same slot never twice.
         self.assertEqual(self.publish(trigger="manual")["status"], "sent")           # A manual send is its own run.
-        self.assertEqual(self.publish(kind="overview")["error_code"], "not-personalized")
+        self.assertEqual(self.publish(kind="monday")["error_code"], "not-personalized")   # The original full report.
         without = {**CONFIG, "mail": {"recipient": "me@example.com"}}
         self.assertEqual(self.publish(config=without)["error_code"], "no-partner-recipient")
         self.assertEqual(len(self.sent), 2)
@@ -114,22 +114,24 @@ class PartnerLetterTests(unittest.TestCase):
         seen = []
 
         def narrator(data):
-            seen.append((data["audience"], data["as_of"]))
+            seen.append((data["audience"], data["as_of"], data["baseline"]))
             narrative.attach(data, None, None, {"outcome": "skipped", "run_ids": ["n1"]})
             data["narrative"]["household"] = "배우자 쪽 호출이 쓴 두 분 문단"
+        week = AT - timedelta(days=7)        # The client's report's baseline: the spouse's week compares with it too.
 
         def rejected(credentials, **kwargs):
             raise gmail.MailError("http-400")
         household = {"partner_birth_year": 1990, "birth_year": 1990}
         failed = partner_letter.publish(self.db, CONFIG, now=AT + timedelta(hours=2), kind="markets", trigger="scheduled",
                                         credentials=("a", "b", "c"), household=household, sender=rejected,
-                                        narrator=narrator, snapshot_at=AT)
+                                        narrator=narrator, snapshot_at=AT, baseline=week)
         self.assertEqual(failed["status"], "failed")
         retried = partner_letter.publish(self.db, CONFIG, now=AT + timedelta(hours=3), kind="markets", trigger="scheduled",
                                          credentials=("a", "b", "c"), household=household, sender=self.send,
                                          narrator=narrator)
         self.assertEqual(retried["status"], "sent")
-        self.assertEqual(seen, [("partner", AT), ("partner", AT)])     # The spouse's side, the client's snapshot, twice.
+        # The spouse's side, the client's snapshot and baseline, on the retry too.
+        self.assertEqual(seen, [("partner", AT, week), ("partner", AT, week)])
         (_, _, html), = self.sent
         self.assertNotIn("Microsoft", html)            # Recorded after the client's report: not in this letter.
         self.assertIn("배우자 쪽 호출이 쓴 두 분 문단", html)

@@ -278,6 +278,57 @@ class PerspectiveTests(Upgrade):
         self.assertNotIn("진행 중", own_page[own_page.index("나의 생활·목표"):own_page.index("우리 집 생활·목표")])
         self.assertIn("진행 중", own_page[own_page.index("우리 집 생활·목표"):])
 
+    def test_the_overview_shows_the_reader_s_own_side_then_the_whole_household(self):
+        # Report design §42.9: the reader's own net worth, assets, loans and month at a glance, then the household's
+        # whole picture with the household-money proposals for both; the spouse's letter asks for nothing.
+        household = dict(HOUSEHOLD, partner_birth_year=1990)
+        mine = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="overview", household=household)
+        hers = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="overview", household=household,
+                            audience="partner")
+        page, own_page = render(hers)[1], render(mine)[1]
+        order = [page.index(t) for t in ("나의 종합 보고", "나의 자산 한눈에", "우리 집 종합", "두 분께 드리는 제안")]
+        self.assertEqual(order, sorted(order))
+        worth = hers["view"].summary.net_worth_by_owner["self"]
+        self.assertEqual(hers["own_net_worth"], worth)
+        self.assertIn(f"고객님 명의 순자산은 <b>{report_html._short(worth)}</b>", page)
+        self.assertNotEqual(worth, mine["view"].summary.net_worth_by_owner["self"])         # Hers, not the client's.
+        self.assertIn("배우자분만", page)                                                   # The client's home plan.
+        self.assertIn("본인만", own_page)
+        self.assertNotIn("다음에 확인할 것", page)
+        self.assertNotIn("알려 주시면", page[page.index("앞으로 들어올 돈"):] if "앞으로 들어올 돈" in page else "")
+        # Codex review 2026-11-08: a liability of hers without an FX rate makes her net worth unknown, never a partial sum.
+        self.apply("jpy-loan", [rec("jpy-loan", "liability", "partner", category="other", currency="JPY",
+                                    outstanding_principal="1000000", annual_rate="0.01", rate_type="fixed",
+                                    repayment_method="bullet", maturity="2030-01-01")])
+        hers = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="overview", household=household,
+                            audience="partner")
+        self.assertIsNone(hers["own_net_worth"])
+        self.assertIn("순자산은 <b>미상</b>", render(hers)[1])
+
+    def test_expected_pay_is_taxed_on_each_member_s_own_salary_in_either_letter(self):
+        # Codex review 2026-11-08: the pay model applied the salary to "self" only, so the client's grant took the
+        # assumed rate in the spouse's letter and the two letters stated different after-tax pay.
+        household = dict(HOUSEHOLD, partner_birth_year=1990)
+        mine = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="overview", household=household)
+        hers = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="overview", household=household,
+                            audience="partner")
+
+        def grant(data):
+            return next(i for i in data["future_income"]["items"] if i.record_id == "grant")
+        self.assertEqual((grant(mine).net, grant(mine).withholding_basis), (grant(hers).net, grant(hers).withholding_basis))
+        self.assertEqual(grant(hers).owner_id, "partner")                          # The client's, from her side.
+        self.assertEqual(grant(mine).withholding_basis, "estimated")               # On the client's stated salary.
+
+    def test_every_part_put_back_after_failing_verification_is_named(self):
+        # Codex review 2026-11-08: a block restored for a reason without memo text, and a restored experience, were
+        # missing from the spouse's end-of-letter caveat.
+        data = self.report("life")
+        out = {"situation": {"text": "판단 문단", "refs": []}, "household": {"text": "", "refs": []},
+               "insights": [], "watch": [], "holdings": [], "proposal_notes": [],
+               "experiences": [{"title": "전시 한 곳", "restored": True, "memo": ""}]}
+        self.assertEqual(narrative._doubtful_parts(data, out, {"situation": "", "household": ""}),
+                         ["판단", "경험 '전시 한 곳'"])                                     # The empty paragraph is not named.
+
     def test_a_decided_proposal_renders_in_either_letter(self):
         # Codex review 2026-11-08: the follow-up read a decision's time from a field the ledger never returns, so any
         # letter showing a decided proposal failed to build; the spouse's decided key also kept its scope.
@@ -428,7 +479,10 @@ class LayoutTests(Upgrade):
     def test_sections_collapse_and_a_theme_opens_its_lead_view_before_the_proposals(self):
         overview = render(self.report("overview"))[1]
         self.assertGreaterEqual(overview.count("<details style"), 3)
-        self.assertNotIn("<details open", overview.split("고객님께 드리는 제안")[1].split("함께 검토한")[-1])
+        # The overview is a per-person letter (§42): each group opens its first card only; the household's sections after
+        # the first (the change since last week) stay collapsed.
+        self.assertIn("나의 종합 보고", overview)
+        self.assertNotIn("<details open", overview.split("목표와 일정")[1])
         self.assertIn("background:#f8f9fa;padding:16px 20px;border-radius:16px;", overview)
         self.assertIn("▼ 펼쳐서 상세 보기", overview)
         # A phone reads the home scenarios as cards and the gauge label on its own line (user review 2026-11-02).

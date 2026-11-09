@@ -624,7 +624,8 @@ def _publish_once(args: argparse.Namespace) -> int:
         if result.get("subject"):
             print(f"Subject: {result['subject']}")
     partner = _send_partner_letter(args, config, kind=kind, slot=slot, credentials=stored, explicit=only_partner,
-                                   snapshot_at=result.get("snapshot_at"), brief_id=brief_id)
+                                   snapshot_at=result.get("snapshot_at"), baseline=result.get("baseline"),
+                                   brief_id=brief_id)
     if only_partner:
         # The spouse's letter alone (Codex review 2026-11-08): its own outcome is the command's.
         return 0 if partner is not None and partner["status"] == "sent" else 1
@@ -639,12 +640,13 @@ def _publish_once(args: argparse.Namespace) -> int:
 
 def _send_partner_letter(args: argparse.Namespace, config: dict[str, Any], *, kind: str, slot: datetime | None,
                          credentials: tuple[str, str, str] | None, explicit: bool,
-                         snapshot_at: datetime | None = None, brief_id: str | None = None) -> dict[str, Any] | None:
+                         snapshot_at: datetime | None = None, baseline: datetime | None = None,
+                         brief_id: str | None = None) -> dict[str, Any] | None:
     """The spouse's own letter of the same edition (report design §42), right after the client's; never raises.
     Only an edition already split goes, and only with `[mail] partner_recipient`; a manual send-now sends it with
     the client's unless `--audience self` (or alone with `--audience partner`). `snapshot_at` is the ledger time the
-    client's report was built on and `brief_id` its research. Returns its outcome, None when it does not apply or
-    crashed."""
+    client's report was built on, `baseline` what it was compared with and `brief_id` its research. Returns its
+    outcome, None when it does not apply or crashed."""
     if args.action == "send-now" and args.audience == "self":
         return None
     if not partner_recipient(config) or not editions.personalized(kind):
@@ -654,12 +656,12 @@ def _send_partner_letter(args: argparse.Namespace, config: dict[str, Any], *, ki
     tz = config["app"]["timezone"]
     return _partner_publish(args.db, config, kind=kind, trigger="manual" if slot is None else "scheduled",
                             day=None if slot is None else slot.astimezone(ZoneInfo(tz)).date(), credentials=credentials,
-                            snapshot_at=snapshot_at, brief_id=brief_id)
+                            snapshot_at=snapshot_at, baseline=baseline, brief_id=brief_id)
 
 
 def _partner_publish(db: Path, config: dict[str, Any], *, kind: str, trigger: str, day: Any,
                      credentials: tuple[str, str, str] | None, snapshot_at: datetime | None = None,
-                     brief_id: str | None = None) -> dict[str, Any] | None:
+                     baseline: datetime | None = None, brief_id: str | None = None) -> dict[str, Any] | None:
     """One partner_letter.publish with its own narrative call (user decision 2026-11-08: one per person), logged;
     never raises (the spouse's letter never blocks the client's report). A retry has no `brief_id`: the narrative then
     takes the newest brief on the same topics (narrative.pinned_brief)."""
@@ -672,7 +674,8 @@ def _partner_publish(db: Path, config: dict[str, Any], *, kind: str, trigger: st
         _narrator(db, now, brief_id)(data)
     try:
         outcome = partner_letter.publish(db, config, now=now, kind=kind, trigger=trigger, credentials=credentials,
-                                         household=profile(config), day=day, narrator=narrate, snapshot_at=snapshot_at)
+                                         household=profile(config), day=day, narrator=narrate, snapshot_at=snapshot_at,
+                                         baseline=baseline)
     except Exception as error:  # noqa: BLE001 - the spouse's letter must never block or fail the client's report.
         _say(db, f"Partner letter crashed: {type(error).__name__}")
         return None

@@ -42,14 +42,15 @@ def publish(db: Path, config: dict[str, Any], *, now: datetime, kind: str, trigg
             credentials: tuple[str, str, str] | None, household: dict[str, Any] | None,
             day: date | None = None, sender: delivery.Sender = gmail.send,
             narrator: Callable[[dict[str, Any]], None] | None = None,
-            snapshot_at: datetime | None = None) -> dict[str, Any]:
+            snapshot_at: datetime | None = None, baseline: datetime | None = None) -> dict[str, Any]:
     """Claim, build, narrate, send and record the spouse's letter of one edition. A scheduled letter is one per
     edition and local `day`; a manual one always gets a fresh key. `narrator(data)` adds the letter's own verified
     narrative in place (report_command._narrator; without one the letter keeps its code-written content).
     `snapshot_at` is the ledger time the client's report was built on: the spouse's letter is built on the same
-    snapshot, so the household figures of the two letters agree (Codex review 2026-11-08). That time is kept with the
-    run, so a retry rebuilds the same snapshot, with the narrative ids for the next letter on the theme not to repeat
-    this one. Returns {"status", "run_key", "subject", "error_code"}."""
+    snapshot, so the household figures of the two letters agree (Codex review 2026-11-08), and compared with the same
+    `baseline` (the client's report's), so the week's changes agree too. Both are kept with the run, so a retry
+    rebuilds the same letter, with the narrative ids for the next letter on the theme not to repeat this one.
+    Returns {"status", "run_key", "subject", "error_code"}."""
     recipient = partner_recipient(config)
     if recipient is None:
         return {"status": "skipped", "run_key": None, "subject": None, "error_code": "no-partner-recipient"}
@@ -69,14 +70,17 @@ def publish(db: Path, config: dict[str, Any], *, now: datetime, kind: str, trigg
     with closing(ledger.connect(db)) as conn:
         kept = ledger.daily_snapshot(conn, key) or {}
         if snapshot_at is None and kept.get("snapshot_at"):
-            snapshot_at = datetime.fromisoformat(kept["snapshot_at"])     # A retry: the first attempt's snapshot.
+            # A retry: the first attempt's snapshot and baseline.
+            snapshot_at = datetime.fromisoformat(kept["snapshot_at"])
+            baseline = datetime.fromisoformat(kept["baseline"]) if kept.get("baseline") else None
         elif snapshot_at is not None:
             ledger.record_daily_snapshot(conn, run_key=key, day=day, created_at=now,
-                                         snapshot={"product": PRODUCT, "snapshot_at": snapshot_at.isoformat()})
+                                         snapshot={"product": PRODUCT, "snapshot_at": snapshot_at.isoformat(),
+                                                   "baseline": None if baseline is None else baseline.isoformat()})
     at = snapshot_at or now
     try:
         with closing(ledger.connect_read_only(db)) as conn:
-            data = build_report(conn, as_of=at, known_at=at, baseline=None, kind=kind, tz=tz, household=household,
+            data = build_report(conn, as_of=at, known_at=at, baseline=baseline, kind=kind, tz=tz, household=household,
                                 schedule=config.get("reports"), audience=AUDIENCE)
         if narrator is not None:
             narrator(data)   # Its own call, on the spouse's side; a model failure leaves the code's content.
@@ -90,6 +94,7 @@ def publish(db: Path, config: dict[str, Any], *, now: datetime, kind: str, trigg
         # letter on the theme), and the snapshot it was built on, for a retry.
         ledger.record_daily_snapshot(conn, run_key=key, day=day, created_at=now,
                                      snapshot={"product": PRODUCT, "snapshot_at": at.isoformat(),
+                                               "baseline": None if baseline is None else baseline.isoformat(),
                                                "narrative_run_ids": list(status.get("run_ids") or [])})
         # Committed before the request: a run that dies after Gmail accepted the mail never sends it again.
         held = ledger.advance_daily_run(conn, run_key=key, token=token, from_status="building", status="sending",

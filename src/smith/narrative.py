@@ -66,7 +66,7 @@ logger = logging.getLogger(__name__)
 # v32: no per-sentence law caveat; the footer says it once (user decision 2026-11-02); the check no longer asks for it.
 # v33: holdings[].week_change and index_moves; a holding that moved 10% or more opens its reason with why (2026-11-03).
 # v34: tax.realized_this_year, this year's sales with their estimated gains and the deduction left (2026-11-03).
-PROMPT_VERSION = "narrative-v39"   # v39: property and life days per person (owners, own_month, plan_of); v38: rates (§42).
+PROMPT_VERSION = "narrative-v40"   # v40: the overview per person, whose pay; v39: property and life days per person (§42).
 MODEL = headless.MODEL
 # A runaway guard, not a cost limit (flat-rate subscription): the markets day cost 4.39 USD on 2026-10-27 and, with a
 # payload a fifth larger, ran past 5.00 on 2026-11-03 (error_max_budget_usd), so that report went out without opinions.
@@ -417,8 +417,9 @@ Write:
   client's own loans; on the property day: the move plan, the household's in both letters, and the lease return,
   with each home's `owner` and the plan's `expected_pay_of` saying whose they are; on the household day: the
   household's month (cash.spending_split), reserve, spending room and goals, while sector_metrics.own_month is the
-  client's own month and home_plan is the plan of `plan_of`, its partner_* figures the other member's home).
-  Write "두 분" or "우리 집"; the client's own accounts, pay and proposals are in the letter's
+  client's own month and home_plan is the plan of `plan_of`, its partner_* figures the other member's home; on the
+  overview: the household's whole picture, its net worth change, dated plans, stress result and long-range
+  direction). Write "두 분" or "우리 집"; the client's own accounts, pay and proposals are in the letter's
   own section, so do not repeat them here.
 - When home_plan.plan_of or move_plan.expected_pay_of is household_member_1, the home plan's expected pay
   (bonuses, share grants) is the spouse's: say whose it is ("배우자분 성과급"), never as the client's own.
@@ -1342,7 +1343,6 @@ def restore(verified: dict[str, Any], dropped: list[str], raw: dict[str, Any]) -
         if reason == "law-tone" and not any(item.get(name) for name in ("body", "reason", "context", "item", "why")):
             continue
         if reason not in SOFT:
-            # Marked explicitly: a reason without a memo text leaves the memo empty (the spouse's letter drops these).
             item["memo"], item["restored"] = memo, True
         out[field].append(item)
         if field == "proposal_notes":
@@ -2027,8 +2027,30 @@ def attach(data: dict[str, Any], result: dict[str, Any] | None, brief: dict[str,
             watch=[{"item": w["item"], "why": w["why"], "memo": w.get("memo", ""),
                     "links": [links[r] for r in w["refs"] if r in links]} for w in out["watch"]],
             experiences=[{**{k: e[k] for k in ("title", "body", "when")}, "memo": e.get("memo", ""),
-                          "links": [links[r] for r in e["refs"] if r in links]} for e in out.get("experiences") or []])
+                          "links": [links[r] for r in e["refs"] if r in links]} for e in out.get("experiences") or []],
+            doubtful=_doubtful_parts(data, out, memos))
     data["narrative"] = narrative
+
+
+_BLOCK_LABELS = {"situation": "판단", "direction": "전략 방향", "portfolio": "투자 전략", "household": "우리 집 문단"}
+
+
+def _doubtful_parts(data: dict[str, Any], out: dict[str, Any], memos: dict[str, str]) -> list[str]:
+    """Every part put back after failing verification, by the name the reader sees (report design §42.4): a block
+    whose path `restore` put in `memos`, an item it marked `restored`, whatever its memo text (Codex review
+    2026-11-08: a reason without memo text, and the experiences, were missed). The spouse's letter names them at its
+    end; the client's keeps them in the system notes."""
+    parts = [label for path, label in _BLOCK_LABELS.items() if path in memos and (out.get(path) or {}).get("text")]
+    parts += [f"변화 '{i['title']}'" for i in out.get("insights") or [] if i.get("restored")]
+    parts += [f"지켜볼 것 '{w['item']}'" for w in out.get("watch") or [] if w.get("restored")]
+    parts += [f"경험 '{e['title']}'" for e in out.get("experiences") or [] if e.get("restored")]
+    names = {p["key"]: str(p["name"]) for p in opined(data)["positions"]}
+    held = [names.get(h["symbol"], h["symbol"]) for h in out.get("holdings") or [] if h.get("restored")]
+    if held:
+        parts.append(f"종목 의견({', '.join(held)})")
+    if any(n.get("restored") for n in out.get("proposal_notes") or []):
+        parts.append("제안 맥락")
+    return parts
 
 
 def _opinions(data: dict[str, Any], items: list[dict[str, Any]], links: dict[str, tuple[str, str]]) -> dict[str, Any]:
@@ -2296,8 +2318,6 @@ def narrate(db: Path, view: Any, data: dict[str, Any], *, now: datetime, secrets
     if "specialists" in result:
         status["specialists"] = result["specialists"]
     result["output"] = edition_trim(result["output"], data["kind"])
-    if data.get("audience", "self") != "self":
-        result = without_restored(result)
     # What the client receives (repair, first reader and the edition's cut applied): mail answers read this record,
     # not the first call's verified output, which lacks blocks taken from later calls and keeps blocks the edition
     # cut (Codex review 2026-10-26). Like every audit, a failed record withholds the narrative. The Korean corrections
@@ -2309,21 +2329,6 @@ def narrate(db: Path, view: Any, data: dict[str, Any], *, now: datetime, secrets
         attach(data, None, brief, status)
         return
     attach(data, result, brief, status)
-
-
-def without_restored(result: dict[str, Any]) -> dict[str, Any]:
-    """The spouse's letter without any block put back after failing verification (Codex review 2026-11-08). Keeping a
-    doubtful block with a caveat is the client's decision for the client's own letters (2026-10-05); its caveat lives in
-    the footer's system notes, which the mail does not print and only the client's e-mail answers read, while the
-    spouse's replies are not answered. A holding that must get an opinion then gets the code's (`_opinions`)."""
-    memos = result.get("memos") or {}
-    out = dict(result["output"])
-    for field in SCALAR_BLOCKS:
-        if field in memos and field in out:
-            out[field] = {**out[field], "text": "", "refs": []}
-    for field in _LISTS:
-        out[field] = [item for item in out.get(field) or [] if not item.get("restored")]
-    return {**result, "output": out, "memos": {}}
 
 
 def edition_trim(output: dict[str, Any], kind: str) -> dict[str, Any]:
