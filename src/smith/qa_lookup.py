@@ -33,7 +33,7 @@ from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from smith import dart, ledger, research, sources
+from smith import dart, ledger, perspective, research, sources
 from smith.payload import check_outbound, load_view, mask_identifiers
 from smith.records import Kind
 
@@ -367,25 +367,30 @@ def _date(value: Any) -> date | None:
 # --- the household's dividend -------------------------------------------------------------------------------------
 
 def estimates(db: Path, data: dict[str, Any], declared: list[dict[str, Any]], *, known_at: datetime,
-              unproven: list[str] = ()) -> dict[str, Any] | None:
+              unproven: list[str] = (), owners: frozenset[str] | None = None) -> dict[str, Any] | None:
     """What the household receives from each declared dividend, per owner and account type, in deterministic code.
 
     Shares are those held on the record date in the ledger as known at the report (`known_at`); when the ledger has no
     lot of that share on the record date (or the record date is later or unknown), the report's lots are used and
     `quantity_basis` says so. Withholding is per lot (one account). Hermes-managed lots are left out and flagged; a lot
     without a quantity or in another currency is counted in `uncounted_lots` and leaves the total unknown, and so does
-    a share class whose reported dividend no source proved (`unproven`). Returns None when nothing was declared."""
+    a share class whose reported dividend no source proved (`unproven`). Returns None when nothing was declared.
+    `owners` limits the lots to those owner aliases (a spouse's answer counts only their own, report design §42.11;
+    Codex review 2026-11-10: the other member's lots, accounts and amounts reached the spouse's answer)."""
     if not declared and not unproven:
         return None
     rows: list[dict[str, Any]] = []
     uncounted = 0
     for d in declared:
-        lots, basis = _lots(data["view"], d), "report_date"
+        lots, basis = _lots(data["view"], d, owners), "report_date"
         if d["record_date"] is not None and d["record_date"] <= data["as_of"].date():
             with closing(ledger.connect_read_only(db)) as conn:
                 then = load_view(conn, as_of=datetime.combine(d["record_date"], time(23, 59, 59), data["as_of"].tzinfo),
                                  known_at=known_at)
-            on_record = _lots(then, d)
+            # The same side as the report's own view: the spouse's answer sees the record date from the spouse's side
+            # (Codex review 2026-11-10: the client's lots came back as the reader's own).
+            then = perspective.as_seen_by(then, data.get("audience", "self"))
+            on_record = _lots(then, d, owners)
             if on_record["lots"] or on_record["uncounted"]:
                 lots, basis = on_record, "record_date"
         uncounted += lots["uncounted"]
@@ -399,13 +404,16 @@ def estimates(db: Path, data: dict[str, Any], declared: list[dict[str, Any]], *,
             "not_held": [d["symbol"] for d in declared if not any(r["symbol"] == d["symbol"] for r in rows)]}
 
 
-def _lots(view: Any, declared: dict[str, Any]) -> dict[str, Any]:
+def _lots(view: Any, declared: dict[str, Any], owners: frozenset[str] | None = None) -> dict[str, Any]:
     """The client-side lots of the declared share: [(owner alias, account type, quantity)], whether Hermes-managed lots
-    exist, and how many lots cannot be counted (no quantity, or another currency than the dividend's)."""
+    exist, and how many lots cannot be counted (no quantity, or another currency than the dividend's). With `owners`,
+    only the lots of those owner aliases."""
     lots, hermes, uncounted = [], False, 0
     for record in view.records:
         f = record.fields
         if record.kind is not Kind.ASSET or f.get("symbol") != declared["symbol"]:
+            continue
+        if owners is not None and view.owner_aliases[record.owner_id] not in owners:
             continue
         if f.get("managed_by") == "hermes":
             hermes = True

@@ -9,7 +9,8 @@ paragraph and reasons are written for the spouse's own holdings and goals.
 
 It keeps its own run state in daily_runs (product PRODUCT, one run per edition and local day), so the client's
 report runs, their baselines, the reply answering and the client's proposal history never see it. The proposals it
-carried are recorded under the spouse's scope (smith.perspective). Replies to it are not answered.
+carried are recorded under the spouse's scope (smith.perspective). Replies to it from the spouse's configured address
+are answered from the same side (partner_qa, report design §42.11); nothing they state is recorded.
 """
 import hashlib
 import logging

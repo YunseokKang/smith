@@ -3236,8 +3236,9 @@ def _footer(warnings: list[str] | tuple[str, ...] = (), week: str = "", correcti
     checked = "" if not corrections else f'<div style="{small};margin-bottom:6px">{escape(corrections)}</div>'
     caveat = f"세금·법령은 {tax.RULES_YEAR}년 기준으로 계산했으니 실행 전 현행 법령을 확인하십시오. " if law else ""
     family = " 이 메일은 가족 주소로도 함께 보냅니다(답장 질문은 고객님 메일에서 보내신 것에만 답합니다)." if shared else ""
-    # The spouse's own letter (§42): replies to it are not answered yet, so it does not invite them.
-    ask = ("이 레터의 답장 질문에는 아직 답하지 않습니다." if reader != "self" else "판단 근거는 답장으로 물어 주십시오.")
+    # The spouse's own letter (§42.11): questions sent by reply are answered, but what they state reaches no later letter.
+    ask = ("판단 근거는 답장으로 물어 주십시오. 답장에 적어 주신 사실은 다음 레터에 반영되지 않습니다." if reader != "self"
+           else "판단 근거는 답장으로 물어 주십시오.")
     return (f'<tr><td>{warn}{basis}{guide}{checked}<div style="{small}">Smith는 조회 전용 자문입니다(매매·이체·대출 '
             f'실행 없음). {caveat}{ask}{family}</div></td></tr>')  # The one law caveat (user decision 2026-11-02).
 

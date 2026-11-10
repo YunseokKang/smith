@@ -8,6 +8,11 @@ Cost and exposure are kept low by construction:
 - A model is called only for an actual question, at most MAX_ANSWERS_PER_DAY a day.
 - A message counts as a question only if the account owner sent it (Gmail label SENT) from the
   configured address: mail from anyone else that lands in the thread is never answered or read further.
+  The one exception is the spouse's own letter (report design §42.11): in its thread, a reply received from
+  `[mail] partner_recipient` that Gmail authenticated (DMARC, or DKIM of the sender's domain) is a question. Its
+  answer goes to that configured address only and sees the household from the spouse's side, without the client
+  memory or the other member's own accounts (spouse_payload); what the spouse states never reaches the memory or
+  later letters.
 - The question is the client's own words but is still treated as data: Smith stays read-only and never
   executes, forwards or changes recipients. Answers pass the same code verification as the report.
 - Each question is claimed in the ledger (with the daily limit, atomically) and marked sending just
@@ -36,12 +41,13 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-from smith import dart, editions, gmail, headless, korean, ledger, memory, narrative, principles, qa_lookup, report_html
+from smith import (dart, editions, gmail, headless, korean, ledger, memory, narrative, perspective, principles, qa_lookup,
+                   report_html, research)
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import check_outbound, mask_identifiers
 from smith.report_data import build_report
 
-PROMPT_VERSION = "mail-answer-v19"  # v19: the money needed outside the pensions in the client's wording (2026-11-09); v18: household_member_1 is the spouse (2026-11-08); v17: tax.realized_this_year; ask the client only what Smith cannot know (2026-11-03); v16: korean.STYLE (client style guide 2026-11-01); v15: public look-ups (FR-43); v14: narrative-v27 (natural Korean); v13: principles are consensus, not law.
+PROMPT_VERSION = "mail-answer-v20"  # v20: the spouse's questions (asker "spouse", report design §42.11); v19: the money needed outside the pensions in the client's wording (2026-11-09); v18: household_member_1 is the spouse (2026-11-08); v17: tax.realized_this_year; ask the client only what Smith cannot know (2026-11-03); v16: korean.STYLE (client style guide 2026-11-01); v15: public look-ups (FR-43); v14: narrative-v27 (natural Korean); v13: principles are consensus, not law.
 MODEL = headless.MODEL
 BUDGET_USD = "3.00"
 TIMEOUT_SECONDS = 600
@@ -152,6 +158,18 @@ shortfall is drawn, until age 100; nothing is kept for after 100, client decisio
 the amount. held_outside_in_clients_words is the code's sentence for each age: use it or its figures. It is not a 4%
 withdrawal: never describe it as one.
 
+Spouse: when asker is "spouse", the question is a reply from the client's spouse to their own letter (each member gets
+one), and the input is the household seen from their side: they are the client of every rule here, called 고객님, and
+household_member_1 is the other member, who keeps Smith's records (배우자분). client_memory is empty and nothing they
+write reaches Smith's memory or later letters (only this thread's conversation): remember stays empty and you never
+write that you noted or will keep anything ("기억해 두겠습니다"). When they state a fact or ask for a change, say it does
+not reach the next letters from this mail and that 배우자분 can add it to Smith's records. Their input holds their own
+accounts and cash-flow items, the household's homes, lease deposits and loans, and the household's totals only. holdings, holding_quantity_changes, portfolio_facts and sector_metrics.debt are their own;
+household_portfolio_facts (held_by client means the asker) and sector_metrics.household_debt are the household's. On the
+other member's own accounts, holdings, pay and pensions, answer only at the level the household sections of their
+letter show (household totals, the household pension stack, the household's largest holdings and whose they are); for
+more detail say it is in 배우자분's own letter.
+
 Behavioural shield: when the question weighs a decision (sell or keep a holding, buy more, move home, borrow,
 repay early, a large spend), add one sentence naming the trap this decision is most exposed to in plain
 Korean (loss aversion, sunk cost, anchoring on a purchase price or a past peak, fear of missing out,
@@ -190,7 +208,8 @@ class Question:
     references: str
     product: str = "report"   # "report": a finance report thread; "daily": a daily-routine mail thread (daily_qa);
                               # "health": a health-letter thread (health_qa); "counsel": a thread the client opened
-                              # with a mail to themselves (counsel, FR-49).
+                              # with a mail to themselves (counsel, FR-49); "partner": the spouse's letter thread,
+                              # report_id its run key (partner_qa, report design §42.11).
 
 
 _REPLY_MARKS = re.compile(r"^(?:(?:re|fw|fwd|답장|전달)\s*:\s*)+", re.IGNORECASE)
@@ -205,9 +224,14 @@ def counsel_subject(subject: str, prefix: str) -> bool:
 
 def find(db: Path, credentials: tuple[str, str, str], recipient: str, *, now: datetime,
          reader: gmail.Getter = gmail.get, poster: gmail.Poster = gmail.post,
-         counsel_prefix: str | None = None, counsel_only: bool = False) -> tuple[list[Question], list[tuple[str, str, str]]]:
+         counsel_prefix: str | None = None, counsel_only: bool = False,
+         partner_address: str | None = None) -> tuple[list[Question], list[tuple[str, str, str]]]:
     """(questions to answer, [(message_id, thread_id, reason)] to record as skipped). Reads the headers of
     Smith's own report threads (last LOOKBACK) and the body only of messages approved as the client's.
+
+    With `partner_address` (`[mail] partner_recipient`), the threads of the spouse's letters are read too, and there
+    the question is a message received from that address and authenticated by Gmail (`authenticated`); the client's
+    own messages in such a thread are not questions (report design §42.11).
 
     With `counsel_prefix` (FR-49), the client's own sent mails whose subject opens with it are questions too: one
     ids-only search of the sent mail, then the same header checks; the threads they open are read again for the
@@ -234,6 +258,10 @@ def find(db: Path, credentials: tuple[str, str, str], recipient: str, *, now: da
             # Health letters likewise (health design §8): their replies get the health context and nothing else.
             runs += [{**r, "report_id": r["run_key"], "product": "health"}
                      for r in ledger.sent_daily_runs(conn, since=now - LOOKBACK, product="health")]
+            if partner_address:
+                # The spouse's own letters (report design §42.11): their replies get the spouse's side of the household.
+                runs += [{**r, "report_id": r["run_key"], "product": "partner"}
+                         for r in ledger.sent_daily_runs(conn, since=now - LOOKBACK, product=perspective.PARTNER_PRODUCT)]
         known = ledger.seen_questions(conn) | ledger.answer_message_ids(conn) | {r["message_id"] for r in runs}
         counsel_since = now - (COUNSEL_RECENT if counsel_only else LOOKBACK)
         counsel_threads = ledger.counsel_threads(conn, since=counsel_since) if counsel_prefix else set()
@@ -250,6 +278,7 @@ def find(db: Path, credentials: tuple[str, str, str], recipient: str, *, now: da
             threads.setdefault(thread_id, {"report_id": None, "subject": None, "product": "counsel"})
     questions, skipped = [], []
     address = recipient.strip().lower()
+    spouse = (partner_address or "").strip().lower()
     for thread_id, run in threads.items():
         if not thread_id:
             continue
@@ -258,12 +287,21 @@ def find(db: Path, credentials: tuple[str, str, str], recipient: str, *, now: da
             message_id = str(message.get("id", ""))
             if not message_id or message_id in known:
                 continue
-            headers = {h.get("name", "").lower(): h.get("value", "") for h in message.get("payload", {}).get("headers", [])}
+            raw = message.get("payload", {}).get("headers", [])
+            headers = {h.get("name", "").lower(): h.get("value", "") for h in raw}
             sender = parseaddr(headers.get("from", ""))[1].lower()
+            labels = message.get("labelIds", [])
             if gmail.SMITH_HEADER.lower() in headers:
                 skipped.append((message_id, thread_id, "smith-message"))
                 continue
-            if "SENT" not in message.get("labelIds", []) or sender != address:
+            if run.get("product") == "partner":
+                if not spouse or sender != spouse or "SENT" in labels or "DRAFT" in labels:
+                    skipped.append((message_id, thread_id, "not-from-partner"))
+                    continue
+                if not authenticated(raw, spouse.rsplit("@", 1)[-1]):
+                    skipped.append((message_id, thread_id, "partner-unauthenticated"))
+                    continue
+            elif "SENT" not in labels or sender != address:
                 skipped.append((message_id, thread_id, "not-from-client"))
                 continue
             subject = run["subject"] or headers.get("subject", "")
@@ -282,6 +320,40 @@ def find(db: Path, credentials: tuple[str, str, str], recipient: str, *, now: da
                                       text, headers.get("message-id", ""), headers.get("references", ""),
                                       run.get("product", "report")))
     return questions, skipped
+
+
+_COMMENT = re.compile(r"\([^()]*\)")
+
+
+def authenticated(headers: list[dict[str, Any]], domain: str) -> bool:
+    """Whether Gmail authenticated a received message as sent from `domain`: the first Authentication-Results header
+    (the one Gmail's own server prepends, authserv-id mx.google.com; a sender cannot place one above it) shows DMARC
+    pass with header.from exactly that domain, or a DKIM pass whose signing domain (header.d, or the whole domain after
+    the last "@" of header.i) is that domain or one of its subdomains. SPF alone is not enough (it checks the envelope,
+    not the From the reader sees). Each result is read as "method=result property=value ..." between semicolons, with
+    comments removed, so text inside a value or a comment is never taken for a verdict (Codex review 2026-11-10:
+    header.i=example.org@attacker.example passed as example.org)."""
+    first = next((h.get("value", "") for h in headers if h.get("name", "").lower() == "authentication-results"), "")
+    parts = [part.strip() for part in _COMMENT.sub(" ", first).split(";")]
+    domain = (domain or "").strip().lower().rstrip(".")
+    if not domain or parts[0].lower() != "mx.google.com":
+        return False
+    for part in parts[1:]:
+        tokens = part.split()
+        if not tokens or tokens[0].count("=") != 1:
+            continue
+        method, result = (t.lower() for t in tokens[0].split("="))
+        if result != "pass":
+            continue
+        props = {k.lower(): v.lower().rstrip(".") for k, v in (t.split("=", 1) for t in tokens[1:] if "=" in t)}
+        if method == "dmarc" and props.get("header.from") == domain:
+            return True
+        if method == "dkim":
+            identity = props.get("header.i", "")
+            for signer in (props.get("header.d", ""), identity.rsplit("@", 1)[1] if "@" in identity else ""):
+                if signer and (signer == domain or signer.endswith("." + domain)):
+                    return True
+    return False
 
 
 def body_text(payload: dict[str, Any]) -> str:
@@ -359,8 +431,12 @@ def answer(db: Path, data: dict[str, Any], question: Question, *, now: datetime,
            executable: Path, runner: headless.Runner = subprocess.run,
            report: dict[str, Any] | None = None, history: list[dict[str, str | None]] | None = None,
            tz: str = DEFAULT_TIMEZONE, verifier: qa_lookup.Verifier | None = None, dart_key: str | None = None,
-           dart_fetch: Any = None) -> dict[str, Any]:
+           dart_fetch: Any = None, spouse: bool = False) -> dict[str, Any]:
     """Write and check an answer. Returns {"text", "refs", "follow_up", "memos", "brief", "remember", "looked_up"}.
+
+    `spouse`: the question is the spouse's, on their own letter (partner_qa, report design §42.11). `data` is then the
+    household from their side, `report` carries that letter's narrative runs, the client memory stays out of the
+    call and "remember" is always empty (what the spouse states is never kept).
 
     `history` is the earlier turns of the thread ({"client", "smith"}, oldest first, see
     ledger.thread_turns); the model sees them as the conversation the question continues. The client
@@ -380,31 +456,47 @@ def answer(db: Path, data: dict[str, Any], question: Question, *, now: datetime,
     """
     view = data["view"]
     at = data["as_of"]
+    # The spouse's letter's narrative is audited under its own use cases (narrative.PARTNER_USE_CASE).
+    suffix = narrative.PARTNER_USE_CASE if spouse else ""
     # The report's own brief; a day that researched nothing has none (no fallback to another day's brief).
     brief, _ = narrative.pinned_brief(db, view, now=at, brief_id=(report or {}).get("brief_id"),
                                       kind=(report or {}).get("kind") or data["kind"])
+    if spouse:
+        brief = spouse_brief(brief, data)
     with closing(ledger.connect_read_only(db)) as conn:
         # The narrative as sent (repair and first reader applied); reports written before it was recorded fall
         # back to the first call's verified output.
         if report is None:
-            recent = (ledger.latest_advice(conn, use_case=narrative.FINAL_USE_CASE)
-                      or ledger.latest_advice(conn, use_case="report-narrative"))
+            recent = (ledger.latest_advice(conn, use_case=narrative.FINAL_USE_CASE + suffix)
+                      or ledger.latest_advice(conn, use_case="report-narrative" + suffix))
             moved = False
         else:
-            recent = (ledger.get_advice(conn, report["advice_run_ids"], use_case=narrative.FINAL_USE_CASE,
+            recent = (ledger.get_advice(conn, report["advice_run_ids"], use_case=narrative.FINAL_USE_CASE + suffix,
                                         created_at=report["created_at"])
-                      or ledger.get_advice(conn, report["advice_run_ids"], use_case="report-narrative",
+                      or ledger.get_advice(conn, report["advice_run_ids"], use_case="report-narrative" + suffix,
                                            created_at=report["created_at"]))
             moved = ledger.changed_since(conn, datetime.fromisoformat(report["known_at"] or report["as_of"]))
-    stored = _stored_memory(db)
+    # The client memory is the client's own account of the household, written from their side: never in the spouse's
+    # call (report design §42.4), and nothing the spouse states is added to it.
+    stored = [] if spouse else _stored_memory(db)
     query = " ".join([question.text] + [turn["client"] or "" for turn in history or []])
     payload = narrative.build_payload(view, data, brief, memory.for_model(memory.retrieve(stored, query)))
+    payload["asker"] = "spouse" if spouse else "client"
+    # A spouse looks up only their own holdings (and public matters): the other member's smaller holdings are not in
+    # their letter (Codex review 2026-11-10).
+    scope = dict(data, holdings=data["own_holdings"]) if spouse and data.get("own_holdings") is not None else data
+    if spouse:
+        # Their own holdings are `holdings`; the household's, as the letter's "두 분의 보유 종목" shows them, come apart.
+        payload["household_portfolio_facts"] = narrative._household_portfolio(data["holdings"])
+        payload = spouse_payload(payload)
     verified_report = (recent or {}).get("content", {}).get("verified") or {}
     payload["recent_report"] = {k: verified_report.get(k) for k in ("situation", "direction", "portfolio", "holdings",
                                                                      "insights", "watch", "experiences")}
     # The mail keeps only the client's reading; the reasons behind it (status, data status, assumptions) and the
     # principles it applied travel here so "why did you judge that" can be answered (report design §18.1).
-    payload["report_notes"] = report_html.system_notes(data)
+    # Not for a spouse: their letter never shows the system notes, which carry the client's account observations
+    # (Codex review 2026-11-10: the client's buying power reached the spouse's input).
+    payload["report_notes"] = [] if spouse else report_html.system_notes(data)
     cited = list((verified_report.get("portfolio") or {}).get("principles") or [])
     cited += [p for h in verified_report.get("holdings") or [] for p in h.get("principles") or []]
     payload["report_principles"] = [{"id": p.id, "investor": p.investor, "title": p.title, "principle": p.principle,
@@ -420,44 +512,51 @@ def answer(db: Path, data: dict[str, Any], question: Question, *, now: datetime,
     payload["conversation"] = [{"client": mask_identifiers(turn["client"]),
                                 "smith": None if turn["smith"] is None else mask_identifiers(turn["smith"])}
                                for turn in history or []]
-    payload["lookup_candidates"] = qa_lookup.candidates(data)
+    payload["lookup_candidates"] = qa_lookup.candidates(scope)
     text = json.dumps(payload, ensure_ascii=False)
     check_outbound(text, secrets)
-    output, _ = _call(db, text, now, report_kind, executable, runner, "mail-answer")
+    output, _ = _call(db, text, now, report_kind, executable, runner, "mail-answer" + suffix)
     memos: list[str] = []
     looked_up = qa_lookup.wanted(output)
     if looked_up:
         def web_call(text: str) -> Any:
-            return _call(db, text, now, report_kind, executable, runner, "mail-lookup", web=True)[0]
-        payload, brief, memos = _look_up(db, data, payload, brief, output["lookup"], now=now, tz=tz, report=report,
+            return _call(db, text, now, report_kind, executable, runner, "mail-lookup" + suffix, web=True)[0]
+        payload, brief, memos = _look_up(db, scope, payload, brief, output["lookup"], now=now, tz=tz, report=report,
                                          secrets=secrets, call=web_call, verifier=verifier, dart_key=dart_key,
-                                         dart_fetch=dart_fetch)
+                                         dart_fetch=dart_fetch,
+                                         # The spouse's own lots only (`spouse_context`'s scope, report design §42.11).
+                                         owners=frozenset({"self"}) if spouse else None)
         text = json.dumps(payload, ensure_ascii=False)
         check_outbound(text, secrets)
-        output, _ = _call(db, text, now, report_kind, executable, runner, "mail-answer-looked-up")
+        output, _ = _call(db, text, now, report_kind, executable, runner, "mail-answer-looked-up" + suffix)
+    # Nothing the spouse states is kept, so their reply never says it was noted (report design §42.11).
+    promise_memo, safe = (SPOUSE_PROMISE_MEMO, SPOUSE_SAFE_SENTENCE) if spouse else (PROMISE_MEMO, SAFE_SENTENCE)
     problem = _problems(output, payload)
     if problem:
         reason = (problem if problem != "promise" else
                   "promise: says a change to Smith's calculations, layout or settings is done or applies from the next "
-                  "report; Smith cannot change itself: say it is noted and takes effect once Smith is updated")
+                  "report" + (", or that what they said is kept" if spouse else "") + "; Smith cannot change itself: say "
+                  + ("it does not reach the next letters from this mail and 배우자분 can pass it on" if spouse
+                     else "it is noted") + " and takes effect once Smith is updated")
         repair = dict(payload, previous_output=output, rejected=[{"field": "answer", "reason": reason}])
         repair_text = json.dumps(repair, ensure_ascii=False)
         check_outbound(repair_text, secrets)
         try:
-            output, _ = _call(db, repair_text, now, report_kind, executable, runner, "mail-answer-repair")
+            output, _ = _call(db, repair_text, now, report_kind, executable, runner, "mail-answer-repair" + suffix)
             problem = _problems(output, payload)
         except headless.HeadlessError:
             pass
     if problem and problem.split(":")[0] not in narrative.SOFT:  # Wording left unnatural is sent without a footnote.
         reason, *detail = problem.split(":")
-        memos.append(PROMISE_MEMO if reason == "promise" else narrative.MEMOS.get(reason, "확인되지 않은 부분이 있습니다.")
+        memos.append(promise_memo if reason == "promise" else narrative.MEMOS.get(reason, "확인되지 않은 부분이 있습니다.")
                      + (f"({detail[0]})." if reason == "ungrounded-number" and detail else ""))
-    if promises_change(output["answer"]["text"]):
+    if promises_change(output["answer"]["text"]) or (spouse and keeps_fact(output["answer"]["text"])):
         # Fail closed (review 2026-10-20): a promise the repair left is replaced by the one true sentence, not sent
         # with a footnote the client may not read.
-        output = {**output, "answer": {**output["answer"], "text": neutralize_promises(output["answer"]["text"])}}
-        if PROMISE_MEMO not in memos:
-            memos.append(PROMISE_MEMO)
+        output = {**output, "answer": {**output["answer"],
+                                       "text": neutralize_promises(output["answer"]["text"], safe, keeps=spouse)}}
+        if promise_memo not in memos:
+            memos.append(promise_memo)
     claimed = _client_figures(question.text, payload, output["answer"]["text"])
     if claimed:
         memos.append(f"말씀하신 수치({', '.join(claimed[:3])})는 원장에서 확인되지 않은 값이라, 그 가정을 전제로 "
@@ -471,13 +570,63 @@ def answer(db: Path, data: dict[str, Any], question: Question, *, now: datetime,
     # The same prose rules as the report (report design §17.6): rounded amounts, no bare qualifier tags.
     return {"text": narrative.polish(narrative.readable(output["answer"]["text"])), "refs": output["answer"]["refs"],
             "follow_up": [narrative.polish(narrative.readable(f)) for f in output["follow_up"]], "memos": memos,
-            "brief": brief, "remember": memory.new_facts(stored, output["remember"]), "looked_up": looked_up}
+            "brief": brief, "remember": [] if spouse else memory.new_facts(stored, output["remember"]),
+            "looked_up": looked_up}
+
+
+# The other member's records a spouse's answer may still see: the homes and lease deposits, which the letter's household
+# sections show with their owner. Their loans stay too (the household's loans are listed with whose they are).
+SHARED_ASSET_CATEGORIES = frozenset({"real_estate", "lease_deposit"})
+
+
+def spouse_brief(brief: dict[str, Any] | None, data: dict[str, Any]) -> dict[str, Any] | None:
+    """The report's brief for a spouse's answer: public topics, and company research only on the spouse's own holdings
+    (the household's brief researches every holding, so the rest would name the other member's smaller holdings; Codex
+    review 2026-11-10). Its gaps and dropped reasons are free text that may name any holding without its topic, so none
+    are kept (the spouse's own look-up adds its gaps later). The look-up's second pass widens this filtered brief, so
+    nothing removed here comes back."""
+    inner = (brief or {}).get("brief")
+    if not inner:
+        return brief
+    refs = research.holding_refs(data["view"])
+    keys = {(p["symbol"], p["market"]): p["key"] for p in data["holdings"]["positions"]}
+    own = {refs.get(keys.get((p["symbol"], p["market"]), p["key"]))
+           for p in (data.get("own_holdings") or {"positions": []})["positions"]}
+    items = [i for i in inner.get("items", []) if not str(i.get("topic", "")).startswith("H") or i.get("topic") in own]
+    return {**brief, "brief": {**inner, "items": items, "gaps": [], "dropped": []}}
+
+
+def spouse_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """A spouse's answer input without the other member's own records (report design §42.11): the ledger context
+    (`spouse_context`) and this year's sales (only their own; the totals there are already theirs). What stays of the
+    other member is what their letter's household sections show: homes, loans, the pension stack, the move plan,
+    expected pay, goals and the household's totals. Every later input (look-up, repair) is built from this one."""
+    tax = payload.get("tax") or {}
+    realized = tax.get("realized_this_year")
+    if realized:
+        # Codex review 2026-11-10 (P0): the client's sales, prices and gains reached the spouse's input.
+        tax = {**tax, "realized_this_year": {**realized, "sales": [s for s in realized.get("sales", [])
+                                                                   if s.get("owner") == "self"]}}
+    return {**payload, "household": spouse_context(payload["household"]), **({"tax": tax} if tax else {})}
+
+
+def spouse_context(household: dict[str, Any]) -> dict[str, Any]:
+    """The ledger context of a spouse's answer (report design §42.11): their own records, the other member's homes, lease
+    deposits and loans, the household's totals; never the other member's own accounts or cash-flow items, which their
+    letter does not show (Codex review 2026-11-10: the client's account balances reached the spouse's answer). The asker
+    is "self" in the spouse's view."""
+    flows = household.get("cash_flow") or {}
+    return {**household,
+            "assets": [a for a in household.get("assets", [])
+                       if a.get("owner") == "self" or a.get("category") in SHARED_ASSET_CATEGORIES],
+            "cash_flow": {**flows, "items": [i for i in flows.get("items", []) if i.get("owner") == "self"]}}
 
 
 def _look_up(db: Path, data: dict[str, Any], payload: dict[str, Any], brief: dict[str, Any] | None,
              asked: dict[str, Any], *, now: datetime, tz: str, report: dict[str, Any] | None, secrets: list[str],
              call: Callable[[str], Any], verifier: qa_lookup.Verifier | None, dart_key: str | None = None,
-             dart_fetch: Any = None) -> tuple[dict[str, Any], dict[str, Any] | None, list[str]]:
+             dart_fetch: Any = None, owners: frozenset[str] | None = None
+             ) -> tuple[dict[str, Any], dict[str, Any] | None, list[str]]:
     """(the second pass's payload, the brief widened with the new items for the reply's links, memos). The new items
     are numbered after the report's own (R<n+1>, ...), so refs stay unique and the usual checks apply to them."""
     request, refused = qa_lookup.gate(asked, data)
@@ -489,7 +638,8 @@ def _look_up(db: Path, data: dict[str, Any], payload: dict[str, Any], brief: dic
                                first_ref=first, verifier=verifier, dart_key=dart_key, cache=dart.cache_path(db),
                                **({"fetch": dart_fetch} if dart_fetch else {}))
     known_at = now if report is None else datetime.fromisoformat(report["known_at"] or report["as_of"])
-    found = qa_lookup.estimates(db, data, result["dividends"], known_at=known_at, unproven=result["unproven_dividends"])
+    found = qa_lookup.estimates(db, data, result["dividends"], known_at=known_at, unproven=result["unproven_dividends"],
+                                owners=owners)
     items = old + result["items"]
     widened = {**(brief or {"created_at": now}), "brief": {**((brief or {}).get("brief") or {"gaps": []}), "items": items}}
     shown = payload["brief"] or {"researched_at": f"{local_time(now, tz):%Y-%m-%d}", "gaps": []}
@@ -532,16 +682,31 @@ _PROMISE = re.compile(r"다음 (?:보고서|리포트)부터|(?:반영|적용|�
                       r"|바로 (?:반영|적용)|고쳐 ?두었|바꿔 ?두었")
 PROMISE_MEMO = "보고서의 계산·구성·설정은 Smith를 업데이트해야 바뀝니다. 말씀하신 내용은 기억해 두었습니다."
 SAFE_SENTENCE = "말씀하신 내용은 기억해 두었고, Smith를 업데이트하면 보고서에 반영됩니다."
+# What the spouse states never reaches Smith's memory or later letters (report design §42.11): their reply never says
+# it was kept, and the true sentence points to the member who keeps the records. The question and the answer stay in
+# the thread's ledger rows and the audit like every question; "반영되지 않습니다" is what holds.
+SPOUSE_PROMISE_MEMO = "보고서의 계산·구성·설정은 Smith를 업데이트해야 바뀝니다. 이 메일로 말씀하신 내용은 다음 레터에 반영되지 않습니다."
+SPOUSE_SAFE_SENTENCE = ("이 메일로 말씀하신 내용은 다음 레터에 반영되지 않으니, 배우자분께 전해 주시면 Smith를 업데이트할 때 "
+                        "반영할 수 있습니다.")
+# A promise to keep what was said ("기억해 두겠습니다", "메모해 두었습니다"): true for the client (their memory), never for
+# the spouse (Codex review 2026-11-10: such a sentence passed without "다음 보고서부터").
+_KEEPS = re.compile(r"기억(?:해 ?두|해 ?드리|하겠|하도록)|(?:메모|기록|저장)(?:해 ?(?:두|드리|놓)|하겠)")
 
 
-def neutralize_promises(text: str) -> str:
-    """The answer with every sentence that promises a change replaced by SAFE_SENTENCE (once), the rest as it was."""
+def keeps_fact(text: str) -> bool:
+    """Whether an answer says Smith keeps what was said."""
+    return bool(_KEEPS.search(text))
+
+
+def neutralize_promises(text: str, safe: str = SAFE_SENTENCE, *, keeps: bool = False) -> str:
+    """The answer with every sentence that promises a change (or, with `keeps`, to keep what was said) replaced by
+    `safe` (once), the rest as it was."""
     kept, replaced = [], False
     for sentence in narrative._SENTENCE_END.split(text):
-        if not promises_change(sentence):
+        if not (promises_change(sentence) or (keeps and keeps_fact(sentence))):
             kept.append(sentence)
         elif not replaced:
-            kept.append(SAFE_SENTENCE)
+            kept.append(safe)
             replaced = True
     return " ".join(s for s in kept if s).strip()
 
@@ -550,7 +715,8 @@ def _problems(output: dict[str, Any], payload: dict[str, Any]) -> str | None:
     # Evidence is narrative's allowlist: Smith's earlier answers and the report's own narrative (recent_report)
     # are model output, so a figure only they contain must still be grounded in the inputs or a cited source.
     found = narrative.check_block([output["answer"]["text"]], output["answer"]["refs"], payload)
-    if found is None and promises_change(output["answer"]["text"]):
+    text = output["answer"]["text"]
+    if found is None and (promises_change(text) or (payload.get("asker") == "spouse" and keeps_fact(text))):
         return "promise"
     return found
 
@@ -634,13 +800,16 @@ def poll(db: Path, *, recipient: str, credentials: tuple[str, str, str], now: da
          sender: Any = gmail.send, reader: gmail.Getter = gmail.get, poster: gmail.Poster = gmail.post,
          tz: str = DEFAULT_TIMEZONE, daily: Any = None, health: Any = None,
          verifier: qa_lookup.Verifier | None = None, dart_key: str | None = None,
-         counsel: Any = None, counsel_prefix: str | None = None, counsel_only: bool = False) -> list[dict[str, Any]]:
+         counsel: Any = None, counsel_prefix: str | None = None, counsel_only: bool = False,
+         partner: Any = None, partner_recipient: str | None = None) -> list[dict[str, Any]]:
     """Answer new questions. `build(report)` rebuilds the data of the report a question replies to (from
     its run record and lineage; None only if the run is unknown, then current data). `daily(question, history)`
     answers a daily-thread question with the daily context and returns (html, text, result), `health` likewise for
     a health-letter thread and `counsel` for a thread the client opened under `counsel_prefix` (FR-49; without both
     no such mail is looked for; with `counsel_only` only those are looked for, see `find`); without the answerer
-    such a question is left for the next run.
+    such a question is left for the next run. `partner` answers the spouse's replies to their own letter, and only
+    together with `partner_recipient` (the configured address, never a header's) are those looked for; the answer
+    goes to that address (report design §42.11).
 
     A question is claimed (answering), marked sending just before the reply, then answered, failed or
     unknown. Interrupted runs are recovered first: answering becomes a retryable failure, sending becomes
@@ -650,8 +819,10 @@ def poll(db: Path, *, recipient: str, credentials: tuple[str, str, str], now: da
     with closing(ledger.connect(db)) as conn:
         for item in ledger.recover_questions(conn, now=now):
             results.append({"message_id": item["message_id"], "status": "recovered", "was": item["was"]})
+    spouse_to = partner_recipient if partner is not None and partner_recipient else None
     questions, skipped = find(db, credentials, recipient, now=now, reader=reader, poster=poster,
-                              counsel_prefix=counsel_prefix if counsel is not None else None, counsel_only=counsel_only)
+                              counsel_prefix=counsel_prefix if counsel is not None else None, counsel_only=counsel_only,
+                              partner_address=spouse_to)
     with closing(ledger.connect(db)) as conn:
         for message_id, thread_id, reason in skipped:
             ledger.skip_question(conn, message_id=message_id, thread_id=thread_id, now=now, reason=reason)
@@ -659,7 +830,7 @@ def poll(db: Path, *, recipient: str, credentials: tuple[str, str, str], now: da
         return results
     questions.sort(key=lambda q: q.received_at)  # A later question in a thread sees the answer to an earlier one.
     built: dict[str | None, tuple[dict[str, Any] | None, dict[str, Any]]] = {}
-    answerers = {"daily": daily, "health": health, "counsel": counsel}
+    answerers = {"daily": daily, "health": health, "counsel": counsel, "partner": partner}
     for question in questions:
         if question.product in answerers:
             if answerers[question.product] is None:
@@ -704,8 +875,10 @@ def poll(db: Path, *, recipient: str, credentials: tuple[str, str, str], now: da
                                        answer_text=text):
                 results.append({"message_id": question.message_id, "status": "skipped", "error_code": "claim-lost"})
                 continue
+        # The spouse's answer goes to the configured spouse address (find only takes their questions with one).
+        to = spouse_to if question.product == "partner" else recipient
         try:
-            answer_id = sender(credentials, recipient=recipient, subject=subject, html=html, text=text,
+            answer_id = sender(credentials, recipient=to, subject=subject, html=html, text=text,
                                thread_id=question.thread_id, in_reply_to=question.header_id or None,
                                references=references or None)
         except gmail.MailError as error:
@@ -725,7 +898,9 @@ def poll(db: Path, *, recipient: str, credentials: tuple[str, str, str], now: da
 
 def _remember(db: Path, question: Question, result: dict[str, Any], tz: str) -> dict[str, Any]:
     """Store the facts the reply said Smith would keep, dated by the client's message. A failed write is
-    reported in the result; it never undoes the answer."""
+    reported in the result; it never undoes the answer. The spouse's questions keep nothing (report design §42.11)."""
+    if question.product == "partner":
+        return {}
     on = local_time(question.received_at, tz).date()
     saved = 0
     try:

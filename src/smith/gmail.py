@@ -202,7 +202,8 @@ def access_token(credentials: tuple[str, str, str], *, poster: Poster = post) ->
 
 
 _ID = re.compile(r"[0-9A-Za-z]{6,40}")
-_THREAD_HEADERS = ("From", "To", "Subject", "Message-ID", "References", SMITH_HEADER)   # To: a counsel mail is to oneself.
+# To: a counsel mail is to oneself. Authentication-Results: Gmail's verdict on a reply from the spouse (qa.authenticated).
+_THREAD_HEADERS = ("From", "To", "Subject", "Message-ID", "References", "Authentication-Results", SMITH_HEADER)
 
 
 def thread_of(token: str, message_id: str, *, getter: Getter = get) -> str:

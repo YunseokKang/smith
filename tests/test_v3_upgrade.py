@@ -155,8 +155,10 @@ class PerspectiveTests(Upgrade):
         for text in ("나의 세금·연금", "고객님 명의의 계좌·집·대출·연금·보험만 봅니다", "우리 집 노후", "두 분을 합쳐 봅니다"):
             self.assertIn(text, page)
             self.assertIn(text, own_page)
-        self.assertIn("이 레터의 답장 질문에는 아직 답하지 않습니다", page)
-        self.assertNotIn("이 레터의 답장 질문에는", own_page)
+        # Her replies are answered (§42.11), but what they state reaches no later letter; the client's footer is unchanged.
+        self.assertIn("판단 근거는 답장으로 물어 주십시오. 답장에 적어 주신 사실은 다음 레터에 반영되지 않습니다.", page)
+        self.assertIn("판단 근거는 답장으로 물어 주십시오.", own_page)
+        self.assertNotIn("다음 레터에 반영되지 않습니다", own_page)
         # The credit split's share for an account not opened yet is projected from zero, not dropped (Codex review).
         self.apply("savings-only", [rec("ps-partner", "asset", "partner", category="fund", account_type="pension_savings",
                                         currency="KRW", value="0", valuation_method="statement", liquidity="restricted"),
@@ -405,8 +407,8 @@ class PerspectiveTests(Upgrade):
         from smith.payload import won
         payload = narrative.build_payload(hers["view"], hers, None)
         self.assertTrue(payload["per_person_letter"])
-        self.assertFalse(payload["replies_answered"])                                  # Her replies are not answered.
-        self.assertTrue(narrative.build_payload(mine["view"], mine, None)["replies_answered"])
+        self.assertFalse(payload["replies_recorded"])                       # What she states by reply is not kept.
+        self.assertTrue(narrative.build_payload(mine["view"], mine, None)["replies_recorded"])
         self.assertEqual({h["symbol"] for h in payload["holdings"]}, {"AAPL", "VOO"})
         self.assertTrue(next(h for h in payload["holdings"] if h["symbol"] == "AAPL")["above_concentration_limit"])
         self.assertEqual(payload["portfolio_facts"]["total"], won(hers["own_holdings"]["total"]))

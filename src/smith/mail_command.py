@@ -1,5 +1,6 @@
 """`smith mail`: connect the Gmail grant, send a test message, and answer the client's e-mail questions (replies in
-Smith's threads and, when `[counsel]` is on, the `[상담]` mails the client writes to themselves)."""
+Smith's threads and, when `[counsel]` is on, the `[상담]` mails the client writes to themselves), and the spouse's
+replies to their own letter when `[mail] partner_recipient` is set."""
 import argparse
 import tomllib
 from collections.abc import Callable
@@ -130,11 +131,20 @@ def answer(db: Path, config_path: Path, *, verbose: bool = False, counsel_only: 
     counsel_config = config.get("counsel") or {}
     counsel_on = bool(counsel_config.get("enabled"))
     counsel_answerer = counsel.answerer(db, config, now=now, tz=tz, secrets=secrets) if counsel_on else None
+    # The spouse's replies to their own letter (report design §42.11), only with `[mail] partner_recipient`: the answer
+    # goes to that configured address.
+    from smith import partner_qa
+    from smith.config import partner_recipient
+    spouse = partner_recipient(config)
+    dart_key = credentials.load_api_key("dart")
+    partner_answerer = None if spouse is None else partner_qa.answerer(
+        db, now=now, tz=tz, secrets=secrets, household=household, lineage=current, dart_key=dart_key)
     try:
         results = qa.poll(db, recipient=to, credentials=stored, now=now, build=build, secrets=secrets, tz=tz,
-                          daily=daily_answerer, health=health_answerer, dart_key=credentials.load_api_key("dart"),
+                          daily=daily_answerer, health=health_answerer, dart_key=dart_key,
                           counsel=counsel_answerer, counsel_only=counsel_only,
-                          counsel_prefix=counsel_config.get("prefix", counsel.DEFAULT_PREFIX) if counsel_on else None)
+                          counsel_prefix=counsel_config.get("prefix", counsel.DEFAULT_PREFIX) if counsel_on else None,
+                          partner=partner_answerer, partner_recipient=spouse)
     except gmail.MailError as error:
         if verbose or error.code != "no-read-scope":
             say(f"Answering questions failed ({error.code}).")

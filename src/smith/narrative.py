@@ -66,7 +66,7 @@ logger = logging.getLogger(__name__)
 # v32: no per-sentence law caveat; the footer says it once (user decision 2026-11-02); the check no longer asks for it.
 # v33: holdings[].week_change and index_moves; a holding that moved 10% or more opens its reason with why (2026-11-03).
 # v34: tax.realized_this_year, this year's sales with their estimated gains and the deduction left (2026-11-03).
-PROMPT_VERSION = "narrative-v41"   # v41: the money needed outside the pensions in the client's wording; v40: the overview per person, whose pay; v39: property and life days per person (§42).
+PROMPT_VERSION = "narrative-v42"   # v42: replies_recorded (the spouse's replies are answered, their facts not kept); v41: the money needed outside the pensions in the client's wording; v40: the overview per person, whose pay; v39: property and life days per person (§42).
 MODEL = headless.MODEL
 # A runaway guard, not a cost limit (flat-rate subscription): the markets day cost 4.39 USD on 2026-10-27 and, with a
 # payload a fifth larger, ran past 5.00 on 2026-11-03 (error_max_budget_usd), so that report went out without opinions.
@@ -429,9 +429,9 @@ Write:
   own section, so do not repeat them here.
 - When home_plan.plan_of or move_plan.expected_pay_of is household_member_1, the home plan's expected pay
   (bonuses, share grants) is the spouse's: say whose it is ("배우자분 성과급"), never as the client's own.
-- When `replies_answered` is false, this reader's replies are not answered: never ask the reader to tell, send or
-  confirm anything to Smith ("알려 주시면"); say plainly what is not recorded and what it would change (for example
-  "대출 시기가 기록되면 미리 갚는 비용을 계산합니다").
+- When `replies_recorded` is false, nothing this reader tells Smith by reply reaches its records or later letters
+  (their questions are answered): never ask the reader to tell, send or confirm anything to Smith ("알려 주시면"); say
+  plainly what is not recorded and what it would change (for example "대출 시기가 기록되면 미리 갚는 비용을 계산합니다").
 - order: the proposal keys in the order the client should act on them (most important first).
 - proposal_notes: at most 3, for the proposals where the research changes the picture most, one sentence of market or policy
   context with refs. At most one note per proposal key. Skip proposals with nothing to add. A proposal's
@@ -528,8 +528,9 @@ def build_payload(view: Any, data: dict[str, Any], brief: dict[str, Any] | None,
     # and also writes the household paragraph of its "우리 집 …" section.
     payload["per_person_letter"] = bool(edition.personal)
     if edition.personal:
-        # The spouse's replies are not answered (report design §42.3): that letter never asks for one (sample 2026-11-08).
-        payload["replies_answered"] = data.get("audience", "self") == "self"
+        # The spouse's replies are answered but what they state is not recorded (report design §42.11): that letter never
+        # asks for a fact (sample 2026-11-08).
+        payload["replies_recorded"] = data.get("audience", "self") == "self"
     if edition.personal and edition.key == "markets":
         payload["household_portfolio_facts"] = _household_portfolio(data["holdings"])
     if edition.key != "markets":
@@ -609,7 +610,7 @@ def sector_metrics(view: Any, data: dict[str, Any]) -> dict[str, Any]:
     s = data["sectors"]
     # A per-person edition's call writes about the reader's own loans (report design §42); the household's total
     # comes apart for the household paragraph.
-    personal = editions.personalized(data["kind"]) and data.get("own_debt") is not None
+    personal = per_person(data) and data.get("own_debt") is not None
     cash, debt, securities = s["cash"], data["own_debt"] if personal else s["debt"], s["securities"]
     estate, pension = s["real_estate"], s["pension_insurance"]
 
@@ -931,11 +932,18 @@ def ratio(value: Decimal | None) -> str | None:
     return None if value is None else f"{value:.4f}"
 
 
+def per_person(data: dict[str, Any]) -> bool:
+    """Whether the data is one member's own: a per-person edition (report design §42), or the full data an answer to the
+    spouse is built on (`per_person`, §42.11), whose holdings and loans must stay the spouse's own (Codex review
+    2026-11-10: the full rebuild gave the spouse's answer both members' lots without owners)."""
+    return editions.personalized(data["kind"]) or bool(data.get("per_person"))
+
+
 def opined(data: dict[str, Any]) -> dict[str, Any]:
-    """The holdings review the narrative opines on: in a per-person edition the reader's own (each member's letter is
+    """The holdings review the narrative opines on: in a per-person letter the reader's own (each member's letter is
     narrated by a call of its own, report design §42; user decision 2026-11-08), otherwise the household's."""
     own = data.get("own_holdings")
-    return own if own is not None and editions.personalized(data["kind"]) else data["holdings"]
+    return own if own is not None and per_person(data) else data["holdings"]
 
 
 def _household_portfolio(review: dict[str, Any]) -> dict[str, Any]:
