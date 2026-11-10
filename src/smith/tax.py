@@ -551,7 +551,9 @@ def _person_guard(owner: str, g: dict[str, Any]) -> str:
                   f"이자 연 약 {short_won(g['interest_with_pay'])}에 배당까지 더해 연 약 {short_won(g['income_with_pay'])}")
         text = (f"{who} 명의로는 3년 안에 받을 성과급·주식 보상(확정·예상, 세후) {short_won(g['pay'])}까지 예금에 두면 {income}"
                 f"(기준의 {percent(g['share_with_pay'], 0)})이므로, 예금에 약 {short_won(g['threshold_balance'])}을 넘게 두지 말고 "
-                "처음부터 아래 통로에 나눠 두십시오. ")
+                # The letter shows a note's first sentence only, so the channels are named here, not pointed to
+                # ("아래 통로"; client reply 2026-11-06: the channels below could not be seen).
+                "처음부터 ISA·연금저축·IRP·해외주식 같은 비과세·분리과세 통로에 나눠 두십시오. ")
     elif owner == "self":
         text = (f"{who} 명의로는 예금에 약 {short_won(g['threshold_balance'])}을 넘게 두면 "
                 + ("이자만으로" if g["dividends"] is None else "배당과 합쳐") + " 기준을 넘습니다. ")

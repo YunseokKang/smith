@@ -1087,6 +1087,10 @@ class FinancialIncomeTests(unittest.TestCase):
         text = tax._guard_text([("self", g)])
         self.assertTrue(text.startswith("본인 명의로는 3년 안에 받을 성과급"))  # The mail shows the first sentence.
         self.assertIn("예금에 약 5.0억 원을 넘게 두지 말고", text)
+        # That first sentence names the channels instead of pointing below (client reply 2026-11-06).
+        first = text[:text.find(". ") + 1]
+        self.assertIn("ISA·연금저축·IRP·해외주식 같은 비과세·분리과세 통로", first)
+        self.assertNotIn("아래", first)
         self.assertIn("연 약 1,600만 원(기준의 80%)", text)
         # Unknown is never zero: no rate, no figures; an unknown balance leaves the interest unknown.
         self.assertIsNone(tax.financial_income_guard(Decimal(1), None, None))
