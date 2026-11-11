@@ -73,6 +73,8 @@ class LedgerView:
     record_sources: dict[str, str] = field(default_factory=dict)  # record id -> import source; stays local.
     sales: list[realized.Sale] = field(default_factory=list)  # Listed stocks sold this year (realized.sales).
     sales_since: datetime | None = None  # The first broker snapshot: sales before it are unknown.
+    # Exchange closes of stocks no holding prices (a grant's), {(market, symbol): (price, currency, day)}.
+    quotes: dict[tuple[str, str], tuple[Decimal, str, date]] = field(default_factory=dict)
 
 
 def load_view(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetime) -> LedgerView:
@@ -81,13 +83,23 @@ def load_view(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetime) 
         states = [s for s in ledger.valued_states(conn, as_of=as_of, known_at=known_at)
                   if s.record.status is Status.ACTIVE]
         links = exposures(conn, as_of=as_of, known_at=known_at)
-        series = evidence.describe(ledger.load_evidence(conn, known_at=known_at), as_of=as_of.date())
+        raw = ledger.load_evidence(conn, known_at=known_at)
+        series = evidence.describe(raw, as_of=as_of.date())
         news = ledger.load_announcements(conn, since=as_of - timedelta(days=90), until=as_of, known_at=known_at)
         sales = realized.sales(conn, as_of=as_of, known_at=known_at)
         sales_since = realized.covered_since(conn, known_at=known_at)
+    # summary.fx carries the Bank of Korea reference rate for a currency no broker reports (summary._add_reference_rates).
     rates = {BASE_CURRENCY: Decimal(1), **{f["subject"]: f["value"] for f in summary.fx}}
+    quotes = {}
+    for (provider, symbol), points in raw.items():
+        # Other providers' points are not all numbers (dividend records carry JSON): read the exchange's only.
+        found = evidence.latest(points, as_of=as_of.date(), max_age_days=evidence.QUOTE_MAX_AGE_DAYS) \
+            if provider == "twse" else None
+        if found is not None:
+            quotes[("TW", symbol)] = (found[0], "TWD", found[1])
     view = LedgerView(as_of, summary, [s.record for s in states], rates, links, series, news,
-                      record_sources={s.record.record_id: s.source for s in states}, sales=sales, sales_since=sales_since)
+                      record_sources={s.record.record_id: s.source for s in states}, sales=sales, sales_since=sales_since,
+                      quotes=quotes)
     view.aliases = _aliases(view)
     view.owner_aliases = owner_aliases(view)
     sources = {row["source"] for row in summary.freshness} | {row["source"] for row in summary.sync}

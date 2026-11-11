@@ -876,6 +876,19 @@ def _timeline(view: LedgerView, pay: list[future_income.Inflow]) -> list[dict[st
     return sorted(items, key=lambda item: item["date"])
 
 
+def option_text(i: future_income.Inflow) -> str:
+    """A stock option in words: its shares, exercise price, the close it is valued at (with its day) and expiry."""
+    unit = "NT$" if i.currency == "TWD" else f"{i.currency} "
+    text = f"스톡옵션 {i.quantity:,f}주(행사가 {unit}{i.exercise_price:,f}"
+    text += ", 시세 없음: 입력 추정액" if i.price is None else f", {i.priced_on:%m/%d} 종가 {unit}{i.price:,f} 기준"
+    return text + ("" if i.expires_on is None else f", {i.expires_on:%Y.%m.%d} 만료") + ")"
+
+
+def option_status(i: future_income.Inflow) -> str:
+    """Whether a stock option can be exercised now, from when it can, or whether its expiry needs confirming."""
+    return "지금 행사 가능" if i.exercisable else "행사·만료 확인 필요" if i.overdue else f"{i.paid_on:%Y.%m} 행사 시작"
+
+
 def _pay_rows(pay: list[future_income.Inflow], horizon: date) -> list[dict[str, Any]]:
     """Expected pay as timeline rows. The tranches of one payment (same day, category, certainty and owner,
     entered as separate records because each part becomes usable on its own date, data contract) are one row
@@ -885,8 +898,11 @@ def _pay_rows(pay: list[future_income.Inflow], horizon: date) -> list[dict[str, 
     for i in pay:
         if i.overdue or i.paid_on > horizon:
             continue
-        label = (f"{PAY_LABELS.get(i.category, '예정 수입')}({CERTAINTY_LABELS[i.certainty]})"
+        label = (f"{'스톡옵션' if i.option else PAY_LABELS.get(i.category, '예정 수입')}({CERTAINTY_LABELS[i.certainty]})"
                  + ("" if i.owner_id == "self" else "·배우자"))
+        if i.option:
+            # The overview has no pay table (Codex review 2026-11-11): its timeline row says what the option is.
+            label += f" · {option_status(i)} · {option_text(i).removeprefix('스톡옵션 ')}"
         row = rows.setdefault((i.paid_on, label), {"date": i.paid_on, "label": label, "amount": Decimal(0), "gross": Decimal(0),
                                                    "kind": "inflow", "category": i.category, "count": 0, "usable": []})
         row["count"] += 1

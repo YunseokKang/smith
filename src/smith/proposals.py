@@ -1323,7 +1323,8 @@ def _retirement_track(facts: dict[str, Any], home: dict[str, Any] | None) -> Tra
     # allocation was applied to the spouse's pay).
     own_plan = home is None or home.get("owner", "self") == "self"
     home_goal = own_plan and any(g["category"] == "home" and g["target_date"] > facts["today"] for g in facts["summary"].goals)
-    share = future_income.retirement_share(facts["pay"], home=home if own_plan else None, home_goal=home_goal)
+    share = future_income.retirement_share(facts["pay"], home=home if own_plan else None, home_goal=home_goal,
+                                           today=facts["today"])
     birth = facts["tax"]["birth_year"]
     added = None if birth is None else tax.set_aside(share, int(birth) + head["retire_age"])
     need = head["outside_need"]

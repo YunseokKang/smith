@@ -219,7 +219,35 @@ def _evidence(args: argparse.Namespace) -> int:
         print(f"{provider}: {len(points)} observation(s) fetched, {added} new or revised")
         _record_sync(args.db, attempted_at, "success", source=provider)
     failed += _sync_feeds(args.db)
+    _sync_quotes(args.db)   # Recorded in sync_runs; a report names it by its price date, not as a rates failure.
     return 1 if failed else 0
+
+
+def _sync_quotes(db: Path) -> None:
+    """Taiwan Stock Exchange closes for the symbols active ledger records name with market TW (a grant's price,
+    report design §15 스톡옵션). Nothing is requested when no record names one."""
+    from smith import evidence
+    from smith.records import Status
+
+    if not db.exists():
+        return
+    attempted_at = datetime.now(timezone.utc)
+    with closing(ledger.connect_read_only(db)) as conn:
+        symbols = {s.record.fields["symbol"] for s in ledger.valued_states(conn, as_of=attempted_at, known_at=attempted_at)
+                   if s.record.status is Status.ACTIVE and s.record.fields.get("market") == "TW"
+                   and s.record.fields.get("symbol")}
+    if not symbols:
+        return
+    try:
+        points = evidence.fetch_twse(symbols)
+        with closing(ledger.connect(db)) as conn:
+            added = ledger.store_evidence(conn, points, retrieved_at=datetime.now(timezone.utc))
+    except evidence.EvidenceError as error:
+        print(f"twse: failed ({error.code}). Nothing stored.")
+        _record_sync(db, attempted_at, "failure", error.code, source="twse")
+        return
+    print(f"twse: {len(points)} close(s) fetched, {added} new or revised")
+    _record_sync(db, attempted_at, "success", source="twse")
 
 
 def _sync_feeds(db: Path) -> int:

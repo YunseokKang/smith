@@ -6,7 +6,7 @@ separately and mark the summary incomplete; they are never counted as zero.
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, localcontext
 from typing import Any
 
@@ -82,6 +82,7 @@ def _build(conn: sqlite3.Connection, summary: Summary) -> Summary:
     states = [s for s in ledger.valued_states(conn, as_of=as_of, known_at=known_at)
               if s.record.status is Status.ACTIVE]
     rates = _load_observations(conn, summary)
+    _add_reference_rates(conn, summary, rates, {s.record.fields.get("currency") for s in states})
     by_id = {s.record.record_id: s.record for s in states}
     for state in states:
         record = state.record
@@ -117,6 +118,29 @@ def _load_observations(conn: sqlite3.Connection, summary: Summary) -> dict[str, 
         if stale:
             summary.warnings.append(f"{subject} {metric} {currency} is older than {_STALE_FX.days} days")
     return rates
+
+
+def _add_reference_rates(conn: sqlite3.Connection, summary: Summary, rates: dict[str, Decimal],
+                         currencies: set[str | None]) -> None:
+    """A currency a record uses but no recorded rate covers takes the Bank of Korea reference rate (evidence.FX_SERIES,
+    report design §15 스톡옵션), added to `summary.fx` so the summary, the view and every reader convert with one set
+    of rates (Codex review 2026-11-11: the view had the rate and the summary did not, so the cash flow read as
+    unknown). Nothing is read when no record needs it."""
+    from smith import evidence  # Here: evidence is not needed by most summaries.
+
+    needed = sorted(c for c in currencies if c in evidence.FX_SERIES and c not in rates)
+    if not needed:
+        return
+    raw = ledger.load_evidence(conn, known_at=summary.known_at)
+    for currency in needed:
+        spec = evidence.FX_SERIES[currency]
+        found = evidence.latest(raw.get((spec.provider, spec.series_id)), as_of=summary.as_of.date(),
+                                max_age_days=spec.max_age_days)
+        if found is None or found[0] <= 0:
+            continue
+        rates[currency] = found[0]
+        summary.fx.append({"subject": currency, "metric": "fx_mid_rate", "currency": BASE_CURRENCY, "value": found[0],
+                           "observed_at": datetime.combine(found[1], time(), tzinfo=timezone.utc), "source": spec.provider})
 
 
 def _mark_incomplete(summary: Summary, area: str) -> None:

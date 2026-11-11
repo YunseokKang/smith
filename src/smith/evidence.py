@@ -93,6 +93,19 @@ SERIES = (
     *INDEX_SERIES,
 )
 
+# Exchange rates for currencies the broker does not report (payload.load_view adds them to the view's rates when
+# no recorded rate exists). Fetched with the provider's series, but not macro evidence: describe() leaves them out
+# of the rates table and the model's evidence. Code checked against ECOS StatisticItemList on 2026-11-11
+# (731Y001 0000031 "원/대만달러", KRW per 1 TWD: 40.99 on 2026-11-02). Optional: a failure leaves the rate unknown.
+FX_SERIES = {
+    "TWD": SeriesSpec("ecos", "731Y001/0000031", "KRW per TWD (BOK reference rate)", "KRW",
+                      "https://ecos.bok.or.kr/ (731Y001 0000031)", 10, required=False),
+}
+# Taiwan Stock Exchange daily closes of every listed stock, latest trading day (no key). Read for the symbols a
+# ledger record names with market TW (cli._sync_quotes): a grant's price, never a holding's.
+TWSE_DAILY_URL = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
+QUOTE_MAX_AGE_DAYS = 10
+
 # url -> (status, body bytes)
 Getter = Callable[[str], tuple[int, bytes]]
 Point = tuple[str, str, date, str, date | None]  # provider, series_id, observed_on, value, published_on
@@ -128,7 +141,7 @@ def fetch_provider(provider: str, api_key: str, *, start: date, end: date,
     """
     fetch = _fetch_ecos if provider == "ecos" else _fetch_fred
     points: list[Point] = []
-    for spec in (s for s in SERIES if s.provider == provider):
+    for spec in (s for s in (*SERIES, *FX_SERIES.values()) if s.provider == provider):
         try:
             series = fetch(spec, api_key, start, end, get)
         except (EvidenceError, KeyError, TypeError, ValueError, AttributeError) as error:
@@ -180,6 +193,40 @@ def _fetch_fred(spec: SeriesSpec, key: str, start: date, end: date, get: Getter)
     # publication date is recorded.
     return [("fred", spec.series_id, date.fromisoformat(row["date"]), canonical_decimal(row["value"]), None)
             for row in payload["observations"] if row["value"] != "."]
+
+
+def fetch_twse(symbols: set[str], *, get: Getter = urllib_get) -> list[Point]:
+    """The latest daily close of each of `symbols` on the Taiwan Stock Exchange, as ("twse", symbol, day, close)
+    points; a symbol the exchange does not list that day (suspended, delisted) is simply absent.
+
+    Raises:
+        EvidenceError: the request failed or the response was malformed.
+    """
+    status, body = get(TWSE_DAILY_URL)
+    if status != 200:
+        raise EvidenceError("twse", f"http-{status}")
+    try:
+        rows = json.loads(body.decode("utf-8"))
+        points = []
+        for row in rows:
+            if row.get("Code") not in symbols or row.get("ClosingPrice") in (None, "", "--"):
+                continue
+            stamp = str(row["Date"])   # Republic of China calendar, e.g. 1151110 is 2026-11-10.
+            day = date(int(stamp[:-4]) + 1911, int(stamp[-4:-2]), int(stamp[-2:]))
+            points.append(("twse", row["Code"], day, canonical_decimal(row["ClosingPrice"].replace(",", "")), None))
+    except (UnicodeDecodeError, ValueError, KeyError, TypeError, AttributeError):
+        raise EvidenceError("twse", "invalid-response") from None
+    return points
+
+
+def latest(series: dict[date, tuple[str, date | None]] | None, *, as_of: date,
+           max_age_days: int) -> tuple[Decimal, date] | None:
+    """The newest value on or before `as_of` that is at most `max_age_days` old, with its day."""
+    days = [day for day in (series or {}) if as_of - timedelta(days=max_age_days) <= day <= as_of]
+    if not days:
+        return None
+    day = max(days)
+    return Decimal(series[day][0]), day
 
 
 def _json(response: tuple[int, bytes]) -> tuple[int, dict[str, Any]]:

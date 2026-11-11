@@ -30,7 +30,7 @@ from smith.holdings import STANCES
 from smith.proposals import Track
 from smith.realestate import MIN_BASIS
 from smith.report_data import (CATEGORY_LABELS, CERTAINTY_LABELS, COMPONENT_LABELS, GROUP_LABELS, PAY_LABELS,
-                               QUANTITY_CHANGES)
+                               QUANTITY_CHANGES, option_status, option_text)
 
 # Design tokens (docs/design-reference.md).
 CANVAS, SOFT, STRONG, DARK, DARK_RAISED = "#ffffff", "#f7f7f7", "#eef0f3", "#0a0b0d", "#16181c"
@@ -1931,11 +1931,15 @@ def _future_income(data: dict[str, Any], *, overview: bool = False) -> str:
     rows = []
     for i in items:
         what = PAY_LABELS.get(i.category, "예정 수입")
-        if i.shares:
+        if i.option:
+            what = option_text(i)
+        elif i.shares:
             what += f" {i.quantity:,f}주" + ("" if i.price is None else f"(주가 {i.price:,f} 기준)")
         elif i.in_stock:
             what += "(자사주로 지급)"
-        rows.append([f"{i.paid_on:%Y.%m}", what, "지급 확인 필요" if i.overdue else CERTAINTY_LABELS[i.certainty],
+        when = option_status(i) if i.option and not i.overdue else f"{i.paid_on:%Y.%m}"
+        rows.append([when, what, option_status(i) if i.option and i.overdue
+                     else "지급 확인 필요" if i.overdue else CERTAINTY_LABELS[i.certainty],
                      _short(i.gross), _short(i.net),
                      TAX_BASIS_TEXT[i.withholding_basis] + ("" if i.usable_from == i.paid_on else f", {i.usable_from:%Y.%m}부터 사용")])
     # The overview's timeline lists every payment already; the table stays for the original full report only.
@@ -1944,9 +1948,11 @@ def _future_income(data: dict[str, Any], *, overview: bool = False) -> str:
         # A known 0% now (no securities yet) still warns; only unknown shares are skipped.
         if stock["share_now"] is None or stock["share_with_grants"] is None or not stock["granted"]:
             continue
+        received = ("스톡옵션을 행사해 주식으로 보유하면(행사 대금은 현금으로, 세금만큼은 주식을 팔아 낸다고 보면)" if stock.get("option")
+                    else "예정된 주식 보상과 자사주로 받는 성과급(기준, 세후)을 받으면")
         inner += (f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin-top:10px">회사 주식 집중: '
-                  f'{escape(stock.get("name") or stock["symbol"])}의 비중은 지금 주식의 <b>{_pct(stock["share_now"], 0)}</b>이고, 예정된 주식 보상과 자사주로 '
-                  f'받는 성과급(기준, 세후)을 받으면 <b>{_pct(stock["share_with_grants"], 0)}</b>가 됩니다. 받는 대로 일부를 분산하는 '
+                  f'{escape(stock.get("name") or stock["symbol"])}의 비중은 지금 주식의 <b>{_pct(stock["share_now"], 0)}</b>이고, '
+                  f'{received} <b>{_pct(stock["share_with_grants"], 0)}</b>가 됩니다. 받는 대로 일부를 분산하는 '
                   "원칙을 정해 두시길 권합니다.</div>")
     return _section("앞으로 들어올 돈", lead, inner)
 

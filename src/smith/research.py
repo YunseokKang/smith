@@ -121,7 +121,7 @@ Method:
 - If you cannot find reliable information for a topic, list it in gaps instead of guessing.
 Output: at most {PER_HOLDING_ITEMS} items per topic, the most decision-relevant first, each tagged with its
 topic ref (H1, H2, ...)."""
-_MARKET_LABELS = {"KR": "한국", "US": "미국", "other": "해외"}
+_MARKET_LABELS = {"KR": "한국", "US": "미국", "TW": "대만", "other": "해외"}
 
 
 @dataclass(frozen=True)

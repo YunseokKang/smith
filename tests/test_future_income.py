@@ -263,5 +263,193 @@ class FutureIncomeTests(unittest.TestCase):
         self.assertTrue(any(i["kind"] == "inflow" for i in data["timeline"]))
 
 
+def option(record_id="opt", start="2026-01-01", **extra):
+    """A synthetic stock option on a Taiwan-listed stock: 1,000 shares at NT$100, estimate NT$50,000."""
+    fields = dict(category="stock_compensation", direction="inflow", currency="TWD", amount="50000", frequency="once",
+                  start_date=start, certainty="expected", amount_basis="gross", symbol="0001", market="TW",
+                  quantity="1000", exercise_price="100")
+    return rec(record_id, "cashflow", **{**fields, **extra})
+
+
+TWD_RATE = ("ecos", "731Y001/0000031", date(2026, 10, 16), "41", None)
+
+
+class StockOptionTests(unittest.TestCase):
+    """Report design §15 (스톡옵션): an option is worth what exercising it today earns, priced by the exchange close."""
+
+    def inflows(self, records, points=(TWD_RATE,)):
+        conn = load(records)
+        self.addCleanup(conn.close)
+        ledger.store_evidence(conn, list(points), retrieved_at=AT - timedelta(hours=1))
+        view = load_view(conn, as_of=AT, known_at=AT)
+        return view, {i.record_id: i for i in future_income.inflows(view, salary=SALARY)}
+
+    def test_import_rules(self):
+        cases_ = {
+            "price on a bonus": (pay("b", "bonus", "2027-01-01", "1", "confirmed", exercise_price="1"), "exercise_price"),
+            "expiry without a price": (grant("g", "2027-01-01", 1, "confirmed", expires_on="2030-01-01"), "expires_on"),
+            "expiry before the first day": (option(expires_on="2025-12-31"), "expires_on"),
+            "after-tax option": (option(amount_basis="net"), "amount_basis"),
+        }
+        for name, (record, field) in cases_.items():
+            with self.subTest(name), self.assertRaises(ImportRejected) as raised:
+                load([record])
+            self.assertTrue(any(f".{field}:" in p for p in raised.exception.problems), raised.exception.problems)
+
+    def test_valued_at_the_close_above_the_exercise_price_and_due_today(self):
+        close = ("twse", "0001", date(2026, 10, 16), "250", None)
+        view, got = self.inflows([option()], points=(TWD_RATE, close))
+        item = got["opt"]
+        self.assertEqual(view.rates["TWD"], Decimal(41))
+        self.assertEqual((item.gross, item.price, item.priced_on), (Decimal(1000 * 150 * 41), Decimal(250), date(2026, 10, 16)))
+        self.assertEqual((item.paid_on, item.usable_from, item.overdue, item.withholding_basis),
+                         (AT.date(), AT.date(), False, "estimated"))
+        self.assertTrue(item.option and item.shares)
+        # Below the exercise price exercising earns nothing; it is never negative.
+        _, below = self.inflows([option()], points=(TWD_RATE, close[:3] + ("80", None)))
+        self.assertEqual(below["opt"].gross, Decimal(0))
+        # A close older than ten days is stale: the entered estimate stands in, in won at the rate.
+        _, stale = self.inflows([option()], points=(TWD_RATE, ("twse", "0001", date(2026, 10, 1), "250", None)))
+        self.assertEqual((stale["opt"].gross, stale["opt"].price), (Decimal(50000 * 41), None))
+        # Without the rate the value is unknown, never zero.
+        _, no_rate = self.inflows([option()], points=(close,))
+        self.assertEqual((no_rate["opt"].gross, no_rate["opt"].withholding_basis), (None, "unknown"))
+        # Other providers store JSON, not numbers (dividends, fundamentals): the view reads only the exchange's
+        # points as prices (a real-ledger dry run on 2026-11-11 failed here before).
+        dividend = ("dart-dividend", "KR:005930", date(2026, 10, 15), '{"per_share": "361"}', None)
+        view, _ = self.inflows([option()], points=(TWD_RATE, close, dividend))
+        self.assertEqual(view.quotes, {("TW", "0001"): (Decimal(250), "TWD", date(2026, 10, 16))})
+
+    def test_due_from_its_first_exercise_day_and_overdue_only_after_expiry(self):
+        _, got = self.inflows([option("later", start="2027-03-01"), option("expired", expires_on="2026-10-01"),
+                               option("open", expires_on="2030-12-31")])
+        self.assertEqual((got["later"].paid_on, got["later"].overdue, got["later"].exercisable),
+                         (date(2027, 3, 1), False, False))
+        self.assertEqual((got["expired"].overdue, got["expired"].exercisable), (True, False))
+        self.assertEqual((got["open"].paid_on, got["open"].overdue, got["open"].expires_on, got["open"].exercisable),
+                         (AT.date(), False, date(2030, 12, 31), True))
+        # The first exercise day itself is exercisable.
+        _, today = self.inflows([option("today", start=AT.date().isoformat())])
+        self.assertTrue(today["today"].exercisable)
+
+    def test_a_scenario_moves_the_share_price_not_the_gain(self):
+        """Codex review 2026-11-11: an option first exercisable in a year, NT$105 against NT$100, is worth nothing
+        if the price falls 10% by then; growing today's gain by -10% kept 90% of it."""
+        close = ("twse", "0001", date(2026, 10, 16), "105", None)
+        _, got = self.inflows([option("later", start="2027-10-17", certainty="confirmed")], points=(TWD_RATE, close))
+        item = got["later"]
+        horizon = date(2029, 10, 17)
+        goal = lambda rate: future_income.at_goal([item], owner_id="self", scenario="adverse", horizon=horizon,
+                                                  today=AT.date(), rate=Decimal(rate))["value"]
+        self.assertEqual(goal("-0.10"), Decimal(0))
+        # Up 10% a year the price is 115.5 at exercise: the gain triples (15.5 / 5) and then grows as cash.
+        self.assertAlmostEqual(future_income.option_at_exercise(item, rate=Decimal("0.10"), today=AT.date()),
+                               item.net * Decimal("15.5") / 5, places=2)
+        self.assertAlmostEqual(goal("0.10"), item.net * Decimal("3.1") * Decimal("1.1") ** 2, places=0)
+        # Under water today (95 against 100) but above it by the first exercise day: 104.5 at +10% a year earns
+        # 4.5 a share, after the assumed marginal tax since nothing is earned today (Codex review, fourth pass).
+        _, under = self.inflows([option("later", start="2027-10-17", certainty="confirmed")],
+                                points=(TWD_RATE, close[:3] + ("95", None)))
+        kept = 1 - tax.ASSUMED_MARGINAL_RATE * Decimal("1.1") - tax.PAYROLL_INSURANCE_RATE
+        self.assertAlmostEqual(future_income.option_at_exercise(under["later"], rate=Decimal("0.10"), today=AT.date()),
+                               1000 * Decimal("4.5") * 41 * kept, places=2)
+        self.assertEqual(future_income.option_at_exercise(under["later"], rate=Decimal("-0.10"), today=AT.date()), 0)
+        # Exercisable today, the scenario starts from today's gain as before.
+        _, now = self.inflows([option(certainty="confirmed")], points=(TWD_RATE, close))
+        self.assertEqual(future_income.option_at_exercise(now["opt"], rate=Decimal("-0.10"), today=AT.date()),
+                         now["opt"].net)
+
+    def test_only_an_expired_option_asks_whether_it_was_exercised(self):
+        """Codex review 2026-11-11 found the checklist read the first exercise day as a missed payment day."""
+        cases_ = {"exercisable": ([option()], set()), "not yet": ([option(start="2027-03-01")], set()),
+                  "expired": ([option(expires_on="2026-10-01")], {"option-expired"}),
+                  "expired and a late bonus": ([option(expires_on="2026-10-01"),
+                                                pay("late", "bonus", "2026-09-01", "1000000", "confirmed")], {"pay-overdue"})}
+        for name, (records, expected) in cases_.items():
+            with self.subTest(name):
+                view, _ = self.inflows(records)
+                keys = {r.key for r in checklist.requests(view, {"annual_gross_salary": int(SALARY)})}
+                self.assertEqual(keys & {"pay-overdue", "option-expired"}, expected)
+        view, _ = self.inflows(cases_["expired and a late bonus"][0])
+        text = next(r for r in checklist.requests(view, {}) if r.key == "pay-overdue").title
+        self.assertIn("2건(만료일이 지난 스톡옵션 1건 포함", text)
+
+    def test_retirement_and_concentration_read_the_option_as_exercised(self):
+        """Codex review 2026-11-11: retirement grew today's gain from the exercise day only, and the concentration
+        added the after-tax gain alone, not the shares the exercise price buys."""
+        close = ("twse", "0001", date(2026, 10, 16), "105", None)
+        _, got = self.inflows([option("later", start="2036-10-17")], points=(TWD_RATE, close))
+        item = got["later"]
+        share = future_income.retirement_share([item], home=None, home_goal=False, today=AT.date())
+        self.assertEqual(share, [(item.usable_from, future_income.option_at_exercise(item, rate=tax.REAL_RETURN,
+                                                                                      today=AT.date()))])
+        self.assertGreater(share[0][1], item.net * 3)   # Ten years at 3%: 105 -> ~141, a gain of ~41 against 5.
+        # Kept after exercise: the shares at today's price less the tax (exercise price paid in cash).
+        _, now = self.inflows([option()], points=(TWD_RATE, ("twse", "0001", date(2026, 10, 16), "250", None)))
+        held = future_income.held_after(now["opt"])
+        self.assertEqual(held, Decimal(1000 * 250 * 41) - now["opt"].withholding)
+        self.assertEqual(future_income.held_after(item), item.gross * 105 / 5 - item.withholding)
+        # Under water it leaves nothing above the exercise price: its after-tax gain (zero).
+        _, under = self.inflows([option()], points=(TWD_RATE, ("twse", "0001", date(2026, 10, 16), "80", None)))
+        self.assertEqual(future_income.held_after(under["opt"]), under["opt"].net)
+
+    def test_an_expired_unconfirmed_option_does_not_raise_the_years_tax(self):
+        """Codex review 2026-11-11: it was exercised at an unknown gain or lapsed; today's estimate must not stack."""
+        close = ("twse", "0001", date(2026, 10, 16), "250", None)
+        bonus = pay("bonus-dec", "bonus", "2026-12-24", "10000000", "confirmed")
+        _, alone = self.inflows([bonus], points=(TWD_RATE, close))
+        _, expired = self.inflows([bonus, option("expired", expires_on="2026-10-01")], points=(TWD_RATE, close))
+        self.assertEqual(expired["bonus-dec"].net, alone["bonus-dec"].net)
+        # One that can still be exercised is assumed exercised today and does raise the later bonus's bracket.
+        _, open_ = self.inflows([bonus, option("open")], points=(TWD_RATE, close))
+        self.assertLess(open_["bonus-dec"].net, alone["bonus-dec"].net)
+
+    def test_the_summary_converts_with_the_reference_rate(self):
+        """Codex review 2026-11-11: the view had the TWD rate and the summary did not, so the cash flow was unknown."""
+        view, _ = self.inflows([*RECORDS, option()])
+        self.assertNotIn("cash_flow", view.summary.incomplete_areas)
+        self.assertEqual([(f["subject"], f["value"], f["source"]) for f in view.summary.fx], [("TWD", Decimal(41), "ecos")])
+        # Without a record in that currency the series is not read and no rate is added.
+        bare, _ = self.inflows(RECORDS)
+        self.assertEqual(bare.summary.fx, [])
+        # A stale reference rate is no rate: the cash flow is unknown again, never converted at an old rate.
+        stale, _ = self.inflows([*RECORDS, option()], points=(TWD_RATE[:2] + (date(2026, 9, 1), "41", None),))
+        self.assertIn("cash_flow", stale.summary.incomplete_areas)
+
+    def test_the_report_and_the_model_read_it_as_an_option(self):
+        close = ("twse", "0001", date(2026, 10, 16), "250", None)
+        conn = load([*RECORDS, option(expires_on="2030-12-31")])
+        self.addCleanup(conn.close)
+        ledger.store_evidence(conn, [TWD_RATE, close], retrieved_at=AT - timedelta(hours=1))
+        view = load_view(conn, as_of=AT, known_at=AT)
+        found = future_income.review(view, future_income.inflows(view, salary=SALARY))
+        item = next(i for i in future_income.context(view, found)["items"] if i.get("kind") == "stock_option")
+        self.assertEqual((item["exercise_price"], item["valued_at"], item["price_currency"], item["exercisable_now"],
+                          item["expires_on"], item["paid_on"]), ("100", "250", "TWD", True, "2030-12-31", "2026-10-17"))
+        html = render(build_report(conn, as_of=AT, known_at=AT, baseline=None, kind="monday",
+                                   household={"annual_gross_salary": int(SALARY)}))[1]
+        self.assertIn("스톡옵션 1,000주(행사가 NT$100, 10/16 종가 NT$250 기준, 2030.12.31 만료)", html)
+        self.assertIn("지금 행사 가능", html)
+        # Before its first exercise day the row and the model say when it starts, not that it can be exercised.
+        later = load([*RECORDS, option("later", start="2027-03-01")])
+        self.addCleanup(later.close)
+        ledger.store_evidence(later, [TWD_RATE, close], retrieved_at=AT - timedelta(hours=1))
+        view = load_view(later, as_of=AT, known_at=AT)
+        found = future_income.review(view, future_income.inflows(view, salary=SALARY))
+        item = next(i for i in future_income.context(view, found)["items"] if i.get("kind") == "stock_option")
+        self.assertFalse(item["exercisable_now"])
+        html = render(build_report(later, as_of=AT, known_at=AT, baseline=None, kind="monday",
+                                   household={"annual_gross_salary": int(SALARY)}))[1]
+        self.assertIn("2027.03 행사 시작", html)
+        self.assertNotIn("지금 행사 가능", html)
+        # The overview (the real Monday letter) has no pay table: its timeline row carries the same facts.
+        html = render(build_report(conn, as_of=AT, known_at=AT, baseline=None, kind="overview",
+                                   household={"annual_gross_salary": int(SALARY)}))[1]
+        self.assertIn("스톡옵션(예상) · 지금 행사 가능 · 1,000주(행사가 NT$100, 10/16 종가 NT$250 기준, 2030.12.31 만료)", html)
+        # The exchange rate is not macro evidence: it stays out of the rates table and the model's evidence.
+        self.assertNotIn("KRW per TWD", html)
+        self.assertFalse(any("731Y001/0000031" in str(row["spec"].series_id) for row in view.evidence))
+
+
 if __name__ == "__main__":
     unittest.main()

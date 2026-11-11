@@ -196,6 +196,10 @@ _KIND_FIELDS: dict[Kind, dict[str, _Field]] = {
         "symbol": _Field(_symbol, nullable=True),
         "market": _Field(_enum(MARKETS), nullable=True),
         "quantity": _Field(_decimal(positive=True), nullable=True),
+        # A stock option (stock_compensation only): the price per share paid on exercise, in `currency`, and the
+        # last day it can be exercised when known. `start_date` is then the first day it can be exercised.
+        "exercise_price": _Field(_decimal(positive=True), nullable=True),
+        "expires_on": _Field(_date, nullable=True),
         # When the money can actually be used, if later than the payment (shares held under a lock-up).
         "available_from": _Field(_date, nullable=True),
         # Paid or not, stated by the client: the actual payment day and taxable (gross) amount once received.
@@ -489,6 +493,16 @@ def _check_compensation(fields: dict[str, str | None], path: str, problems: _Pro
                          + ("" if name == "quantity" else " or a bonus paid in shares"))
     if category == "bonus" and (fields.get("symbol") is None) != (fields.get("market") is None):
         problems.add(f"{path}.market", "a bonus paid in shares needs both symbol and market")
+    for name in ("exercise_price", "expires_on"):
+        if fields.get(name) is not None and not shares:
+            problems.add(f"{path}.{name}", "is only allowed for category stock_compensation (a stock option)")
+    if fields.get("expires_on") is not None and fields.get("exercise_price") is None:
+        problems.add(f"{path}.expires_on", "is only allowed for a stock option (with exercise_price)")
+    elif fields.get("expires_on") and fields.get("start_date") and fields["expires_on"] < fields["start_date"]:
+        problems.add(f"{path}.expires_on", "must not be before start_date (the first exercise day)")
+    if fields.get("exercise_price") is not None and fields.get("amount_basis") == "net":
+        # The quantity of an after-tax grant is the shares kept; an option's gain is taxed when exercised.
+        problems.add(f"{path}.amount_basis", "must be gross for a stock option")
     if compensation and fields.get("frequency") not in (None, "once"):
         problems.add(f"{path}.frequency", f"must be once for category {category}: enter each payment as its own record")
     usable, start = fields.get("available_from"), fields.get("start_date")

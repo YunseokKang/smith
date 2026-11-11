@@ -211,11 +211,22 @@ def _expected_pay(view: LedgerView, household: dict[str, Any], today: date) -> R
 def _pay_overdue(view: LedgerView, household: dict[str, Any], today: date) -> Request | None:
     """Pay whose day has passed without a stated receipt is left out of the plans and of the balances alike
     until the client says what happened."""
-    late = [r for r in _unpaid(view) if r.fields["start_date"] <= today.isoformat()]
+    # A stock option is paid on the day the client exercises it: only its expiry makes it late (report design §15).
+    late = [r for r in _unpaid(view) if not r.fields.get("exercise_price") and r.fields["start_date"] <= today.isoformat()]
+    expired = [r for r in _unpaid(view) if r.fields.get("exercise_price") and r.fields.get("expires_on")
+               and r.fields["expires_on"] < today.isoformat()]
+    if expired and not late:
+        return Request(
+            "option-expired", "must", f"만료일이 지난 스톡옵션 {len(expired)}건을 행사하셨는지, 행사했다면 행사일과 행사 차익(세전)",
+            "행사했는지 소멸했는지 기록이 없어 계획에서 뺐고, 같은 해 다른 보상의 세금 구간 계산에도 넣지 않았습니다.",
+            "cashflow 레코드의 다음 revision: 행사했으면 payment_status=received, received_on(행사일), taxable_amount(행사 차익), "
+            "소멸했으면 status=closed. 행사로 받은 주식은 자산에 반영")
     if not late:
         return None
+    options = f"(만료일이 지난 스톡옵션 {len(expired)}건 포함: 행사했는지 소멸했는지)" if expired else ""
     return Request(
-        "pay-overdue", "must", f"지급 예정일이 지난 성과급·주식 보상 {len(late)}건을 받으셨는지, 받았다면 실제 지급일과 과세 금액",
+        "pay-overdue", "must", f"지급 예정일이 지난 성과급·주식 보상 {len(late) + len(expired)}건{options}을 받으셨는지, "
+                               "받았다면 실제 지급일과 과세 금액",
         "받았다는 기록이 없어 계획에서 뺐습니다. 이미 받으셨다면 같은 해 뒤에 받는 보상의 세금 구간 계산에도 빠져 있습니다.",
         "cashflow 레코드의 다음 revision: payment_status=received, received_on, taxable_amount(세전 과세 금액). "
         "지급이 미뤄졌다면 start_date를, 취소됐다면 status=closed로 갱신. 받은 돈은 현금·주식 자산에 반영")

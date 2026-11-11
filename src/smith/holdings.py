@@ -29,7 +29,7 @@ TRADABLE = ("immediate", "days")
 # leaves the PC in a research query or a model payload (the symbol and market do).
 PUBLIC_NAME_SOURCES = ("toss",)
 _CASH_LIKE = ("cash", "deposit", "installment_savings")
-_MARKET_OVERSEAS = {"KR": False, "US": True, "other": True}
+_MARKET_OVERSEAS = {"KR": False, "US": True, "TW": True, "other": True}
 
 
 # Index funds recognised by symbol (an explicit, reviewable list; extend it as holdings change). Broad funds

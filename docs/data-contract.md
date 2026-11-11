@@ -11,8 +11,8 @@
   정수부 최대 15자리, 소수부 최대 8자리. 천 단위 구분 쉼표는 쓰지 않는다.
 - 같은 객체 안의 중복 키, 알 수 없는 필드는 거절한다.
 - 금액에는 부호를 쓰지 않는다. `-0`처럼 0에 붙은 음수 부호도 거절한다.
-- 통화는 Smith가 평가할 수 있는 목록만 허용한다: `KRW`, `USD`, `EUR`, `JPY`, `CNY`.
-  늘릴 때는 환율 출처와 함께 추가한다.
+- 통화는 Smith가 평가할 수 있는 목록만 허용한다: `KRW`, `USD`, `EUR`, `JPY`, `CNY`, `TWD`.
+  늘릴 때는 환율 출처와 함께 추가한다. `TWD`는 기록된 환율이 없으면 한국은행 기준환율(ECOS 731Y001 0000031, 10일 이내)을 쓴다.
 - 시각은 UTC offset이 있는 ISO 8601(`2026-09-01T09:00:00+09:00`), 날짜는 `YYYY-MM-DD`.
 - ID(`import_id`, owner `id`, record `id`)는 1~64자의 영문·숫자·`.`·`_`·`-`. 이름·계좌번호를 넣지 않는다.
 - 문제는 한 번에 모두 보고하며, 하나라도 있으면 아무것도 저장하지 않는다.
@@ -70,7 +70,7 @@
 - `account_type`(계좌·세제 포장): `bank`, `brokerage`, `isa`, `pension_savings`(연금저축), `irp`, `dc`,
   `insurance`, `crypto_exchange`, `none`(부동산·보증금처럼 계좌가 없음), `other`
 - 선택 필드(종목 단위 세부): `symbol`(영문·숫자·`.`·`-` 20자 이하), `instrument_name`(100자 이하),
-  `market`(`KR`, `US`, `other`), `quantity`, `unit_price`, `average_cost`, `value_after_costs`
+  `market`(`KR`, `US`, `TW`(대만증권거래소), `other`), `quantity`, `unit_price`, `average_cost`, `value_after_costs`
   (세금·수수료 공제 후 평가액). 토스 동기화가 채우며 수동 입력에도 쓸 수 있다. `unit_price`(현재가)와
   `average_cost`(평균 매입 단가)는 **1주당, 그 자산의 `currency` 기준**이다(미국 주식이면 달러). 수익률
   `(unit_price − average_cost) / average_cost`는 환율 없이 계산하고, 원화 미실현 손익만 환율이 있을 때 계산한다.
@@ -145,8 +145,15 @@
   - `amount_basis`(필수): `gross`(세전) 또는 `net`(세후 실수령). 이 두 category에만 쓴다. `net`이면 세전 금액은 미상으로 두며,
     같은 해 그 뒤에 받는 보상의 세율 구간도 정할 수 없어 세후가 미상이 된다. 세후로 입력한 주식 보상의 `quantity`는 세금 뒤 실제로
     받을 주식 수다.
-  - `stock_compensation`은 `symbol`, `market`, `quantity`(지급 주식 수)가 필수다. `amount`는 입력 시점의 원화 추정액이며,
-    원장에 같은 시장·심볼·통화의 보유 종목 단가가 있으면 Smith가 가장 최근 단가 × 수량으로 다시 평가한다.
+  - `stock_compensation`은 `symbol`, `market`, `quantity`(지급 주식 수)가 필수다. `amount`는 입력 시점의 그 통화 추정액이며,
+    원장에 같은 시장·심볼·통화의 보유 종목 단가가 있으면 Smith가 가장 최근 단가 × 수량으로 다시 평가한다. 보유가 없는 대만 상장
+    종목(`market=TW`, 통화 `TWD`)은 Smith가 읽은 대만증권거래소 종가(10일 이내)로 평가한다.
+  - **스톡옵션**(`stock_compensation`만): `exercise_price`(1주당 행사가, 레코드 통화)를 적으면 옵션이다. 가치는 오늘 행사할 때의
+    세전 차익 `quantity × (종가 − 행사가)`(음수면 0)이고, `amount`는 시세가 없을 때 쓰는 그 차익 추정액이다. `start_date`는 처음
+    행사할 수 있는 날이며, 그날이 지나면 지급일은 오늘(언제 행사할지는 고객이 정함)이고 행사 가능한 동안은 "지급 확인 필요"가 되지
+    않는다. `expires_on`(선택, 행사가 있을 때만)은 마지막 행사일이며, 그 뒤에도 `received`가 아니면 "행사·만료 확인 필요"다.
+    `amount_basis`는 `gross`만 받는다(차익은 행사할 때 과세). 행사하면 `received`, `received_on`(행사일), `taxable_amount`(행사 차익)로
+    적고, 받은 주식은 자산으로 따로 입력한다.
   - 원화 금액으로 정해져 지급일 주가로 자사주를 받는 성과급은 `bonus`에 `symbol`·`market`(둘 다)을 적는다(`quantity`는 쓰지 않음).
     같은 종목 집중도에 들어가고, 지급일부터 주가 위험을 진다고 본다. 매도 제한이 단계적이면 금액을 나눠 레코드마다 `available_from`을 둔다.
   - `available_from`(선택): 의무 보유 등으로 실제로 쓸 수 있게 되는 날(지급일 이후). 없으면 지급일.

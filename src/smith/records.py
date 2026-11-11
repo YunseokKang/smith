@@ -45,8 +45,9 @@ class Action(StrEnum):
     UNCHANGED = "unchanged"
 
 
-# Currencies Smith can value; extend together with an FX source.
-CURRENCIES = frozenset({"KRW", "USD", "EUR", "JPY", "CNY"})
+# Currencies Smith can value; extend together with an FX source. TWD has the Bank of Korea reference rate
+# (evidence.FX_SERIES) when no broker rate is recorded.
+CURRENCIES = frozenset({"KRW", "USD", "EUR", "JPY", "CNY", "TWD"})
 
 # Economic asset type. The account wrapper (tax treatment, withdrawal limits) is a separate axis.
 ASSET_CATEGORIES = frozenset({
@@ -60,7 +61,8 @@ ACCOUNT_TYPES = frozenset({
 PENSION_ACCOUNT_TYPES = frozenset({"pension_savings", "irp", "dc", "insurance"})
 VALUATION_METHODS = frozenset({"manual", "statement", "market", "appraisal", "api"})
 LIQUIDITY_CLASSES = frozenset({"immediate", "days", "months", "restricted"})
-MARKETS = frozenset({"KR", "US", "other"})
+# TW: the Taiwan Stock Exchange, whose daily closes Smith reads for a grant it values (evidence.fetch_twse).
+MARKETS = frozenset({"KR", "US", "TW", "other"})
 OCCUPANCY = frozenset({"owner_occupied", "leased_out", "vacant", "other"})
 # Who operates the holding. Hermes-managed assets are run by a separate agent and are not Smith's to sell.
 MANAGERS = frozenset({"self", "hermes", "other"})
@@ -78,7 +80,8 @@ INFLOW_CATEGORIES = frozenset({
     "bonus", "stock_compensation",
 })
 # Pay from an employer beyond the salary: a bonus in cash or a grant of shares. Each payment is its own
-# one-time record, because the amount and even the payment are uncertain until the day it is paid.
+# one-time record, because the amount and even the payment are uncertain until the day it is paid. A grant
+# with an `exercise_price` is a stock option: worth (price - exercise price) x quantity, paid when exercised.
 COMPENSATION_CATEGORIES = frozenset({"bonus", "stock_compensation"})
 # How sure a future inflow is: `confirmed` (announced or contractual, amount fixed), `expected` (the payment
 # is all but certain but the amount depends on results or a share price), `possible` (it may not be paid).

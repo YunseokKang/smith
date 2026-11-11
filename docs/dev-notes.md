@@ -422,3 +422,12 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
 - 예방: 레터에 첫 문장만 나가는 글(세금 메모, 제안 이유 등)은 첫 문장 안에서 뜻이 끝나야 한다. "아래", "다음" 같은 지시어로 잘리는
   뒷부분을 가리키지 않는다. 주간 점검 때 `mail_questions`의 `failed`(시도 소진) 행을 확인한다.
 
+### TS-041 `evidence_points`의 값을 모두 숫자로 읽어 보기 생성이 멈춤 (2026-11-11, 배포 전 발견)
+
+- 증상: 스톡옵션용 대만 종가를 보기(`view.quotes`)에 넣는 첫 구현이 실제 원장 점검에서 `decimal.InvalidOperation`으로 멈췄다. 합성 테스트는 통과했다.
+- 원인: `evidence_points`에는 금리·지수 숫자뿐 아니라 배당·재무·내부자 기록이 JSON 문자열로 함께 들어 있다(`dividends`, `fundamentals`,
+  `insiders`). 모든 시리즈에 `evidence.latest`(숫자 변환)를 돌렸다.
+- 해결: provider가 `twse`인 점만 시세로 읽는다. 다른 provider의 JSON 점을 넣은 회귀 테스트를 더했다.
+- 예방: `evidence_points`를 읽는 새 코드는 provider·series를 먼저 고른 뒤 값을 해석한다. 원장 구조를 바꾸는 기능은 커밋 전에 실제 DB
+  복사본이나 읽기 전용 연결로 한 번 돌려 본다(합성 데이터에는 다른 기능이 남긴 행이 없다).
+

@@ -5,7 +5,8 @@ from decimal import Decimal
 
 from smith import ledger
 from smith.announcements import FEEDS, Announcement, FeedError, fetch_feed
-from smith.evidence import SERIES, EvidenceError, describe, fetch_provider, index_moves, next_policy_meeting
+from smith.evidence import (FX_SERIES, SERIES, EvidenceError, describe, fetch_provider, fetch_twse, index_moves, latest,
+                            next_policy_meeting)
 
 START, END = date(2025, 9, 1), date(2026, 10, 4)
 
@@ -25,7 +26,8 @@ class EvidenceTests(unittest.TestCase):
         ecos = fetch_provider("ecos", "k", start=START, end=END,
                               get=lambda url: (200, ecos_rows(("20261001", "3"), ("20261002", ""))))
         self.assertEqual(ecos[0][2:4], (date(2026, 10, 1), "3"))
-        self.assertEqual(len(ecos), len([s for s in SERIES if s.provider == "ecos"]))  # Blank value skipped.
+        # Blank value skipped; the exchange rates (FX_SERIES) are fetched with the provider's series.
+        self.assertEqual(len(ecos), len([s for s in (*SERIES, *FX_SERIES.values()) if s.provider == "ecos"]))
         fred = fetch_provider("fred", "k", start=START, end=END,
                               get=lambda url: (200, fred_rows(("2026-10-01", "4.78"), ("2026-10-02", "."))))
         self.assertEqual(fred[0][2:], (date(2026, 10, 1), "4.78", None))  # "." is missing, not 0.
@@ -41,6 +43,26 @@ class EvidenceTests(unittest.TestCase):
             with self.subTest(code=code), self.assertRaises(EvidenceError) as caught:
                 fetch_provider(provider, "k", start=START, end=END, get=lambda url, r=response: r)
             self.assertEqual((caught.exception.code, str(caught.exception)), (code, f"{provider}: {code}"))
+
+    def test_twse_closes_are_read_for_the_named_symbols_only(self):
+        rows = [{"Date": "1151110", "Code": "0001", "Name": "X", "ClosingPrice": "218.00"},
+                {"Date": "1151110", "Code": "0002", "Name": "Y", "ClosingPrice": "1,045.50"},
+                {"Date": "1151110", "Code": "0003", "Name": "Z", "ClosingPrice": ""},   # No trade: absent.
+                {"Date": "1151110", "Code": "0004", "Name": "W", "ClosingPrice": "9.9"}]
+        got = fetch_twse({"0001", "0002", "0003"}, get=lambda url: (200, json.dumps(rows).encode()))
+        self.assertEqual(got, [("twse", "0001", date(2026, 11, 10), "218", None),
+                               ("twse", "0002", date(2026, 11, 10), "1045.5", None)])
+        for response, code in (((503, b""), "http-503"), ((200, b"<html>"), "invalid-response"),
+                               ((200, b'[{"Code": "0001", "Date": "x", "ClosingPrice": "1"}]'), "invalid-response")):
+            with self.subTest(code=code), self.assertRaises(EvidenceError) as caught:
+                fetch_twse({"0001"}, get=lambda url, r=response: r)
+            self.assertEqual(caught.exception.code, code)
+
+    def test_latest_takes_the_newest_value_within_its_age(self):
+        series = {date(2026, 10, 30): ("41.2", None), date(2026, 11, 2): ("40.99", None), date(2026, 11, 20): ("39", None)}
+        self.assertEqual(latest(series, as_of=date(2026, 11, 11), max_age_days=10), (Decimal("40.99"), date(2026, 11, 2)))
+        self.assertIsNone(latest(series, as_of=date(2026, 11, 19), max_age_days=10))   # 11-02 is too old, 11-20 is ahead.
+        self.assertIsNone(latest(None, as_of=date(2026, 11, 11), max_age_days=10))
 
     def test_revised_values_are_added_not_overwritten(self):
         conn = ledger.connect(":memory:")
