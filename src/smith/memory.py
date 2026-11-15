@@ -10,7 +10,9 @@ correct or delete in any editor:
     - 2026-10-05 · 메일 · 솔방울은 푸른마을아파트를 말한다.
 
 Facts come only from the client: an answered e-mail question (the answer names what it will remember)
-or `smith memory add`. Web research never writes memory and the research model never reads it.
+or `smith memory add`. Web research never writes memory and the research model never reads it. Once a month the
+client sees what Smith remembers and replies with corrections (FR-52, `memory_review`); `revise` then retires or
+rewrites the line and keeps the old one in ARCHIVE.
 
 Retrieval is a small RAG step without embeddings, so nothing leaves the machine to index it: the profile
 and preference topics always go with a call; the other facts are ranked by shared character bigrams
@@ -22,7 +24,11 @@ flagged like a figure from the client's question. Identifiers (phone, e-mail, ac
 building or unit numbers are removed when a fact is written and again when it is read.
 """
 import math
+import os
 import re
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -41,6 +47,14 @@ BUDGET_CHARS = 4000                  # About 25 facts; beyond this only the most
 _ENTRY = re.compile(r"^- (?:(\d{4}-\d{2}-\d{2}) · ([^·]{1,20}) · )?(.+)$")
 # A building or unit number ("303동", "1203호") narrows a complex to one home: never kept.
 _UNIT = re.compile(r"(?<!\d)\d{1,4}\s*(?:동|호)(?!\s*(?:이상|이하|이내))")
+# Lines the client retired or corrected (FR-52) are kept here, below the folder: `load` reads only the top level, so a
+# retired line never reaches a call again, and nothing the client once said is lost.
+ARCHIVE = Path("archive") / "retired.md"
+LOCK_WAIT_SECONDS = 2.0   # A write that meets a live lock waits this long before giving up: appends take milliseconds.
+
+
+class MemoryBusy(OSError):
+    """Another write holds the memory folder's lock (an OSError, so callers that keep going on a failed write still do)."""
 
 
 @dataclass(frozen=True)
@@ -49,6 +63,7 @@ class Fact:
     text: str
     recorded_on: date | None   # None for a line the client wrote by hand without a date.
     source: str
+    file: str = ""             # The file's stem ("other" facts may come from a file that is not a topic).
 
 
 def directory(db: Path) -> Path:
@@ -78,8 +93,24 @@ def load(folder: Path, *, private: bool = False) -> list[Fact]:
                 recorded = date.fromisoformat(match.group(1)) if match.group(1) else None
             except ValueError:
                 recorded = None
-            facts.append(Fact(topic, clean(match.group(3)), recorded, (match.group(2) or "직접 작성").strip()))
+            facts.append(Fact(topic, clean(match.group(3)), recorded, (match.group(2) or "직접 작성").strip(), path.stem))
     return facts
+
+
+def text_key(text: str) -> str:
+    """What `add` and `revise` compare: the cleaned text without spacing or punctuation (a decimal point kept)."""
+    return _key(clean(text))
+
+
+def find(folder: Path, text: str, *, file: str | None = None) -> Fact | None:
+    """The remembered fact that says `text` (spacing and punctuation aside), in `file` when given; counsel included."""
+    wanted = text_key(text)
+    return next((f for f in load(folder, private=True) if _key(f.text) == wanted and (file is None or f.file == file)), None)
+
+
+def fact_key(fact: Fact) -> str:
+    """A fact's identity across months: its file and its text without spacing or punctuation."""
+    return f"{fact.file or fact.topic}:{_key(fact.text)}"
 
 
 def new_facts(existing: list[Fact], candidates: list[dict[str, str]]) -> list[tuple[str, str]]:
@@ -96,17 +127,119 @@ def new_facts(existing: list[Fact], candidates: list[dict[str, str]]) -> list[tu
 def add(folder: Path, topic: str, text: str, *, on: date, source: str) -> Fact | None:
     """Append one fact to `<topic>.md`; None when it is empty or already remembered."""
     topic = topic if topic in TOPICS else "other"
-    fresh = new_facts(load(folder, private=True), [{"topic": topic, "fact": text}])
-    if not fresh:
-        return None
-    _, text = fresh[0]
-    source = clean(source).replace("·", " ")[:20] or "직접 작성"
+    with _locked(folder):
+        fresh = new_facts(load(folder, private=True), [{"topic": topic, "fact": text}])
+        if not fresh:
+            return None
+        _, text = fresh[0]
+        source = _source(source)
+        path = folder / f"{topic}.md"
+        header = "" if path.exists() else f"# {TOPICS[topic]}\n\n"
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(f"{header}- {on.isoformat()} · {source} · {text}\n")
+    return Fact(topic, text, on, source, topic)
+
+
+def revise(folder: Path, fact: Fact, *, replacement: str | None, on: date, source: str) -> str:
+    """Retire one remembered line the client said is wrong or no longer true, writing `replacement` in its place when
+    given. The old line moves to ARCHIVE with the day and what happened, so it never reaches a call again but is not lost.
+
+    Returns "retired", "replaced", "unchanged" (the replacement says the same) or "missing": the line is no longer in its
+    file (edited by hand since it was shown), and nothing was written.
+
+    Raises:
+        MemoryBusy: another write holds the lock. OSError: the folder could not be written.
+    """
+    new_text = clean(replacement) if replacement is not None else None
+    if replacement is not None and not new_text:
+        raise ValueError("empty replacement")
+    if new_text is not None and _key(new_text) == _key(fact.text):
+        return "unchanged"
+    path = folder / f"{fact.file or fact.topic}.md"
+    with _locked(folder):
+        lines = path.read_text(encoding="utf-8-sig").splitlines() if path.exists() else []
+        index = next((i for i, line in enumerate(lines) if _line_key(line) == _key(fact.text)), None)
+        if index is None:
+            return "missing"
+        old = lines[index]
+        known = {_key(f.text) for f in load(folder, private=True)}
+        if new_text is None or _key(new_text) in known:
+            del lines[index]   # Retired, or the replacement is already remembered in another line.
+        else:
+            lines[index] = f"- {on.isoformat()} · {_source(source)} · {new_text}"
+        _archive(folder, old, on, "지움" if new_text is None else f"고침 → {new_text}")
+        temp = path.with_name(path.name + ".tmp")
+        temp.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+        os.replace(temp, path)
+    return "retired" if new_text is None else "replaced"
+
+
+def _line_key(line: str) -> str | None:
+    match = _ENTRY.match(line.strip()) if not line.startswith((" ", "\t")) else None
+    return _key(clean(match.group(3))) if match else None
+
+
+def _archive(folder: Path, line: str, on: date, what: str) -> None:
+    """Append the retired line, as it stood in its file, to ARCHIVE (written before the file is replaced)."""
+    target = folder / ARCHIVE
+    target.parent.mkdir(parents=True, exist_ok=True)
+    header = "" if target.exists() else "# 고치거나 지운 기억 (FR-52)\n\n"
+    with target.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(f"{header}- {on.isoformat()} · {what[:MAX_FACT_CHARS + 10]} · 원래 줄: {line.strip()[2:]}\n")
+
+
+def _source(source: str) -> str:
+    return clean(source).replace("·", " ")[:20] or "직접 작성"
+
+
+@contextmanager
+def _locked(folder: Path) -> Iterator[None]:
+    """A process lock for the memory folder: a reply that corrects a line and one that adds a fact would otherwise lose
+    each other's write. The operating system holds the lock on an open handle and releases it when the process ends,
+    so a crashed run never leaves a lock behind and no age rule can let two writers in at once (Codex review
+    2026-11-15). A held lock is waited for up to LOCK_WAIT_SECONDS, so a fact a concurrent answer keeps is not dropped.
+
+    Raises:
+        MemoryBusy: the lock stayed held for LOCK_WAIT_SECONDS.
+    """
     folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{topic}.md"
-    header = "" if path.exists() else f"# {TOPICS[topic]}\n\n"
-    with path.open("a", encoding="utf-8", newline="\n") as handle:
-        handle.write(f"{header}- {on.isoformat()} · {source} · {text}\n")
-    return Fact(topic, text, on, source)
+    handle = open(folder / ".write.lock", "a+b")
+    deadline = time.monotonic() + LOCK_WAIT_SECONDS
+    try:
+        while not _try_lock(handle):
+            if time.monotonic() >= deadline:
+                raise MemoryBusy("another memory write is in progress")
+            time.sleep(0.05)
+        try:
+            yield
+        finally:
+            _unlock(handle)
+    finally:
+        handle.close()
+
+
+def _try_lock(handle: Any) -> bool:
+    try:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def _unlock(handle: Any) -> None:
+    if os.name == "nt":
+        import msvcrt
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def retrieve(facts: list[Fact], query: str, *, budget: int = BUDGET_CHARS) -> list[Fact]:
@@ -133,7 +266,9 @@ def for_model(facts: list[Fact]) -> list[dict[str, Any]]:
 
 
 def _key(text: str) -> str:
-    return re.sub(r"[\s.,·!?~]", "", text)
+    """Text without spacing or punctuation, except a decimal point between digits: "1.5억" is not "15억" (Codex review
+    2026-11-15)."""
+    return re.sub(r"[\s.,·!?~]", "", re.sub(r"(?<=\d)\.(?=\d)", "_", text))
 
 
 def _recency(fact: Fact) -> date:

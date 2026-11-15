@@ -124,9 +124,10 @@ def answer(db: Path, config_path: Path, *, verbose: bool = False, counsel_only: 
     secrets = credentials.all_secrets()
     # A reply to any daily mail Smith sent gets the daily answerer, whether or not the schedule is on; it reads
     # nothing until such a question arrives.
-    from smith import counsel, daily_qa, health_qa
+    from smith import counsel, daily_qa, health_qa, memory_qa
     daily_answerer = daily_qa.answerer(db, config, now=now, tz=tz, secrets=secrets)
     health_answerer = health_qa.answerer(db, config, now=now, tz=tz, secrets=secrets)
+    memory_answerer = memory_qa.answerer(db, now=now, tz=tz, secrets=secrets)   # Replies to the memory check (FR-52).
     # Counsel (FR-49): the client's own `[상담]` mails are looked for only while the section is enabled.
     counsel_config = config.get("counsel") or {}
     counsel_on = bool(counsel_config.get("enabled"))
@@ -144,7 +145,7 @@ def answer(db: Path, config_path: Path, *, verbose: bool = False, counsel_only: 
                           daily=daily_answerer, health=health_answerer, dart_key=dart_key,
                           counsel=counsel_answerer, counsel_only=counsel_only,
                           counsel_prefix=counsel_config.get("prefix", counsel.DEFAULT_PREFIX) if counsel_on else None,
-                          partner=partner_answerer, partner_recipient=spouse)
+                          partner=partner_answerer, partner_recipient=spouse, memory_check=memory_answerer)
     except gmail.MailError as error:
         if verbose or error.code != "no-read-scope":
             say(f"Answering questions failed ({error.code}).")

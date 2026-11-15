@@ -209,7 +209,8 @@ class Question:
     product: str = "report"   # "report": a finance report thread; "daily": a daily-routine mail thread (daily_qa);
                               # "health": a health-letter thread (health_qa); "counsel": a thread the client opened
                               # with a mail to themselves (counsel, FR-49); "partner": the spouse's letter thread,
-                              # report_id its run key (partner_qa, report design §42.11).
+                              # report_id its run key (partner_qa, report design §42.11); "memory": the monthly
+                              # memory check (memory_qa, FR-52).
 
 
 _REPLY_MARKS = re.compile(r"^(?:(?:re|fw|fwd|답장|전달)\s*:\s*)+", re.IGNORECASE)
@@ -258,6 +259,9 @@ def find(db: Path, credentials: tuple[str, str, str], recipient: str, *, now: da
             # Health letters likewise (health design §8): their replies get the health context and nothing else.
             runs += [{**r, "report_id": r["run_key"], "product": "health"}
                      for r in ledger.sent_daily_runs(conn, since=now - LOOKBACK, product="health")]
+            # The monthly memory check (FR-52): its replies correct what Smith remembers (memory_qa).
+            runs += [{**r, "report_id": r["run_key"], "product": "memory"}
+                     for r in ledger.sent_daily_runs(conn, since=now - LOOKBACK, product="memory")]
             if partner_address:
                 # The spouse's own letters (report design §42.11): their replies get the spouse's side of the household.
                 runs += [{**r, "report_id": r["run_key"], "product": "partner"}
@@ -801,7 +805,7 @@ def poll(db: Path, *, recipient: str, credentials: tuple[str, str, str], now: da
          tz: str = DEFAULT_TIMEZONE, daily: Any = None, health: Any = None,
          verifier: qa_lookup.Verifier | None = None, dart_key: str | None = None,
          counsel: Any = None, counsel_prefix: str | None = None, counsel_only: bool = False,
-         partner: Any = None, partner_recipient: str | None = None) -> list[dict[str, Any]]:
+         partner: Any = None, partner_recipient: str | None = None, memory_check: Any = None) -> list[dict[str, Any]]:
     """Answer new questions. `build(report)` rebuilds the data of the report a question replies to (from
     its run record and lineage; None only if the run is unknown, then current data). `daily(question, history)`
     answers a daily-thread question with the daily context and returns (html, text, result), `health` likewise for
@@ -809,7 +813,7 @@ def poll(db: Path, *, recipient: str, credentials: tuple[str, str, str], now: da
     no such mail is looked for; with `counsel_only` only those are looked for, see `find`); without the answerer
     such a question is left for the next run. `partner` answers the spouse's replies to their own letter, and only
     together with `partner_recipient` (the configured address, never a header's) are those looked for; the answer
-    goes to that address (report design §42.11).
+    goes to that address (report design §42.11). `memory_check` answers a reply to the monthly memory check (FR-52).
 
     A question is claimed (answering), marked sending just before the reply, then answered, failed or
     unknown. Interrupted runs are recovered first: answering becomes a retryable failure, sending becomes
@@ -830,7 +834,7 @@ def poll(db: Path, *, recipient: str, credentials: tuple[str, str, str], now: da
         return results
     questions.sort(key=lambda q: q.received_at)  # A later question in a thread sees the answer to an earlier one.
     built: dict[str | None, tuple[dict[str, Any] | None, dict[str, Any]]] = {}
-    answerers = {"daily": daily, "health": health, "counsel": counsel, "partner": partner}
+    answerers = {"daily": daily, "health": health, "counsel": counsel, "partner": partner, "memory": memory_check}
     for question in questions:
         if question.product in answerers:
             if answerers[question.product] is None:

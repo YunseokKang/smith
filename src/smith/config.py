@@ -50,6 +50,8 @@ KNOWN_KEYS = {
     # Personal counsel (FR-49, docs/counsel-design.md): mails the client writes to themselves under `prefix` are
     # answered as a warm senior would; `max_notes` bounds the client's notes one answer may read.
     "counsel": {"enabled", "prefix", "max_notes", "reader"},
+    # The monthly memory check (FR-52): the first `weekday` of each month at `time`, `size` facts per mail.
+    "memory_review": {"enabled", "weekday", "time", "size"},
 }
 COUNSEL_PREFIX = re.compile(r"^\[[0-9A-Za-z가-힣]{1,20}\]$")
 HEALTH_MIDWEEK_KEYS = {"enabled", "weekday", "time"}
@@ -141,6 +143,7 @@ def load_config(path: Path) -> dict:
     _check_trading(config.get("trading", {}))
     _check_evernote(config.get("evernote", {}))
     _check_counsel(config.get("counsel", {}))
+    _check_memory_review(config.get("memory_review", {}))
     if "properties" in config or "targets" in config:
         from smith.realestate import RealEstateError, validate_properties, validate_targets
         try:
@@ -398,6 +401,16 @@ def _check_health(health: object) -> None:
     if unknown:
         raise ValueError(f"Unknown setting(s): {', '.join('health.midweek.' + k for k in unknown)}")
     _check_letter_slot("health.midweek", midweek, "wednesday", "18:00")
+
+
+def _check_memory_review(table: object) -> None:
+    """Optional `[memory_review]` (FR-52): the month's first `weekday` at `time`, and how many facts one mail shows."""
+    if not isinstance(table, dict):
+        raise ValueError("memory_review must be a table")
+    _check_letter_slot("memory_review", table, "sunday", "10:00")
+    size = table.get("size", 12)
+    if not isinstance(size, int) or isinstance(size, bool) or not 3 <= size <= 30:
+        raise ValueError("memory_review.size must be a whole number from 3 to 30")
 
 
 def _check_letter_slot(where: str, table: dict, default_day: str, default_time: str) -> None:

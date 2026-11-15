@@ -208,9 +208,19 @@ def note(db: Path, facts: list[str], *, on: date) -> None:
         return
     file = health.path(db) / "client-notes.md"
     file.parent.mkdir(parents=True, exist_ok=True)
-    lines = [f"- {on.isoformat()} (메일 답장): {mask_identifiers(fact)}" for fact in facts]
+    lines = [_note_line(fact, on) for fact in facts]
     with file.open("a", encoding="utf-8") as handle:
         handle.write("\n" + "\n".join(lines) + "\n")
+
+
+def noted(db: Path, fact: str, *, on: date) -> bool:
+    """Whether `note` already wrote this statement on this day (a memory-check reply resumed after a crash, FR-52)."""
+    file = health.path(db) / "client-notes.md"
+    return file.exists() and _note_line(fact, on) in file.read_text(encoding="utf-8").splitlines()
+
+
+def _note_line(fact: str, on: date) -> str:
+    return f"- {on.isoformat()} (메일 답장): {mask_identifiers(fact)}"
 
 
 def render(question_text: str, result: dict[str, Any]) -> tuple[str, str]:

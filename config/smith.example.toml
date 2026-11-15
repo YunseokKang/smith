@@ -161,3 +161,12 @@ prefix = "[상담]"
 max_notes = 8
 # The first reader (Codex) reading each letter and one rewrite of what it marks: minutes more per letter, so off.
 reader = false
+
+# The monthly memory check (FR-52): the first `weekday` of each month at `time`, Smith mails up to `size` of the facts it
+# remembers (never-shown first, then the ones shown longest ago; the counsel topic stays out) and applies the corrections
+# the client replies with. Needs `[mail] answer_replies = true` and the Gmail read grant for the replies.
+[memory_review]
+enabled = false
+weekday = "sunday"
+time = "10:00"
+size = 12
