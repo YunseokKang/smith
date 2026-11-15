@@ -6,6 +6,7 @@ network. The finance line (⑦) is dates only: the next Bank of Korea rate meeti
 statutory tax calendar below, and the pay dates of the dividends the finance event notes announced, with the names
 of the filings those notes carried since the last mail (FR-44); amounts never enter this mail (FR-30).
 """
+import re
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass, field
@@ -20,8 +21,9 @@ from smith.config import local_time
 WEEKDAYS_KO = "월화수목금토일"
 CONTACT_PREFIX = "contact-"   # Person ids of address-book entries in the merged date book (contacts.person_id).
 AHEAD_DAYS = 14
-# Statutory periods that recur every year (start month, day, end month, day, label). Dates only, no amounts; the mail
-# calls them the usual schedule because a year's notice can shift a deadline (FR-17 wording rule).
+# Statutory periods that recur every year (start month, day, end month, day, label). The mail calls them the usual
+# schedule because a year's notice can shift a deadline (FR-17 wording rule). The holding-tax lines carry the
+# household's bill as Smith computes it (FR-53, user decision 2026-11-15: "일일 메일에도 쓰자"); the others stay dates.
 TAX_CALENDAR = ((1, 15, 2, 28, "연말정산 간소화 자료·서류 제출"), (5, 1, 5, 31, "종합소득세 신고·납부"),
                 (6, 16, 6, 30, "자동차세 1기분 납부"), (7, 16, 7, 31, "재산세 1기분 납부"),
                 (9, 16, 9, 30, "재산세 2기분 납부"), (12, 1, 12, 15, "종합부동산세 납부"),
@@ -47,6 +49,8 @@ class Inputs:
     address_book: list[contacts.Contact] = field(default_factory=list)
     # Filings the finance event notes carried (FR-44), with the time the note went out: titles and dates only.
     filings: list[tuple[datetime, dict[str, Any]]] = field(default_factory=list)
+    # The year's holding tax (FR-53) when a 재산세 or 종부세 date is in the window; None otherwise or on failure.
+    holding: dict[str, Any] | None = None
 
 
 def collect(db: Path, config: dict[str, Any], *, now: datetime, day: date | None = None,
@@ -131,8 +135,53 @@ def collect(db: Path, config: dict[str, Any], *, now: datetime, day: date | None
     except (OSError, ValueError) as error:
         failures["history"] = str(error)[:40]
     notes = keep.load_all(db, thoughts=True)
+    holding = None
+    if any(_HOLDING_LABELS.search(f["label"]) for f in finance_dates(day)):
+        holding = _holding(db, config, local_now, now, failures)
     return Inputs(report, events, tasks, book, today_holiday, ahead, failures, events_today, notes, keep.used(keep.directory(db)),
-                  weather_label, address_book, _carried_filings(db))
+                  weather_label, address_book, _carried_filings(db), holding=holding)
+
+
+_HOLDING_LABELS = re.compile(r"재산세|종합부동산세")
+
+
+def _holding(db: Path, config: dict[str, Any], local_now: datetime, now: datetime,
+             failures: dict[str, str]) -> dict[str, Any] | None:
+    """The year's holding tax from the ledger, as the reports compute it; a failure is recorded, never raised (the
+    date line then goes out without the amount)."""
+    from smith import report_data
+    from smith.report_command import profile
+
+    try:
+        with closing(ledger.connect_read_only(db)) as conn:
+            return report_data.holding_tax_now(conn, profile(config), as_of=local_now, known_at=now)
+    except Exception as error:  # noqa: BLE001 - an optional line must never stop the daily mail.
+        failures["holding-tax"] = type(error).__name__
+        return None
+
+
+def holding_note(label: str, year: int, holding: dict[str, Any] | None) -> str | None:
+    """What the household pays on a holding-tax date line ("우리 집 약 103만 원"), or None when it is not a holding-tax
+    line, the figure is of another year, or unknown. Estimated prices say so."""
+    from smith import holding_tax
+    from smith.fmt import short_won
+
+    if holding is None or holding.get("year") != year or not _HOLDING_LABELS.search(label):
+        return None
+    months = holding_tax.due_on(holding)
+    flag = "(추정)" if holding.get("estimated") or holding.get("year") != holding.get("rules_year") else ""
+    if "종합부동산세" in label:
+        owners = holding.get("owners") or {}
+        known = owners and all(o.get("comprehensive") is not None for o in owners.values())
+        if months.get(12):
+            return f"우리 집 약 {short_won(months[12])}{flag}"
+        return f"우리 집은 대상 아님{flag}" if known else None
+    month = 7 if "1기분" in label else 9 if "2기분" in label else None
+    if month is None or holding.get("total") is None:
+        return None
+    if month in months:
+        return f"우리 집 약 {short_won(months[month])}{flag}"
+    return "우리 집은 7월에 한 번에 냄" if month == 9 and 7 in months else None
 
 
 def _with_holidays(book: people.Book, key: str | None, db: Path, day: date, now: datetime,
@@ -188,7 +237,8 @@ def assemble(inputs: Inputs, *, day: date, tz: str, now: datetime, airways_sensi
         "routine_reminders": [r for r in due if people.is_routine(r.occurrence)],
         "upcoming": people.upcoming(book, day, AHEAD_DAYS),
         "holidays_ahead": ahead, "long_weekends": holidays.long_weekends(ahead, day),
-        "finance_dates": sorted(finance_dates(day) + dividend_dates(inputs.filings, day), key=lambda f: f["date"]),
+        "finance_dates": sorted([{**f, "note": holding_note(f["label"], f["date"].year, inputs.holding)}
+                                 for f in finance_dates(day)] + dividend_dates(inputs.filings, day), key=lambda f: f["date"]),
         # Filings the finance event notes carried since yesterday morning: the daily mail names them, no figures.
         "new_filings": [f for at, f in inputs.filings if at >= now - FILINGS_SHOWN],
         "history_events": list(inputs.history_events or []),

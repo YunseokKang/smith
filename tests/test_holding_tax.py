@@ -346,5 +346,41 @@ class LoginTests(unittest.TestCase):
         self.assertIn("already stored as vworld", out.getvalue())
 
 
+class DailyNoteTests(unittest.TestCase):
+    """The daily mail's tax dates carry the household's bill (user decision 2026-11-15)."""
+
+    def test_each_holding_tax_line_names_its_bill(self):
+        from smith import daily
+
+        found = ht.household([home("h1", "self", 700_000_000), home("h2", "partner", 150_000_000)], {})
+        self.assertEqual(daily.holding_note("재산세 1기분 납부 시작", 2026, found), "우리 집 약 64만 원")   # 50.4만 + the small home's whole 13.2만
+        self.assertEqual(daily.holding_note("재산세 2기분 납부 마감", 2026, found), "우리 집 약 50만 원")
+        self.assertEqual(daily.holding_note("종합부동산세 납부 시작", 2026, found), "우리 집은 대상 아님")
+        self.assertIsNone(daily.holding_note("재산세 2기분 납부 시작", 2027, found))      # Another year's bill.
+        self.assertIsNone(daily.holding_note("자동차세 2기분 납부 시작", 2026, found))
+        self.assertIsNone(daily.holding_note("종합부동산세 납부 시작", 2026, None))
+        # A small bill comes whole in July; an owing household names the December amount; estimates say so.
+        small = ht.household([home("h", "self", 150_000_000)], {})
+        self.assertEqual(daily.holding_note("재산세 2기분 납부 시작", 2026, small), "우리 집은 7월에 한 번에 냄")
+        dear = ht.household([home("h", "self", 2_070_000_000)], {})
+        self.assertEqual(daily.holding_note("종합부동산세 납부 시작", 2026, dear), "우리 집 약 254만 원")
+        guessed = ht.household([ht.Home(ref="h", label="h", owner="self", price=Decimal(700_000_000), estimated=True,
+                                        basis="")], {})
+        self.assertEqual(daily.holding_note("재산세 1기분 납부 시작", 2026, guessed), "우리 집 약 50만 원(추정)")
+
+    def test_the_card_shows_the_note_and_says_what_it_is(self):
+        from datetime import date as day
+
+        from smith import daily_html
+
+        card = daily_html._finance({"new_filings": [], "finance_dates": [
+            {"date": day(2026, 12, 1), "label": "종합부동산세 납부 시작", "days": 11, "note": "우리 집은 대상 아님"}]})
+        self.assertIn("종합부동산세 납부 시작 · D-11 · 우리 집은 대상 아님", card)
+        self.assertIn("보유세 금액은 Smith가 계산한 예상액", card)
+        plain = daily_html._finance({"new_filings": [], "finance_dates": [
+            {"date": day(2026, 11, 26), "label": "한국은행 금통위", "days": 6}]})
+        self.assertIn("날짜만 적습니다", plain)
+
+
 if __name__ == "__main__":
     unittest.main()

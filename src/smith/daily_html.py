@@ -387,8 +387,11 @@ def _finance(data: dict[str, Any]) -> str:
                      + " (재무 사건 안내 메일)")
     for item in dates:
         when = "오늘" if item["days"] == 0 else f"D-{item['days']}"
-        lines.append(f"{item['date']:%m/%d} {escape(item['label'])} · {when}")
-    return _card("재무 날짜", "날짜만 적습니다. 금액과 판단은 재무 메일에서 다룹니다.",
+        note = f" · {escape(item['note'])}" if item.get("note") else ""
+        lines.append(f"{item['date']:%m/%d} {escape(item['label'])} · {when}{note}")
+    lead = ("보유세 금액은 Smith가 계산한 예상액이고, 판단은 재무 메일에서 다룹니다." if any(i.get("note") for i in dates)
+            else "날짜만 적습니다. 금액과 판단은 재무 메일에서 다룹니다.")
+    return _card("재무 날짜", lead,
                  "".join(f'<div style="font-size:14px;line-height:1.7;color:{BODY}">{line}</div>' for line in lines)
                  + f'<div style="font-size:12px;color:{MUTED};margin-top:6px">세금 일정은 통상 일정이며 그해 고지서로 확인하십시오.</div>')
 

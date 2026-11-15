@@ -601,6 +601,20 @@ def _spending_split(view: LedgerView, owner: str | None = None) -> dict[str, Any
             "discretionary_share": discretionary / inflow if inflow else None}
 
 
+def holding_tax_now(conn: sqlite3.Connection, household: dict[str, Any] | None, *, as_of: datetime,
+                    known_at: datetime) -> dict[str, Any] | None:
+    """The year's holding tax (FR-53) the way the reports compute it, for a caller without a report: the daily mail's
+    tax dates (user decision 2026-11-15). `as_of` is in the household's timezone. None when the ledger holds no home."""
+    view = load_view(conn, as_of=as_of, known_at=known_at)
+    properties = _real_estate_sector(view)["properties"]
+    if not properties:
+        return None
+    market = realestate.analyze(ledger.load_deals(conn, since=as_of.date() - timedelta(days=400)), today=as_of.date())
+    for prop in properties:
+        prop["market"] = market.get(prop["record_id"])
+    return _holding_tax(conn, properties, household, market, as_of=as_of, known_at=known_at, audience="self")
+
+
 def _official_holding(plan: dict[str, Any] | None, store: dict[str, Any], *, year: int) -> dict[str, Any] | None:
     """Each move target's yearly holding tax on the year's official price of its same-area units when one was read
     (FR-53), else on the market price at the realization rate; the basis is named either way."""
