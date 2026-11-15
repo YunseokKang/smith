@@ -13,8 +13,9 @@ _GMAIL_NAMES = ("client_id", "client_secret", "refresh_token")
 _HEALTH = "smith.google-health"
 # Public statistics APIs: read-only data keys, still kept out of files and logs.
 EVIDENCE_PROVIDERS = ("ecos", "fred")
-# Official real-estate APIs: data.go.kr (MOLIT transaction prices) and the Korea Real Estate Board (R-ONE).
-REAL_ESTATE_PROVIDERS = ("datagokr", "rone")
+# Official real-estate APIs: data.go.kr (MOLIT transaction prices), the Korea Real Estate Board (R-ONE) and the
+# Ministry's V-World service (official apartment prices for the holding tax, FR-53).
+REAL_ESTATE_PROVIDERS = ("datagokr", "rone", "vworld")
 # The FSS electronic disclosure system (OpenDART): company filings such as dividend decisions (FR-43).
 DISCLOSURE_PROVIDERS = ("dart",)
 # The authenticator secret that approves trades (trading design §5). Only the trade approval check reads it.

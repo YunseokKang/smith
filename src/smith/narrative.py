@@ -577,11 +577,24 @@ def _full_payload(view: Any, data: dict[str, Any], brief: dict[str, Any] | None,
         "client_memory": client_memory or [],
         "tax": {"notes": [{"title": n.title, "body": n.body, "when": n.when} for n in advice.get("tax_notes", [])],
                 "year_end_checklist": [list(row) for row in advice.get("tax_checklist", [])],
-                "realized_this_year": tax.realized_payload(view)},
+                "realized_this_year": tax.realized_payload(view),
+                # The year's holding tax per owner (FR-53), computed in code; "estimated" when a price was estimated.
+                "holding_tax": _holding_payload(data.get("holding_tax"))},
         "brief": None if brief is None else {
             "researched_at": brief["created_at"].date().isoformat(),
             "items_untrusted": _model_items(brief["brief"]["items"]), "gaps": brief["brief"]["gaps"]},
     }
+
+
+def _holding_payload(found: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The holding tax as the model reads it: totals per owner and for the household, no prices per home."""
+    if not found:
+        return None
+    return {"year": found["year"], "estimated": found["estimated"], "household_total": won(found["total"]),
+            "per_owner": {owner: {"property_tax": won(v["property"]),
+                                  "comprehensive_tax": won(None if v["comprehensive"] is None else v["comprehensive"]["total"])}
+                          for owner, v in found["owners"].items()},
+            "reform_pending": True}
 
 
 def _without_links(household: dict[str, Any]) -> dict[str, Any]:

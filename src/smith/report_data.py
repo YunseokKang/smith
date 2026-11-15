@@ -7,13 +7,13 @@ import logging
 import sqlite3
 from dataclasses import replace
 from collections.abc import Iterable
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal, localcontext
 from typing import Any
 
-from smith import (cases, checklist, dividends, editions, evidence, fundamentals, future_income, holdings, insiders, lease,
-                   ledger, move_plan, pension, perspective, picks, principles, product_review, proposals, realestate, stress,
-                   tax)
+from smith import (cases, checklist, dividends, editions, evidence, fundamentals, future_income, holding_tax, holdings,
+                   insiders, lease, ledger, move_plan, official_price, pension, perspective, picks, principles,
+                   product_review, proposals, realestate, stress, tax)
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import LedgerView, base_amount, load_view, unrealized_gain
 from smith.records import INFLOW_CATEGORIES, TRANSFER_CATEGORIES, Kind, RecordInput, Status
@@ -100,6 +100,8 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
         prop["market"] = market.get(prop["record_id"])
     # Move-target complexes (report design §18.3) share the official-deal store under "target:<key>" refs.
     targets_market = {ref: found for ref, found in market.items() if ref.startswith(realestate.TARGET_PREFIX)}
+    holding = _holding_tax(conn, sectors["real_estate"]["properties"], household, market, as_of=as_of,
+                           known_at=known_at, audience=audience)
     # How each lease deposit due is actually returned (report design §17.2): the plans feed the proposals,
     # the stress test (reverse-jeonse gap, not the whole deposit) and the property day's section.
     lease_plans = lease.plans(view, sectors["real_estate"]["properties"], household, today=as_of.date(),
@@ -171,6 +173,7 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
                          "us_positions": plan["us_positions"], "pension_unconverted": plan["pension_unconverted"],
                          "us_realized": plan["us_realized"], "us_sales": len(plan["us_sales"]),
                          "us_realized_unknown": plan["us_realized_unknown"]},
+            "holding_tax": holding,
             "requests": checklist.requests(view, household, pension_stack=pension_stack),
             "household_profile": _profile(household, as_of),
             # The balance sheet by kind and owner (hero bar), the four pension pipelines against the monthly
@@ -593,6 +596,33 @@ def _spending_split(view: LedgerView, owner: str | None = None) -> dict[str, Any
             "left": inflow - fixed - discretionary - transfers,
             "fixed_share": fixed / inflow if inflow else None,
             "discretionary_share": discretionary / inflow if inflow else None}
+
+
+def _holding_tax(conn: sqlite3.Connection, properties: list[dict[str, Any]], household: dict[str, Any] | None,
+                 market: dict[str, dict[str, Any]], *, as_of: datetime, known_at: datetime, audience: str) -> dict[str, Any]:
+    """The year's holding tax (FR-53), per owner as the law taxes it (each letter reads its own owner as "self").
+
+    It falls on the homes held on the assessment day (1 June): from that day on they are read from the ledger as of
+    then, so a home sold in July still owes the year's tax and one bought after it does not (Codex review
+    2026-11-15); before it, today's homes, and the result says it is a projection."""
+    day = holding_tax.assessment_day(as_of.year)
+    held = properties
+    if as_of.date() >= day:
+        on_day = perspective.as_seen_by(load_view(conn, as_of=datetime.combine(day, time.min, tzinfo=as_of.tzinfo),
+                                                  known_at=known_at), audience)
+        held = [{**prop, "market": market.get(prop["record_id"])} for prop in _real_estate_sector(on_day)["properties"]]
+        # The ledger often begins after a home was bought (records entered later, as these were in October 2026):
+        # a home bought before this year was held on 1 June whatever the ledger's first date. One whose purchase
+        # is unknown or this year is counted as held and says so, so the figure is never too low.
+        seen = {prop["record_id"] for prop in held}
+        bought = (household or {}).get("properties") or {}
+        for prop in properties:
+            if prop["record_id"] in seen:
+                continue
+            year = (bought.get(prop["record_id"]) or {}).get("acquired_year")
+            held.append(prop if isinstance(year, int) and year < as_of.year else {**prop, "held_assumed": True})
+    homes = holding_tax.homes(held, household, official_price.store_for(conn), year=as_of.year)
+    return holding_tax.household(homes, household, year=as_of.year, projected=as_of.date() < day)
 
 
 def _household_move(base: LedgerView, view: LedgerView, properties: list[dict[str, Any]],

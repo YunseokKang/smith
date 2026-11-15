@@ -118,6 +118,9 @@ time = "18:00"
 # occupational_average_wage = 8000000   # DB plan: the employer's average monthly wage (pay + bonuses / 12)
 # occupational_service_start = 2015-03-02  # DB plan: the service start the severance counts from
 # retirement_monthly_spend = 5000000   # won, today's prices, after tax, for the whole household
+# marriage_registered = false          # registered marriage: one household for the home taxes
+# marriage_date = 2027-05-01           # the wedding day: each spouse keeps the one-home 종부세 deduction
+#                                      # for ten years after it (FR-53); without it the rule is not applied
 # retirement_age = 60                  # the headline retirement age of the pension stack (default 55); 50·55·60 always shown
 # emergency_months = 3                 # reserve size in months of spending (default 6): lower it when a gap
 #                                      # in pay is not a near-term risk and a credit line backs the reserve

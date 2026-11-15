@@ -80,7 +80,19 @@ def _parse(kind: str, item: ElementTree.Element) -> dict[str, Any] | None:
         return None
     return {"kind": kind, "apt_name": text("aptNm"), "dong": text("umdNm"), "deal_date": deal, "area": area,
             "price": amount, "monthly_rent": rent, "floor": text("floor"),
-            "contract_type": text("contractType") or None, "cancelled": text("cdealType") == "O"}
+            "contract_type": text("contractType") or None, "cancelled": text("cdealType") == "O",
+            # The lot number the official-price lookup asks by (FR-53); not stored with the deal.
+            "pnu": pnu({name: text(name) for name in ("sggCd", "umdCd", "landCd", "bonbun", "bubun")})}
+
+
+def pnu(item: dict[str, str]) -> str | None:
+    """The 19-digit lot number from a MOLIT record's fields (sggCd 5 + umdCd 5 + landCd 1 + bonbun 4 + bubun 4), or
+    None when any part is missing or malformed. landCd is 1 for an ordinary lot and 2 for a mountain lot."""
+    sgg, umd, land, main, sub = ((item.get(name) or "").strip() for name in ("sggCd", "umdCd", "landCd", "bonbun", "bubun"))
+    if not (len(sgg) == 5 and len(umd) == 5 and sgg.isdigit() and umd.isdigit() and land in ("1", "2")
+            and main.isdigit() and sub.isdigit() and len(main) <= 4 and len(sub) <= 4):
+        return None
+    return f"{sgg}{umd}{land}{main.zfill(4)}{sub.zfill(4)}"
 
 
 def months_back(today: date, count: int) -> list[str]:
@@ -176,7 +188,8 @@ def sync(properties: dict[str, dict[str, Any]], api_key: str, *, today: date, mo
                         matched.append({"property_ref": ref, "kind": kind, "deal_date": row["deal_date"].isoformat(),
                                         "area": str(row["area"]), "price": str(row["price"]),
                                         "monthly_rent": str(row["monthly_rent"]), "floor": row["floor"],
-                                        "contract_type": row["contract_type"], "cancelled": row["cancelled"]})
+                                        "contract_type": row["contract_type"], "cancelled": row["cancelled"],
+                                        "pnu": row.get("pnu")})
     return matched, fetched
 
 

@@ -605,7 +605,7 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
         "real_estate": lambda: _real_estate(sectors["real_estate"], data.get("figures") or {}),
         "lease_plan": lambda: _lease_plan(data), "move_targets": lambda: _move_targets(data),
         "debt": lambda: _debt(sectors["debt"], advice.get("refinance"), sectors["macro"].get("policy")),
-        "tax": lambda: _tax(advice, data, True),
+        "tax": lambda: _tax(advice, data, True), "holding_tax": lambda: _holding_tax(data),
         "pension": lambda: _pension(sectors["pension_insurance"], advice.get("insurance_review")),
         "pension_stack": lambda: _pension_stack(data), "annuity_review": lambda: _annuity_review(data),
         "cash": lambda: _cash(sectors["cash"], data),
@@ -1603,6 +1603,63 @@ def _household_tax(advice: dict[str, Any]) -> str:
                     f'margin-bottom:4px">{escape(n.title)}</div><div style="font-size:14px;line-height:1.6;color:{BODY}">'
                     f'{escape(_first_sentence(n.body))}</div></div>' for n in notes[:MAX_TAX_NOTES])
     return _section("두 분의 세금: 혼인신고·주택·증여", "두 분이 함께 정할 세금 문제입니다.", inner, brief=None)
+
+
+_OWNER_NAMES = {"self": "고객님", "partner": "배우자분"}
+
+
+def _holding_tax(data: dict[str, Any]) -> str:
+    """The year's 재산세 and 종합부동산세 of each home (FR-53): the price it is levied on and where that price came
+    from, the July and September bills, the December tax per owner, and the reform still before the Assembly.
+    Stacked lines rather than a table (phone readers)."""
+    from smith import holding_tax as rules
+
+    found = data.get("holding_tax")
+    if not found or not found["homes"]:
+        return ""
+    lines = []
+    for h in found["homes"]:
+        p = h["property"]
+        bills = " · ".join(f"{month}월 {_short(amount)}" for month, amount in h["bills"])
+        owner = _OWNER_NAMES.get(h["owner"], "")
+        lines.append(f'<div style="margin:6px 0 12px"><div style="font-size:15px;font-weight:600;color:{INK}">'
+                     f'{escape(h["label"])}' + (f' <span style="font-size:12px;color:{MUTED}">{owner} 명의</span>' if owner else "")
+                     + f'</div><div style="font-size:14px;line-height:1.6;color:{BODY}">'
+                     + ("공시가격을 알 수 없어 보유세를 계산하지 못했습니다." if p is None else
+                        f"공시가격 {_short(h['price'])}{'(추정)' if h['estimated'] else ''} · 재산세 연 <b>{_short(p['total'])}</b>"
+                        + (f" ({bills})" if bills else "")
+                        + ("" if h["one_home"] else " · 1주택 특례 없이 계산"))
+                     + f'</div><div style="font-size:12px;color:{MUTED}">{escape(h["basis"])}</div></div>')
+    owners = found["owners"]
+    comprehensive = {o: v["comprehensive"]["total"] for o, v in owners.items() if v["comprehensive"] is not None}
+    if comprehensive and all(v == 0 for v in comprehensive.values()) and len(comprehensive) == len(owners):
+        december = ("12월 종합부동산세는 " + ("두 분 모두 " if len(owners) > 1 else "")
+                    + "나오지 않습니다(공시가격이 공제 금액 아래: 1주택자 12억 원, 그 밖에는 9억 원).")
+    else:
+        december = " · ".join(f"{_OWNER_NAMES.get(o, o)} 12월 종합부동산세 약 {_short(v['comprehensive']['total'])}"
+                              if v["comprehensive"] is not None else f"{_OWNER_NAMES.get(o, o)} 종합부동산세 미상"
+                              for o, v in owners.items())
+    unchecked = any(v["one_home"]["unchecked"] for v in owners.values())
+    lead = (f"올해 집 {len(found['homes'])}채의 보유세는 합계 약 <b>{_short(found['total'])}</b>입니다. " if found["total"] is not None
+            else "일부 집의 공시가격을 알 수 없어 합계는 미상입니다. ") + escape(december)
+    if found["estimated"]:
+        lead += " 공시가격을 아직 조회하지 못한 집은 실거래가로 추정한 값이라 고지서와 다를 수 있습니다."
+    notes = [rules.PENDING]
+    if found.get("projected"):
+        notes.insert(0, "올해 과세 기준일(6월 1일)이 아직 오지 않아, 그날에도 지금 집들을 그대로 가지고 계신다고 보고 계산했습니다.")
+    if unchecked:
+        notes.append("혼인신고 뒤 두 집을 가진 세대의 재산세 1주택 특례 유지 여부는 아직 확인하지 못해 일반 세율로 계산했습니다.")
+    if any(v["one_home"].get("marriage_date_missing") for v in owners.values()):
+        notes.append("혼인일이 설정에 없어 종합부동산세의 혼인 특례(혼인 뒤 10년간 각자 1주택자)를 적용하지 않았습니다. 실제 세액은 "
+                     "이보다 적을 수 있습니다.")
+    if found["year"] != found["rules_year"]:
+        notes.append(f"{found['year']}년 규칙은 아직 확인 전이라 {found['rules_year']}년 규칙으로 계산했습니다.")
+    inner = "".join(lines) + "".join(f'<div style="font-size:13px;line-height:1.6;color:{BODY};margin-top:6px">'
+                                     f'{escape(n)}</div>' for n in notes)
+    inner += (f'<div style="font-size:12px;color:{MUTED};margin-top:8px">근거(보유세 기준 {rules.RULES_YEAR}년, '
+              f'{rules.RULES_CHECKED} 확인): ' + " · ".join(_cell(item) for item in rules.sources())
+              + " · " + escape("; ".join(rules.assumptions())) + "</div>")
+    return _section("집 보유세: 재산세·종합부동산세", lead, inner)
 
 
 def _tax(advice: dict[str, Any], data: dict[str, Any], full: bool) -> str:
@@ -2789,8 +2846,24 @@ def _move_targets(data: dict[str, Any]) -> str:
     trend = (f'<div style="font-size:13px;font-weight:600;color:{INK};margin:14px 0 6px">필요 추가 자금 추이(세전, 6개월 전 → 지금)'
              f'</div>{trend}{withheld}' if trend else withheld)
     note = "" if nearest is None else f"최소 추가 자금 {_short(nearest['spread'])}"
-    return _section("목표 단지 vs 보유 주택 2채 시세 스프레드", lead, _bars(bars) + trend + table,
+    return _section("목표 단지 vs 보유 주택 2채 시세 스프레드", lead, _bars(bars) + trend + table + _move_holding(plan, data),
                     note=_stale_note(escape(note), data["sectors"]["real_estate"]))
+
+
+def _move_holding(plan: dict[str, Any], data: dict[str, Any]) -> str:
+    """Each target's yearly holding tax as the only home against what the homes pay now (FR-53): one owner, and the
+    couple half and half after registering the marriage, the comprehensive tax being per person."""
+    targets = [t for t in plan["targets"] if t.get("holding")]
+    if not targets:
+        return ""
+    now = (data.get("holding_tax") or {}).get("total")
+    rows = "".join(f'<div style="font-size:13px;line-height:1.6;color:{BODY}">· {escape(t["alias"])} · {escape(t["label"])}: '
+                   f'연 약 <b>{_short(t["holding"]["single"])}</b>(한 사람 명의), 부부 공동명의면 약 '
+                   f'{_short(t["holding"]["joint"])}</div>' for t in targets)
+    head = ("새 집의 보유세(연, 공시가격은 시세의 69%로 추정)" + (f": 지금 집들은 연 약 {_short(now)}" if now is not None else ""))
+    return (f'<div style="font-size:13px;font-weight:600;color:{INK};margin:14px 0 6px">{escape(head)}</div>{rows}'
+            f'<div style="font-size:12px;color:{MUTED};margin-top:4px">종합부동산세는 사람별로 매겨져, 혼인신고 뒤 공동명의면 '
+            f'각자 9억 원씩 공제됩니다. 국회 심의 중인 개편안이 통과되면 달라집니다.</div>')
 
 
 def _delta_pct(ratio: Decimal | None) -> str:

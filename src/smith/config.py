@@ -22,7 +22,7 @@ KNOWN_KEYS = {
     # partner_recipient: the spouse's own financial letters and a copy of the event notes (FR-51, report design §42).
     "mail": {"recipient", "answer_replies", "partner_recipient"},
     "household": {"birth_year", "birth_month", "partner_birth_year", "partner_birth_month", "retirement_monthly_spend",
-                  "marriage_registered", "cohabiting", "partner_annual_gross_salary",
+                  "marriage_registered", "marriage_date", "cohabiting", "partner_annual_gross_salary",
                   "annual_gross_salary", "retirement_age", "emergency_months",
                   "occupational_plan", "occupational_institution", "occupational_average_wage",
                   "occupational_service_start",
@@ -206,6 +206,13 @@ def _check_household(household: object) -> None:
     for field in ("marriage_registered", "cohabiting", "emergency_months_confirmed"):
         if not isinstance(household.get(field, False), bool):
             raise ValueError(f"household.{field} must be a boolean")
+    # The wedding day (FR-53): the comprehensive tax treats each spouse as their own household for ten years after it.
+    wedding = household.get("marriage_date")
+    if wedding is not None and not isinstance(wedding, date):
+        try:
+            date.fromisoformat(wedding)
+        except (TypeError, ValueError):
+            raise ValueError("household.marriage_date must be a date (YYYY-MM-DD)") from None
     age = household.get("retirement_age")
     if age is not None and (not isinstance(age, int) or isinstance(age, bool) or not 40 <= age <= 90):
         raise ValueError("household.retirement_age must be an age from 40 to 90")

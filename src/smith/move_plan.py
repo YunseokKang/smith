@@ -11,7 +11,8 @@ figure here is deterministic and dated:
   no recorded trades, such as one still under construction) plus the purchase costs;
 - the spread = cost less the household's net proceeds, now and six months ago (from each complex's own
   six-month change), so the report can say whether the gap is widening or narrowing;
-- the expected pay usable before the horizon (base and adverse scenarios) is shown against the spread.
+- the expected pay usable before the horizon (base and adverse scenarios) is shown against the spread;
+- each target's yearly holding tax as the only home (smith.holding_tax), beside what the two homes pay now.
 
 Unknown inputs stay None (never zero); assumptions are named constants echoed in the result.
 """
@@ -19,7 +20,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from smith import future_income, lease
+from smith import future_income, holding_tax, lease
 from smith.payload import LedgerView
 from smith.realestate import MIN_BASIS, target_ref
 
@@ -149,4 +150,7 @@ def _target(key: str, spec: dict[str, Any], market: dict[str, Any] | None, proce
             "spread_with_pay": None if spread is None or pay_base is None else spread - pay_base,
             "spread_6m_ago": spread_6m, "trend": trend,
             # Withheld for want of deals; a complex priced by reference (no trades at all) simply has no past.
-            "trend_hold": trend is None and estimate is not None and bool(hold or proceeds["hold"])}
+            "trend_hold": trend is None and estimate is not None and bool(hold or proceeds["hold"]),
+            # The yearly holding tax once it is the household's only home (FR-53): official price estimated from
+            # the price above, one owner or the couple half and half.
+            "holding": None if price is None else holding_tax.target(holding_tax.estimated_price(price))}

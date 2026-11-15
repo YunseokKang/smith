@@ -110,7 +110,8 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "a loan to repay.", opening=("debt",),
             personal=("my_debt",), household=("household_debt", "macro"), household_label="금리·대출"),
     Edition("tax", "세금·연금",
-            "tax", ("tax", "annuity_review", "pension"), ("pension-credit", "overseas-harvest", "isa-open", "insurance-review"),
+            "tax", ("tax", "holding_tax", "annuity_review", "pension"),
+            ("pension-credit", "overseas-harvest", "isa-open", "insurance-review"),
             ("pension_tax", "home_tax"), False, False,
             "tax and pensions: the pension stack first (sector_metrics.pension_insurance.pension_stack: every "
             "pipeline's after-tax monthly payout and start age against the monthly retirement target, the readiness "
@@ -128,7 +129,8 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "weigh every placement after tax and name the tax-advantaged route (ISA, pension accounts, the "
             "savings-insurance exemption, separately taxed bonds and infrastructure funds, the overseas capital-gains "
             "regime) as a standing rule.", opening=("pension_stack",),
-            personal=("my_pensions", "tax", "annuity_review"), household=("pension_stack", "household_tax", "pension"),
+            personal=("my_pensions", "tax", "annuity_review"),
+            household=("pension_stack", "household_tax", "holding_tax", "pension"),
             household_label="노후"),
     Edition("life", "생활·목표",
             "life", ("experiences", "cash", "spending", "stress", "goals", "follow_up", "requests"),

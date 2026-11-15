@@ -1,4 +1,5 @@
-"""`smith realestate`: keys for official real-estate data (data.go.kr MOLIT prices, R-ONE indices)."""
+"""`smith realestate`: keys for official real-estate data (data.go.kr MOLIT prices, R-ONE indices, V-World official
+apartment prices for the holding tax, FR-53)."""
 import argparse
 import getpass
 import sqlite3
@@ -11,14 +12,17 @@ from typing import Any
 from smith import credentials, ledger
 from smith.config import local_time
 
-_LABELS = {"datagokr": "공공데이터포털(data.go.kr) 일반 인증키", "rone": "한국부동산원 R-ONE 인증키"}
+_LABELS = {"datagokr": "공공데이터포털(data.go.kr) 일반 인증키", "rone": "한국부동산원 R-ONE 인증키",
+           "vworld": "V-World(국토교통부 공간정보) 인증키, 공동주택 공시가격용"}
 
 
 def add_parser(sub: Any, default_db: Any) -> None:
     command = sub.add_parser("realestate", help="Official real-estate data: store API keys, check status")
-    command.add_argument("action", choices=("login", "logout", "status", "sync", "show"),
+    command.add_argument("action", choices=("login", "logout", "status", "sync", "show", "official"),
                          help="login: enter keys without echo; status: which keys exist; sync: fetch official "
-                              "transactions for configured properties; show: price and jeonse summary")
+                              "transactions for configured properties; show: price and jeonse summary; official: "
+                              "read this year's official apartment prices (V-World) for the holding tax")
+    command.add_argument("--year", type=int, help="official: the price year (default: this year)")
     command.add_argument("--months", type=int, default=13, help="sync: months of history (default: 13)")
     command.add_argument("--config", type=Path, default=Path("config/smith.local.toml"))
     command.add_argument("--db", type=type(default_db), default=default_db)
@@ -34,6 +38,8 @@ def run(args: argparse.Namespace) -> int:
         return sync(args.db, args.config, months=args.months)
     if args.action == "show":
         return _show(args)
+    if args.action == "official":
+        return official(args.db, args.config, year=args.year)
     if args.action == "logout":
         for provider in credentials.REAL_ESTATE_PROVIDERS:
             credentials.delete_api_key(provider)
@@ -80,9 +86,40 @@ def sync(db: Path, config_path: Path, *, months: int = 13) -> int:
     with closing(ledger.connect(db)) as conn:
         stored = ledger.replace_deals(conn, deals, months=fetched, properties=refs,
                                       fetched_at=datetime.now(timezone.utc))
+    # The lot numbers the official-price lookup asks by (FR-53), from the same records; kept beside the ledger.
+    from smith import official_price
+    try:
+        official_price.remember_lots(Path(db).parent, deals)
+    except OSError:
+        print("Warning: could not keep the lot numbers for the official-price lookup.")
     _record(db, now, "success")
     print(f"Real-estate sync: {len(deals)} matching deal(s), {stored} row(s) stored")
     return 0
+
+
+def official(db: Path, config_path: Path, *, year: int | None = None) -> int:
+    """Read the year's official apartment price of every configured home and move target with a known lot number
+    (FR-53). Needs the V-World key (`smith realestate login`) and one `sync` before it (the lot numbers)."""
+    from smith import official_price, realestate
+    from smith.config import load_config
+
+    now = datetime.now(timezone.utc)
+    try:
+        config = load_config(config_path)
+    except (OSError, ValueError, UnicodeDecodeError):
+        print("Missing setup: the local config could not be read.")
+        return 2
+    key = credentials.load_api_key("vworld")
+    specs = {**(config.get("properties") or {}),
+             **{realestate.target_ref(k): v for k, v in (config.get("targets") or {}).items()}}
+    if key is None or not specs:
+        print("Missing setup: [properties] in the local config and a V-World key (`smith realestate login`).")
+        return 2
+    year = year or local_time(now, config["app"]["timezone"]).year
+    outcomes = official_price.sync(Path(db).parent, specs, key, year=year, now=now)
+    for ref, outcome in sorted(outcomes.items()):
+        print(f"{ref}: {outcome}")
+    return 0 if outcomes and all(o == "ok" for o in outcomes.values()) else 1
 
 
 def _record(db: Path, at: datetime, outcome: str, code: str | None = None) -> None:
