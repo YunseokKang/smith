@@ -444,6 +444,25 @@ def _sync_fundamentals(db: Path, config: dict[str, Any], now: datetime) -> None:
             _say(db, f"{label} sync crashed: {type(error).__name__}")
 
 
+def _sync_law(db: Path, now: datetime) -> None:
+    """The weekly tax-law watch (FR-54): the watched laws' versions from the 법제처 API; never raises. Without the OC key
+    the attempt is still kept (as "no-key"), so it is retried a day later rather than on every run."""
+    from smith import credentials, law_watch
+
+    try:
+        folder = Path(db).parent
+        if not law_watch.stale(folder, now):
+            return
+        result = law_watch.check(credentials.load_api_key("law"), now=now, previous=law_watch.load(folder))
+        law_watch.save(folder, result)
+        failed = [name for name, entry in result["laws"].items() if entry["error"]]
+        found = law_watch.pending(result)
+        _say(db, f"Law watch: {len(result['laws']) - len(failed)} read, {len(failed)} failed, "
+                 f"{len(found)} amendment(s) not yet reflected")
+    except Exception as error:  # noqa: BLE001 - the weekly refresh must never block the scheduled task.
+        _say(db, f"Law watch crashed: {type(error).__name__}")
+
+
 def _events_after_report(args: argparse.Namespace) -> None:
     """The event check that follows a sent report, run once the daily mail has gone; never raises."""
     from smith.config import load_config
@@ -586,6 +605,7 @@ def _publish_once(args: argparse.Namespace) -> int:
             _check_events(args.db, config, now, reason="slot", sync=True)
             _sync_dividends(args.db, config, now)   # Weekly, never while a report is due (FR-45).
             _sync_fundamentals(args.db, config, now)   # The holdings' official quarters, weekly as well.
+            _sync_law(args.db, now)   # The tax-law watch (FR-54), weekly.
             upcoming = delivery.slots_between(config["reports"], tz, now, now + PREPARE_AHEAD)
             if upcoming:
                 # Prepare: research ahead of the scheduled time so the report itself is not delayed.

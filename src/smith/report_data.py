@@ -12,7 +12,7 @@ from decimal import Decimal, localcontext
 from typing import Any
 
 from smith import (cases, checklist, dividends, editions, evidence, fundamentals, future_income, holding_tax, holdings,
-                   insiders, lease, ledger, move_plan, official_price, pension, perspective, picks, principles,
+                   insiders, law_watch, lease, ledger, move_plan, official_price, pension, perspective, picks, principles,
                    product_review, proposals, realestate, stress, tax)
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import LedgerView, base_amount, load_view, unrealized_gain
@@ -174,6 +174,8 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
                          "us_realized": plan["us_realized"], "us_sales": len(plan["us_sales"]),
                          "us_realized_unknown": plan["us_realized_unknown"]},
             "holding_tax": holding,
+            # The weekly tax-law watch (FR-54): when the laws were read and the amendments not reflected yet.
+            "law_watch": law_watch.summary(law_watch.store_for(conn)),
             "requests": checklist.requests(view, household, pension_stack=pension_stack),
             "household_profile": _profile(household, as_of),
             # The balance sheet by kind and owner (hero bar), the four pension pipelines against the monthly
@@ -182,9 +184,10 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
             "pension_stack": pension_stack,
             # What each insurer's annuity is worth on its own illustration (report design §19, FR-24).
             "annuity_reviews": product_review.annuity_reviews(view, household, as_of.date()),
-            "move_plan": _household_move(base, view, sectors["real_estate"]["properties"], household, client_household,
-                                         pay, audience=audience, today=as_of.date(), lease_plans=lease_plans,
-                                         market=targets_market),
+            "move_plan": _official_holding(_household_move(base, view, sectors["real_estate"]["properties"], household,
+                                                           client_household, pay, audience=audience, today=as_of.date(),
+                                                           lease_plans=lease_plans, market=targets_market),
+                                           official_price.store_for(conn), year=as_of.year),
             # The reader's own homes (report design §42): a per-person property day's "나의 부동산" and its hero.
             "own_real_estate": _own_estate(view, sectors["real_estate"]),
             "own_net_worth": _own_net_worth(view),
@@ -596,6 +599,22 @@ def _spending_split(view: LedgerView, owner: str | None = None) -> dict[str, Any
             "left": inflow - fixed - discretionary - transfers,
             "fixed_share": fixed / inflow if inflow else None,
             "discretionary_share": discretionary / inflow if inflow else None}
+
+
+def _official_holding(plan: dict[str, Any] | None, store: dict[str, Any], *, year: int) -> dict[str, Any] | None:
+    """Each move target's yearly holding tax on the year's official price of its same-area units when one was read
+    (FR-53), else on the market price at the realization rate; the basis is named either way."""
+    if plan is None:
+        return None
+    for target in plan["targets"]:
+        price, units = official_price.price_of(store, realestate.target_ref(target["key"]), year)
+        if price is not None:
+            target["holding"] = {**holding_tax.target(price, estimated=False),
+                                 "basis": f"{year}년 공시가격 기준(같은 면적 {units}세대 중간값)"}
+        elif target.get("holding"):
+            target["holding"] = {**target["holding"],
+                                 "basis": f"공시가격은 시세의 {round(holding_tax.REALIZATION_RATE * 100)}%로 추정"}
+    return plan
 
 
 def _holding_tax(conn: sqlite3.Connection, properties: list[dict[str, Any]], household: dict[str, Any] | None,

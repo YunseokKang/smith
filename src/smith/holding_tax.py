@@ -192,49 +192,79 @@ def assessment_day(year: int) -> date:
 
 
 MARRIAGE_YEARS = 10   # 종부세법 시행령 제1조의2 ④: each spouse is their own household for ten years after the wedding.
+# 지방세법 시행령 제110조의2 ①9·②2 (read through the law API 2026-11-15): for five years after the wedding, homes each
+# spouse brought into the marriage (at most one each, none bought since) leave the higher-priced one the household's
+# one home for the property tax; the other pays the general rate.
+MARRIAGE_PROPERTY_YEARS = 5
+
+
+def _wedding(household: dict[str, Any] | None) -> date | None:
+    wedding = (household or {}).get("marriage_date")
+    if isinstance(wedding, str):
+        try:
+            return date.fromisoformat(wedding)
+        except ValueError:
+            return None
+    return wedding if isinstance(wedding, date) else None
 
 
 def one_home_status(homes: list[Home], household: dict[str, Any] | None, *, year: int = RULES_YEAR
                     ) -> dict[str, dict[str, Any]]:
-    """Per owner: whether the property tax and the comprehensive tax treat the owner as a one-home household on the
-    year's assessment day, and what was left unchecked.
+    """Per owner: whether the comprehensive tax treats the owner as a one-home owner on the year's assessment day.
 
     Unmarried partners are separate households even at one address (a 동거인 is not family: 지방세법 시행령
-    제110조의2, 종부세법 시행령 제1조의2), so each owner counts only their own homes. After registration the two form
-    one household. For the comprehensive tax each spouse stays their own household for ten years from the wedding,
-    read from `[household] marriage_date`; without that date the rule is not applied (the figure can then be too high,
-    never too low) and `marriage_date_missing` says so. The property tax's marriage rule was not checked against the
-    decree, so a married household with two homes pays the general rate there and `unchecked` says so. A jointly held
-    only home is one home for the property tax, while each spouse pays the comprehensive tax on a share with the
-    general deduction (the one-home choice for joint owners is the couple's to make)."""
+    제110조의2 ①, 종부세법 시행령 제1조의2 ①②), so each owner counts only their own homes. After registration the two
+    form one household, but for the comprehensive tax each spouse stays their own household for ten years from the
+    wedding, read from `[household] marriage_date`; without that date the rule is not applied (the figure can then be
+    too high, never too low) and `marriage_date_missing` says so. A jointly held only home: each spouse pays the
+    comprehensive tax on a share with the general deduction (the one-home choice for joint owners is the couple's)."""
     shares_of = {h.ref: h.shares or {h.owner: Decimal(1)} for h in homes}
     owners = sorted({o for shares in shares_of.values() for o in shares})
     count = {o: sum(1 for shares in shares_of.values() if o in shares) for o in owners}
-    config = household or {}
-    married = bool(config.get("marriage_registered"))
-    wedding = config.get("marriage_date")
-    if isinstance(wedding, str):
-        try:
-            wedding = date.fromisoformat(wedding)
-        except ValueError:
-            wedding = None
-    wedding = wedding if isinstance(wedding, date) else None
+    married = bool((household or {}).get("marriage_registered"))
+    wedding = _wedding(household)
     day = assessment_day(year)
     within = wedding is not None and wedding <= day < _years_after(wedding, MARRIAGE_YEARS)
     found = {}
     for owner in owners:
         if not married:
-            found[owner] = {"property": count[owner] == 1, "comprehensive": count[owner] == 1, "unchecked": False,
-                            "marriage_date_missing": False}
-            continue
-        only = len(homes) == 1
-        joint = only and len(shares_of[homes[0].ref]) > 1
-        if only:
-            found[owner] = {"property": True, "comprehensive": not joint, "unchecked": False, "marriage_date_missing": False}
+            found[owner] = {"comprehensive": count[owner] == 1, "marriage_date_missing": False}
+        elif len(homes) == 1:
+            found[owner] = {"comprehensive": len(shares_of[homes[0].ref]) == 1, "marriage_date_missing": False}
         else:
-            found[owner] = {"property": False, "comprehensive": count[owner] == 1 and within, "unchecked": True,
+            found[owner] = {"comprehensive": count[owner] == 1 and within,
                             "marriage_date_missing": count[owner] == 1 and wedding is None}
     return found
+
+
+def property_one_home(homes: list[Home], household: dict[str, Any] | None, *, year: int = RULES_YEAR
+                      ) -> tuple[dict[str, bool], str | None]:
+    """Per home: whether the property tax treats it as the household's one home, and the marriage rule that decided it
+    ("until:<date>" while the five-year rule holds, "after" once it has lapsed or cannot be shown, "undated" without
+    the wedding day), None when no marriage rule was involved.
+
+    Unmarried: each owner's only home. Married with one home: that home. Married with more: for five years after
+    the wedding, when each spouse brought at most one home into the marriage (bought in a year before the wedding's)
+    and none was bought since, the higher-priced home; otherwise none."""
+    shares_of = {h.ref: h.shares or {h.owner: Decimal(1)} for h in homes}
+    count: dict[str, int] = {}
+    for shares in shares_of.values():
+        for owner in shares:
+            count[owner] = count.get(owner, 0) + 1
+    if not (household or {}).get("marriage_registered"):
+        return {h.ref: all(count[o] == 1 for o in shares_of[h.ref]) for h in homes}, None
+    if len(homes) <= 1:
+        return {h.ref: True for h in homes}, None
+    wedding = _wedding(household)
+    if wedding is None:
+        return {h.ref: False for h in homes}, "undated"
+    until = _years_after(wedding, MARRIAGE_PROPERTY_YEARS)
+    brought = all(c <= 1 for c in count.values()) and all(
+        h.acquired_year is not None and h.acquired_year < wedding.year for h in homes)
+    if wedding <= assessment_day(year) < until and brought and all(h.price is not None for h in homes):
+        top = max(homes, key=lambda h: h.price)
+        return {h.ref: h.ref == top.ref for h in homes}, f"until:{until.isoformat()}"
+    return {h.ref: False for h in homes}, "after"
 
 
 def _years_after(day: date, years: int) -> date:
@@ -260,10 +290,11 @@ def household(homes: list[Home], household_config: dict[str, Any] | None, *, yea
     owner's figures, and the total, unknown (None) rather than partial. `projected`: the homes are today's, before
     the year's assessment day, so the figure assumes they are still held on 1 June."""
     status = one_home_status(homes, household_config, year=year)
+    flags, marriage_rule = property_one_home(homes, household_config, year=year)
     rows, per_owner_homes = [], {}
     for home in homes:
         shares = home.shares or {home.owner: Decimal(1)}
-        one_home = all(status[o]["property"] for o in shares)
+        one_home = flags[home.ref]
         tax = None if home.price is None else property_tax(home.price, one_home=one_home)
         rows.append({"ref": home.ref, "label": home.label, "owner": home.owner, "price": home.price,
                      "estimated": home.estimated, "basis": home.basis, "one_home": one_home, "property": tax,
@@ -285,7 +316,8 @@ def household(homes: list[Home], household_config: dict[str, Any] | None, *, yea
                          "one_home": status[owner], "estimated": any(home.estimated for home, _, _ in held)}
     totals = [o["total"] for o in owners.values()]
     # A later year is computed on the rules checked for RULES_YEAR and says so: the one-home ratio is set per year.
-    return {"year": year, "rules_year": RULES_YEAR, "projected": projected, "homes": rows, "owners": owners,
+    return {"year": year, "rules_year": RULES_YEAR, "projected": projected, "marriage_rule": marriage_rule,
+            "homes": rows, "owners": owners,
             "total": None if not totals or None in totals else sum(totals, Decimal(0)),
             "estimated": any(h.estimated for h in homes), "pending": PENDING}
 

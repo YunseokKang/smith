@@ -90,15 +90,25 @@ class HouseholdTests(unittest.TestCase):
         self.assertEqual(found["owners"]["self"]["property"], Decimal(1_008_000))
         self.assertEqual(found["owners"]["self"]["comprehensive"]["total"], 0)
         self.assertEqual(found["total"], found["owners"]["self"]["total"] + found["owners"]["partner"]["total"])
-        self.assertFalse(found["owners"]["self"]["one_home"]["unchecked"])
+        self.assertIsNone(found["marriage_rule"])
         months = ht.due_on(found)
         self.assertEqual(set(months), {7, 9})                          # No December bill under the deduction.
 
-    def test_after_registration_two_homes_lose_the_property_tax_one_home_rate_and_say_so(self):
-        homes = [home("h1", "self", 700_000_000), home("h2", "partner", 450_000_000)]
+    def test_after_registration_the_higher_priced_home_keeps_the_property_tax_rate_for_five_years(self):
+        # 지방세법 시행령 제110조의2 ①9·②2, read through the law API 2026-11-15.
+        homes = [home("h1", "self", 700_000_000, acquired_year=2021), home("h2", "partner", 450_000_000, acquired_year=2020)]
         found = ht.household(homes, {"marriage_registered": True, "marriage_date": "2026-09-01"}, year=2027)
-        self.assertFalse(any(row["one_home"] for row in found["homes"]))
-        self.assertTrue(found["owners"]["self"]["one_home"]["unchecked"])
+        self.assertEqual({row["ref"]: row["one_home"] for row in found["homes"]}, {"h1": True, "h2": False})
+        self.assertEqual(found["marriage_rule"], "until:2031-09-01")
+        # Five years on, or a home bought in the wedding's year (not shown to be brought in), or no date: neither.
+        later = ht.household(homes, {"marriage_registered": True, "marriage_date": "2026-09-01"}, year=2032)
+        self.assertFalse(any(row["one_home"] for row in later["homes"]))
+        self.assertEqual(later["marriage_rule"], "after")
+        bought = [home("h1", "self", 700_000_000, acquired_year=2026), homes[1]]
+        self.assertFalse(any(r["one_home"] for r in ht.household(bought, {"marriage_registered": True,
+                                                                          "marriage_date": "2026-09-01"}, year=2027)["homes"]))
+        undated = ht.household(homes, {"marriage_registered": True}, year=2027)
+        self.assertEqual((undated["marriage_rule"], any(r["one_home"] for r in undated["homes"])), ("undated", False))
         # The comprehensive tax's marriage rule keeps each owner's one-home status for ten years from the wedding.
         self.assertTrue(found["owners"]["self"]["one_home"]["comprehensive"])
         # Codex review 2026-11-15: not after the ten years, and not on a guess when the date is not configured.
@@ -157,8 +167,10 @@ class OfficialPriceTests(unittest.TestCase):
         return lambda url: (200, json.dumps(body).encode("utf-8"))
 
     @staticmethod
-    def unit(area, price, year=2026):
-        return {"stdrYear": str(year), "dongNm": "101", "hoNm": "1001", "prvuseAr": str(area), "pblntfPc": str(price)}
+    def unit(area, price, year=2026, _numbers=iter(range(1, 10**6))):
+        # A unit number of its own each time: the client counts a (dong, ho) once.
+        return {"stdrYear": str(year), "dongNm": "101", "hoNm": str(next(_numbers)), "prvuseAr": str(area),
+                "pblntfPc": str(price)}
 
     def test_the_lot_number_is_built_from_the_trade_record(self):
         fields = {"sggCd": "11110", "umdCd": "18700", "landCd": "1", "bonbun": "0060", "bubun": "0000"}
@@ -173,6 +185,16 @@ class OfficialPriceTests(unittest.TestCase):
              self.unit("59.9", 650_000_000, year=2025)]))
         self.assertEqual(official_price.median_for(rows, area=Decimal("59.9"), year=2026), (Decimal(710_000_000), 2))
         self.assertEqual(official_price.median_for(rows, area=Decimal("120"), year=2026), (None, 0))
+        # A unit listed twice (seen live 2026-11-15) counts once; a corrected row (later update) wins.
+        twice = [{"dong": "101", "ho": "1001", "area": Decimal("59.9"), "price": Decimal(700_000_000), "year": 2026,
+                  "updated": "2026-04-30"},
+                 {"dong": "101", "ho": "1001", "area": Decimal("59.9"), "price": Decimal(700_000_000), "year": 2026,
+                  "updated": "2026-04-30"},
+                 {"dong": "101", "ho": "1002", "area": Decimal("59.9"), "price": Decimal(800_000_000), "year": 2026,
+                  "updated": "2026-04-30"},
+                 {"dong": "101", "ho": "1002", "area": Decimal("59.9"), "price": Decimal(760_000_000), "year": 2026,
+                  "updated": "2026-05-14"}]
+        self.assertEqual(official_price.median_for(twice, area=Decimal("59.9"), year=2026), (Decimal(730_000_000), 2))
 
     def test_an_error_or_an_empty_answer_fails_visibly(self):
         import json
@@ -299,6 +321,29 @@ class RenderTests(unittest.TestCase):
         self.assertIn("두 분 모두 나오지 않습니다", page)
         self.assertIn("국회 심의 중", page)
         self.assertEqual(report_html._holding_tax({"holding_tax": None}), "")
+
+
+
+class LoginTests(unittest.TestCase):
+    def test_a_key_already_stored_for_another_service_is_refused(self):
+        # 2026-11-15: the V-World key typed into the data.go.kr prompt replaced that key and stopped the trade sync.
+        import argparse
+        import io
+        from contextlib import redirect_stdout
+        from unittest import mock
+
+        from smith import realestate_command
+
+        stored = {"vworld": "11111111-2222-3333-4444-555555555555", "datagokr": "old", "rone": "r"}
+        saved = {}
+        with mock.patch.object(realestate_command.sys.stdin, "isatty", return_value=True), \
+                mock.patch.object(realestate_command.getpass, "getpass", return_value=stored["vworld"]), \
+                mock.patch.object(realestate_command.credentials, "load_api_key", side_effect=stored.get), \
+                mock.patch.object(realestate_command.credentials, "save_api_key", side_effect=saved.__setitem__), \
+                redirect_stdout(io.StringIO()) as out:
+            realestate_command.run(argparse.Namespace(action="login", only="datagokr"))
+        self.assertEqual(saved, {})
+        self.assertIn("already stored as vworld", out.getvalue())
 
 
 if __name__ == "__main__":

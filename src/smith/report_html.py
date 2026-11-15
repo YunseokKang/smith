@@ -20,6 +20,7 @@ reasons, data status and sources moved out of the mail into `system_notes` (for 
 """
 import base64
 import re
+from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from html import escape
 from typing import Any
@@ -1605,6 +1606,47 @@ def _household_tax(advice: dict[str, Any]) -> str:
     return _section("두 분의 세금: 혼인신고·주택·증여", "두 분이 함께 정할 세금 문제입니다.", inner, brief=None)
 
 
+def _law_watch(data: dict[str, Any], rules: str) -> tuple[str, str]:
+    """(notice, source-line note) of the weekly tax-law watch (FR-54) for one rule set ("tax" or "holding"): the
+    amendments promulgated after its rules were checked, and when the laws were last read. A law that could not be
+    read is counted, never reported as unchanged."""
+    from smith import law_watch as watch_rules
+
+    watch = data.get("law_watch")
+    if not watch:
+        return "", " · 법제처 개정 확인 전"
+    names = {name for name, _, of in watch_rules.WATCHED if of == rules}
+    failed = [name for name in watch["failed"] if name in names]
+    found = [a for a in watch["pending"] if a["rules"] == rules]
+    if watch["no_key"] and not found:
+        return "", " · 법제처 개정 확인 전"
+    try:
+        day = datetime.fromisoformat(watch["checked_at"]).astimezone(data["as_of"].tzinfo).date()
+    except (TypeError, ValueError, KeyError):
+        return "", " · 법제처 개정 확인 전"
+    # Only what was read is reported as read (Codex review 2026-11-15): a check that read nothing says it failed, one
+    # that read some says its "no amendment" covers those laws.
+    if watch["no_key"]:
+        # Amendments found before the key was removed stay shown (Codex review 2026-11-15).
+        note = f" · 법제처 키 없음, 지난 확인 기준 반영 전 개정 {len(found)}건"
+    elif len(failed) == len(names) and not found:
+        note = f" · 법제처 확인 실패({day.month}월 {day.day}일)"
+    else:
+        note = (f" · 법제처 확인 {day.month}월 {day.day}일: "
+                + (f"반영 전 개정 {len(found)}건" if found else
+                   "읽은 법령에서는 그 뒤 공포된 개정 없음" if failed else "그 뒤 공포된 개정 없음")
+                + (f", {len(failed)}개 법령은 이번에 읽지 못함(지난 확인 기준)" if failed else ""))
+    if not found:
+        return "", note
+    rows = "".join(f'<div style="font-size:14px;line-height:1.6;color:{BODY}">· {escape(a["name"])} {escape(a["kind"])}'
+                   f'({a["promulgated"]} 공포, {a["effective"]} 시행): {escape(a["about"])}</div>' for a in found)
+    notice = (f'<div style="margin:4px 0 12px;padding:10px 12px;border-left:3px solid {INK}">'
+              f'<div style="font-size:14px;font-weight:600;color:{INK};margin-bottom:4px">세법 개정 공포: Smith 계산에 아직 반영 전'
+              f'</div>{rows}<div style="font-size:12px;color:{MUTED};margin-top:4px">아래 금액은 개정 전 규칙으로 계산했습니다. '
+              f'시행일 전에 계산 규칙을 고칩니다.</div></div>')
+    return notice, note
+
+
 _OWNER_NAMES = {"self": "고객님", "partner": "배우자분"}
 
 
@@ -1639,7 +1681,6 @@ def _holding_tax(data: dict[str, Any]) -> str:
         december = " · ".join(f"{_OWNER_NAMES.get(o, o)} 12월 종합부동산세 약 {_short(v['comprehensive']['total'])}"
                               if v["comprehensive"] is not None else f"{_OWNER_NAMES.get(o, o)} 종합부동산세 미상"
                               for o, v in owners.items())
-    unchecked = any(v["one_home"]["unchecked"] for v in owners.values())
     lead = (f"올해 집 {len(found['homes'])}채의 보유세는 합계 약 <b>{_short(found['total'])}</b>입니다. " if found["total"] is not None
             else "일부 집의 공시가격을 알 수 없어 합계는 미상입니다. ") + escape(december)
     if found["estimated"]:
@@ -1647,17 +1688,27 @@ def _holding_tax(data: dict[str, Any]) -> str:
     notes = [rules.PENDING]
     if found.get("projected"):
         notes.insert(0, "올해 과세 기준일(6월 1일)이 아직 오지 않아, 그날에도 지금 집들을 그대로 가지고 계신다고 보고 계산했습니다.")
-    if unchecked:
-        notes.append("혼인신고 뒤 두 집을 가진 세대의 재산세 1주택 특례 유지 여부는 아직 확인하지 못해 일반 세율로 계산했습니다.")
+    rule = found.get("marriage_rule") or ""
+    if rule.startswith("until:"):
+        until = rule.split(":", 1)[1]
+        notes.append(f"혼인신고 뒤 5년({until} 전까지)은 두 분이 혼인 전부터 가진 집 가운데 공시가격이 높은 한 채만 재산세 1주택 "
+                     "특례를 받고, 다른 한 채는 일반 세율입니다(지방세법 시행령 제110조의2).")
+    elif rule == "after":
+        notes.append("혼인신고 뒤 두 집은 재산세 1주택 특례 없이 계산했습니다(혼인 뒤 5년이 지났거나, 혼인 전부터 각자 한 채씩이고 "
+                     "그 뒤 산 집이 없다는 것이 확인되지 않음).")
+    elif rule == "undated":
+        notes.append("혼인일이 설정에 없어 재산세의 혼인 특례(혼인 뒤 5년간 두 집 중 공시가격이 높은 한 채를 1주택으로 봄)를 "
+                     "적용하지 않았습니다.")
     if any(v["one_home"].get("marriage_date_missing") for v in owners.values()):
         notes.append("혼인일이 설정에 없어 종합부동산세의 혼인 특례(혼인 뒤 10년간 각자 1주택자)를 적용하지 않았습니다. 실제 세액은 "
                      "이보다 적을 수 있습니다.")
     if found["year"] != found["rules_year"]:
         notes.append(f"{found['year']}년 규칙은 아직 확인 전이라 {found['rules_year']}년 규칙으로 계산했습니다.")
-    inner = "".join(lines) + "".join(f'<div style="font-size:13px;line-height:1.6;color:{BODY};margin-top:6px">'
-                                     f'{escape(n)}</div>' for n in notes)
+    notice, checked = _law_watch(data, "holding")
+    inner = notice + "".join(lines) + "".join(f'<div style="font-size:13px;line-height:1.6;color:{BODY};margin-top:6px">'
+                                              f'{escape(n)}</div>' for n in notes)
     inner += (f'<div style="font-size:12px;color:{MUTED};margin-top:8px">근거(보유세 기준 {rules.RULES_YEAR}년, '
-              f'{rules.RULES_CHECKED} 확인): ' + " · ".join(_cell(item) for item in rules.sources())
+              f'{rules.RULES_CHECKED} 확인{escape(checked)}): ' + " · ".join(_cell(item) for item in rules.sources())
               + " · " + escape("; ".join(rules.assumptions())) + "</div>")
     return _section("집 보유세: 재산세·종합부동산세", lead, inner)
 
@@ -1682,8 +1733,11 @@ def _tax(advice: dict[str, Any], data: dict[str, Any], full: bool) -> str:
                   + _table(["항목", "올해 상황", "할 일"], [list(row) for row in rows]))
     lead = "같은 돈도 어느 계좌에 두고 언제 실현하느냐에 따라 세후 결과가 달라집니다."
     from smith import tax as tax_rules
+    notice, checked = _law_watch(data, "tax")
+    inner = notice + inner
     inner += (f'<div style="font-size:12px;color:{MUTED};margin-top:8px">근거(세법 기준 {tax_rules.RULES_YEAR}년, '
-              f'{tax_rules.RULES_CHECKED} 확인): ' + " · ".join(_cell(item) for item in tax_rules.sources()) + "</div>")
+              f'{tax_rules.RULES_CHECKED} 확인{escape(checked)}): '
+              + " · ".join(_cell(item) for item in tax_rules.sources()) + "</div>")
     return _section("세금 관점 전략", lead, inner)
 
 
@@ -2859,8 +2913,10 @@ def _move_holding(plan: dict[str, Any], data: dict[str, Any]) -> str:
     now = (data.get("holding_tax") or {}).get("total")
     rows = "".join(f'<div style="font-size:13px;line-height:1.6;color:{BODY}">· {escape(t["alias"])} · {escape(t["label"])}: '
                    f'연 약 <b>{_short(t["holding"]["single"])}</b>(한 사람 명의), 부부 공동명의면 약 '
-                   f'{_short(t["holding"]["joint"])}</div>' for t in targets)
-    head = ("새 집의 보유세(연, 공시가격은 시세의 69%로 추정)" + (f": 지금 집들은 연 약 {_short(now)}" if now is not None else ""))
+                   f'{_short(t["holding"]["joint"])}'
+                   + (f' <span style="color:{MUTED}">· {escape(t["holding"]["basis"])}</span>' if t["holding"].get("basis") else "")
+                   + '</div>' for t in targets)
+    head = "새 집의 보유세(연)" + (f": 지금 집들은 연 약 {_short(now)}" if now is not None else "")
     return (f'<div style="font-size:13px;font-weight:600;color:{INK};margin:14px 0 6px">{escape(head)}</div>{rows}'
             f'<div style="font-size:12px;color:{MUTED};margin-top:4px">종합부동산세는 사람별로 매겨져, 혼인신고 뒤 공동명의면 '
             f'각자 9억 원씩 공제됩니다. 국회 심의 중인 개편안이 통과되면 달라집니다.</div>')

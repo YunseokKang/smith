@@ -579,7 +579,11 @@ def _full_payload(view: Any, data: dict[str, Any], brief: dict[str, Any] | None,
                 "year_end_checklist": [list(row) for row in advice.get("tax_checklist", [])],
                 "realized_this_year": tax.realized_payload(view),
                 # The year's holding tax per owner (FR-53), computed in code; "estimated" when a price was estimated.
-                "holding_tax": _holding_payload(data.get("holding_tax"))},
+                "holding_tax": _holding_payload(data.get("holding_tax")),
+                # Amendments promulgated after the rules were checked (FR-54): names and dates only.
+                "law_amendments_not_reflected": [
+                    {"law": a["name"], "kind": a["kind"], "promulgated": a["promulgated"], "effective": a["effective"]}
+                    for a in ((data.get("law_watch") or {}).get("pending") or [])]},
         "brief": None if brief is None else {
             "researched_at": brief["created_at"].date().isoformat(),
             "items_untrusted": _model_items(brief["brief"]["items"]), "gaps": brief["brief"]["gaps"]},

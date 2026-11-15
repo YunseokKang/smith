@@ -32,7 +32,7 @@ from smith.realestate import AREA_TOLERANCE, pnu  # noqa: F401 - pnu is part of 
 ENDPOINT = "https://api.vworld.kr/ned/data/getApartHousingPriceAttr"
 STORE = "official-prices.json"
 PAGE_ROWS = 1000
-MAX_PAGES = 10
+MAX_PAGES = 30   # 30,000 rows: a lot of a 5,678-unit complex answered 11,356 rows for 2026 (two per unit).
 _TIMEOUT_SECONDS = 20
 
 Getter = Callable[[str], tuple[int, bytes]]
@@ -160,12 +160,26 @@ def _row(item: dict[str, Any]) -> dict[str, Any] | None:
     if price <= 0 or area <= 0:
         return None
     return {"dong": str(item.get("dongNm") or ""), "ho": str(item.get("hoNm") or ""), "area": area, "price": price,
-            "year": year}
+            "year": year, "updated": str(item.get("lastUpdtDt") or "")}
 
 
 def median_for(rows: list[dict[str, Any]], *, area: Decimal, year: int) -> tuple[Decimal | None, int]:
-    """(median price of the same-area units of `year`, how many units), (None, 0) when none match."""
-    prices = [row["price"] for row in rows if row["year"] == year and abs(row["area"] - area) <= AREA_TOLERANCE]
+    """(median price of the same-area units of `year`, how many units), (None, 0) when none match.
+
+    V-World lists a unit more than once (2026-11-15: every unit of two large complexes came twice, same month and
+    price), so a unit (dong, ho) counts once, its most recently updated row."""
+    units: dict[tuple[str, str], dict[str, Any]] = {}
+    unnamed = []
+    for row in rows:
+        if row["year"] != year or abs(row["area"] - area) > AREA_TOLERANCE:
+            continue
+        if not (row["dong"] or row["ho"]):
+            unnamed.append(row)
+            continue
+        key = (row["dong"], row["ho"])
+        if key not in units or row.get("updated", "") > units[key].get("updated", ""):
+            units[key] = row
+    prices = [row["price"] for row in [*units.values(), *unnamed]]
     if not prices:
         return None, 0
     return Decimal(statistics.median(prices)), len(prices)

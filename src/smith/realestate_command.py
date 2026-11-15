@@ -23,6 +23,8 @@ def add_parser(sub: Any, default_db: Any) -> None:
                               "transactions for configured properties; show: price and jeonse summary; official: "
                               "read this year's official apartment prices (V-World) for the holding tax")
     command.add_argument("--year", type=int, help="official: the price year (default: this year)")
+    command.add_argument("--only", choices=credentials.REAL_ESTATE_PROVIDERS,
+                         help="login: ask for this one key only (e.g. --only vworld)")
     command.add_argument("--months", type=int, default=13, help="sync: months of history (default: 13)")
     command.add_argument("--config", type=Path, default=Path("config/smith.local.toml"))
     command.add_argument("--db", type=type(default_db), default=default_db)
@@ -48,10 +50,18 @@ def run(args: argparse.Namespace) -> int:
     if not sys.stdin.isatty():
         print("Run `smith realestate login` in an interactive terminal; keys are never passed as arguments.")
         return 2
-    for provider in credentials.REAL_ESTATE_PROVIDERS:
+    for provider in (args.only,) if args.only else credentials.REAL_ESTATE_PROVIDERS:
         key = getpass.getpass(f"{_LABELS[provider]} (hidden, Enter to skip or keep): ").strip()
-        if key:
-            credentials.save_api_key(provider, key)
+        if not key:
+            continue
+        # One key typed into the wrong prompt silently replaced the data.go.kr key on 2026-11-15 and stopped the
+        # trade sync and the daily weather: a key already stored for another service is refused.
+        clash = next((other for other in credentials.REAL_ESTATE_PROVIDERS
+                      if other != provider and credentials.load_api_key(other) == key), None)
+        if clash:
+            print(f"Not saved: that key is already stored as {clash} ({_LABELS[clash]}). Check which prompt it belongs to.")
+            continue
+        credentials.save_api_key(provider, key)
     print("Saved to the OS credential store. Check with: smith realestate status")
     return 0
 
