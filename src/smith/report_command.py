@@ -444,6 +444,33 @@ def _sync_fundamentals(db: Path, config: dict[str, Any], now: datetime) -> None:
             _say(db, f"{label} sync crashed: {type(error).__name__}")
 
 
+def _sync_official_prices(db: Path, config: dict[str, Any], now: datetime) -> None:
+    """The year's official apartment prices of the homes and move targets (FR-53), read once they are announced
+    (user decision 2026-11-15: "5월부터 자동으로"); never raises. Without the V-World key the attempt is kept, so it is
+    asked again a week later."""
+    from smith import credentials, official_price, realestate
+    from smith.config import local_time
+
+    try:
+        folder = Path(db).parent
+        today = local_time(now, config["app"]["timezone"]).date()
+        specs = {**(config.get("properties") or {}),
+                 **{realestate.target_ref(k): v for k, v in (config.get("targets") or {}).items()}}
+        if not specs or not official_price.due(folder, specs, today=today, now=now):
+            return
+        key = credentials.load_api_key("vworld")
+        if key is None:
+            official_price.record_no_key(folder, year=today.year, now=now)
+            _say(db, f"Official prices {today.year}: skipped, no V-World key")
+            return
+        outcomes = official_price.sync(folder, specs, key, year=today.year, now=now)
+        failed = sorted(f"{ref} {o}" for ref, o in outcomes.items() if o not in ("ok", "no-lot"))
+        _say(db, f"Official prices {today.year}: {sum(o == 'ok' for o in outcomes.values())} read"
+                 + (f"; {', '.join(failed)}" if failed else ""))
+    except Exception as error:  # noqa: BLE001 - the yearly refresh must never block the scheduled task.
+        _say(db, f"Official prices crashed: {type(error).__name__}")
+
+
 def _sync_law(db: Path, now: datetime) -> None:
     """The weekly tax-law watch (FR-54): the watched laws' versions from the 법제처 API; never raises. Without the OC key
     the attempt is still kept (as "no-key"), so it is retried a day later rather than on every run."""
@@ -606,6 +633,7 @@ def _publish_once(args: argparse.Namespace) -> int:
             _sync_dividends(args.db, config, now)   # Weekly, never while a report is due (FR-45).
             _sync_fundamentals(args.db, config, now)   # The holdings' official quarters, weekly as well.
             _sync_law(args.db, now)   # The tax-law watch (FR-54), weekly.
+            _sync_official_prices(args.db, config, now)   # The year's official prices (FR-53), from 1 May.
             upcoming = delivery.slots_between(config["reports"], tz, now, now + PREPARE_AHEAD)
             if upcoming:
                 # Prepare: research ahead of the scheduled time so the report itself is not delayed.

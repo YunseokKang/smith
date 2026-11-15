@@ -21,7 +21,7 @@ import urllib.parse
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -186,15 +186,15 @@ def median_for(rows: list[dict[str, Any]], *, area: Decimal, year: int) -> tuple
 
 
 def load(folder: Path) -> dict[str, Any]:
-    """The stored prices and lot numbers: {"lots": {ref: pnu}, "prices": {ref: {year, price, units, read_at}}}."""
+    """The stored prices, lot numbers and read attempts: {"lots": {ref: pnu}, "prices": {ref: {year, price, units,
+    read_at}}, "attempts": {year: {at, outcomes}}}."""
     try:
         found = json.loads((folder / STORE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {"lots": {}, "prices": {}}
+        found = {}
     if not isinstance(found, dict):
-        return {"lots": {}, "prices": {}}
-    return {"lots": found.get("lots") if isinstance(found.get("lots"), dict) else {},
-            "prices": found.get("prices") if isinstance(found.get("prices"), dict) else {}}
+        found = {}
+    return {name: found.get(name) if isinstance(found.get(name), dict) else {} for name in ("lots", "prices", "attempts")}
 
 
 def store_for(conn: Any) -> dict[str, Any]:
@@ -264,10 +264,43 @@ def sync(folder: Path, specs: dict[str, dict[str, Any]], api_key: str, *, year: 
             continue
         found[ref] = {"year": year, "price": str(price), "units": units, "read_at": now.isoformat(), "pnu": lot}
         outcomes[ref] = "ok"
-    if found:
-        with _updating(folder) as store:
-            store["prices"].update(found)
+    with _updating(folder) as store:
+        store["prices"].update(found)
+        store["attempts"][str(year)] = {"at": now.isoformat(), "outcomes": outcomes}
     return outcomes
+
+
+# The year's prices are announced at the end of April (2026: 30 April); the scheduled run reads them from 1 May.
+PUBLISHED = (5, 1)
+RETRY_SOON = timedelta(days=1)    # After a call that failed for a passing reason.
+RETRY_LATER = timedelta(days=7)   # After an answer that will not change by itself (no lot yet, no same-area unit).
+_FINAL = ("ok", "no-lot", "no-same-area", "no-key")
+
+
+def due(folder: Path, specs: dict[str, dict[str, Any]], *, today: date, now: datetime) -> bool:
+    """Whether the scheduled run should read `today.year`'s prices: from 1 May, while a configured ref with a known
+    lot number has no price for the year; again a day after a passing failure or a week after any other attempt."""
+    if (today.month, today.day) < PUBLISHED:
+        return False
+    store = load(folder)
+    missing = [ref for ref in specs if store["lots"].get(ref) and price_of(store, ref, today.year)[0] is None]
+    if not missing:
+        return False
+    attempt = store["attempts"].get(str(today.year))
+    if not isinstance(attempt, dict):
+        return True
+    try:
+        last = datetime.fromisoformat(attempt["at"])
+    except (KeyError, TypeError, ValueError):
+        return True
+    passing = any(outcome not in _FINAL for outcome in (attempt.get("outcomes") or {}).values())
+    return now - last > (RETRY_SOON if passing else RETRY_LATER)
+
+
+def record_no_key(folder: Path, *, year: int, now: datetime) -> None:
+    """Keep an attempt without the V-World key, so the scheduled run asks again a week later, not on every run."""
+    with _updating(folder) as store:
+        store["attempts"][str(year)] = {"at": now.isoformat(), "outcomes": {"*": "no-key"}}
 
 
 def remember_lots(folder: Path, deals: list[dict[str, Any]]) -> int:

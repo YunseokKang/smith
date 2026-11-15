@@ -267,6 +267,31 @@ class OfficialPriceTests(unittest.TestCase):
         self.assertEqual([p.name for p in self.folder.iterdir() if p.suffix == ".tmp"], [])
 
 
+    def test_the_scheduled_run_reads_the_year_from_may_and_does_not_repeat_itself(self):
+        # User decision 2026-11-15: the year's prices are read by the scheduled run once announced (end of April).
+        from datetime import date as day, datetime, timedelta, timezone
+        specs = {"h1": {"exclusive_area_m2": 59.9}, "h2": {"exclusive_area_m2": 84.9}}
+        official_price.remember_lots(self.folder, [{"property_ref": "h1", "deal_date": "2026-05-01",
+                                                    "pnu": "1111018700100600000"}])
+        may = datetime(2027, 5, 2, 1, tzinfo=timezone.utc)
+        self.assertFalse(official_price.due(self.folder, specs, today=day(2027, 4, 30), now=may))
+        self.assertTrue(official_price.due(self.folder, specs, today=day(2027, 5, 2), now=may))
+        # A passing failure is tried again the next day; h2 has no lot, so it alone never makes the run due.
+        official_price.sync(self.folder, specs, "k", year=2027, now=may, get=lambda url: (503, b""))
+        self.assertEqual(official_price.load(self.folder)["attempts"]["2027"]["outcomes"],
+                         {"h1": "http-503", "h2": "no-lot"})
+        self.assertFalse(official_price.due(self.folder, specs, today=day(2027, 5, 2), now=may + timedelta(hours=20)))
+        self.assertTrue(official_price.due(self.folder, specs, today=day(2027, 5, 3), now=may + timedelta(hours=25)))
+        # Read: nothing left to do this year.
+        official_price.sync(self.folder, specs, "k", year=2027, now=may + timedelta(hours=25),
+                            get=self.page([self.unit("59.9", 720_000_000, year=2027)]))
+        self.assertFalse(official_price.due(self.folder, specs, today=day(2027, 6, 1), now=may + timedelta(days=30)))
+        # No key: kept as an attempt, asked again a week later rather than on every run.
+        official_price.record_no_key(self.folder, year=2028, now=may.replace(year=2028))
+        self.assertFalse(official_price.due(self.folder, specs, today=day(2028, 5, 3), now=may.replace(year=2028) + timedelta(days=1)))
+        self.assertTrue(official_price.due(self.folder, specs, today=day(2028, 5, 10), now=may.replace(year=2028) + timedelta(days=8)))
+
+
 class AssessmentDayTests(unittest.TestCase):
     """Codex review 2026-11-15: a home sold in July still owes the year's tax; the report read only today's homes."""
 
