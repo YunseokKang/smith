@@ -216,9 +216,19 @@ class Question:
 _REPLY_MARKS = re.compile(r"^(?:(?:re|fw|fwd|답장|전달)\s*:\s*)+", re.IGNORECASE)
 
 
+# The dot before a phone-typed prefix: the 천지인 keyboard's ㆍ (a Hangul letter) and the middle dots it looks like.
+COUNSEL_DOTS = "ㆍᆞ·・•‧∙"
+
+
 def counsel_subject(subject: str, prefix: str) -> bool:
-    """Whether a subject opens a counsel question: the exact prefix after any reply marks ("Re: [상담] …")."""
-    return _REPLY_MARKS.sub("", (subject or "").strip()).startswith(prefix)
+    """Whether a subject opens a counsel question, after any reply marks ("Re: [상담] …"): the configured prefix, or,
+    easier to type on a phone, its word before a colon ("상담:", "상담 : ") or after a middle dot ("ㆍ상담 …"), with
+    spaces optional (2026-11-16). The bare word ("상담 예약 확인", "상담사 연락처") stays a note to self."""
+    text = _REPLY_MARKS.sub("", (subject or "").strip())
+    if text.startswith(prefix):
+        return True
+    word = re.escape(prefix.strip("[]"))
+    return bool(word) and re.match(rf"(?:{word}\s*[:：]|[{COUNSEL_DOTS}]\s*{word}(?![^\s:：]))", text) is not None
 
 
 # --- finding questions -------------------------------------------------------------------------------------

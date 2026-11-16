@@ -4,6 +4,7 @@ import re
 import tempfile
 import unittest
 import unittest.mock
+import urllib.parse
 from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -488,6 +489,21 @@ class CounselMailTests(unittest.TestCase):
         questions, _ = self.find(prefix=None)
         self.assertEqual(questions, [])
         self.assertFalse(any("messages?q=" in url for url in self.reads))
+
+    def test_phone_friendly_prefixes_count_and_a_bare_word_does_not(self):
+        """"상담:" and "ㆍ상담 " are easier on a phone than brackets (2026-11-16); spaces are optional."""
+        for subject, counted in (("[상담] 팀장 제안", True), ("Re: [상담] 팀장 제안", True), ("상담: 성수 맛집", True),
+                                 ("상담 :성수 맛집", True), ("  상담：성수 맛집", True), ("ㆍ상담 성수 맛집", True),
+                                 ("ㆍ 상담 성수 맛집", True), ("·상담: 성수 맛집", True), ("답장: ㆍ상담 성수 맛집", True),
+                                 ("ㆍ상담", True), ("상담 예약 확인", False), ("상담사 연락처", False),
+                                 ("ㆍ상담사 연락처", False), ("상담예약: 10시", False), ("예약 상담: 10시", False)):
+            with self.subTest(subject=subject):
+                self.assertEqual(qa.counsel_subject(subject, "[상담]"), counted)
+        self.messages.append(message("phonemsg01", "thread0005", "ㆍ상담 성수 맛집"))
+        questions, _ = self.find()
+        self.assertEqual([q.message_id for q in questions], ["counselmsg01", "phonemsg01"])
+        search = next(urllib.parse.unquote(url) for url in self.reads if "messages?q=" in url)
+        self.assertIn("{subject:상담 subject:ㆍ상담 subject:ᆞ상담}", search)
 
     def test_replies_continue_the_counsel_thread_and_the_answer_stays_in_it(self):
         def counsel_answerer(question, history):

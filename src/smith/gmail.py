@@ -241,11 +241,13 @@ def sent_with_subject(token: str, words: str, *, after: int, getter: Getter = ge
 
     Counsel (FR-49) uses it to find the mails the client wrote to themselves under the `[상담]` prefix. Gmail's search is
     a coarse filter (brackets are not matched), so the caller checks the exact prefix on each message's header; ids
-    only, no body is read here.
+    only, no body is read here. The 천지인 dot (ㆍ, ᆞ) is a Hangul letter that Gmail may read as part of the word
+    ("ㆍ상담"), so those spellings are searched too (any of them: Gmail's `{…}`).
     """
     if not re.fullmatch(r"[0-9A-Za-z가-힣]{1,20}", words or ""):
         raise MailError("invalid-query")
-    query = urllib.parse.quote(f"in:sent from:me after:{int(after)} subject:{words}")
+    spellings = " ".join(f"subject:{w}" for w in (words, f"ㆍ{words}", f"ᆞ{words}"))
+    query = urllib.parse.quote(f"in:sent from:me after:{int(after)} {{{spellings}}}")
     ids: list[str] = []
     page = ""
     for _ in range(_SEARCH_PAGES):   # Later pages too (review 2026-11-01), within a bound.
