@@ -211,7 +211,9 @@ def _google_key(action: str) -> int:
         print("Run `smith dining google-login` in an interactive terminal; keys are never passed as arguments.")
         return 2
     key = getpass.getpass("Google Places API key (hidden, Enter to keep): ").strip()
-    if key:
-        credentials.save_api_key(google_places.PROVIDER, key)
+    if not key:
+        print("Nothing entered; the stored key (if any) is unchanged. Check with: smith dining google-status")
+        return 0
+    credentials.save_api_key(google_places.PROVIDER, key)
     print("Saved to the OS credential store. Check with: smith dining google-status")
     return 0

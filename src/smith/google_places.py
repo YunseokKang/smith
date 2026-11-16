@@ -60,9 +60,34 @@ def lookup(name: str, area: str | None, *, key: str, poster: Poster | None = Non
     for item in places[:RESULTS] if isinstance(places, list) else []:
         found = _rating(item)
         address = item.get("formattedAddress") if isinstance(item, dict) else None
-        if found is not None and isinstance(address, str) and district in address and naver_place.same_name(name, found.name):
+        if found is None or not isinstance(address, str) or district not in address:
+            continue
+        if naver_place.same_name(name, found.name) or _same_branch(name, found.name, area or "", address):
             return found
     return None
+
+
+def _same_branch(naver: str, google: str, area: str, address: str) -> bool:
+    """The two sources spell a branch differently ("요쇼쿠 서울숲 본점" / "요쇼쿠 성수", live 2026-11-16): the names agree
+    once the branch words are gone, and Google's address carries the Naver area's 동, not just its 구."""
+    words = area.split()
+    neighbourhood = words[-1] if words and words[-1].endswith(("동", "가", "읍", "면", "리")) else None
+    if neighbourhood is None or neighbourhood not in address:
+        return False
+    shop = _without_branch(naver, words)
+    return len(shop) >= 2 and shop == _without_branch(google, words)
+
+
+def _without_branch(name: str, area_words: list[str]) -> str:
+    """A shop name without its branch words: after the first word, those ending in 점 ("본점", "성수2호점"), listed
+    meeting areas ("서울숲") and the start of an area word ("성수" for "성수동1가")."""
+    from smith.dining_evening import AREAS   # Here, not at the top: dining_evening reaches this module at import.
+
+    areas = {naver_place.name_key(a) for a in AREAS}
+    spots = [naver_place.name_key(w) for w in area_words]
+    words = [w for w in (naver_place.name_key(w) for w in name.split()) if w]
+    return "".join(words[:1] + [w for w in words[1:]
+                                if not (w.endswith("점") or w in areas or any(s.startswith(w) for s in spots))])
 
 
 def searchable(area: str | None) -> bool:

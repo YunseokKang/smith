@@ -258,6 +258,19 @@ class GoogleAndLogTest(unittest.TestCase):
         self.assertIsNone(google_places.lookup("다라", "서울 성동구 가상동", key="k", poster=poster))
         self.assertIsNone(google_places.lookup("가나 키친", None, key="k", poster=poster))   # No district: no call.
 
+    def test_google_branch_spelled_differently_matches_in_the_same_dong_only(self) -> None:
+        """"다라마 서울숲 본점" on Naver is "다라마 성수" on Google (live 2026-11-16); a longer name or another 동 is not."""
+        def answer(name: str, address: str):  # noqa: ANN202 - a fake poster
+            return lambda url, body, headers, timeout: {"places": [
+                {"displayName": {"text": name}, "formattedAddress": address, "rating": 4.2, "userRatingCount": 31}]}
+        area = "서울 성동구 가상동1가"
+        found = google_places.lookup("다라마 서울숲 본점", area, key="k", poster=answer("다라마 성수", "서울특별시 성동구 가상동1가 1-1"))
+        self.assertEqual((found.rating, found.count), (Decimal("4.2"), 31))
+        self.assertIsNone(google_places.lookup("다라마 서울숲 본점", area, key="k",
+                                               poster=answer("다라마 성수", "서울특별시 성동구 가상동2가 1-1")))
+        self.assertIsNone(google_places.lookup("돈카츠 가상점", area, key="k",
+                                               poster=answer("돈카츠 히로 가상", "서울특별시 성동구 가상동1가 1-1")))
+
     def test_cross_is_off_without_a_key_and_counts_calls_up_to_the_cap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             where = Path(tmp)
