@@ -33,8 +33,9 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-from smith import (cases, contacts, daily_html, daily_qa, future_income, health, health_qa, health_writer, headless, keep,
-                   korean, ledger, memory, people, qa, reader, sources)
+from smith import (aside, cases, contacts, daily_html, daily_qa, dining, dining_command, dining_evening, dining_view,
+                   future_income, health, health_qa, health_writer, headless, keep, korean, ledger, memory, people, qa,
+                   reader, sources)
 from smith.config import local_time
 from smith.payload import PayloadRejected, build_context, check_outbound, load_view, mask_identifiers
 
@@ -46,9 +47,9 @@ TIMEOUT_SECONDS = 600
 ROUTE_TIMEOUT_SECONDS = 180
 RESEARCH_TIMEOUT_SECONDS = 900
 READER_TIMEOUT_SECONDS = 180   # The first reader (Codex) reads a short letter; the rewrite gets TIMEOUT_SECONDS.
-ROUTE_PROMPT_VERSION = "counsel-route-v1"
+ROUTE_PROMPT_VERSION = "counsel-route-v2"   # v2: the food store (FR-55).
 RESEARCH_PROMPT_VERSION = "counsel-research-v1"
-PROMPT_VERSION = "counsel-answer-v2"   # v2: the client's style guide (korean.STYLE), lists, no "what I heard" opener.
+PROMPT_VERSION = "counsel-answer-v3"   # v3: restaurant picks (FR-55); v2: the style guide, lists, no "what I heard" opener.
 DEFAULT_PREFIX = "[상담]"
 MAX_NOTES = 8
 MAX_TERMS = 8
@@ -61,6 +62,7 @@ DOMAINS = {
     "finance": "돈: 자산·부채·현금흐름·보유 종목·보험·연금·세금·집·이사·목표 (원장 수치)",
     "health": "몸: 검진 수치와 소견, 운동·수면·식사, 복용 중인 것 (건강 원장과 웨어러블)",
     "life": "일정과 사람: 앞으로 2주의 일정·할 일, 가족·지인의 다가오는 기념일",
+    "food": "음식점: 오늘 뭐 먹지, 동네·데이트 맛집 (그 자리에서 네이버 플레이스를 읽고 못 드시는 음식을 거름)",
 }
 # Crisis words (narrow on purpose: a fixed answer replaces the model). Health danger symptoms are health_qa.DANGER.
 CRISIS = re.compile(r"자살|자해|죽고\s*싶|죽어\s*버리고|목숨을\s*끊|극단적\s*(?:선택|생각)|suicid|self-?harm|kill\s*myself",
@@ -109,10 +111,11 @@ ROUTE_PROMPT = """You plan how Smith, a Korean household's personal adviser, wil
 the catalogue of stores Smith may read. You hold no personal data. Output JSON matching the schema.
 
 - summary: the matter in one Korean sentence: what the client is deciding or asking, and the lean you hear, if any.
-- domains: which stores the answer needs, from the catalogue keys (finance, health, life); empty when the question is
-  about work, leadership, relationships, study or the client's own thinking and none of the stores would add facts.
-  Choose finance only when money figures matter to the answer, health only when the body or habits do, life only
-  when the coming weeks' schedule or dates do. Fewer is better: each store is private.
+- domains: which stores the answer needs, from the catalogue keys (finance, health, life, food); empty when the
+  question is about work, leadership, relationships, study or the client's own thinking and none of the stores would
+  add facts. Choose finance only when money figures matter to the answer, health only when the body or habits do, life
+  only when the coming weeks' schedule or dates do, food only when the client asks where or what to eat out, order or
+  book (맛집, 오늘 뭐 먹지, 데이트 식당). Fewer is better: each store is private.
 - search_terms: three to eight short Korean words or phrases to search the client's own notes and memory with:
   synonyms of the matter, related concepts, roles, feelings, places (팀장, 승진, 번아웃, 이직, 리더십, 아내, 이사).
   Not the whole question; not generic words (생각, 고민).
@@ -144,7 +147,7 @@ restated), domains (which stores were read), client_notes (entries from the clie
 touch the matter: `source` keep = the client's own words; evernote with reference_only = things the client collected,
 such as book or lecture notes, to use as reference, not as the client's view), client_memory (what the client told
 Smith before), finance / health / life (present only when read: the household's ledger figures, the health ledger and
-wearable, the coming schedule and dates), research_findings (public findings with refs R1, R2, ... when a look-up ran,
+wearable, the coming schedule and dates), food (present only when read: restaurant picks), research_findings (public findings with refs R1, R2, ... when a look-up ran,
 with gaps), data_status (what was read, what failed), conversation (earlier turns of this thread), client_question,
 message_date, asks_action.
 
@@ -176,6 +179,16 @@ not be read) is marked in parentheses right after the claim ("(단일 출처 [R1
 never state a number the input does not hold as a fact. A limit of the material (a store that could not be read, a
 note that holds nothing) goes inside the sentence or in parentheses, never as a separate remark (rule 4), and only when
 it matters to the answer.
+
+Food: `food` holds restaurant picks Smith read from Naver Place just now, ranked by code (the share of reviews that
+found the food good, the share of 1~2 star ratings, Google's rating) and filtered by the client's food constraints.
+Recommend among food.picks only, in their order unless the client's words favour another, and say in words why each
+fits the matter (a place to share with the partner, the dishes the client can eat there, what reviewers single out).
+Never suggest to the client a dish in a pick's `avoid` list. You may say a place also suits the partner's taste for
+fish, but never put a fish dish next to a word of eating or recommending (code drops that sentence). Write no
+restaurant figures (shares, ratings, counts, prices) and no links: Smith attaches the list with its figures and links
+below the letter. When food.picks is empty, say so and how to ask again (동네 이름 + 음식). A question about food alone
+takes 400 to 900 characters.
 
 - follow_up: up to 3 short things the client might ask next.
 - remember: up to 3 facts the client states about themselves or their family in this question (a plan, a taste, a
@@ -374,6 +387,18 @@ def assemble(db: Path, config: dict[str, Any], route_plan: dict[str, Any], quest
     if "health" in ctx:
         ctx["_health_meta"] = {"resolved": ctx["health"].pop("resolved_findings", []) or [],
                                "banned": set(ctx["health"].pop("banned_words", []) or [])}
+    if "food" in route_plan["domains"]:
+        # The letter check never depends on the Naver read: a failed read still leaves the food rules in place
+        # (review 2026-11-16, round 5).
+        ctx["_food_meta"] = {"rules": dining.Rules.household(lambda: [c.text for c in health.load(health.path(db)).constraints]),
+                             "avoid": set()}
+        try:
+            ctx["food"], ctx["_dining"], ctx["_food_meta"] = _food(db, question_text, now=now)
+            status["food"] = "included"
+        except (aside.AsideError, dining_command.DiningUnavailable) as error:
+            status["food"] = f"unavailable: {error.code}"
+    else:
+        status["food"] = "not asked"
     ctx["data_status"] = status
     return ctx
 
@@ -410,6 +435,26 @@ def _life(db: Path, config: dict[str, Any], *, now: datetime, tz: str, today: da
     book = people.load(people.path(db))
     return {"window": window, "upcoming_45_days": [{"label": o.label, "date": o.on.isoformat(), "milestone": o.milestone}
                                                   for o in people.upcoming(book, today, 45)]}
+
+
+def _food(db: Path, question_text: str, *, now: datetime) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Restaurant picks for the question (FR-55). The Naver query is code's: a known area in the question and the
+    food words it names (`dining.query_words`), so no name or plan from the question leaves (review 2026-11-16, P0);
+    without an area Naver searches around this computer's location. Returns (what the answer model reads, the full
+    result for the list under the letter, the letter check's {"rules", "avoid"}). Raises aside.AsideError or
+    dining_command.DiningUnavailable."""
+    area = dining_evening.area_in(question_text)
+    query = dining.query_words(question_text, area)
+    result = dining_command.search(db, query, now=now)
+    rules = dining.Rules.from_constraints([c.text for c in health.load(health.path(db)).constraints])
+    avoid = {name for p in result["picks"] for name in p["avoid"]}
+    # No shop address: the outbound check (rightly) stops anything shaped like a Korean address.
+    keep = ("name", "category", "taste_share", "voters", "rating", "rated", "low", "split", "stars_hidden", "cross",
+            "signature", "avoid", "highlights", "visit", "broth", "michelin", "booking", "status")
+    for_model = {"query": query, "around_this_computer": area is None,
+                 "picks": [{k: p.get(k) for k in keep} for p in result["picks"]],
+                 "ruled_out": {why: len(names) for why, names in result["ruled_out"].items()}}
+    return for_model, result, {"rules": rules, "avoid": avoid}
 
 
 # --- research -----------------------------------------------------------------------------------------------
@@ -510,6 +555,8 @@ def answer(db: Path, config: dict[str, Any], question_text: str, *, now: datetim
                        domains_override=domains_override, verifier=verifier)
     ctx, links, memos = prepared["ctx"], prepared["links"], list(prepared["memos"])
     health_meta = ctx.pop("_health_meta", {"resolved": [], "banned": set()})
+    dining_result = ctx.pop("_dining", None)   # The list under the letter (figures and links), never the model's.
+    food = ctx.pop("_food_meta", None)          # The client's food rules for the letter check (never sent).
     payload = {**ctx, "client_question": mask_identifiers(question_text), "message_date": f"{local_time(received_at, tz):%Y-%m-%d}",
                "conversation": [{"client": mask_identifiers(t["client"] or ""), "smith": None if t["smith"] is None else mask_identifiers(t["smith"])}
                                 for t in history or []],
@@ -531,7 +578,7 @@ def answer(db: Path, config: dict[str, Any], question_text: str, *, now: datetim
     matched = [f.get("claim") for f in (ctx.get("research_findings") or {}).get("items", []) if f.get("verification") == "matched"]
     health_allowed = _numbers(ctx.get("health")) | _numbers(matched) | _numbers(client_text) | _COUNTS
     answer_text, problems = verify(str(output.get("answer") or ""), allowed=allowed, resolved=resolved, banned=banned, money=money,
-                                   health_allowed=health_allowed)
+                                   health_allowed=health_allowed, food=food)
     repeated = [written for v, p, kind, written in amounts(answer_text)
                 if any(v == s and kind == k for s, _, k, _ in stated) and not _ledger_has(v, kind, ledger_figures, p)]
     if repeated:
@@ -552,7 +599,8 @@ def answer(db: Path, config: dict[str, Any], question_text: str, *, now: datetim
         memos.append(ACTION_MEMO)
     reading: dict[str, Any] = {"outcome": "no-reader"}
     if first_reader is not None:
-        checks = {"allowed": allowed, "resolved": resolved, "banned": banned, "money": money, "health_allowed": health_allowed}
+        checks = {"allowed": allowed, "resolved": resolved, "banned": banned, "money": money, "health_allowed": health_allowed,
+                  "food": food}
         answer_text, reading = _read_and_rewrite(db, now, answer_text, payload, first_reader=first_reader, call=call,
                                                  address_book=prepared["address_book"], secrets=secrets, links=links, checks=checks)
         refs = [ref for ref in dict.fromkeys(_REF.findall(answer_text)) if ref in links]
@@ -586,14 +634,15 @@ def answer(db: Path, config: dict[str, Any], question_text: str, *, now: datetim
     follow_up = []
     for item in _list(output.get("follow_up")):
         checked, lost = verify(item if isinstance(item, str) else "", allowed=allowed, resolved=resolved, banned=banned, money=money,
-                               health_allowed=health_allowed)
+                               health_allowed=health_allowed, food=food)
         if checked and not lost and not qa.promises_change(checked):
             follow_up.append(checked[:200])
     follow_up = follow_up[:3]
     return {"text": answer_text, "refs": refs, "links": links, "follow_up": follow_up,
             "remember": remember[:3], "noted": noted[:3], "memos": memos, "searched": prepared["searched"],
             "unchecked": prepared["unchecked"], "domains": prepared["plan"]["domains"], "data_status": ctx.get("data_status", {}),
-            "researched": bool(prepared["searched"]), "problems": problems, "emergency": False, "reading": reading}
+            "researched": bool(prepared["searched"]), "problems": problems, "emergency": False, "reading": reading,
+            "dining": dining_result}
 
 
 def _read_and_rewrite(db: Path, now: datetime, letter_text: str, payload: dict[str, Any], *, first_reader: reader.Reader,
@@ -646,7 +695,8 @@ def _record(db: Path, now: datetime, use_case: str, text: str, outcome: str, *, 
 
 
 def verify(raw: str, *, allowed: set[str], resolved: list[str], banned: set[str],
-           money: dict[str, set[Decimal]] | None = None, health_allowed: set[str] | None = None) -> tuple[str, list[str]]:
+           money: dict[str, set[Decimal]] | None = None, health_allowed: set[str] | None = None,
+           food: dict[str, Any] | None = None) -> tuple[str, list[str]]:
     """Sentence by sentence: diagnosis or dosing wording, a link or contact, or a resolved finding drops the sentence
     anywhere; a number drops it when the sentence names a health item and the number is not in `health_allowed` (the
     health record, checked findings and the client's own words; `allowed` when not given); an amount or a rate
@@ -676,6 +726,11 @@ def verify(raw: str, *, allowed: set[str], resolved: list[str], banned: set[str]
                 problem = _amount_problem(sentence, money or ledger_money(None))
             if not problem and banned and health_qa._suggests_eating(sentence) and any(word in sentence for word in banned):
                 problem = "names a food the client ruled out"
+            # A restaurant letter (FR-55) is checked harder (reviews 2026-11-16, P1): a sentence naming a ruled-out food
+            # (the dish rules, raw fish itself) or a pick's flagged dish drops unless it only tells the client to keep off
+            # it, whatever else it says ("알레르기가 있어도 연어를 추천", "연어가 좋겠습니다", "회부터 드셔 보세요").
+            if not problem and food and food["rules"].unsafe(sentence, food["avoid"]):
+                problem = "suggests a dish the client cannot eat"
             if problem:
                 problems.append(f"{problem}: {sentence[:40]}")
                 continue
@@ -875,7 +930,8 @@ def said_by_client(statement: str, client_text: str) -> bool:
 
 def _fixed(text: str) -> dict[str, Any]:
     return {"text": text, "refs": [], "links": {}, "follow_up": [], "remember": [], "noted": [], "memos": [], "searched": [],
-            "unchecked": [], "domains": [], "data_status": {}, "researched": False, "problems": [], "emergency": True}
+            "unchecked": [], "domains": [], "data_status": {}, "researched": False, "problems": [], "emergency": True,
+            "dining": None}
 
 
 # --- mail ---------------------------------------------------------------------------------------------------
@@ -927,14 +983,44 @@ def render(question_text: str, result: dict[str, Any]) -> tuple[str, str]:
             f'border-radius:20px;padding:20px 22px">'
             f'<div style="font-size:12px;font-weight:700;color:{daily_html.ACCENT};margin-bottom:12px">SMITH · 상담</div>'
             f'<div style="border-left:3px solid {daily_html.HAIRLINE};padding:4px 12px;margin-bottom:16px;font-size:13px;color:{daily_html.MUTED}">'
-            f'{quoted}</div>{paragraphs}{status_html}{source_html}{follow}'
+            f'{quoted}</div>{paragraphs}{_dining_html(result.get("dining"))}{status_html}{source_html}{follow}'
             f'<div style="font-size:12px;color:{daily_html.MUTED};margin-top:20px;padding-top:12px;border-top:1px solid {daily_html.HAIRLINE}">'
             f'Smith는 조회와 조언만 해요. 돈을 옮기거나 주문하거나 메일을 보내지 않아요. 이 메일에 답장하면 이어서 이야기해요.'
             f'</div></div></body></html>')
-    text = result["text"] + "".join(f"\n{line}" for line in [read_line, *(f"참고: {m}" for m in result["memos"])] if line) \
+    text = result["text"] + _dining_text(result.get("dining")) \
+        + "".join(f"\n{line}" for line in [read_line, *(f"참고: {m}" for m in result["memos"])] if line) \
         + ("\n\n출처: " + ", ".join(f"[{ref}] {url}" for ref, _, url in source_items) if source_items else "") \
         + ("\n\n기억해 둘게요: " + " / ".join(kept) if kept else "")
     return html, text
+
+
+def _dining_lines(found: dict[str, Any] | None) -> list[str]:
+    """The restaurant list under a food letter (FR-55): code's lines with figures and links, then the cautions."""
+    if not found:
+        return []
+    lines = [f"Smith가 읽은 가게 (네이버 플레이스 \"{found['query']}\", 로그인하지 않은 상태로 읽음)"]
+    for n, pick in enumerate(found.get("picks") or [], 1):
+        lines += dining_view.pick_lines(n, pick)
+    if not found.get("picks"):
+        lines.append("추천할 곳을 찾지 못했습니다.")
+    return lines + dining_view.notes(found)
+
+
+def _dining_html(found: dict[str, Any] | None) -> str:
+    lines = _dining_lines(found)
+    if not lines:
+        return ""
+    rows = "".join(
+        f'<div style="font-size:13px;line-height:1.6;color:{daily_html.BODY}">'
+        + (f'<a href="{escape(line.strip(), quote=True)}" style="color:{daily_html.ACCENT}">네이버 지도에서 보기</a>'
+           if line.strip().startswith("https://") else escape(line)) + "</div>" for line in lines[1:])
+    return (f'<div style="margin-top:16px;padding-top:12px;border-top:1px solid {daily_html.HAIRLINE}">'
+            f'<div style="font-size:12px;font-weight:700;color:{daily_html.MUTED};margin-bottom:6px">{escape(lines[0])}</div>{rows}</div>')
+
+
+def _dining_text(found: dict[str, Any] | None) -> str:
+    lines = _dining_lines(found)
+    return "\n\n" + "\n".join(lines) if lines else ""
 
 
 def read_summary(result: dict[str, Any]) -> str | None:
@@ -948,7 +1034,7 @@ def read_summary(result: dict[str, Any]) -> str | None:
         parts.append(f"메모 {notes['keep'] + notes['evernote']}개" + (f"(에버노트 {notes['evernote']}개 참고)" if notes["evernote"] else ""))
     if isinstance(status.get("memory"), int):
         parts.append(f"기억 {status['memory']}개")
-    labels = {"finance": "재무", "health": "건강", "life": "일정"}
+    labels = {"finance": "재무", "health": "건강", "life": "일정", "food": "맛집"}
     included = [labels[d] for d in labels if status.get(d) == "included"]
     failed = [labels[d] for d in labels if str(status.get(d, "")).startswith("unavailable")]
     if included:

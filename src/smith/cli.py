@@ -63,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
     macro.add_argument("--days", type=int, default=400, help="sync: history window in days (default: 400)")
     macro.add_argument("--as-of", type=date.fromisoformat, help="show: YYYY-MM-DD (default: today)")
     from smith import (advise_command, agenda_command, ask_command, backup_command, contacts_command, daily_command,
+                       dining_command,
                        dividends_command, doctor_command, fundamentals_command, evening_command, events_command, evernote_command,
                        followup_command, health_command, keep_command, law_command, mail_command, people_command, picks_command,
                        memory_command, realestate_command, report_command, trade_command, weather_command)
@@ -90,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
     mail_command.add_parser(sub)
     trade_command.add_parser(sub, DEFAULT_DB)
     ask_command.add_parser(sub, DEFAULT_DB)
+    dining_command.add_parser(sub, DEFAULT_DB)
     args = parser.parse_args(argv)
     commands = {"check-config": _check_config, "import": _import, "records": _records, "toss": _toss,
                 "summary": _summary, "evidence": _evidence, "advise": advise_command.run,
@@ -100,7 +102,8 @@ def main(argv: list[str] | None = None) -> int:
                 "people": people_command.run, "agenda": agenda_command.run, "weather": weather_command.run,
                 "daily": daily_command.run, "keep": keep_command.run, "evernote": evernote_command.run, "contacts": contacts_command.run,
                 "health": health_command.run, "evening": evening_command.run, "dividends": dividends_command.run,
-                "fundamentals": fundamentals_command.run, "trade": trade_command.run, "ask": ask_command.run}
+                "fundamentals": fundamentals_command.run, "trade": trade_command.run, "ask": ask_command.run,
+                "dining": dining_command.run}
     return commands[args.command](args)
 
 

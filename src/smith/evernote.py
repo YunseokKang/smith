@@ -16,16 +16,14 @@ import json
 import logging
 import os
 import re
-import shutil
-import subprocess
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Iterator
 
-from smith import keep
+from smith import aside, keep
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +55,7 @@ _FULL = re.compile(r"(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일")
 _DOTS = re.compile(r"(\d{2})\.\s*(\d{1,2})\.\s*(\d{1,2})\.")
 _MONTH_DAY = re.compile(r"(\d{1,2})월\s*(\d{1,2})일")
 
-Runner = Callable[[list[str], float], tuple[int, str]]
+Runner = aside.Runner
 
 
 class EvernoteError(Exception):
@@ -81,47 +79,22 @@ def directory(db: Path) -> Path:
 # --- Aside adapter ---------------------------------------------------------------------------------------------------
 
 def find_aside() -> Path:
-    """The Aside CLI executable (a native .exe, never a .cmd wrapper: TS-010). Raises EvernoteError."""
-    local = os.environ.get("LOCALAPPDATA")
-    candidates = [Path(local) / "Aside" / "CLI" / "current" / "aside.exe"] if local else []
-    found = shutil.which("aside")
-    candidates += [Path(found)] if found else []
-    for path in candidates:
-        if path.is_file() and path.suffix.lower() == ".exe":
-            return path
-    raise EvernoteError("aside-not-found")
-
-
-def run_aside(args: list[str], timeout: float) -> tuple[int, str]:
-    """Run the Aside CLI; returns (exit code, stdout). A timeout returns -1 with what was printed so far."""
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    """The Aside CLI executable. Raises EvernoteError."""
     try:
-        done = subprocess.run(args, capture_output=True, timeout=timeout, creationflags=flags, check=False)
-        return done.returncode, done.stdout.decode("utf-8", "replace")
-    except subprocess.TimeoutExpired as expired:
-        out = expired.stdout or b""
-        return -1, out.decode("utf-8", "replace") if isinstance(out, bytes) else str(out)
+        return aside.find_executable()
+    except aside.AsideError as error:
+        raise EvernoteError(error.code) from None
+
+
+run_aside = aside.run
 
 
 def _call(script: str, args: dict[str, Any], runner: Runner, executable: Path) -> list[dict[str, Any]]:
     """Run one script; returns its SMITH-EN records. Raises EvernoteError when nothing usable came back."""
-    code = script.replace("__ARGS__", json.dumps(args, ensure_ascii=False))
-    status, out = runner([str(executable), "repl", code], CALL_TIMEOUT)
-    records = []
-    for line in out.splitlines():
-        if line.startswith(MARK):
-            try:
-                record = json.loads(line[len(MARK):])
-            except ValueError:
-                continue
-            if isinstance(record, dict):
-                records.append(record)
-    errors = [r for r in records if r.get("kind") == "error"]
-    if errors:
-        raise EvernoteError(str(errors[0].get("code", "script-error"))[:40])
-    if not records:
-        raise EvernoteError("aside-timeout" if status == -1 else "aside-failed")
-    return records
+    try:
+        return aside.records(script, args, mark=MARK, runner=runner, executable=executable, timeout=CALL_TIMEOUT)
+    except aside.AsideError as error:
+        raise EvernoteError(error.code) from None
 
 
 # --- the scripts (run inside Aside; read-only: they navigate and read, never type or click a note's controls) ----------

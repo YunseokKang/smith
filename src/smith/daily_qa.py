@@ -278,6 +278,16 @@ def answer(db: Path, ctx: dict[str, Any], question_text: str, *, now: datetime, 
         elif len(identity.get("matched_anchors", [])) < 2 and request.get("kind") == "person":
             memos.append("동일인 확인이 되지 않아 참고로만 보시기 바랍니다(일치한 단서 " + f"{len(identity.get('matched_anchors', []))}개).")
     answer_text = korean.tidy(_clean_text(str((output.get("answer") or {}).get("text", ""))))
+    follow_up = [korean.tidy(_clean_text(f))[:200] for f in output.get("follow_up", [])][:3]
+    guard = _food_guard(db, ctx)
+    if guard is not None:
+        # The evening mail carried restaurant picks (FR-55): a reply about them never offers the client a dish they
+        # cannot eat (review 2026-11-16, P1). Follow-ups that lose a sentence drop whole.
+        rules, avoid = guard
+        answer_text, dropped = rules.scrub(answer_text, avoid)
+        follow_up = [f for f in follow_up if not rules.scrub(f, avoid)[1]]
+        if dropped:
+            problems.append(f"food: {dropped} sentence(s) dropped")
     if not answer_text:
         raise headless.HeadlessError("empty-answer")
     refs = [r for r in (output.get("answer") or {}).get("refs", []) if r in links]
@@ -302,8 +312,21 @@ def answer(db: Path, ctx: dict[str, Any], question_text: str, *, now: datetime, 
             continue
         remember.append((item.get("topic") if item.get("topic") in memory.TOPICS else "other", fact))
     return {"text": answer_text, "refs": refs, "links": links,
-            "follow_up": [korean.tidy(_clean_text(f))[:200] for f in output.get("follow_up", [])][:3],
-            "remember": remember[:3], "memos": memos, "researched": researched, "problems": problems}
+            "follow_up": follow_up, "remember": remember[:3], "memos": memos, "researched": researched, "problems": problems}
+
+
+def _food_guard(db: Path, ctx: dict[str, Any]) -> tuple[Any, set[str]] | None:
+    """The food rules and the flagged dishes when the mail answered carried restaurant picks, else None. An unreadable
+    health ledger falls back to the strict fish rules (the safe side for the client's allergy)."""
+    from smith import dining, health
+
+    prose = ((ctx.get("today") or {}).get("mail_prose") or {})
+    entries = prose.get("dining") if isinstance(prose, dict) else None
+    picks = [p for e in entries or [] if isinstance(e, dict) for p in e.get("picks") or [] if isinstance(p, dict)]
+    if not picks:
+        return None
+    rules = dining.Rules.household(lambda: [c.text for c in health.load(health.path(db)).constraints])
+    return rules, {str(name) for p in picks for name in p.get("avoid") or []}
 
 
 def research(request: dict[str, Any], *, now: datetime, secrets: list[str], caller: ModelCall,

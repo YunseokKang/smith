@@ -7,7 +7,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-from smith import daily_art, daily_html, korean, netflix_picks, talk, weather
+from smith import daily_art, daily_html, dining_view, korean, netflix_picks, talk, weather
 from smith.daily_html import ACCENT, BODY, INK, LIGHTS, MUTED, _card, _page, _pill
 from smith.report_html import _plain
 
@@ -32,7 +32,7 @@ def render(data: dict[str, Any], *, partner: str = "아내", inline: bool = Fals
     item = talk_item(data)
     fixes = prose.setdefault("korean_fixes", []) if prose else []
     cards = [c for c in (_prep(data), _talk(item, partner), _netflix(data, fixes), _sleep(data), _agenda(data, prose),
-                         _dates(data, prose)) if c]
+                         _dining(data), _dates(data, prose)) if c]
     footer_lines = [FOOTER]
     if data["failures"]:
         footer_lines.append("받지 못한 자료: " + ", ".join(f"{k}({v})" for k, v in sorted(data["failures"].items())))
@@ -200,6 +200,37 @@ def _netflix(data: dict[str, Any], fixes: list[dict[str, str]]) -> str:
     return _card("오늘 밤 넷플릭스", "", "".join(rows) + note)
 
 
+def _dining(data: dict[str, Any]) -> str:
+    """내일 근처 맛집: for each place in tomorrow's calendar, three picks with the evidence and the client's dishes
+    (FR-55). The lines are dining_view's; nothing here is a model's."""
+    entries = data.get("dining")
+    if not entries:
+        return ""
+    blocks = []
+    for entry in entries:
+        head = (f'<div style="font-size:13px;color:{MUTED};margin:6px 0 2px">내일 {escape(entry["when"])} '
+                f'{escape(entry["title"])} · <b style="color:{INK}">{escape(entry["area"])}</b> 근처</div>')
+        result = entry.get("result")
+        if result is None or not result.get("picks"):
+            why = "네이버를 읽지 못했습니다" if result is None else "조건에 맞는 곳을 찾지 못했습니다"
+            blocks.append(head + f'<div style="font-size:14px;color:{BODY};padding:4px 0 8px">{why}.</div>')
+            continue
+        rows = []
+        for n, pick in enumerate(result["picks"], 1):
+            lines = dining_view.pick_lines(n, pick, show_status=False)
+            body = "".join(f'<div style="font-size:13px;line-height:1.55;color:{BODY if not line.strip().startswith("주의") else ACCENT}">'
+                           f'{escape(line.strip())}</div>' for line in lines[1:-1])
+            rows.append(f'<div style="padding:8px 0;border-bottom:1px solid #f0e6da">'
+                        f'<a href="{escape(pick["link"], quote=True)}" style="font-size:16px;font-weight:700;color:{INK};'
+                        f'text-decoration:underline">{n}. {escape(pick["name"])}</a>'
+                        f'<span style="font-size:12px;color:{MUTED}"> · {escape(pick["category"])}</span>{body}</div>')
+        blocks.append(head + "".join(rows))
+    notes = dining_view.notes(next((e["result"] for e in entries if e.get("result")), {"rules_known": True}))
+    small = "".join(f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-top:6px">{escape(t)}</div>'
+                    for t in ["네이버 플레이스(로그인하지 않은 상태로 읽음) 기준. 순위는 \"음식이 맛있어요\" 비율에서 별점 1~2점 비율을 깎아 정합니다.", *notes])
+    return _card("내일 근처 맛집", "", "".join(blocks) + small)
+
+
 def _sleep(data: dict[str, Any]) -> str:
     """오늘 밤 숙면: a bedtime from the usual wake time, the bedroom actions the night calls for, what the recent nights
     suggest, and the figures and guidance behind them."""
@@ -286,6 +317,10 @@ def _text(data: dict[str, Any], prose: dict[str, Any], item: dict[str, str], sub
     if data.get("netflix"):
         lines += ["", "오늘 밤 넷플릭스"] + [f"- {p['title']} ({p.get('year') or ''} {p.get('kind') or ''}) {p['netflix_url']}"
                                           for p in data["netflix"]]
+    for entry in data.get("dining") or []:
+        lines += ["", f"내일 근처 맛집: {entry['area']} ({entry['when']} {entry['title']})"]
+        picks = (entry.get("result") or {}).get("picks") or []
+        lines += [line for n, pick in enumerate(picks, 1) for line in dining_view.pick_lines(n, pick, show_status=False)]             or ["- 추천을 받지 못했습니다."]
     lines += ["", f"내일 일정 {len(data['events'])}건"]
     for event in data["events"]:
         lines.append(f"- {'종일' if event.all_day else format(event.start, '%H:%M')} {event.title}")

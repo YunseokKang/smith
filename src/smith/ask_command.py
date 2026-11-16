@@ -52,6 +52,8 @@ def run(args: argparse.Namespace) -> int:
             prepared = counsel.prepare(args.db, config, args.question, now=now, tz=tz, history=[], secrets=secrets,
                                        caller=caller, domains_override=domains)
             prepared["ctx"].pop("_health_meta", None)
+            prepared["ctx"].pop("_dining", None)
+            prepared["ctx"].pop("_food_meta", None)
             print(json.dumps({"plan": prepared["plan"], "context": prepared["ctx"], "searched": prepared["searched"],
                               "memos": prepared["memos"]}, ensure_ascii=False, indent=1, default=str))
             return 0

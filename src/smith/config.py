@@ -52,6 +52,9 @@ KNOWN_KEYS = {
     "counsel": {"enabled", "prefix", "max_notes", "reader"},
     # The monthly memory check (FR-52): the first `weekday` of each month at `time`, `size` facts per mail.
     "memory_review": {"enabled", "weekday", "time", "size"},
+    # Restaurant picks (FR-55, daily design §17): picks for tomorrow's places in the evening mail, the Google
+    # cross-check when a key is stored, and areas never read (home, the office).
+    "dining": {"evening", "google", "skip_areas"},
 }
 COUNSEL_PREFIX = re.compile(r"^\[[0-9A-Za-z가-힣]{1,20}\]$")
 HEALTH_MIDWEEK_KEYS = {"enabled", "weekday", "time"}
@@ -144,6 +147,7 @@ def load_config(path: Path) -> dict:
     _check_evernote(config.get("evernote", {}))
     _check_counsel(config.get("counsel", {}))
     _check_memory_review(config.get("memory_review", {}))
+    _check_dining(config.get("dining", {}))
     if "properties" in config or "targets" in config:
         from smith.realestate import RealEstateError, validate_properties, validate_targets
         try:
@@ -340,6 +344,18 @@ def _check_evening(evening: object) -> None:
                 or any(not isinstance(s, list) or len(s) != 2 or any(isinstance(h, bool) or not isinstance(h, int) for h in s)
                        or not 0 <= s[0] <= s[1] <= 23 for s in spans)):
             raise ValueError(f"evening.{key} must be two [start, end] hour pairs such as [[7, 9], [18, 20]]")
+
+
+def _check_dining(dining: object) -> None:
+    """Optional `[dining]` (FR-55): `evening` and `google` switches (default on), `skip_areas` a list of short names."""
+    if not isinstance(dining, dict):
+        raise ValueError("dining must be a table")
+    for key in ("evening", "google"):
+        if not isinstance(dining.get(key, True), bool):
+            raise ValueError(f"dining.{key} must be a boolean")
+    skip = dining.get("skip_areas", [])
+    if not isinstance(skip, list) or any(not isinstance(a, str) or not a.strip() or len(a) > 20 for a in skip):
+        raise ValueError("dining.skip_areas must list short area names such as 판교")
 
 
 def _check_daily(daily: object) -> None:

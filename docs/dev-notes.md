@@ -431,3 +431,11 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
 - 예방: `evidence_points`를 읽는 새 코드는 provider·series를 먼저 고른 뒤 값을 해석한다. 원장 구조를 바꾸는 기능은 커밋 전에 실제 DB
   복사본이나 읽기 전용 연결로 한 번 돌려 본다(합성 데이터에는 다른 기능이 남긴 행이 없다).
 
+### TS-042 Aside로 연 `map.naver.com` 탭이 `closeTab`으로 닫히지 않고 고객 탭으로 남음 (2026-11-15)
+
+- 증상: 맛집 추천 시험에서 `openTab('https://map.naver.com/p/search/…')` 뒤 `closeTab`이 "tab is no longer in the Agent Tabs
+  group, so it was left open for the user"를 내고 탭이 Aside 브라우저에 남았다. 다시 붙여 닫아도 떼어 내기만 한다.
+- 원인: 네이버 지도 쪽이 탭 상태를 바꿔(주소 갱신·iframe) Aside가 에이전트 탭 묶음에서 빠진 것으로 본다(추정).
+- 해결: 검색 목록을 iframe 원본인 `https://pcmap.place.naver.com/restaurant/list?query=…`로 직접 연다. 이 탭은 정상적으로 닫힌다.
+  남은 탭은 고객에게 직접 닫아 달라고 했다.
+- 예방: Aside 스크립트는 감싸는 페이지보다 내용 iframe의 원본 주소를 연다. 새 사이트는 먼저 `listBrowserTabs()`로 탭이 남지 않는지 본다.
