@@ -505,8 +505,17 @@ class LayoutTests(Upgrade):
         # and proposals first, then the household's pension stack.
         tax_page = render(self.report("tax"))[1]
         order = [tax_page.index(text) for text in ("나의 세금·연금", "나의 연금", "고객님께 드리는 제안", "우리 집 노후",
-                                                   "노후 현금흐름 준비율")]
+                                                   "노후 현금흐름 준비율", "두 분의 세금", "참고", "세금 관점 전략",
+                                                   "집 보유세")]
         self.assertEqual(order, sorted(order))
+        # User review 2026-11-16: every topic is a card of its own, what reads the same every week sits under 참고 at
+        # the end, and nothing is said twice (the reader's pension rows are in the household's table only).
+        spacer = '<td style="height:12px;line-height:12px;font-size:0">'
+        between = lambda a, b: tax_page[tax_page.index(a):tax_page.index(b)]  # noqa: E731
+        self.assertIn(spacer, between("노후 현금흐름 준비율", "두 분의 세금"))
+        self.assertIn(spacer, between("나의 연금", "고객님께 드리는 제안"))
+        self.assertNotIn(">연금·보험<", tax_page)
+        self.assertNotIn("분류가입 상품", re.sub(r"<[^>]+>", "", between("나의 연금", "고객님께 드리는 제안")))
         self.assertIn("노후 준비율(연금 세후)", tax_page)
 
     def test_opinions_and_policy_checks_are_colour_pills(self):
@@ -1405,6 +1414,69 @@ class HouseholdTests(Upgrade):
         self.assertIn(report_html.escape("금주의 라이프스타일 & 경험 소비 큐레이션"), page)
         self.assertIn("기획전", page)
         self.assertIn("https://example.org/show", page)
+
+    def test_the_relationship_asset_keeps_a_tie_from_the_date_book_and_widens_with_sourced_programmes(self):
+        # User request 2026-11-16 (report design §43): the Friday letter closes with the relationship asset.
+        data = self.report("tax")
+        with tempfile.TemporaryDirectory() as folder:
+            db = Path(folder) / "smith.db"
+            self.assertEqual(narrative.close_people(db, data), ([], 0))            # No date book: no dates.
+            (Path(folder) / "people.json").write_text(json.dumps({
+                "people": [{"id": "mother", "label": "어머니", "relation": "mother", "birth": {"month": 10, "day": 25}},
+                           {"id": "pal", "label": "홍길동", "relation": "friend", "birth": {"month": 10, "day": 27}}],
+                "dates": [{"id": "passport", "label": "여권 만료", "kind": "expiry", "date": "2026-10-28"},
+                          {"id": "wedding", "label": "결혼기념일", "kind": "anniversary", "month": 10, "day": 29},
+                          {"id": "trip", "label": "홍길동 결혼식", "kind": "occasion", "month": 10, "day": 30}]}),
+                encoding="utf-8")
+            found, count = narrative.close_people(db, data)
+            # The expiry is not a tie; a typed name never reaches the model (Codex review 2026-11-16).
+            self.assertEqual(([(f["label"], f["date"], f["days_left"]) for f in found], count),
+                             ([("어머니 생신", "2026-10-25", 7), ("가까운 분 생일", "2026-10-27", 9),
+                               ("결혼기념일", "2026-10-29", 11), ("챙길 날", "2026-10-30", 12)], 4))
+            self.assertNotIn("홍길동", json.dumps(found, ensure_ascii=False))
+            self.assertEqual(narrative.close_people(db, {**data, "audience": "partner"}), (None, None))
+            self.assertEqual(narrative.close_people(db, self.report("markets")), (None, None))
+            (Path(folder) / "people.json").write_text("{", encoding="utf-8")
+            self.assertEqual(narrative.close_people(db, data), ([], "PeopleError"))   # Broken: no dates, said so.
+            (Path(folder) / "people.json").write_text(json.dumps({"people": [
+                {"id": "mother", "label": "어머니", "relation": "mother", "birth": {"month": 4, "day": 31}}]}), encoding="utf-8")
+            self.assertEqual(narrative.close_people(db, data)[0], [])                 # An impossible date holds nothing.
+        brief = {"brief_id": "b", "created_at": AT, "reused": False,
+                 "brief": {"items": [{"ref": "R1", "topic": "T3", "tier": "secondary", "kind": "fact", "published_on": "2026-10-10",
+                                      "headline": "구립 테니스 동호회 회원 모집", "detail": "11월 말까지 신청을 받습니다.",
+                                      "publisher": "구청", "source_title": "모집 안내", "source_url": "https://example.org/club"}],
+                           "gaps": []}}
+        empty = {"situation": {"text": "", "refs": []}, "direction": {"text": "", "refs": []},
+                 "portfolio": {"text": "", "refs": [], "principles": []}, "order": [], "proposal_notes": [], "holdings": [],
+                 "insights": [], "watch": []}
+        tie = {"title": "어머니 생신 저녁", "body": "다음 주 일요일 어머니 생신에 저녁을 함께 드시면 좋겠습니다.",
+               "when": "10월 25일", "refs": ["people"]}
+        club = {"title": "테니스 동호회", "body": "구립 테니스 동호회가 회원을 모집합니다.", "when": "11월 말까지 신청",
+                "refs": ["R1"]}
+        without_book = narrative.build_payload(data["view"], data, brief)
+        self.assertEqual(without_book["close_people"], [])
+        _, dropped = narrative.verify(dict(empty, relationships=[tie]), without_book)
+        self.assertIn("relationships[0]:unknown-ref", dropped)                  # "people" only with the dates.
+        payload = narrative.build_payload(data["view"], {**data, "close_people": found}, brief)
+        _, dropped = narrative.verify(dict(empty, relationships=[dict(club, refs=["people"])]), payload)
+        self.assertIn("relationships[0]:no-source", dropped)                    # A programme needs its research,
+        _, dropped = narrative.verify(dict(empty, relationships=[dict(club, refs=["tax"])]), payload)
+        self.assertIn("relationships[0]:no-source", dropped)                    # not Smith's tax rules.
+        reading = {"title": "독서 모임", "body": "구립도서관에서 매주 토요일 열리는 독서 모임에 참여해 보십시오.", "when": "매주 토요일",
+                   "refs": []}
+        _, dropped = narrative.verify(dict(empty, relationships=[reading]), payload)
+        self.assertIn("relationships[0]:no-source", dropped)                    # A public reading group is one too.
+        verified, dropped = narrative.verify(dict(empty, relationships=[tie, club]), payload)
+        self.assertEqual(dropped, [])
+        self.assertEqual(narrative.edition_trim(dict(verified), "life")["relationships"], [])
+        self.assertEqual(len(narrative.edition_trim(dict(verified), "tax")["relationships"]), 2)
+        narrative.attach(data, {"output": verified, "memos": {}}, brief, {"outcome": "success", "dropped": []})
+        page = render(data)[1]
+        self.assertIn("노후의 관계 자산", page)
+        self.assertIn("어머니 생신 저녁", page)
+        self.assertIn("https://example.org/club", page)
+        self.assertIn(report_html.RELATIONSHIP_SOURCE[1], page)
+        self.assertNotIn("노후의 관계 자산", render(self.report("tax"))[1])     # Nothing written: no card.
 
 
 class ReviewFixTests(Upgrade):

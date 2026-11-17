@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from smith import (adviser, editions, fundamentals, future_income, headless, holdings, insiders, korean, ledger, memory,
-                   pension, perspective, principles, reader, research, stress, tax)
+                   pension, people, perspective, principles, reader, research, stress, tax)
 from smith.fmt import short_won
 from smith.payload import PayloadRejected, build_context, check_outbound, won
 from smith.proposals import Proposal
@@ -66,7 +66,7 @@ logger = logging.getLogger(__name__)
 # v32: no per-sentence law caveat; the footer says it once (user decision 2026-11-02); the check no longer asks for it.
 # v33: holdings[].week_change and index_moves; a holding that moved 10% or more opens its reason with why (2026-11-03).
 # v34: tax.realized_this_year, this year's sales with their estimated gains and the deduction left (2026-11-03).
-PROMPT_VERSION = "narrative-v42"   # v42: replies_recorded (the spouse's replies are answered, their facts not kept); v41: the money needed outside the pensions in the client's wording; v40: the overview per person, whose pay; v39: property and life days per person (§42).
+PROMPT_VERSION = "narrative-v43"   # v43: relationships and close_people on the tax day (§43); v42: replies_recorded (the spouse's replies are answered, their facts not kept); v41: the money needed outside the pensions in the client's wording; v40: the overview per person, whose pay; v39: property and life days per person (§42).
 MODEL = headless.MODEL
 # A runaway guard, not a cost limit (flat-rate subscription): the markets day cost 4.39 USD on 2026-10-27 and, with a
 # payload a fifth larger, ran past 5.00 on 2026-11-03 (error_max_budget_usd), so that report went out without opinions.
@@ -103,6 +103,7 @@ _BLOCK = lambda limit: {"type": "object", "additionalProperties": False, "requir
 NARRATIVE_SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False,
     # `experiences` is optional in the output: only the household theme writes it, and an absent list is empty.
+    # `relationships` likewise: only the tax and pensions day writes it (report design §43).
     # `household` is optional too: only a per-person edition writes it, and an absent block reads as empty.
     "required": ["situation", "direction", "portfolio", "order", "proposal_notes", "holdings", "insights", "watch"],
     # Length limits are about a quarter of the v13 ones (user review 2026-10-18, twice: the mails read long, then
@@ -134,6 +135,11 @@ NARRATIVE_SCHEMA: dict[str, Any] = {
         # The experience dividend (report design §18.6): one or two curated things to see, read or do, with
         # their sources; written only for the household theme.
         "experiences": {"type": "array", "maxItems": 2, "items": {
+            "type": "object", "additionalProperties": False, "required": ["title", "body", "when", "refs"],
+            "properties": {"title": _TEXT(60), "body": _TEXT(160), "when": _TEXT(80), "refs": _REFS}}},
+        # The relationship asset (report design §43): one or two moves that keep a close tie warm or widen the circle
+        # beyond work; written only for the tax and pensions day.
+        "relationships": {"type": "array", "maxItems": 2, "items": {
             "type": "object", "additionalProperties": False, "required": ["title", "body", "when", "refs"],
             "properties": {"title": _TEXT(60), "body": _TEXT(160), "when": _TEXT(80), "refs": _REFS}}},
     },
@@ -334,8 +340,12 @@ Input JSON:
   of a home means, residence periods, plans, consents, preferences. They are the client's statements, not
   ledger facts, and a newer one wins over an older one. Use them to understand the household and its
   intentions; when a judgement rests on one, say so ("고객님 말씀 기준"). They never override ledger figures.
+- close_people (only on the tax and pensions day, in the client's own letter): the family and friends' dates of
+  the next two weeks from the client's date book: label (a relation word such as "어머니 생신", never a name),
+  kind (birthday, anniversary, occasion), date, days_left, and milestone (칠순, 10주년) when there is one. Cite
+  it as "people".
 - last_report (when present): what this theme's previous report, sent on `date`, told the client: situation,
-  direction, portfolio, insights, watch, experiences and the holding opinions. It is Smith's earlier prose, not
+  direction, portfolio, insights, watch, experiences, relationships and the holding opinions. It is Smith's earlier prose, not
   evidence: cite nothing from it. The client read it, so do not say it again. Lead with what is new since that
   date (a figure that moved, a finding in the brief dated after it, a stance that changed) and take a different
   angle on what is unchanged. An insight, watch item or experience it already gave comes back only when
@@ -444,6 +454,14 @@ Write:
   do this week or month (an exhibition, a book, a place, a table, a court), chosen from the brief's findings
   to fit the preferences in client_memory, written as an invitation with the practical detail (where, until
   when) in `when`, and the refs of the findings. Otherwise an empty list.
+- relationships: only when edition_focus asks for the relationship asset: one or two moves for this reader this
+  week or month, each an invitation, never a warning about loneliness. A tie kept warm: a date in close_people
+  (refs ["people"]) with one small act that fits the relation and the milestone (a call, a meal together, a
+  handwritten card, a visit for an elder's birthday), or the family and friends the reader named in client_memory.
+  A circle widened beyond work: a club, a class or volunteering from the brief's relationship findings (their
+  refs), matched to the reader's interests in client_memory, with where and when to sign up in `when`. Never
+  invent a person, a relation, a taste or a programme; a person appears only by the label given. Otherwise an
+  empty list.
 - portfolio {text, refs, principles}: 2-3 sentences, the household's investment strategy for its stocks as a
   private banker would set it: the target structure (core and satellite) the principles imply for this
   household, which policy_checks its present situation argues to adjust first and the concrete steps, in order (which holdings to
@@ -543,6 +561,9 @@ def build_payload(view: Any, data: dict[str, Any], brief: dict[str, Any] | None,
         payload["tax"] = {"notes": [], "year_end_checklist": [], "realized_this_year": payload["tax"]["realized_this_year"]}
     if not edition.strategy:
         payload["strategy"] = []
+    if "relationships" in edition.sections:
+        # The client's date book (report design §43), read for the client's own letter only (`close_people`).
+        payload["close_people"] = data.get("close_people") or []
     return payload
 
 
@@ -1290,7 +1311,7 @@ def apply_rewrites(current: dict[str, Any], paths: list[str], second: dict[str, 
         field, index = path.split("[")[0], int(path.split("[")[1].rstrip("]"))
         identity, now, items = _LISTS[field], out[field][index], second.get(field) or []
         at = next((j for j, item in enumerate(items) if item[identity] == now[identity]), None)
-        if at is None and field in ("insights", "watch", "experiences") and index < len(items):
+        if at is None and field in ("insights", "watch", "experiences", "relationships") and index < len(items):
             at = index
         if at is None or f"{field}[{at}]" in bad:
             continue
@@ -1443,7 +1464,8 @@ def merge(first: dict[str, Any], first_dropped: list[str], repaired: dict[str, A
             wanted = raw[field][int(index)][identity]
         fresh = [item for item in repaired[field] if item[identity] not in taken]
         candidate = next((item for item in fresh if wanted is None or item[identity] == wanted), None)
-        if candidate is None and wanted is not None and field in ("insights", "watch", "experiences") and index.isdigit():
+        if (candidate is None and wanted is not None and index.isdigit()
+                and field in ("insights", "watch", "experiences", "relationships")):
             # A rewritten insight may carry a new title: the item at the same position, when it is new.
             at = int(index)
             candidate = repaired[field][at] if at < len(repaired[field]) and repaired[field][at][identity] not in taken else None
@@ -1569,6 +1591,11 @@ _OUTSIDE = ("정부", "정책", "규제", "대책", "세법", "법령", "개정"
 # Company facts (report design §12): results, guidance and analyst views come from research items.
 _COMPANY = ("실적", "매출", "영업이익", "순이익", "가이던스", "목표주가", "목표가", "컨센서스", "투자의견", "밸류에이션")
 _OUTSIDE += _COMPANY
+# A programme to join (report design §43): where it is, when it takes sign-ups and who runs it come from research. Not
+# "모임" alone: a family gathering is a warm tie, not a programme; a public reading group or a venue still counts (Codex
+# review 2026-11-16: a library's reading group passed with no source).
+_PROGRAMME = ("동호회", "클럽", "강좌", "강의", "수강", "아카데미", "평생학습", "봉사", "프로그램", "모집", "접수", "독서 모임",
+              "독서모임", "도서관", "문화센터", "복지관", "주민센터", "구립", "시립", "워크숍", "행사", "축제", "참가")
 _LAW = ("세법", "법령", "세금", "양도세", "양도소득세", "종부세", "종합부동산세", "취득세", "재산세", "세액공제",
         "비과세", "과세", "LTV", "DSR", "주택담보인정비율", "총부채", "규제지역", "투기과열", "조정대상", "토지거래허가",
         "대출 한도", "대출한도")
@@ -1590,9 +1617,10 @@ def with_blocks(output: dict[str, Any]) -> dict[str, Any]:
     return {**output, **{field: output.get(field) or dict(_EMPTY_BLOCK) for field in SCALAR_BLOCKS}}
 TAX_PROPOSALS = ("pension-credit", "overseas-harvest", "isa-open")  # Proposals computed by Smith's tax rules.
 # A daily edition's lists are cut in code too, not only asked for in the prompt (overview, other days).
-EDITION_LIMITS = {"insights": (2, 1), "watch": (2, 2), "experiences": (0, 2)}  # (overview, themed day)
+EDITION_LIMITS = {"insights": (2, 1), "watch": (2, 2), "experiences": (0, 2),
+                  "relationships": (0, 2)}  # (overview, themed day)
 _LISTS = {"proposal_notes": "key", "holdings": "symbol", "insights": "title", "watch": "item",
-          "experiences": "title"}  # field -> identity
+          "experiences": "title", "relationships": "title"}  # field -> identity
 _REASONS = {"unknown-ref": "cites a ref that is not in the input",
             "invalid-holding": "names a symbol that is not in holdings or a stance other than add, hold, trim, exit",
             "add-over-limit": "advises buying more of a holding above the single-company limit (policy forbids it)",
@@ -1649,7 +1677,8 @@ def verify(output: dict[str, Any], payload: dict[str, Any]) -> tuple[dict[str, A
     earlier = previous.get("earlier") or []
     told = {"insights": {_squash(i["title"]) for i in previous.get("insights", [])},
             "watch": {_squash(w["item"]) for w in previous.get("watch", [])},
-            "experiences": {_squash(e["title"]) for e in previous.get("experiences", [])}}
+            "experiences": {_squash(e["title"]) for e in previous.get("experiences", [])},
+            "relationships": {_squash(r["title"]) for r in previous.get("relationships", [])}}
     for field in told:  # The reports before the last one, by title only (about a month).
         told[field] |= {_squash(title) for report in earlier for title in report.get(field, [])}
 
@@ -1726,6 +1755,19 @@ def verify(output: dict[str, Any], payload: dict[str, Any]) -> tuple[dict[str, A
     result["experiences"] = [n for i, n in enumerate(output.get("experiences") or [])
                              if fresh(f"experiences[{i}]", "experiences", n["title"])
                              and check(f"experiences[{i}]", [n["title"], n["body"], n["when"]], n["refs"], outside=True)]
+    # A relationship move (report design §43) that keeps a tie warm rests on the client's date book ("people") or their
+    # own words; one that names a club, a class or volunteering is an outside fact and needs its research refs.
+    # Smith's own tax rules or filings are no source for a club (Codex review 2026-11-16): a programme cites research.
+    result["relationships"] = []
+    for i, n in enumerate(output.get("relationships") or []):
+        path, texts = f"relationships[{i}]", [n["title"], n["body"], n["when"]]
+        programme = any(word in " ".join(texts) for word in _PROGRAMME)
+        if not fresh(path, "relationships", n["title"]):
+            continue
+        if programme and not any(_RESEARCH_SOURCE.fullmatch(ref) for ref in n["refs"]):
+            dropped.append(f"{path}:no-source")
+        elif check(path, texts, n["refs"], outside=programme):
+            result["relationships"].append(n)
     return result, dropped
 
 
@@ -1793,6 +1835,7 @@ def _problem(texts: list[str], refs: list[str], known_refs: set[str], official: 
 
 
 _RESEARCH_REF = re.compile(r"(?<![A-Za-z0-9_-])R\d+(?![A-Za-z0-9_-])")
+_RESEARCH_SOURCE = re.compile(r"[RN]\d+")   # A research finding or a news item, as a ref.
 
 
 def _known_refs(payload: dict[str, Any]) -> set[str]:
@@ -1813,6 +1856,9 @@ def _known_refs(payload: dict[str, Any]) -> set[str]:
     known |= {item["ref"] for item in household.get("cash_flow", {}).get("items", [])}
     if payload["brief"]:
         known |= {item["ref"] for item in payload["brief"]["items_untrusted"]}
+    # "people" (the client's date book, read by code) only when the input carries its dates (report design §43).
+    if payload.get("close_people"):
+        known.add("people")
     # "filing" (a holding's official figures or insiders' dealings, read by code) only when the input carries them.
     if any(h.get("fundamentals") or h.get("insiders") for h in payload.get("holdings") or []):
         known.add("filing")
@@ -1833,6 +1879,8 @@ _EVIDENCE_KEYS = ("edition", "change_since_last_report", "proposals", "undetermi
                   "report_notes", "report_principles",
                   # The dividend an e-mail answer's look-up found, computed for the household by code (qa_lookup).
                   "dividend_estimates",
+                  # The client's date book (report design §43): dates and milestones read by code.
+                  "close_people",
                   "client_question", "client_memory")
 
 
@@ -2034,7 +2082,7 @@ def attach(data: dict[str, Any], result: dict[str, Any] | None, brief: dict[str,
     # the employer's stock never reads "의견 없음" (report design §17.4).
     narrative: dict[str, Any] = {"status": status, "situation": "", "direction": "", "portfolio": "", "household": "",
                                  "holdings": _opinions(data, [], links) if "holdings" in data else {},
-                                 "insights": [], "watch": [], "experiences": []}
+                                 "insights": [], "watch": [], "experiences": [], "relationships": []}
     if result is not None:
         out = result["output"]
         by_key = {p.key: p for p in data["advice"]["proposals"]}
@@ -2065,6 +2113,8 @@ def attach(data: dict[str, Any], result: dict[str, Any] | None, brief: dict[str,
                     "links": [links[r] for r in w["refs"] if r in links]} for w in out["watch"]],
             experiences=[{**{k: e[k] for k in ("title", "body", "when")}, "memo": e.get("memo", ""),
                           "links": [links[r] for r in e["refs"] if r in links]} for e in out.get("experiences") or []],
+            relationships=[{**{k: e[k] for k in ("title", "body", "when")}, "memo": e.get("memo", ""),
+                            "links": [links[r] for r in e["refs"] if r in links]} for e in out.get("relationships") or []],
             doubtful=_doubtful_parts(data, out, memos))
     data["narrative"] = narrative
 
@@ -2081,6 +2131,7 @@ def _doubtful_parts(data: dict[str, Any], out: dict[str, Any], memos: dict[str, 
     parts += [f"변화 '{i['title']}'" for i in out.get("insights") or [] if i.get("restored")]
     parts += [f"지켜볼 것 '{w['item']}'" for w in out.get("watch") or [] if w.get("restored")]
     parts += [f"경험 '{e['title']}'" for e in out.get("experiences") or [] if e.get("restored")]
+    parts += [f"관계 '{e['title']}'" for e in out.get("relationships") or [] if e.get("restored")]
     names = {p["key"]: str(p["name"]) for p in opined(data)["positions"]}
     held = [names.get(h["symbol"], h["symbol"]) for h in out.get("holdings") or [] if h.get("restored")]
     if held:
@@ -2192,12 +2243,42 @@ def report_memory(db: Path, data: dict[str, Any]) -> tuple[list[dict[str, Any]],
     advice = data["advice"]
     query = " ".join([p.title for p in advice["proposals"]] + [t.headline for t in advice["strategy"]]
                      + [u.topic for u in advice.get("undetermined", [])])
+    edition = editions.of(data["kind"])
+    if edition is not None and "relationships" in edition.sections:
+        query += " " + RELATIONSHIP_QUERY
     try:
         facts = memory.load(memory.directory(db))
     except (OSError, UnicodeDecodeError) as error:
         return [], {"stored": None, "sent": 0, "error_code": type(error).__name__}
     chosen = memory.retrieve(facts, query)
     return memory.for_model(chosen), {"stored": len(facts), "sent": len(chosen)}
+
+
+# The relationship asset (report design §43) asks for the facts it builds on: family, friends and interests.
+RELATIONSHIP_QUERY = "가족 부모님 친구 지인 동료 모임 취미 운동 테니스 독서 배움 봉사"
+CLOSE_PEOPLE_DAYS = 14   # Two weekends ahead of the Friday letter.
+_CLOSE_KINDS = ("birthday", "anniversary", "occasion")   # Not an expiry (a passport) or a monthly routine.
+
+
+def close_people(db: Path, data: dict[str, Any]) -> tuple[list[dict[str, Any]] | None, str | int | None]:
+    """(the family and friends' dates of the next two weeks, status) for the relationship asset (report design §43):
+    None for an edition without it and for the spouse's letter, whose reader the client's relation words would misname
+    ("어머니" would be the spouse's 시어머니). An absent date book is no dates; a broken one is no dates with its error as the status,
+    never a reason to hold the report."""
+    edition = editions.of(data["kind"])
+    if edition is None or "relationships" not in edition.sections or data.get("audience", "self") != "self":
+        return None, None
+    today = data["as_of"].date()
+    try:
+        book = people.load(people.path(db))
+        dates = [o for o in people.upcoming(book, today, CLOSE_PEOPLE_DAYS) if o.kind in _CLOSE_KINDS]
+    except ValueError as error:   # PeopleError, or an impossible date a hand-edited book holds (Codex review 2026-11-16).
+        logger.warning("Date book unavailable to the relationship asset: %s", type(error).__name__)
+        return [], type(error).__name__
+    # The label goes as a relation word or the date's kind, never as typed: it could hold a name (people.safe_label).
+    found = [{"label": people.safe_label(o, book), "kind": o.kind, "date": o.on.isoformat(),
+              "days_left": (o.on - today).days, **({"milestone": o.milestone} if o.milestone else {})} for o in dates]
+    return found, len(found)
 
 
 REPEAT_WINDOW = 4  # Sent reports on the theme whose titles count as already told: about a month of weekly reports.
@@ -2233,11 +2314,13 @@ def previous_report(db: Path, data: dict[str, Any]) -> dict[str, Any] | None:
             "insights": [{"title": i.get("title", ""), "body": i.get("body", "")} for i in verified.get("insights") or []],
             "watch": [{"item": w.get("item", "")} for w in verified.get("watch") or []],
             "experiences": [{"title": e.get("title", "")} for e in verified.get("experiences") or []],
+            "relationships": [{"title": e.get("title", "")} for e in verified.get("relationships") or []],
             "holdings": [{"symbol": h.get("symbol", ""), "stance": h.get("stance", ""), "reason": h.get("reason", "")}
                          for h in verified.get("holdings") or []],
             "earlier": [{"date": d, "insights": [i.get("title", "") for i in v.get("insights") or []],
                          "watch": [w.get("item", "") for w in v.get("watch") or []],
-                         "experiences": [e.get("title", "") for e in v.get("experiences") or []]} for d, v in earlier]}
+                         "experiences": [e.get("title", "") for e in v.get("experiences") or []],
+                         "relationships": [e.get("title", "") for e in v.get("relationships") or []]} for d, v in earlier]}
 
 
 def _final_narrative(conn: sqlite3.Connection, report: dict[str, Any]) -> dict[str, Any]:
@@ -2330,6 +2413,9 @@ def narrate(db: Path, view: Any, data: dict[str, Any], *, now: datetime, secrets
             return False
 
     remembered, status["memory"] = report_memory(db, data)
+    found, status["close_people"] = close_people(db, data)
+    if found is not None:
+        data["close_people"] = found
     previous = previous_report(db, data)
     status["last_report"] = None if previous is None else previous["date"]
     status["attempts"] = 0
@@ -2370,12 +2456,14 @@ def narrate(db: Path, view: Any, data: dict[str, Any], *, now: datetime, secrets
 
 def edition_trim(output: dict[str, Any], kind: str) -> dict[str, Any]:
     """Cut a daily edition's lists to their limits (the overview takes more insights, no experiences); the
-    experience dividend belongs to the household theme alone (report design §18.6). Other kinds are untouched."""
+    experience dividend belongs to the household theme alone (report design §18.6), the relationship asset to the tax
+    and pensions day (§43). Other kinds are untouched."""
     edition = editions.of(kind)
     if edition is None:
         return output
     for field, (overview, other) in EDITION_LIMITS.items():
         output[field] = output.get(field, [])[:overview if edition.key == "overview" else other]
-    if "experiences" not in edition.sections:
-        output["experiences"] = []
+    for field in ("experiences", "relationships"):
+        if field not in edition.sections:
+            output[field] = []
     return output

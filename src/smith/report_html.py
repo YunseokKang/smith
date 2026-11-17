@@ -614,6 +614,7 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
         "stress": lambda: _stress(data["stress"], sectors["real_estate"]),
         "stress_summary": lambda: _stress_summary(data["stress"], sectors["real_estate"]),
         "experiences": lambda: _experiences(story),
+        "relationships": lambda: _relationships(story),
         "my_pensions": lambda: _my_pensions(data), "household_tax": lambda: _household_tax(advice),
         # The reader's own holdings and their week (report design §42), and the two of them together. The letter's
         # own narrative call opined on the reader's own holdings (narrative.opined).
@@ -671,8 +672,9 @@ def _doubtful(data: dict[str, Any], story: dict[str, Any]) -> list[str]:
 def _split_bands(data: dict[str, Any], edition: editions.Edition, renderers: dict[str, Any], advice: dict[str, Any],
                  story: dict[str, Any]) -> list[str]:
     """A per-person letter's body (report design §42): "나의 …" (the reader's own accounts, with the proposals made to
-    the reader) and then "우리 집 …" (the two of them together). Each group's first section is open. Both letters
-    call the reader 고객님 (user decision 2026-11-08)."""
+    the reader) and then "우리 집 …" (the two of them together), then the edition's reference sections under "참고".
+    Every topic is a card of its own (user review 2026-11-16: the topics ran together with nothing between them).
+    Each group's first section is open. Both letters call the reader 고객님 (user decision 2026-11-08)."""
     def group(names: tuple[str, ...]) -> list[str]:
         parts = [renderers[name]() for name in names]
         return [_opened(part) if i == 0 else part for i, part in enumerate(p for p in parts if p)]
@@ -688,8 +690,8 @@ def _split_bands(data: dict[str, Any], edition: editions.Edition, renderers: dic
     household_proposals = (_proposals(both, full, edition=edition, heading="두 분께 드리는 제안") if both["proposals"]
                            else "")
     ours = group(edition.household)
-    bands = [_band(CANVAS, _group_title(f"나의 {edition.label}", "고객님 명의의 계좌·집·대출·연금·보험만 봅니다.")
-                   + "".join(mine[:1]) + proposals + "".join(mine[1:]), border=True)]
+    bands = _cards(_group_title(f"나의 {edition.label}", "고객님 명의의 계좌·집·대출·연금·보험만 봅니다."),
+                   [*mine[:1], proposals, *mine[1:]])
     changes = _changes_outside(story, "이번 주 눈여겨볼 변화" if edition.key == "overview" else f"{edition.label} — 눈여겨볼 변화")
     if changes:
         bands.append(_band(CANVAS, changes, border=True))
@@ -697,12 +699,21 @@ def _split_bands(data: dict[str, Any], edition: editions.Edition, renderers: dic
     shared = story.get("household") or ""
     lead = ("" if not shared else f'<tr><td style="padding:0 0 10px"><div style="font-size:15px;line-height:1.7;'
                                   f'color:{INK}">{escape(shared)}</div></td></tr>')
-    bands.append(_band(CANVAS, _group_title(f"우리 집 {edition.household_label or edition.label}", "두 분을 합쳐 봅니다.")
-                       + lead + household_proposals + "".join(ours), border=True))
+    bands += _cards(_group_title(f"우리 집 {edition.household_label or edition.label}", "두 분을 합쳐 봅니다."),
+                    [lead + household_proposals, *ours])
     # The long-range tracks (home move, lease return, retirement) are the household's: under its group.
     if edition.strategy and advice["strategy"]:
         bands.append(_band(DARK, _strategy(advice["strategy"], story.get("direction", ""))))
+    reference = [part for part in (renderers[name]() for name in edition.reference) if part]
+    if reference:
+        bands += _cards(_group_title("참고", "매주 크게 바뀌지 않는 기준과 표입니다. 필요할 때 펼쳐 보십시오."), reference)
     return bands
+
+
+def _cards(title: str, parts: list[str]) -> list[str]:
+    """A group as cards, one bordered band per topic with the group's title on the first; empty topics are left out."""
+    shown = [part for part in parts if part] or [""]
+    return [_band(CANVAS, (title if i == 0 else "") + part, border=True) for i, part in enumerate(shown)]
 
 
 def _own(data: dict[str, Any]) -> dict[str, Any]:
@@ -858,8 +869,9 @@ def _my_pensions(data: dict[str, Any]) -> str:
                              focus_age=max((start for start, _, _, _ in parts if start is not None), default=None),
                              drop_age=max((end for _, _, _, end in parts if end is not None), default=None),
                              whose="고객님 명의, ")
-    return _section("나의 연금", lead, charts + _family_table(dict(stack, pipelines=mine), colors), brief=None,
-                    note=escape(f"세후 월 {_short(total)}"))
+    # No table of the reader's pipelines: the household's table below lists each of them, marked 본인 or 배우자 (user
+    # review 2026-11-16: the same rows twice in one letter).
+    return _section("나의 연금", lead, charts, brief=None, note=escape(f"세후 월 {_short(total)}"))
 
 
 def _opened(section: str) -> str:
@@ -1547,6 +1559,7 @@ def _system_notes(data: dict[str, Any], story: dict[str, Any], reasons: list[str
             memos.append(f"{label}: {story[field]}")
     memos += [f"변화 '{i['title']}': {i['memo']}" for i in story.get("insights") or [] if i.get("memo")]
     memos += [f"지켜볼 것 '{w['item']}': {w['memo']}" for w in story.get("watch") or [] if w.get("memo")]
+    memos += [f"관계 '{r['title']}': {r['memo']}" for r in story.get("relationships") or [] if r.get("memo")]
     names = {p["key"]: str(p["name"]) for p in (data.get("holdings") or {}).get("positions", [])}
     memos += [f"종목 의견 {names.get(key, key)}: {o['memo']}" for key, o in (story.get("holdings") or {}).items() if o.get("memo")]
     memos += [f"제안 맥락 '{_first_sentence(p.title)}': {p.context_memo}"
@@ -3179,6 +3192,28 @@ def _experiences(story: dict[str, Any]) -> str:
     lead = ("숫자와 저축 너머, 고객님의 삶과 지평을 넓혀 줄 경험(전시, 인문 독서, 여행, 미식, 테니스 같은 웰니스)을 이번 주에 "
             "한두 가지 골랐습니다. 선택은 고객님의 몫입니다.")
     return _opened(_section("금주의 라이프스타일 & 경험 소비 큐레이션", lead, cards, note=escape(f"{len(items)}건")))
+
+
+# The column behind the relationship asset (report design §43): one expert's view, named as hers.
+RELATIONSHIP_SOURCE = ("이서연, 「노후 준비는 관계 자산부터」, 한국경제 2026-11-15",
+                       "https://www.hankyung.com/article/2026111574651")
+
+
+def _relationships(story: dict[str, Any]) -> str:
+    """The relationship asset (report design §43): one or two moves that keep a close tie warm or widen the circle
+    beyond work, with their sources. It closes the household's 노후 group on the tax and pensions day."""
+    items = story.get("relationships") or []
+    if not items:
+        return ""
+    cards = "".join(f'<div style="border:1px solid {HAIRLINE};border-radius:16px;padding:16px 18px;margin-top:10px">'
+                    f'<div style="font-size:16px;font-weight:600;color:{INK}">{escape(e["title"])}</div>'
+                    f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin-top:6px">{escape(e["body"])}</div>'
+                    f'<div style="font-size:12px;color:{MUTED};margin-top:6px">{escape(e["when"])}</div>'
+                    f'{_sources(e.get("links") or [])}</div>' for e in items)
+    lead = ("퇴직하면 직장에서 맺은 관계부터 줄어듭니다. 이서연 교수는 그래서 관계를 연금처럼 미리 쌓아 두는 '관계 자산'으로 "
+            "봅니다. 이번 주에 해 볼 만한 일을 한두 가지 골랐고, 고르시는 건 고객님입니다.")
+    return _section("노후의 관계 자산", escape(lead) + _sources([RELATIONSHIP_SOURCE]), cards,
+                    note=escape(f"{len(items)}건"), brief=None)
 
 
 def _annuity_review(data: dict[str, Any]) -> str:

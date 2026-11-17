@@ -505,7 +505,8 @@ def answer(db: Path, data: dict[str, Any], question: Question, *, now: datetime,
         payload = spouse_payload(payload)
     verified_report = (recent or {}).get("content", {}).get("verified") or {}
     payload["recent_report"] = {k: verified_report.get(k) for k in ("situation", "direction", "portfolio", "holdings",
-                                                                     "insights", "watch", "experiences")}
+                                                                     "insights", "watch", "experiences",
+                                                                     "relationships")}
     # The mail keeps only the client's reading; the reasons behind it (status, data status, assumptions) and the
     # principles it applied travel here so "why did you judge that" can be answered (report design §18.1).
     # Not for a spouse: their letter never shows the system notes, which carry the client's account observations

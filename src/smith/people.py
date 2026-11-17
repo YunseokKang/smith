@@ -59,6 +59,15 @@ DEFAULT_OCCASIONS: tuple[dict[str, Any], ...] = (
     {"id": "seollal", "label": "설날", "month": 1, "day": 1, "lunar": True},
     {"id": "chuseok", "label": "추석", "month": 8, "day": 15, "lunar": True},
 )
+# What a relationship-asset call may read of a person (FR-11, FR-56): a relation word from this vocabulary, never the
+# free label itself, which could hold a name the outbound check cannot see (Codex review 2026-11-16).
+RELATION_WORDS = frozenset({
+    "아버지", "어머니", "아빠", "엄마", "장인", "장인어른", "장모", "장모님", "시아버지", "시어머니", "아내", "와이프", "남편",
+    "배우자", "형", "오빠", "누나", "언니", "동생", "남동생", "여동생", "매형", "매부", "매제", "형부", "제부", "처남", "처제",
+    "처형", "올케", "새언니", "형수", "제수", "조카", "아들", "딸", "할아버지", "할머니", "외할아버지", "외할머니", "삼촌",
+    "이모", "고모", "외삼촌", "큰아버지", "작은아버지", "사촌", "친구", "동료", "선배", "후배"})
+# Event labels a model may read as written; any other anniversary or occasion goes as its kind's word.
+SAFE_EVENT_LABELS = frozenset({"결혼기념일", "혼인신고일"})
 _ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 _FILE_KEYS = {"people", "dates", "occasions", "_note"}
 _PERSON_KEYS = {"id", "label", "relation", "birth"}
@@ -242,6 +251,19 @@ def upcoming(book: Book, today: date, days: int = 14) -> list[Occurrence]:
 def is_routine(occurrence: Occurrence) -> bool:
     """Whether the occurrence is a monthly routine or its lapse, shown in the routine card rather than the dates."""
     return occurrence.kind in ROUTINE_KINDS
+
+
+def safe_label(occurrence: Occurrence, book: Book) -> str:
+    """The occurrence as a model may name it (FR-56): a birthday by its person's relation word ("가까운 분" when the label
+    is not one), a default occasion or a known event by its label, any other date by its kind ("기념일", "챙길 날")."""
+    if occurrence.kind == "birthday":
+        person = next((p for p in book.people if p.id == occurrence.person_id), None)
+        label = "" if person is None else person.label.strip()
+        word = label if label.removesuffix("님") in RELATION_WORDS else "가까운 분"
+        return f"{word} {'생신' if person is not None and person.relation in ELDERS else '생일'}"
+    if occurrence.label in SAFE_EVENT_LABELS | {o["label"] for o in DEFAULT_OCCASIONS}:
+        return occurrence.label
+    return "기념일" if occurrence.kind == "anniversary" else "챙길 날"
 
 
 def for_model(found: list[Reminder]) -> list[dict[str, Any]]:

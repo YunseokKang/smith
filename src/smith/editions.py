@@ -45,6 +45,9 @@ class Edition:
     personal: tuple[str, ...] = ()
     household: tuple[str, ...] = ()
     household_label: str = ""
+    # A per-person letter's reference sections, under "참고" at its end (user review 2026-11-16: the Friday letter was
+    # too long; what reads the same every week goes below what changed and what to do).
+    reference: tuple[str, ...] = ()
 
 
 EDITIONS: dict[str, Edition] = {e.key: e for e in (
@@ -110,9 +113,9 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "a loan to repay.", opening=("debt",),
             personal=("my_debt",), household=("household_debt", "macro"), household_label="금리·대출"),
     Edition("tax", "세금·연금",
-            "tax", ("tax", "holding_tax", "annuity_review", "pension"),
+            "tax", ("tax", "holding_tax", "annuity_review", "relationships"),
             ("pension-credit", "overseas-harvest", "isa-open", "insurance-review"),
-            ("pension_tax", "home_tax"), False, False,
+            ("pension_tax", "home_tax", "relationship"), False, False,
             "tax and pensions: the pension stack first (sector_metrics.pension_insurance.pension_stack: every "
             "pipeline's after-tax monthly payout and start age against the monthly retirement target, the readiness "
             "ratio at each retirement age (retirement_age_tiers: 50, 55, 60, with the years without a pension and what "
@@ -120,18 +123,28 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "banker's words), this year's "
             "pension credit room, overseas capital-gains deduction, ISA, the year-end settlement checklist, "
             "marriage-registration and home-tax timing, and whether the insurance premiums "
-            "(sector_metrics.pension_insurance.insurance_review) are an efficient use of the monthly cash flow. For "
-            "each entry of sector_metrics.pension_insurance.annuity_reviews, give the client a decisive opinion of the "
-            "policy in two or three sentences: what they still pay and get, the forward return by lifespan against "
-            "the index-fund alternative, the code's verdict and the one condition that flips it, and the sunk cost "
-            "to ignore. "
+            "(sector_metrics.pension_insurance.insurance_review) are an efficient use of the monthly cash flow. The "
+            "annuity card already gives each policy in sector_metrics.pension_insurance.annuity_reviews its verdict, "
+            "forward return, flip condition and sunk cost: never restate it as an insight or watch item (user review "
+            "2026-11-16: the letter said it twice). "
             "Expected pay and share grants will lift interest and dividends toward the financial-income threshold: "
             "weigh every placement after tax and name the tax-advantaged route (ISA, pension accounts, the "
             "savings-insurance exemption, separately taxed bonds and infrastructure funds, the overseas capital-gains "
-            "regime) as a standing rule.", opening=("pension_stack",),
-            personal=("my_pensions", "tax", "annuity_review"),
-            household=("pension_stack", "household_tax", "holding_tax", "pension"),
-            household_label="노후"),
+            "regime) as a standing rule. "
+            "Close with the relationship asset (report design §43, user request 2026-11-16): retirement narrows the "
+            "outer circle of work ties, so write `relationships`, one or two concrete moves for this reader: one that "
+            "keeps a close tie warm (a date in close_people, or family and friends named in client_memory) and one "
+            "that widens the circle beyond work (a club, a class, volunteering from the brief's relationship "
+            "findings, matched to the reader's interests in client_memory).", opening=("pension_stack",),
+            personal=("my_pensions",),
+            # The relationship asset closes the household's 노후 group: the money and the people kept for later. The
+            # 연금·보험 one-liner is gone: its premium share read against the household's income beside a proposal
+            # reading it against the client's own (user review 2026-11-16).
+            household=("pension_stack", "household_tax", "relationships"),
+            household_label="노후",
+            # What reads the same every week: the tax notes with the year-end checklist, the year's holding tax (billed
+            # in July, September and December) and the annuity's tables.
+            reference=("tax", "holding_tax", "annuity_review")),
     Edition("life", "생활·목표",
             "life", ("experiences", "cash", "spending", "stress", "goals", "follow_up", "requests"),
             ("emergency-reserve", "surplus-plan", "spending-room"),

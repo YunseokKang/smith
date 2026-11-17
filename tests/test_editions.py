@@ -105,6 +105,9 @@ class EditionTests(unittest.TestCase):
         # The household day researches only the experience dividend (v3.0): no market or policy topic.
         self.assertEqual(titles("life"), ["금주의 라이프스타일·경험 큐레이션"])
         self.assertFalse(any("주택" in t or "금리" in t for t in titles("life")))
+        # The relationship asset (report design §43) is researched for the Friday letter alone.
+        self.assertIn("관계 자산: 일 밖의 모임과 배움", titles("tax"))
+        self.assertNotIn("관계 자산: 일 밖의 모임과 배움", titles("markets") + titles("monday"))
         calls = []
 
         def runner(args, **kwargs):

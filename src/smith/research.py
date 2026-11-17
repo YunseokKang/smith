@@ -191,6 +191,13 @@ def topics(view: LedgerView, kind: str | None = None, target_regions: tuple[str,
                       "이번 달 서울·수도권과 해외 주요 미술관·박물관의 미술·역사 기획전과 전시 일정, 주목할 역사·인문·철학·고전과 "
                       "예술 에세이 신간, 프라이빗한 소규모 여행이 가능한 국내외 조용한 여행지, 파인 다이닝·미식 소식, 테니스 등 "
                       "웰니스 활동 행사"))
+    # The relationship asset (report design §43): where a working adult can widen the circle beyond work. A generic
+    # question about what is open to join, nothing about the household.
+    if wanted is not None and "relationship" in wanted:
+        found.append(("relationship", "관계 자산: 일 밖의 모임과 배움",
+                      "이번 달과 다음 달 서울·수도권에서 직장인이 저녁·주말에 참여할 수 있는 모임과 배움: 테니스 등 운동 동호회, "
+                      "독서·인문 모임, 시·구 평생학습관·도서관·대학의 공개 강좌, 봉사활동 모집, 부부가 함께하는 프로그램의 "
+                      "신청 기간과 장소; 사회적 관계와 고립이 노후 건강에 미치는 영향에 관한 최근 연구·통계"))
     chosen = [(title, question) for category, title, question in found if wanted is None or category in wanted]
     held = holding_topics(view) if editions.researches_holdings(kind) else []
     return [Topic(f"T{i}", title, question) for i, (title, question) in enumerate(chosen, 1)] + held

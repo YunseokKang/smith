@@ -697,7 +697,8 @@ class NarrativeTests(unittest.TestCase):
         previous = narrative.previous_report(self.db, data)
         self.assertEqual(previous["date"], week_ago.astimezone(data["as_of"].tzinfo).date().isoformat())
         self.assertEqual(previous["earlier"], [{"date": older_at.astimezone(data["as_of"].tzinfo).date().isoformat(),
-                                               "insights": ["두 주 전 통찰"], "watch": ["두 주 전 항목"], "experiences": []}])
+                                               "insights": ["두 주 전 통찰"], "watch": ["두 주 전 항목"], "experiences": [],
+                                               "relationships": []}])
         self.assertEqual((previous["situation"], [i["title"] for i in previous["insights"]], previous["watch"],
                           previous["holdings"]),
                          ("지난주 상황", ["영통 규제"], [{"item": "금통위"}],
