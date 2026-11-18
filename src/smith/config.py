@@ -56,6 +56,9 @@ KNOWN_KEYS = {
     # Restaurant picks (FR-55, daily design §17): picks for tomorrow's places in the evening mail, the Google
     # cross-check when a key is stored, and areas never read (home, the office).
     "dining": {"evening", "google", "skip_areas"},
+    # Weekend outings (FR-57, daily design §18): the range read when a question names no 구·시 (whole provinces
+    # 서울·경기·인천 or city/district names; local only, it hints at home) and the Thursday evening card switch.
+    "outing": {"default_areas", "evening"},
 }
 COUNSEL_PREFIX = re.compile(r"^\[[0-9A-Za-z가-힣]{1,20}\]$")
 HEALTH_MIDWEEK_KEYS = {"enabled", "weekday", "time"}
@@ -149,6 +152,7 @@ def load_config(path: Path) -> dict:
     _check_counsel(config.get("counsel", {}))
     _check_memory_review(config.get("memory_review", {}))
     _check_dining(config.get("dining", {}))
+    _check_outing(config.get("outing", {}))
     if "properties" in config or "targets" in config:
         from smith.realestate import RealEstateError, validate_properties, validate_targets
         try:
@@ -357,6 +361,19 @@ def _check_dining(dining: object) -> None:
     skip = dining.get("skip_areas", [])
     if not isinstance(skip, list) or any(not isinstance(a, str) or not a.strip() or len(a) > 20 for a in skip):
         raise ValueError("dining.skip_areas must list short area names such as 판교")
+
+
+def _check_outing(outing: object) -> None:
+    """Optional `[outing]` (FR-57): `default_areas` lists 서울·경기·인천 or 시·군·구 names; `evening` (default on)."""
+    if not isinstance(outing, dict):
+        raise ValueError("outing must be a table")
+    if not isinstance(outing.get("evening", True), bool):
+        raise ValueError("outing.evening must be a boolean")
+    areas = outing.get("default_areas", ["서울"])
+    if (not isinstance(areas, list) or not areas
+            or any(not isinstance(a, str) or not (a in ("서울", "경기", "인천") or (2 <= len(a) <= 10 and a[-1] in "시군구"))
+                   for a in areas)):
+        raise ValueError("outing.default_areas must list 서울, 경기, 인천 or 시·군·구 names such as 과천시")
 
 
 def _check_daily(daily: object) -> None:

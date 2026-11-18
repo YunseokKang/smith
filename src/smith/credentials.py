@@ -20,6 +20,8 @@ REAL_ESTATE_PROVIDERS = ("datagokr", "rone", "vworld")
 DISCLOSURE_PROVIDERS = ("dart",)
 # The 법제처 national law information API (국가법령정보 공동활용 OC): the weekly tax-law watch (FR-54).
 LAW_PROVIDERS = ("law",)
+# The Seoul Open Data Plaza key: cultural events for weekend outings (FR-57).
+LEISURE_PROVIDERS = ("seoul",)
 # The authenticator secret that approves trades (trading design §5). Only the trade approval check reads it.
 _TRADE_TOTP = "smith.trade-totp"
 
@@ -49,7 +51,7 @@ def all_secrets() -> list[str]:
     health = load_health() or ()
     return [*toss, *gmail, *health, load_trade_totp() or "",
             *(load_api_key(p) or "" for p in EVIDENCE_PROVIDERS + REAL_ESTATE_PROVIDERS + DISCLOSURE_PROVIDERS
-                                               + LAW_PROVIDERS)]
+                                               + LAW_PROVIDERS + LEISURE_PROVIDERS)]
 
 
 def load_trade_totp() -> str | None:

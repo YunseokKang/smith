@@ -2,7 +2,7 @@
 
 One account key serves every service the household applied for; it travels only in the query string and never into
 an exception, a log or a model payload. The portal answers in three shapes: a normal body with
-`response.header.resultCode == "00"`, a normal body with another code (no data, out of season), or its own refusal
+`response.header.resultCode == "00"` (or "0000" for the tourism services), a normal body with another code (no data, out of season), or its own refusal
 `OpenAPI_ServiceResponse` (service not applied for, quota, unknown service), which can come with HTTP 200.
 """
 import urllib.parse
@@ -38,7 +38,7 @@ def call(get: Getter, url: str, key: str, **params: str) -> dict[str, Any]:
         raise Error(f"http-{status}")
     header = (body.get("response") or {}).get("header") or {}
     code = str(header.get("resultCode", "00"))
-    if code == "00":
+    if code in ("00", "0000"):   # The Korea Tourism Organization's services (KorService2) answer "0000".
         return body
     if code == "99" and "제공기간" in str(header.get("resultMsg", "")):
         raise Error("out-of-season")

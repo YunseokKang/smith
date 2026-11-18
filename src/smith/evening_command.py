@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from smith import dining_evening, evening, evening_html, evening_send, korean, netflix_picks, talk
+from smith import dining_evening, evening, evening_html, evening_send, korean, netflix_picks, outing_evening, talk
 from smith.config import load_config, local_time
 
 DEFAULT_LOCAL_CONFIG = Path("config/smith.local.toml")
@@ -24,6 +24,8 @@ def add_parser(sub: Any, default_db: Path) -> None:
                          help="the evening, YYYY-MM-DD (default: today in the household timezone); the mail is about the next day")
     command.add_argument("--no-dining", action="store_true",
                          help="preview: skip the restaurant picks for tomorrow's places (they read Naver through Aside)")
+    command.add_argument("--no-outing", action="store_true",
+                         help="preview: skip Thursday's weekend outing card (official API reads)")
     command.add_argument("--model", action="store_true",
                          help="preview/send: also run the talk research and the writer (headless model calls; audited in the ledger)")
     command.add_argument("--force", action="store_true", help="send: send again although tonight's mail already went out")
@@ -50,7 +52,8 @@ def run(args: argparse.Namespace) -> int:
     if args.action == "send":
         return _send(args.db, config, now=now, day=day, with_model=args.model, force=args.force)
     data = evening_send.build(args.db, config, now=now, day=day, modeler=_with_model if args.model else None,
-                              diner=None if args.no_dining else dining_evening.step)
+                              diner=None if args.no_dining else dining_evening.step,
+                              outer=None if args.no_outing else outing_evening.step)
     partner = evening_send.settings(config)["partner"]
     if args.action == "inputs":
         from smith import evening_writer
@@ -97,7 +100,8 @@ def run_due(db: Path, config: dict[str, Any], *, now: datetime) -> list[str]:
         except headless.HeadlessError as error:
             lines.append(f"evening research not prepared ({error})")
     lines += evening_send.run_due(db, config, now=now, recipient=config.get("mail", {}).get("recipient"),
-                                  credentials=credentials.load_gmail(), modeler=_with_model, diner=dining_evening.step)
+                                  credentials=credentials.load_gmail(), modeler=_with_model, diner=dining_evening.step,
+                                  outer=outing_evening.step)
     return lines
 
 
@@ -110,7 +114,7 @@ def _send(db: Path, config: dict[str, Any], *, now: datetime, day: date, with_mo
 
     result = evening_send.publish(db, config, now=now, day=day, trigger="manual", recipient=config.get("mail", {}).get("recipient"),
                                   credentials=credentials.load_gmail(), modeler=_with_model if with_model else None, force=force,
-                                  diner=dining_evening.step)
+                                  diner=dining_evening.step, outer=outing_evening.step)
     if result["status"] == "skipped" and result.get("error_code") == "already-sent":
         print("Tonight's mail already went out; add --force to send another one.")
     print(f"{result['status']}: {result.get('subject') or ''}" + (f" ({result['error_code']})" if result.get("error_code") else ""))

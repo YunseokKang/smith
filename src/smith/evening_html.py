@@ -7,7 +7,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-from smith import daily_art, daily_html, dining_view, korean, netflix_picks, talk, weather
+from smith import daily_art, daily_html, dining_view, korean, netflix_picks, outing, talk, weather
 from smith.daily_html import ACCENT, BODY, INK, LIGHTS, MUTED, _card, _page, _pill
 from smith.report_html import _plain
 
@@ -32,7 +32,7 @@ def render(data: dict[str, Any], *, partner: str = "아내", inline: bool = Fals
     item = talk_item(data)
     fixes = prose.setdefault("korean_fixes", []) if prose else []
     cards = [c for c in (_prep(data), _talk(item, partner), _netflix(data, fixes), _sleep(data), _agenda(data, prose),
-                         _dining(data), _dates(data, prose)) if c]
+                         _dining(data), _outing(data), _dates(data, prose)) if c]
     footer_lines = [FOOTER]
     if data["failures"]:
         footer_lines.append("받지 못한 자료: " + ", ".join(f"{k}({v})" for k, v in sorted(data["failures"].items())))
@@ -231,6 +231,31 @@ def _dining(data: dict[str, Any]) -> str:
     return _card("내일 근처 맛집", "", "".join(blocks) + small)
 
 
+def _outing(data: dict[str, Any]) -> str:
+    """이번 주말 나들이 (Thursday, FR-57): the weekend's weather and three picks fitted to the household. Every line is
+    the code's (outing.py); nothing here is a model's."""
+    found = data.get("outing")
+    if not found:
+        return ""
+    if found.get("error"):
+        return _card("이번 주말 나들이", "이번 주 행사 정보를 읽지 못했습니다. 'smith outing search'로 다시 볼 수 있습니다.", "")
+    head = "".join(f'<div style="font-size:13px;color:{MUTED};margin:2px 0">{escape(line)}</div>' for line in outing.summary_lines(found))
+    rows = []
+    for n, pick in enumerate(found.get("picks") or [], 1):
+        title = escape(f"{n}. {pick['title']}")
+        link = pick.get("link")
+        name = (f'<a href="{escape(link, quote=True)}" style="font-size:16px;font-weight:700;color:{INK};text-decoration:underline">'
+                f'{title}</a>') if link else f'<div style="font-size:16px;font-weight:700;color:{INK}">{title}</div>'
+        body = "".join(f'<div style="font-size:13px;line-height:1.55;color:{BODY}">{escape(line)}</div>'
+                       for line in outing.pick_detail(pick))
+        rows.append(f'<div style="padding:8px 0;border-bottom:1px solid #f0e6da">{name}{body}</div>')
+    if not rows:
+        rows.append(f'<div style="font-size:14px;color:{BODY};padding:4px 0">이번 주말 범위 안에서 추천할 행사를 찾지 못했습니다.</div>')
+    small = "".join(f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-top:6px">{escape(t)}</div>'
+                    for t in [*(found.get("notes") or []), outing.SOURCE_LINE])
+    return _card("이번 주말 나들이", "", head + "".join(rows) + small)
+
+
 def _sleep(data: dict[str, Any]) -> str:
     """오늘 밤 숙면: a bedtime from the usual wake time, the bedroom actions the night calls for, what the recent nights
     suggest, and the figures and guidance behind them."""
@@ -321,6 +346,17 @@ def _text(data: dict[str, Any], prose: dict[str, Any], item: dict[str, str], sub
         lines += ["", f"내일 근처 맛집: {entry['area']} ({entry['when']} {entry['title']})"]
         picks = (entry.get("result") or {}).get("picks") or []
         lines += [line for n, pick in enumerate(picks, 1) for line in dining_view.pick_lines(n, pick, show_status=False)]             or ["- 추천을 받지 못했습니다."]
+    found = data.get("outing")
+    if found:
+        lines += ["", "이번 주말 나들이"]
+        if found.get("error"):
+            lines.append("- 이번 주 행사 정보를 읽지 못했습니다.")
+        else:
+            lines += outing.summary_lines(found)
+            for n, pick in enumerate(found.get("picks") or [], 1):
+                lines += [f"{n}. {pick['title']}", *(f"   {line}" for line in outing.pick_detail(pick))]
+                if pick.get("link"):
+                    lines.append(f"   {pick['link']}")
     lines += ["", f"내일 일정 {len(data['events'])}건"]
     for event in data["events"]:
         lines.append(f"- {'종일' if event.all_day else format(event.start, '%H:%M')} {event.title}")

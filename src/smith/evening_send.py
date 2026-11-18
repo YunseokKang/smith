@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from smith import daily_art, daily_send, dining_evening, evening, evening_html, gmail, ledger, talk
+from smith import daily_art, daily_send, dining_evening, evening, evening_html, gmail, ledger, outing_evening, talk
 from smith.config import local_time
 
 LEASE = daily_send.LEASE
@@ -28,6 +28,8 @@ Modeler = daily_send.Modeler
 # Restaurant picks for tomorrow's places (dining_evening.step): an Aside read, so injected by the command, never run
 # by a test or a caller that did not ask for it.
 Diner = Callable[[Path, dict[str, Any], dict[str, Any], datetime], None]
+# Thursday's weekend outing card (outing_evening.step, FR-57): official API reads, injected the same way.
+Outer = Diner
 
 
 def run_key(day: date) -> str:
@@ -77,7 +79,8 @@ def due(conn: Any, config: dict[str, Any], now: datetime) -> date | None:
 
 def run_due(db: Path, config: dict[str, Any], *, now: datetime, recipient: str | None,
             credentials: tuple[str, str, str] | None, sender: daily_send.Sender = gmail.send,
-            collector: Collector | None = None, modeler: Modeler | None = None, diner: Diner | None = None) -> list[str]:
+            collector: Collector | None = None, modeler: Modeler | None = None, diner: Diner | None = None,
+            outer: Outer | None = None) -> list[str]:
     """Called by `smith report run-due`: sends tonight's mail when it is due. Returns log lines. Interrupted runs of
     every product are closed first, so recovery holds when only this mail is enabled."""
     lines: list[str] = []
@@ -89,14 +92,14 @@ def run_due(db: Path, config: dict[str, Any], *, now: datetime, recipient: str |
     if day is None:
         return lines
     result = publish(db, config, now=now, day=day, trigger="scheduled", recipient=recipient, credentials=credentials,
-                     sender=sender, collector=collector, modeler=modeler, diner=diner)
+                     sender=sender, collector=collector, modeler=modeler, diner=diner, outer=outer)
     return lines + [f"evening {result['run_key']}: {result['status']}" + (f" ({result['error_code']})" if result.get("error_code") else "")]
 
 
 def build(db: Path, config: dict[str, Any], *, now: datetime, day: date, collector: Collector | None = None,
-          modeler: Modeler | None = None, diner: Diner | None = None) -> dict[str, Any]:
+          modeler: Modeler | None = None, diner: Diner | None = None, outer: Outer | None = None) -> dict[str, Any]:
     """The data dict for the mail about `day` (tomorrow), with the restaurant picks for tomorrow's places when `diner`
-    is given and the model steps when `modeler` is."""
+    is given, Thursday's weekend outing card when `outer` is, and the model steps when `modeler` is."""
     inputs = (collector or evening.collect)(db, config, now=now, day=day)
     data = evening.assemble(inputs, day=day, tz=config["app"]["timezone"], now=now,
                             airways_sensitive=bool(config.get("daily", {}).get("airways_sensitive", False)),
@@ -109,6 +112,8 @@ def build(db: Path, config: dict[str, Any], *, now: datetime, day: date, collect
         evening.add_sleep(data, health_folder=health.path(db), now=now)
     if diner is not None:
         diner(db, config, data, now)
+    if outer is not None:
+        outer(db, config, data, now)
     if modeler is not None:
         modeler(db, config, data, now, day)
     return data
@@ -117,7 +122,7 @@ def build(db: Path, config: dict[str, Any], *, now: datetime, day: date, collect
 def publish(db: Path, config: dict[str, Any], *, now: datetime, day: date, trigger: str, recipient: str | None,
             credentials: tuple[str, str, str] | None, sender: daily_send.Sender = gmail.send,
             collector: Collector | None = None, modeler: Modeler | None = None, force: bool = False,
-            diner: Diner | None = None) -> dict[str, Any]:
+            diner: Diner | None = None, outer: Outer | None = None) -> dict[str, Any]:
     """Claim, build, send and record the mail about `day`. Returns {"status", "run_key", "subject", "error_code"}.
     The day is the unit of claiming for scheduled and manual sends alike; only `force` sends a second mail."""
     key = run_key(day) if not force else f"{run_key(day)}-manual-{uuid.uuid4().hex[:6]}"
@@ -132,7 +137,7 @@ def publish(db: Path, config: dict[str, Any], *, now: datetime, day: date, trigg
     started = time.monotonic()
     partner = settings(config)["partner"]
     try:
-        data = build(db, config, now=now, day=day, collector=collector, modeler=modeler, diner=diner)
+        data = build(db, config, now=now, day=day, collector=collector, modeler=modeler, diner=diner, outer=outer)
         subject, html, text = evening_html.render(data, partner=partner)
         send_at = now + timedelta(seconds=time.monotonic() - started)
         if trigger == "scheduled" and local_time(send_at, config["app"]["timezone"]).date() >= day:
@@ -162,6 +167,8 @@ def publish(db: Path, config: dict[str, Any], *, now: datetime, day: date, trigg
             daily_send._mark_shown(db, shown, day, run_id)
         return daily_send._finish(db, key, token, "sending", status, error_code=error.code, subject=subject)
     daily_send._mark_shown(db, shown, day, run_id)
+    # The weekend picks are used up only once the mail is out.
+    outing_evening.after_send(db, data, local_time(now, config["app"]["timezone"]).date())
     return daily_send._finish(db, key, token, "sending", "sent", message_id=message_id, subject=subject)
 
 
@@ -179,7 +186,9 @@ def snapshot(data: dict[str, Any], subject: str, item: dict[str, str]) -> dict[s
                    "talk": shown, "netflix": picks, "dining": dining_evening.for_prose(data.get("dining")),
                    "prose": {**(stored.get("prose") or {}), "talk": shown, "netflix": picks, "prep": [p["text"] for p in data["prep"]],
                              # Tomorrow's restaurant picks (public shop data): "두 번째 식당 예약돼?" is answerable.
-                             "dining": dining_evening.for_prose(data.get("dining"))},
+                             "dining": dining_evening.for_prose(data.get("dining")),
+                             # Thursday's weekend outing picks (public event data): "두 번째 전시 몇 시까지야?".
+                             "outing": outing_evening.for_prose(data.get("outing"))},
                    # The sleep corner is kept beside the prose, never in it: the reply answerer passes the prose to a model,
                    # and the sleep figures go to no model (review 2026-10-27, P0).
                    "sleep_shown": data.get("sleep") is not None})
