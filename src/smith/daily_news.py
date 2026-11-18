@@ -21,21 +21,30 @@ from smith.payload import check_outbound, mask_identifiers
 MODEL = headless.MODEL
 BUDGET_USD = "5.00"
 TIMEOUT_SECONDS = 900
-PROMPT_VERSION = "daily-news-v1"
+PROMPT_VERSION = "daily-news-v2"
 FRESH_DAYS = 2
 REUSE_WITHIN = timedelta(hours=6)
 MAX_HEADLINE, MAX_DETAIL = 90, 400
-# Outlets whose article pages may be linked (host suffixes). National wires, dailies and broadcasters; the big
-# international wires and papers; a few technology titles. The local config may extend this later.
+UNLISTED_KEPT = 20   # Rejected outlet hosts kept in the brief, so a thin morning says which outlets the model chose.
+# Outlets whose article pages may be linked (host suffixes). National wires, dailies, business papers and broadcasters;
+# the big international wires, papers and broadcasters; technology and science titles. The model receives this list
+# (BUG-2026-008: unaware of it, it chose unlisted outlets and the 2026-11-18 mail had no news). The client may trim it.
 HOSTS = ("yna.co.kr", "yonhapnews.co.kr", "news.kbs.co.kr", "kbs.co.kr", "imnews.imbc.com", "mbc.co.kr", "news.sbs.co.kr",
-         "sbs.co.kr", "ytn.co.kr", "jtbc.co.kr", "chosun.com", "joongang.co.kr", "donga.com", "hani.co.kr", "khan.co.kr",
-         "mk.co.kr", "hankyung.com", "sedaily.com", "edaily.co.kr", "newsis.com", "news1.kr", "kmib.co.kr", "hankookilbo.com",
-         "munhwa.com", "segye.com", "seoul.co.kr", "etnews.com", "zdnet.co.kr", "bloter.net", "yonhapnewstv.co.kr",
-         "reuters.com", "apnews.com", "bbc.com", "bbc.co.uk", "nytimes.com", "ft.com", "bloomberg.com", "wsj.com",
-         "theguardian.com", "economist.com", "cnbc.com", "cnn.com", "nikkei.com", "asia.nikkei.com", "techcrunch.com",
-         "theverge.com", "arstechnica.com", "nature.com", "science.org", "washingtonpost.com", "politico.com", "axios.com")
+         "sbs.co.kr", "ytn.co.kr", "jtbc.co.kr", "chosun.com", "joongang.co.kr", "joins.com", "donga.com", "hani.co.kr",
+         "khan.co.kr", "mk.co.kr", "hankyung.com", "sedaily.com", "edaily.co.kr", "newsis.com", "news1.kr", "kmib.co.kr",
+         "hankookilbo.com", "munhwa.com", "segye.com", "seoul.co.kr", "etnews.com", "zdnet.co.kr", "bloter.net",
+         "yonhapnewstv.co.kr", "mt.co.kr", "heraldcorp.com", "asiae.co.kr", "fnnews.com", "ajunews.com", "dt.co.kr",
+         "inews24.com", "nocutnews.co.kr", "mbn.co.kr", "tvchosun.com", "ichannela.com", "koreaherald.com",
+         "koreatimes.co.kr", "aitimes.com", "thelec.kr", "ddaily.co.kr",
+         "reuters.com", "apnews.com", "afp.com", "bbc.com", "bbc.co.uk", "nytimes.com", "ft.com", "bloomberg.com", "wsj.com",
+         "theguardian.com", "economist.com", "cnbc.com", "cnn.com", "nbcnews.com", "abcnews.go.com", "cbsnews.com",
+         "npr.org", "washingtonpost.com", "latimes.com", "politico.com", "axios.com", "semafor.com", "time.com",
+         "fortune.com", "marketwatch.com", "barrons.com", "aljazeera.com", "dw.com", "france24.com", "nikkei.com",
+         "asia.nikkei.com", "nhk.or.jp", "kyodonews.net", "japantimes.co.jp", "scmp.com", "straitstimes.com",
+         "techcrunch.com", "theverge.com", "arstechnica.com", "wired.com", "technologyreview.com", "venturebeat.com",
+         "nature.com", "science.org")
 SYSTEM_PROMPT = """You are the morning news desk for one reader in Korea who is about to commute. You have WebSearch and
-WebFetch; use them. Input JSON: {"today", "topics", "count", "language"}.
+WebFetch; use them. Input JSON: {"today", "topics", "count", "language", "outlets"}.
 
 Pick about twice `count` of the most consequential items of the last 24-36 hours across the topics, Korea and the world
 mixed (at least two Korean and two international), one item per story, no opinion columns, no sports or celebrity news
@@ -43,8 +52,11 @@ unless of national significance. Prefer the outlet that reported it first or an 
 
 Each item: topic (one of the given topics), headline (Korean, factual, under 60 characters), detail (Korean, two
 sentences: what happened, and why it matters to an ordinary reader), published_on (YYYY-MM-DD), publisher (outlet name),
-source_title (the page title), source_url (the article page itself, https, on an established outlet: a wire, a national
-daily or broadcaster, a major international paper), kind ("fact"). Only URLs you actually opened; never compose one.
+source_title (the page title), source_url (the article page itself, https), kind ("fact"). Only URLs you actually
+opened; never compose one.
+
+The source_url host must be one of `outlets` or a subdomain of one. Code drops every other link, portal copies on Naver
+or Daum included, so when a story turns up elsewhere, find the same story on a listed outlet and link that page.
 Write every text in Korean. Output JSON that matches the schema; `gaps` lists topics with nothing worth reporting."""
 
 
@@ -73,6 +85,7 @@ def research_and_store(db: Path, *, now: datetime, today: date, topics: list[str
         ledger.record_research(conn, brief_id=brief_id, created_at=now, topics=topic_list, outcome="success", model=MODEL,
                                cost_usd=result.get("cost_usd"), brief={"items": result["items"], "gaps": result["gaps"],
                                                                          "dropped": result["dropped"],
+                                                                         "unlisted_hosts": result.get("unlisted_hosts", {}),
                                                                          "prompt_version": PROMPT_VERSION})
     return {"outcome": "success", "items": result["items"], "brief_id": brief_id, "error_code": None}
 
@@ -81,17 +94,20 @@ def research_news(*, today: date, topics: list[str], count: int, secrets: list[s
                   runner: headless.Runner = subprocess.run, model: str = MODEL,
                   verifier: Callable[..., tuple[list[dict[str, Any]], dict[str, int]]] | None = None) -> dict[str, Any]:
     """One web call, then selection and page checks. Raises headless.HeadlessError when the call fails."""
-    prompt = json.dumps({"today": today.isoformat(), "topics": topics, "count": count, "language": "ko"}, ensure_ascii=False)
+    prompt = json.dumps({"today": today.isoformat(), "topics": topics, "count": count, "language": "ko",
+                         "outlets": list(HOSTS)}, ensure_ascii=False)
     check_outbound(prompt, secrets)
     output, cost = headless.run(prompt, system_prompt=SYSTEM_PROMPT, schema=research.brief_schema(count * 4, 10),
                                 executable=executable, model=model, budget_usd=BUDGET_USD, timeout_seconds=TIMEOUT_SECONDS,
                                 tools=headless.WEB_TOOLS, runner=runner)
-    items, reasons = select(output.get("items", []), today=today, topics=topics)
+    raw = output.get("items", [])
+    items, reasons = select(raw, today=today, topics=topics)
     items, unreachable = (verifier or sources.verify)(items)
     for reason, number in unreachable.items():
         reasons[reason] = reasons.get(reason, 0) + number
     gaps = [mask_identifiers(str(g))[:200] for g in output.get("gaps", []) if str(g).strip()]
-    return {"items": items[:count], "gaps": gaps, "dropped": reasons, "cost_usd": cost}
+    return {"items": items[:count], "gaps": gaps, "dropped": reasons, "unlisted_hosts": unlisted_hosts(raw),
+            "cost_usd": cost}
 
 
 def select(raw: list[dict[str, Any]], *, today: date, topics: list[str]) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -140,6 +156,17 @@ def select(raw: list[dict[str, Any]], *, today: date, topics: list[str]) -> tupl
 def allowed_host(url: str) -> bool:
     host = (urlsplit(url).hostname or "").lower()
     return any(host == h or host.endswith("." + h) for h in HOSTS)
+
+
+def unlisted_hosts(raw: list[Any]) -> dict[str, int]:
+    """Hosts of proposed https links outside HOSTS, most frequent first: public outlet names only, never the URL."""
+    counts: dict[str, int] = {}
+    for item in raw:
+        url = str(item.get("source_url", "")).strip() if isinstance(item, dict) else ""
+        if research._plain_https(url) and not allowed_host(url):
+            host = (urlsplit(url).hostname or "").lower()
+            counts[host] = counts.get(host, 0) + 1
+    return dict(sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))[:UNLISTED_KEPT])
 
 
 def _clean(value: Any, limit: int) -> str:

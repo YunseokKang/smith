@@ -39,9 +39,8 @@ FALLBACK = "cheer"
 # Entertainment, lifestyle and portal-hosted copies of outlet articles, on top of the news desk's outlets.
 HOSTS = daily_news.HOSTS + (
     "osen.co.kr", "starnewskorea.com", "sportschosun.com", "xportsnews.com", "tenasia.co.kr", "dispatch.co.kr",
-    "mydaily.co.kr", "isplus.com", "spotvnews.co.kr", "newsen.com", "sportsseoul.com", "mbn.co.kr", "tvchosun.com",
-    "ichannela.com", "heraldcorp.com", "asiae.co.kr", "mt.co.kr", "fnnews.com", "nocutnews.co.kr", "inews24.com",
-    "dt.co.kr", "ajunews.com", "vogue.co.kr", "elle.co.kr", "marieclairekorea.com", "harpersbazaar.co.kr",
+    "mydaily.co.kr", "isplus.com", "spotvnews.co.kr", "newsen.com", "sportsseoul.com", "vogue.co.kr", "elle.co.kr",
+    "marieclairekorea.com", "harpersbazaar.co.kr",
     "allurekorea.com", "cosmopolitan.co.kr", "wkorea.com", "gqkorea.co.kr", "esquirekorea.co.kr", "fashionbiz.co.kr",
     "korea.kr", "n.news.naver.com", "news.naver.com", "entertain.naver.com", "m.entertain.naver.com", "v.daum.net")
 # A topic for a pleasant evening: these words in a title or detail drop the item whatever the model said.

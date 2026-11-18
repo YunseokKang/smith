@@ -1,3 +1,5 @@
+import json
+import subprocess
 import tempfile
 import unittest
 from datetime import date, datetime, timezone
@@ -107,6 +109,26 @@ class NewsTests(unittest.TestCase):
         self.assertEqual(kept[2]["topic"], "기타")
         self.assertEqual(reasons, {"duplicate": 1, "host-not-listed": 1, "stale-or-undated": 1, "bad-url": 1})
         self.assertTrue(daily_news.allowed_host("https://m.yna.co.kr/x") and not daily_news.allowed_host("https://yna.co.kr.evil.com/x"))
+
+    def test_the_model_is_told_the_outlets_and_rejected_hosts_are_named(self):
+        # BUG-2026-008: unaware of the list, the model chose unlisted outlets and the 11/18 mail carried no news.
+        def item(url):
+            return {"topic": "경제", "headline": url[-6:], "detail": "내용", "published_on": "2026-11-20",
+                    "publisher": "p", "source_title": "t", "source_url": url, "kind": "fact"}
+        raw = [item("https://n.news.naver.com/article/001/1"), item("https://n.news.naver.com/article/001/2"),
+               item("https://www.example.org/a"), item("https://www.mt.co.kr/x/1"), item("http://bbc.com/news/1")]
+        sent = []
+
+        def run(args, **kwargs):
+            sent.append(json.loads(kwargs["input"]))
+            out = {"subtype": "success", "is_error": False, "total_cost_usd": 0.1,
+                   "structured_output": {"items": raw, "gaps": []}}
+            return subprocess.CompletedProcess(args, 0, json.dumps(out), "")
+        result = daily_news.research_news(today=DAY, topics=["경제"], count=5, secrets=[], executable=Path("claude"),
+                                          runner=run, verifier=lambda items: (items, {}))
+        self.assertEqual(sent[0]["outlets"], list(daily_news.HOSTS))
+        self.assertEqual([i["source_url"] for i in result["items"]], ["https://www.mt.co.kr/x/1"])
+        self.assertEqual(result["unlisted_hosts"], {"n.news.naver.com": 2, "www.example.org": 1})   # Not the bad-url one.
 
     def test_store_and_reuse_through_the_ledger(self):
         with tempfile.TemporaryDirectory() as folder:

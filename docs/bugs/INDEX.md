@@ -8,3 +8,4 @@
 | [BUG-2026-004](BUG-2026-004-fitbit-days-booked-on-utc-date.md) | Fitbit 수면·운동 기록이 현지 날짜가 아니라 UTC 날짜로 저장돼 아침에 끝난 잠이 전날로 들어감 | 2026-10-27 | `fitbit._local`(UTC 시각 + 시차), 14일 재동기화 |
 | [BUG-2026-005](BUG-2026-005-system-prompt-past-windows-command-line-limit.md) | 해석 지시문이 Windows 명령줄 한도(32,767자)를 넘어 부동산 레터가 AI 해석 없이 발송됨 | 2026-10-28 | `--system-prompt-file`, 명령줄 길이 검사 |
 | [BUG-2026-006](BUG-2026-006-sold-stock-cost-asked-of-the-client.md) | 판 종목의 매입가를 고객에게 되묻고, 연말 공제 제안이 올해 실현 이익을 모름 | 2026-11-03 | `realized.sales`, 남은 공제 기준 제안, `mail-answer-v17` |
+| [BUG-2026-008](BUG-2026-008-daily-news-dropped-for-unlisted-outlets.md) | 하루 일과 메일의 뉴스가 매체 허용 목록에 걸려 0건으로 발송됨(모델은 목록을 몰랐음) | 2026-11-18 | 목록을 모델 입력에 포함(`daily-news-v2`), 목록 확대, 버린 매체 호스트 기록 |

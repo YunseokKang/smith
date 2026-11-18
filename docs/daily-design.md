@@ -139,6 +139,13 @@ Fluent Emoji 3D(MIT, `assets/daily/`에 28개 동봉, 라이선스 파일 포함
   2일 이내 날짜, URL·제목 중복을 거른 뒤 `sources.verify`로 페이지 도달을 확인하고 통과한 것만 요청 수까지 싣는다. 모자라면
   적게 싣고 채우지 않는다. 결과는 `research_briefs`(주제 `daily-news`)에 저장하고 6시간 안에는 재사용한다(새벽 준비 호출 → 06:00
   발송). 메일의 링크는 저장된 항목의 URL이며 모델 프로즈 안의 URL은 버린다. 구현 2026-10-25.
+- 허용 목록은 조사 모델의 입력(`outlets`)으로도 간다(`daily-news-v2`, BUG-2026-008). 목록을 모르던 모델이 목록 밖 매체를
+  골라 매일 5~11건이 버려졌고, 2026-11-18 메일에는 뉴스가 0건이었다. 같은 날 목록에 머니투데이·헤럴드경제·아시아경제·
+  파이낸셜뉴스·아주경제·디지털타임스·아이뉴스24·노컷뉴스·MBN·TV조선·채널A·코리아헤럴드·코리아타임스·코리아중앙데일리·
+  AI타임스·디일렉·디지털데일리, AFP·NBC·ABC·CBS·NPR·LA Times·Semafor·TIME·Fortune·MarketWatch·Barron's·Al Jazeera·DW·
+  France 24·NHK·교도·Japan Times·SCMP·Straits Times·Wired·MIT Technology Review·VentureBeat를 더했다(고객이 다듬을 기본값).
+  포털 사본(네이버·다음)은 여전히 받지 않는다. 브리프에는 버린 링크의 매체 호스트(`unlisted_hosts`, 많은 순 20개, URL은
+  저장하지 않음)를 남겨 뉴스가 적은 날 어느 매체가 빠졌는지 보이게 한다.
 - 보유 종목·자산과 엮는 해설은 하지 않는다(재무 스레드의 몫, 영역 분리).
 
 ### 3.5 오늘의 문장 (④) — 고객의 Keep 메모에서
