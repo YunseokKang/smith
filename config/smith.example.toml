@@ -51,6 +51,9 @@ enabled = false
 time = "06:00"
 news_count = 5
 news_topics = ["정치", "경제", "문화", "기술", "AI"]
+# What "relevant to me" means when the overnight news is ranked by importance, urgency and relevance (at most 8 short
+# words, 30 characters each). They go to the web research call, so write public topics, never names or amounts.
+news_interests = ["금리·대출", "부동산 정책", "증시·환율", "AI·반도체"]
 airways_sensitive = false
 # Whose Google Contacts dates join the anniversary reminders (daily design §14): "noted" (default: starred, or a note
 # or 중요한 날 written), "starred" (즐겨찾기 only) or "all". Search, replies and the calendar's "이 분은" use every contact.

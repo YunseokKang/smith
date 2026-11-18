@@ -1,7 +1,9 @@
-"""Overnight news for the daily mail (FR-31 ③): one web call that carries no personal data, then code decides what is
-shown: an outlet allowlist, a plain https article URL, a date within two days, and a reachability check of the page.
+"""Overnight news for the daily mail (FR-31 ③): one web call, then code decides what is shown: an outlet allowlist, a
+plain https article URL, a page dated yesterday or today, and a reachability check of the page.
 
-The model proposes twice the asked count; code keeps the first `count` that pass. Fewer is fine, padding is not, and a
+The call carries the date, the topics and the reader's own short interest words (`[daily] news_interests`, local
+config), nothing else personal. The model proposes about twice the asked count and scores each for importance, urgency
+and relevance; code keeps the `count` with the highest sum among those that pass. Fewer is fine, padding is not, and a
 link is never the model's word alone (`sources.verify` fetches the page). The brief is stored like the finance research
 (`research_briefs`, topic `daily-news`) so a morning run reuses the one prepared shortly before.
 """
@@ -21,8 +23,9 @@ from smith.payload import check_outbound, mask_identifiers
 MODEL = headless.MODEL
 BUDGET_USD = "5.00"
 TIMEOUT_SECONDS = 900
-PROMPT_VERSION = "daily-news-v2"
-FRESH_DAYS = 2
+PROMPT_VERSION = "daily-news-v3"
+SINCE_HOUR = 18   # "Overnight" starts at 18:00 the day before, Korea time (user 2026-11-18: 간밤에 일어난 일).
+FRESH_DAYS = 1    # The page date must be yesterday or today: an overnight event in the Americas is dated yesterday.
 REUSE_WITHIN = timedelta(hours=6)
 MAX_HEADLINE, MAX_DETAIL = 90, 400
 UNLISTED_KEPT = 20   # Rejected outlet hosts kept in the brief, so a thin morning says which outlets the model chose.
@@ -43,39 +46,74 @@ HOSTS = ("yna.co.kr", "yonhapnews.co.kr", "news.kbs.co.kr", "kbs.co.kr", "imnews
          "asia.nikkei.com", "nhk.or.jp", "kyodonews.net", "japantimes.co.jp", "scmp.com", "straitstimes.com",
          "techcrunch.com", "theverge.com", "arstechnica.com", "wired.com", "technologyreview.com", "venturebeat.com",
          "nature.com", "science.org")
-SYSTEM_PROMPT = """You are the morning news desk for one reader in Korea who is about to commute. You have WebSearch and
-WebFetch; use them. Input JSON: {"today", "topics", "count", "language", "outlets"}.
+SYSTEM_PROMPT = """You are the morning news desk for one reader in Korea who reads at 06:00 before the commute. You have
+WebSearch and WebFetch; use them. Input JSON: {"today", "since", "topics", "interests", "count", "language", "outlets"}.
 
-Pick about twice `count` of the most consequential items of the last 24-36 hours across the topics, Korea and the world
-mixed (at least two Korean and two international), one item per story, no opinion columns, no sports or celebrity news
-unless of national significance. Prefer the outlet that reported it first or an established wire.
+Report what happened overnight: events that took place or first broke after `since` (Korea time; the daytime of the
+Americas and Europe). An older story counts only for a new development inside that window, told as that development.
+Propose about twice `count` candidates across `topics` and the reader's `interests`, Korea and the world, one item per
+story (developments of the same story are one item), no opinion columns, no sports or celebrity news unless of
+national significance. Prefer the outlet that reported it first or an established wire.
+
+Score every candidate "1" to "5" on three separate axes. Code ranks by the sum and keeps the top `count`, so score
+honestly and do not inflate:
+- importance: how many people it affects and how deeply (5: a national or global turning point; 1: a minor item).
+- urgency: whether the reader should know or act on it today (5: changes today's commute, money, health or safety, or
+  takes effect today; 1: background that can wait).
+- relevance: how directly it touches the reader (5: squarely on one of `interests`; 3: on one of `topics` only; 1: neither).
 
 Each item: topic (one of the given topics), headline (Korean, factual, under 60 characters), detail (Korean, two
-sentences: what happened, and why it matters to an ordinary reader), published_on (YYYY-MM-DD), publisher (outlet name),
-source_title (the page title), source_url (the article page itself, https), kind ("fact"). Only URLs you actually
-opened; never compose one.
+sentences: what happened, and what it means for this reader, naming the interest it touches when it does),
+published_on (YYYY-MM-DD), publisher (outlet name), source_title (the page title), source_url (the article page itself,
+https), kind ("fact"), importance, urgency, relevance. Only URLs you actually opened; never compose one.
 
 The source_url host must be one of `outlets` or a subdomain of one. Code drops every other link, portal copies on Naver
 or Daum included, so when a story turns up elsewhere, find the same story on a listed outlet and link that page.
 Write every text in Korean. Output JSON that matches the schema; `gaps` lists topics with nothing worth reporting."""
+SCORES = ("importance", "urgency", "relevance")
+MAX_INTERESTS, MAX_INTEREST = 8, 30
 
 
-def research_and_store(db: Path, *, now: datetime, today: date, topics: list[str], count: int, secrets: list[str],
-                       executable: Path | None = None, runner: headless.Runner = subprocess.run,
+def schema(count: int) -> dict[str, Any]:
+    """The research brief schema plus the three scores (strings "1".."5": the validator knows strings, lists, objects)."""
+    shape = research.brief_schema(count * 4, 10)
+    item = shape["properties"]["items"]["items"]
+    item["properties"] = {**item["properties"], **{name: {"type": "string", "maxLength": 4} for name in SCORES}}
+    item["required"] = [*item["required"], *SCORES]
+    return shape
+
+
+def clean_interests(raw: Any) -> list[str]:
+    """The reader's interests from `[daily] news_interests`: short public words only, identifiers masked."""
+    words = [mask_identifiers(" ".join(str(w).split()))[:MAX_INTEREST] for w in (raw if isinstance(raw, list) else [])]
+    return [w for w in words if w][:MAX_INTERESTS]
+
+
+def rank(items: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
+    """The top `count` by the sum of the scores (ties: urgency, then importance, then the model's order), renumbered."""
+    ordered = sorted(enumerate(items), key=lambda pair: (-sum(pair[1][s] for s in SCORES), -pair[1]["urgency"],
+                                                         -pair[1]["importance"], pair[0]))
+    return [dict(item, ref=f"R{n}") for n, (_, item) in enumerate(ordered[:count], start=1)]
+
+
+def research_and_store(db: Path, *, now: datetime, today: date, topics: list[str], interests: list[str], count: int,
+                       secrets: list[str], executable: Path | None = None, runner: headless.Runner = subprocess.run,
                        researcher: Callable[..., dict[str, Any]] | None = None) -> dict[str, Any]:
     """Today's news brief, reused when one was made within REUSE_WITHIN; never raises for a research failure.
 
     Returns {"outcome": success|failure|reused, "items", "brief_id", "error_code"}.
     """
-    topic_list = [{"ref": "N1", "title": "daily-news", "question": f"{today.isoformat()} {' '.join(topics)} x{count}"}]
+    question = f"{today.isoformat()} {' '.join(topics)} | {' '.join(interests)} x{count} {PROMPT_VERSION}"
+    topic_list = [{"ref": "N1", "title": "daily-news", "question": question}]
     with closing(ledger.connect(db)) as conn:
         found = ledger.latest_research(conn, since=now - REUSE_WITHIN, topics=topic_list)
         if found is not None:
             return {"outcome": "reused", "items": found["brief"]["items"], "brief_id": found["brief_id"], "error_code": None}
     brief_id = f"news-{today.isoformat()}-{uuid.uuid4().hex[:8]}"
     try:
-        result = (researcher or research_news)(today=today, topics=topics, count=count, secrets=secrets,
-                                               executable=executable or headless.find_claude(), runner=runner)
+        result = (researcher or research_news)(today=today, topics=topics, interests=interests, count=count,
+                                               secrets=secrets, executable=executable or headless.find_claude(),
+                                               runner=runner)
     except headless.HeadlessError as error:
         with closing(ledger.connect(db)) as conn:
             ledger.record_research(conn, brief_id=brief_id, created_at=now, topics=topic_list, outcome="failure",
@@ -90,15 +128,16 @@ def research_and_store(db: Path, *, now: datetime, today: date, topics: list[str
     return {"outcome": "success", "items": result["items"], "brief_id": brief_id, "error_code": None}
 
 
-def research_news(*, today: date, topics: list[str], count: int, secrets: list[str], executable: Path,
-                  runner: headless.Runner = subprocess.run, model: str = MODEL,
+def research_news(*, today: date, topics: list[str], interests: list[str], count: int, secrets: list[str],
+                  executable: Path, runner: headless.Runner = subprocess.run, model: str = MODEL,
                   verifier: Callable[..., tuple[list[dict[str, Any]], dict[str, int]]] | None = None) -> dict[str, Any]:
-    """One web call, then selection and page checks. Raises headless.HeadlessError when the call fails."""
-    prompt = json.dumps({"today": today.isoformat(), "topics": topics, "count": count, "language": "ko",
-                         "outlets": list(HOSTS)}, ensure_ascii=False)
+    """One web call, then selection, page checks and ranking. Raises headless.HeadlessError when the call fails."""
+    since = f"{(today - timedelta(days=1)).isoformat()} {SINCE_HOUR:02d}:00 KST"
+    prompt = json.dumps({"today": today.isoformat(), "since": since, "topics": topics, "interests": interests,
+                         "count": count, "language": "ko", "outlets": list(HOSTS)}, ensure_ascii=False)
     check_outbound(prompt, secrets)
-    output, cost = headless.run(prompt, system_prompt=SYSTEM_PROMPT, schema=research.brief_schema(count * 4, 10),
-                                executable=executable, model=model, budget_usd=BUDGET_USD, timeout_seconds=TIMEOUT_SECONDS,
+    output, cost = headless.run(prompt, system_prompt=SYSTEM_PROMPT, schema=schema(count), executable=executable,
+                                model=model, budget_usd=BUDGET_USD, timeout_seconds=TIMEOUT_SECONDS,
                                 tools=headless.WEB_TOOLS, runner=runner)
     raw = output.get("items", [])
     items, reasons = select(raw, today=today, topics=topics)
@@ -106,7 +145,7 @@ def research_news(*, today: date, topics: list[str], count: int, secrets: list[s
     for reason, number in unreachable.items():
         reasons[reason] = reasons.get(reason, 0) + number
     gaps = [mask_identifiers(str(g))[:200] for g in output.get("gaps", []) if str(g).strip()]
-    return {"items": items[:count], "gaps": gaps, "dropped": reasons, "unlisted_hosts": unlisted_hosts(raw),
+    return {"items": rank(items, count), "gaps": gaps, "dropped": reasons, "unlisted_hosts": unlisted_hosts(raw),
             "cost_usd": cost}
 
 
@@ -137,8 +176,12 @@ def select(raw: list[dict[str, Any]], *, today: date, topics: list[str]) -> tupl
             drop("host-not-listed")
             continue
         published = _date(item.get("published_on"))
-        if published is None or not (today - timedelta(days=FRESH_DAYS) <= published <= today + timedelta(days=1)):
+        if published is None or not (today - timedelta(days=FRESH_DAYS) <= published <= today):
             drop("stale-or-undated")
+            continue
+        scores = {name: _score(item.get(name)) for name in SCORES}
+        if None in scores.values():
+            drop("unscored")
             continue
         key = re.sub(r"\s+", "", headline)
         if url in seen_urls or key in seen_heads:
@@ -149,7 +192,8 @@ def select(raw: list[dict[str, Any]], *, today: date, topics: list[str]) -> tupl
         topic = str(item.get("topic", "")).strip()
         kept.append({"topic": topic if topic in topics else "기타", "headline": headline, "detail": detail,
                      "published_on": published.isoformat(), "publisher": _clean(item.get("publisher"), 60),
-                     "source_title": _clean(item.get("source_title"), 200), "source_url": url, "kind": "fact"})
+                     "source_title": _clean(item.get("source_title"), 200), "source_url": url, "kind": "fact",
+                     **scores})
     return kept, reasons
 
 
@@ -180,3 +224,9 @@ def _date(value: Any) -> date | None:
         return date.fromisoformat(str(value)[:10])
     except (TypeError, ValueError):
         return None
+
+
+def _score(value: Any) -> int | None:
+    """A score "1".."5" (a bare number is accepted too); anything else is None."""
+    text = str(value).strip()
+    return int(text) if text in ("1", "2", "3", "4", "5") else None

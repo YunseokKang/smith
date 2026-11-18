@@ -27,6 +27,7 @@ PILLS = {"good": ("#e4f3e7", "#0f5f25"), "neutral": ("#efe8df", "#4f433b"), "war
 FOOTER = ("Smith는 조회 전용입니다: 캘린더·할 일을 바꾸지 않고, 메일을 전달하지 않습니다. 일정·기념일·뉴스에 대한 질문이나 조사 요청은 "
           "이 메일에 답장으로 주십시오. 완료 처리는 캘린더 앱에서 직접 하시면 다음 날 메일에서 사라집니다.")
 WEEKDAY_SHORT = "월화수목금토일"
+URGENT = 4   # A news item scored this urgent or more (daily_news.SCORES) is marked "오늘 확인".
 
 
 def render(data: dict[str, Any], *, inline: bool = False) -> tuple[str, str, str]:
@@ -328,10 +329,12 @@ def _news(data: dict[str, Any], prose: dict[str, Any]) -> str:
         link = f'<a href="{escape(url)}" style="color:{INK};text-decoration:underline">{head}</a>' if url.startswith("https://") else head
         meta = " · ".join(p for p in (str(item.get("publisher") or ""), str(item.get("published_on") or "")) if p)
         summary = summaries.get(item.get("ref")) or str(item.get("detail") or "")
-        blocks.append(f'<div style="margin:8px 0 12px"><div style="font-size:15px;line-height:1.5;font-weight:700">{link}</div>'
+        urgent = _pill("오늘 확인", "warn") + " " if (item.get("urgency") or 0) >= URGENT else ""
+        blocks.append(f'<div style="margin:8px 0 12px"><div style="font-size:15px;line-height:1.5;font-weight:700">{urgent}{link}</div>'
                       f'<div style="font-size:12px;color:{MUTED};margin:2px 0 4px">{escape(meta)}</div>'
                       f'<div style="font-size:14px;line-height:1.6;color:{BODY}">{escape(summary)}</div></div>')
-    return _card("오늘의 뉴스", f"간밤의 국내외 소식 {len(news)}건입니다. 링크는 도달을 확인한 것만 싣습니다.", "".join(blocks))
+    return _card("오늘의 뉴스", f"간밤 소식 가운데 중요도·긴급도·관련도가 높은 순으로 {len(news)}건입니다. 링크는 도달을 확인한 "
+                 "것만 싣습니다.", "".join(blocks))
 
 
 def _sentence(prose: dict[str, Any], picture: str | None = None) -> str:

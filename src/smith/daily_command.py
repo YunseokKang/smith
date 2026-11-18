@@ -84,6 +84,7 @@ def run_due(db: Path, config: dict[str, Any], *, now: datetime) -> list[str]:
         daily_config = config.get("daily", {})
         try:
             news = daily_news.research_and_store(db, now=now, today=day, topics=list(daily_config.get("news_topics", [])),
+                                                 interests=daily_news.clean_interests(daily_config.get("news_interests")),
                                                  count=int(daily_config.get("news_count", 5)), secrets=credentials.all_secrets(),
                                                  executable=headless.find_claude())
             if news["outcome"] != "reused":
@@ -202,6 +203,7 @@ def _with_model(db: Path, config: dict[str, Any], data: dict[str, Any], now: dat
         data["failures"]["news"] = data["failures"]["writer"] = "no-claude"
         return
     news = daily_news.research_and_store(db, now=now, today=day, topics=list(daily_config.get("news_topics", [])),
+                                         interests=daily_news.clean_interests(daily_config.get("news_interests")),
                                          count=int(daily_config.get("news_count", 5)), secrets=secrets, executable=executable)
     data["news"] = news["items"]
     print(f"News: {news['outcome']}, {len(news['items'])} item(s)" + (f" ({news['error_code']})" if news["error_code"] else ""))

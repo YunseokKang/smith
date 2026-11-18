@@ -35,7 +35,8 @@ KNOWN_KEYS = {
     "events": {"enabled", "check_time", "portfolio_move_pct"},
     # The daily-routine mail (daily design §2, §3.1, §7): schedule, news topics, the district for weather and the
     # household's airway sensitivity that moves air-quality and pollen cautions one grade earlier.
-    "daily": {"enabled", "time", "weekdays", "news_count", "news_topics", "airways_sensitive", "weather", "contact_reminders"},
+    "daily": {"enabled", "time", "weekdays", "news_count", "news_topics", "news_interests", "airways_sensitive", "weather",
+              "contact_reminders"},
     # The weekly health letter (health design §3, §9): the Sunday plan, the optional midweek check, the rotation
     # of topics and the client's priority goals shown on the dashboard line.
     "health": {"enabled", "weekday", "time", "topics", "goals", "midweek"},
@@ -382,6 +383,10 @@ def _check_daily(daily: object) -> None:
     topics = daily.get("news_topics", [])
     if not isinstance(topics, list) or len(topics) > 10 or any(not isinstance(t, str) or not t.strip() for t in topics):
         raise ValueError("daily.news_topics must be up to 10 short texts")
+    interests = daily.get("news_interests", [])
+    if not isinstance(interests, list) or len(interests) > 8 or any(
+            not isinstance(t, str) or not t.strip() or len(t) > 30 for t in interests):
+        raise ValueError("daily.news_interests must be up to 8 short texts of at most 30 characters")
     if daily.get("contact_reminders", "noted") not in ("starred", "noted", "all"):
         raise ValueError("daily.contact_reminders must be starred, noted or all")
     if "weather" not in daily:
