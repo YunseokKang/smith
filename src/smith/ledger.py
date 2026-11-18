@@ -19,7 +19,7 @@ from typing import Any
 
 from smith.announcements import Announcement
 from smith.records import (
-    REFERENCE_FIELDS, Action, ChangeType, ImportBatch, ImportRejected, ImportResult, Kind, Observation,
+    QUOTE_METRIC, REFERENCE_FIELDS, Action, ChangeType, ImportBatch, ImportRejected, ImportResult, Kind, Observation,
     RecordInput, Status, StoredRevision, canonical_decimal,
 )
 
@@ -1345,23 +1345,45 @@ def effective_history(history: list[StoredRevision]) -> list[StoredRevision]:
 # Sources whose listed prices are market quotes taken at sync time (smith.toss_sync).
 MARKET_SOURCES = ("toss",)
 
+Quotes = dict[tuple[Any, ...], tuple[datetime, str]]   # (market, symbol, currency) -> (quote time, price)
+
 
 def valued_states(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetime) -> list[StoredRevision]:
     """`record_states` with every manually imported listed lot valued at a newer market quote of the same
     instrument (`reprice`); the stored revisions are untouched. The report's readers (summary, view, exposures,
     week-over-week decomposition) use this, so net worth, holdings and changes agree on one price."""
-    return reprice(record_states(conn, as_of=as_of, known_at=known_at))
+    quotes: Quotes = {}
+    for (subject, metric, currency), (observation, source) in latest_observations(
+            conn, as_of=as_of, known_at=known_at).items():
+        if metric == QUOTE_METRIC and source in MARKET_SOURCES:
+            market, _, symbol = subject.partition(":")
+            quotes[(market, symbol, currency)] = (observation.observed_at, observation.value)
+    return reprice(record_states(conn, as_of=as_of, known_at=known_at), quotes)
 
 
-def reprice(states: list[StoredRevision]) -> list[StoredRevision]:
+def hand_listed(states: list[StoredRevision]) -> set[tuple[str, str, str]]:
+    """The instruments (market, symbol, currency) of the active listed lots imported by hand that `reprice` values at
+    a market quote: the ones a broker sync quotes for them (smith.toss_sync, report design §37)."""
+    return {(state.record.fields["market"], state.record.fields["symbol"], state.record.fields["currency"])
+            for state in states if _hand_listed(state) and state.record.fields.get("market")}
+
+
+def _hand_listed(state: StoredRevision) -> bool:
+    record, fields = state.record, state.record.fields
+    return (state.source not in MARKET_SOURCES and record.status is Status.ACTIVE and record.kind is Kind.ASSET
+            and bool(fields.get("symbol")) and bool(fields.get("quantity")) and bool(fields.get("unit_price")))
+
+
+def reprice(states: list[StoredRevision], observed: Quotes | None = None) -> list[StoredRevision]:
     """Value each active listed lot imported by hand (a brokerage statement) at the newest market quote of the same
-    instrument (market, symbol, currency) among the active lots from `MARKET_SOURCES`, when that quote is newer than
-    the lot's own price (report design §37; user decision 2026-11-03: the largest holding read a two-week-old price).
+    instrument (market, symbol, currency), when that quote is newer than the lot's own price (report design §37; user
+    decision 2026-11-03: the largest holding read a two-week-old price). A quote is the price of an active lot from
+    `MARKET_SOURCES` or one of the `observed` quotes (`QUOTE_METRIC`, for stocks no Toss lot holds; 2026-11-17).
 
     The quantity stays the statement's. The lot keeps its `effective_at` (its quantity is as old as the statement)
     and gains `priced_at` (the quote's time) and `statement_price`; its value becomes quantity x quote, and
     `value_after_costs`, which the statement computed at its own price, is dropped."""
-    quotes: dict[tuple[Any, ...], tuple[datetime, str]] = {}
+    quotes: Quotes = dict(observed or {})
     for state in states:
         record, fields = state.record, state.record.fields
         if (state.source in MARKET_SOURCES and record.status is Status.ACTIVE and record.kind is Kind.ASSET
@@ -1373,9 +1395,7 @@ def reprice(states: list[StoredRevision]) -> list[StoredRevision]:
     for state in states:
         record, fields = state.record, state.record.fields
         quote = quotes.get((fields.get("market"), fields.get("symbol"), fields.get("currency")))
-        if (quote is None or state.source in MARKET_SOURCES or record.status is not Status.ACTIVE
-                or record.kind is not Kind.ASSET or not fields.get("quantity") or not fields.get("unit_price")
-                or quote[0] <= record.effective_at):
+        if quote is None or not _hand_listed(state) or quote[0] <= record.effective_at:
             valued.append(state)
             continue
         value = canonical_decimal(str(Decimal(fields["quantity"]) * Decimal(quote[1])))

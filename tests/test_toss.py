@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from smith import ledger
-from smith.records import Action, ImportRejected, Status
+from smith.records import QUOTE_METRIC, Action, ImportRejected, Status
 from smith.toss import ForbiddenRequest, TossClient, TossError, urllib_transport
 from smith.toss_check import run_check
 from smith.toss_sync import SyncError, collect_snapshot
@@ -176,6 +176,35 @@ class TossSyncTests(unittest.TestCase):
         self.assertEqual(run(holding("AAA", "1000")), 0)              # BBB was sold: closed, sync not blocked.
         self.assertEqual(run(), 1)                                     # No holdings at all: refused.
         self.assertEqual(run(extra=("--allow-empty",)), 0)             # Confirmed by hand.
+
+    def test_stocks_held_only_by_hand_get_a_quote_that_never_blocks_the_sync(self):
+        at = datetime(2026, 10, 5, tzinfo=timezone.utc)
+        prices = [{"symbol": "111110", "timestamp": "2026-10-04T19:59:59+09:00", "lastPrice": "61000", "currency": "KRW"},
+                  {"symbol": "XYZ", "timestamp": "2026-10-05T09:00:20+09:00", "lastPrice": "30.5", "currency": "USD"},
+                  {"symbol": "QQQX", "timestamp": None, "lastPrice": "80", "currency": "USD"},       # Nothing traded.
+                  {"symbol": "ABCD", "timestamp": "2026-10-04T09:00:00+09:00", "lastPrice": "0", "currency": "USD"},
+                  {"symbol": "ZZZ", "timestamp": "2026-10-04T09:00:00+09:00", "lastPrice": "1", "currency": "USD"},
+                  {"symbol": ["XYZ"], "lastPrice": "1"}, "XYZ"]                            # Malformed items: skipped.
+        wanted = {("KR", "AAA", "KRW"),                      # Toss holds it: its holding is the quote.
+                  ("KR", "111110", "KRW"), ("US", "XYZ", "USD"), ("US", "QQQX", "USD"), ("US", "ABCD", "USD"),
+                  ("US", "EUX", "EUR"), ("TW", "9999", "TWD")}   # Not quotable by Toss: never asked.
+        cases = [("quoted", (200, {"result": prices})),
+                 ("request failed", (500, {"error": {"code": "internal-error", "requestId": "r1"}})),
+                 ("malformed", (200, {"result": {"items": prices}}))]
+        for label, answer in cases:
+            with self.subTest(label), self.assertLogs("smith.toss_sync", "WARNING"):
+                transport = sync_transport(holding("AAA", "1000"))
+                transport.responses["/api/v1/prices"] = [answer]
+                client = TossClient("id", "secret", transport=transport)
+                client.prices = mock.Mock(wraps=client.prices)
+                batch = collect_snapshot(client, owner_id="self", collected_at=at, quote_for=wanted)
+                client.prices.assert_called_once_with(["111110", "ABCD", "QQQX", "XYZ"])
+                self.assertEqual(len(batch.records), 1)
+                quotes = [(o.subject, o.currency, o.value, o.observed_at) for o in batch.observations
+                          if o.metric == QUOTE_METRIC]
+                self.assertEqual(quotes, [] if label != "quoted" else [
+                    ("KR:111110", "KRW", "61000", datetime(2026, 10, 4, 10, 59, 59, tzinfo=timezone.utc)),
+                    ("US:XYZ", "USD", "30.5", at)])   # Toss's clock ahead of ours: dated at the collection.
 
     def test_unsupported_currency_aborts_the_whole_sync(self):
         with self.assertRaises(SyncError):

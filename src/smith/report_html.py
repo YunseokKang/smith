@@ -2499,14 +2499,14 @@ def _holdings_week(data: dict[str, Any], story: dict[str, Any] | None = None) ->
         notes.append(f"가격이나 환율을 몰라 시세와 매매로 나누지 못해 뺀 종목: {', '.join(str(n) for n in unsplit)}.")
     repriced = [r for r in data["view"].records if r.fields.get("statement_price")] if data.get("view") else []
     if repriced:
-        notes.append(f"직접 입력한 계좌의 {len(repriced)}개 보유분은 같은 종목의 토스 시세로 다시 매겼습니다(수량은 마지막 입력 기준).")
+        notes.append(f"직접 입력한 계좌의 {len(repriced)}개 보유분은 그 종목의 토스 시세로 다시 매겼습니다(수량은 마지막 입력 기준).")
     foot = "".join(f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-top:4px">{escape(n)}</div>' for n in notes)
     if moves["stale"]:
         # A stale price hides that holding's move; said where it is read, not in the grey notes.
         lots = ", ".join(f"{s['name']} {_qty(s['quantity'])}주({s['priced_at']:%m/%d} 가격)" for s in moves["stale"])
         foot = (f'<div style="font-size:13px;line-height:1.6;color:{BODY};background:{PILLS["warn"][0]};border-radius:12px;'
                 f'padding:10px 12px;margin-bottom:6px">가격이 지난 보고 뒤로 갱신되지 않아 주가 변화가 빠진 보유분: '
-                f'{escape(lots)}. 직접 입력한 계좌라 새 잔고를 가져오면 반영됩니다.</div>') + foot
+                f'{escape(lots)}. 그 뒤로 토스에서 시세를 받지 못한 종목입니다.</div>') + foot
     return (f'<tr><td>{_eyebrow(f"{baseline:%m/%d} 대비", color="#ffffff", background=BLUE)}'
             f'{_heading("지난주 대비 보유 종목 변화", size=26)}'
             f'<div style="font-size:15px;line-height:1.65;color:{BODY}">{lead}</div></td></tr>'

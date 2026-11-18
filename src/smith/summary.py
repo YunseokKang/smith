@@ -12,7 +12,7 @@ from typing import Any
 
 from smith import DECIMAL_PRECISION, ledger  # The package-wide Decimal policy (smith/__init__.py).
 from smith.records import (
-    ASSET_CATEGORIES, INFLOW_CATEGORIES, OUTFLOW_CATEGORIES, TRANSFER_CATEGORIES, Kind, RecordInput,
+    ASSET_CATEGORIES, INFLOW_CATEGORIES, OUTFLOW_CATEGORIES, QUOTE_METRIC, TRANSFER_CATEGORIES, Kind, RecordInput,
     Status, StoredRevision,
 )
 
@@ -103,6 +103,8 @@ def _load_observations(conn: sqlite3.Connection, summary: Summary) -> dict[str, 
     rates = {BASE_CURRENCY: Decimal(1)}
     observations = ledger.latest_observations(conn, as_of=summary.as_of, known_at=summary.known_at)
     for (subject, metric, currency), (observation, source) in sorted(observations.items()):
+        if metric == QUOTE_METRIC:
+            continue  # A stock quote prices hand-imported lots (ledger.valued_states); it is no reference figure.
         entry = {"subject": subject, "metric": metric, "currency": currency, "value": Decimal(observation.value),
                  "observed_at": observation.observed_at, "source": source}
         stale = summary.as_of - observation.observed_at > _STALE_FX

@@ -132,11 +132,11 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     advice["assumptions"] = advice["assumptions"] + future_income.assumptions(pay)
     if sectors["macro"]["fx"] is not None:
         advice["assumptions"].append(_FX_ASSUMPTION)
-    # Hand-imported listed lots valued at a newer market quote of the same stock (ledger.reprice, report design §37).
+    # Hand-imported listed lots valued at a newer Toss quote of the stock (ledger.reprice, report design §37).
     repriced = [r for r in view.records if r.fields.get("statement_price")]
     if repriced:
         oldest = min(r.effective_at for r in repriced)
-        advice["assumptions"].append(f"직접 입력한 계좌의 상장 주식 {len(repriced)}건은 같은 종목의 최신 토스 시세로 평가"
+        advice["assumptions"].append(f"직접 입력한 계좌의 상장 주식 {len(repriced)}건은 그 종목의 최신 토스 시세로 평가"
                                      f"(수량은 마지막 입력 기준, 가장 오래된 입력 {oldest:%Y-%m-%d})")
     # The products the review team chose for a proposal that moves money (report design §26), sized here. They were
     # reviewed for the client's proposals: the spouse's letter carries none (§42).

@@ -155,6 +155,11 @@ class Observation:
     observed_at: datetime
 
 
+# A listed instrument's market quote (smith.toss_sync): subject "<market>:<symbol>", currency the quote's,
+# observed at the quote's own time. It values hand-imported lots (ledger.reprice), never net worth by itself.
+QUOTE_METRIC = "last_price"
+
+
 @dataclass(frozen=True)
 class ImportBatch:
     """Records to apply atomically. In snapshot mode the ledger assigns revisions itself and

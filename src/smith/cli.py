@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 from smith import ledger
 from smith.config import DEFAULT_TIMEZONE, load_config, local_time
 from smith.importer import load_import_file
-from smith.records import Action, ImportBatch, ImportRejected, Kind
+from smith.records import QUOTE_METRIC, Action, ImportBatch, ImportRejected, Kind
 
 DEFAULT_DB = Path("data/smith.db")
 # Manual files should use the same owner id so that API and manual records belong together.
@@ -161,7 +161,8 @@ def _toss(args: argparse.Namespace) -> int:
         return run_check(TossClient(*stored), show_values=args.show_values)
     attempted_at = datetime.now(timezone.utc)
     try:
-        batch = collect_snapshot(TossClient(*stored), owner_id=args.owner, collected_at=attempted_at)
+        batch = collect_snapshot(TossClient(*stored), owner_id=args.owner, collected_at=attempted_at,
+                                 quote_for=_hand_listed(args.db, attempted_at))
     except (TossError, SyncError) as error:
         print(f"Toss sync failed: {error}. No records written.")
         code = error.code if isinstance(error, TossError) else "invalid-response"
@@ -178,12 +179,23 @@ def _toss(args: argparse.Namespace) -> int:
         return 1
     result = _apply_batch(batch, args.db, dry_run=args.dry_run, close_missing=args.close_missing,
                           list_records=args.show_values)
+    quotes = sum(o.metric == QUOTE_METRIC for o in batch.observations)
+    if quotes:
+        print(f"Quotes for stocks held only in hand-entered accounts: {quotes}")
     if not args.dry_run:
         if result == 0:
             _record_sync(args.db, attempted_at, "success", import_id=batch.import_id)
         else:
             _record_sync(args.db, attempted_at, "failure", "not-applied")
     return result
+
+
+def _hand_listed(db: Path, at: datetime) -> set[tuple[str, str, str]]:
+    """The instruments of the hand-imported listed lots, for the Toss sync to quote (report design §37)."""
+    if not db.exists():
+        return set()
+    with closing(ledger.connect_read_only(db)) as conn:
+        return ledger.hand_listed(ledger.record_states(conn, as_of=at, known_at=at))
 
 
 def _evidence(args: argparse.Namespace) -> int:

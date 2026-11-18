@@ -314,3 +314,35 @@ class RepriceTests(unittest.TestCase):
         for kept in ("m2", "m3", "t0", "t1"):
             with self.subTest(kept=kept):
                 self.assertNotIn("statement_price", by_id[kept])
+
+    def test_an_observed_quote_prices_a_stock_no_toss_lot_holds_as_then_known(self):
+        from smith.records import QUOTE_METRIC, ChangeType, ImportBatch, Observation, RecordInput, Status
+        from smith.summary import build_summary
+
+        conn = ledger.connect(":memory:")
+        self.addCleanup(conn.close)
+        fields = {"category": "stock", "account_type": "brokerage", "currency": "KRW", "value": "1000",
+                  "valuation_method": "statement", "liquidity": "days", "market": "KR", "symbol": "111110",
+                  "quantity": "10", "unit_price": "100"}
+        lot = lambda record_id, when, price: RecordInput(record_id, Kind.ASSET, "self", when, 1, Status.ACTIVE,
+                                                         ChangeType.UPDATE, None, None, {**fields, "unit_price": price})
+        ledger.apply_import(conn, ImportBatch("i1", "manual-sam", "patch", SEP15, ("self",), (lot("m1", SEP15, "100"),),
+                                              "h1"), recorded_at=SEP15)
+        quote = Observation("KR:111110", QUOTE_METRIC, "KRW", "130", OCT15)
+        ledger.apply_import(conn, ImportBatch("q1", "toss", "snapshot", OCT15, ("self",), (), "h2", (quote,)),
+                            recorded_at=OCT15)
+
+        def m1(as_of, known_at):
+            states = ledger.valued_states(conn, as_of=as_of, known_at=known_at)
+            return next(s.record.fields for s in states if s.record.record_id == "m1")
+        self.assertNotIn("priced_at", m1(LATER, SEP15))          # Not yet recorded then.
+        self.assertNotIn("priced_at", m1(SEP15, LATER))          # Not yet observed then.
+        self.assertEqual({k: m1(LATER, LATER)[k] for k in ("value", "priced_at", "statement_price")},
+                         {"value": "1300", "priced_at": OCT15.isoformat(), "statement_price": "100"})
+        self.assertEqual(build_summary(conn, as_of=LATER, known_at=LATER).reference, [])  # Not a reference figure.
+        held = lot("toss-x-111110", NOV15, "150")
+        ledger.apply_import(conn, ImportBatch("t1", "toss", "snapshot", NOV15, ("self",), (held,), "h3"),
+                            recorded_at=NOV15)
+        self.assertEqual(m1(LATER, LATER)["value"], "1500")       # A newer Toss holding's price wins.
+        self.assertEqual(ledger.hand_listed(ledger.record_states(conn, as_of=LATER, known_at=LATER)),
+                         {("KR", "111110", "KRW")})

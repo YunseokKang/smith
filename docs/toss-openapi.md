@@ -35,6 +35,7 @@
 | 보유 주식 | `GET /api/v1/holdings` | ASSET 5/s | 헤더 `X-Tossinvest-Account` |
 | 매수 가능 금액 | `GET /api/v1/buying-power?currency=` | ORDER_INFO 6/s (09:00~09:10 KST 3/s) | 헤더 필요 |
 | 환율 | `GET /api/v1/exchange-rate?baseCurrency=&quoteCurrency=` | MARKET_INFO 3/s | 참고용 표시 환율 |
+| 현재가 | `GET /api/v1/prices?symbols=` | MARKET_DATA 15/s | 토스에 없는 직접 입력 종목의 시세(아래). 계좌 헤더 불필요 |
 
 한도는 client × API 그룹 단위다. 응답 헤더 `X-RateLimit-Limit`/`X-RateLimit-Remaining`,
 429 응답의 `Retry-After`를 따른다.
@@ -81,6 +82,15 @@ Smith는 값의 성격에 따라 다르게 처리한다.
 - 응답 구조 오류(`result`·`items` 누락, 목록이 아님, 필수 필드 누락, 중복 종목)도 전체 중단한다.
 - DNS·timeout·연결 오류는 `network-error`, 성공 응답의 구조 오류는 `invalid-response` 코드로만 보고한다.
 
+**현재가** (`GET /api/v1/prices`, 명세 v1.2.28·실호출 2026-11-17 확인)
+- `symbols`: 콤마로 구분한 최대 200개. 국내는 6자리 코드(`005930`, `A` 접두어 없음), 미국은 티커(`AAPL`). 시장 인자는 없다.
+- 응답 `result`: `[{symbol, timestamp, lastPrice, currency}]`. `timestamp`는 "데이터 시각"이며 체결이 없으면 null.
+  응답 순서는 요청 순서와 다르다. **모르는 심볼은 오류 없이 응답에서 빠진다**(실호출 확인).
+- 장 밖에서도 값이 온다(07:41 KST 호출): 국내 주식은 NXT 애프터마켓 마지막 체결(19:59), 국내 ETF는 15:58, 미국은 시간외 체결 시각.
+- 토스의 `timestamp`가 이 컴퓨터 시계보다 약 20초 앞선 값이 있었다. Smith는 수집 시각보다 늦은 시각을 수집 시각으로 적는다.
+- Smith 사용: `toss sync`가 토스 보유분에 없는 직접 입력 종목의 시세를 관측값 `last_price`로 저장한다(report-design §37.1).
+  이 조회의 실패는 보유 동기화를 막지 않는다.
+
 ## 오류
 
 - 형식: `{"error": {"requestId", "code", "message", "data"}}`. `requestId`는 헤더 `X-Request-Id`와 같다.
@@ -104,7 +114,7 @@ Smith는 값의 성격에 따라 다르게 처리한다.
 
 ## Smith 구현 현황
 
-- `src/smith/toss.py`: 표준 라이브러리 `urllib` 기반 조회 전용 client. 위 표의 5개 요청만 허용하고,
+- `src/smith/toss.py`: 표준 라이브러리 `urllib` 기반 조회 전용 client. 위 표의 요청과 주문 계획용 조회만 허용하고,
   그 밖의 요청은 네트워크 전에 `ForbiddenRequest`로 거부한다. 요청 timeout 10초.
 - token은 실행마다 발급해 메모리에만 두고, `expired-token`/`invalid-token`이면 한 번 재발급한다.
   OS 자격 증명 저장소(Windows Credential Manager)는 값 길이 제한이 있어 JWT 저장에 쓰지 않는다.
@@ -122,6 +132,8 @@ Smith는 값의 성격에 따라 다르게 처리한다.
     `liquidity=days`, `valuation_method=api`, 수량·현재가·평균단가·공제 후 평가액을 선택 필드로 저장.
   - 평가 시각이 응답에 없어 `effective_at`은 수집 시각이다.
   - 매수 가능 금액(KRW, USD)과 USD/KRW `midRate`는 관측값으로 저장한다. 환율의 관측 시각은 `validFrom`.
+  - 토스 보유분에 없는 직접 입력 KR·US 종목의 현재가도 같은 배치의 관측값(`last_price`)으로 저장한다. 이 조회만은 실패해도
+    동기화를 계속한다(위 현재가 항목).
   - 기본 출력은 개수만 보인다. `--show-values`일 때만 레코드 ID(종목 심볼 포함)를 나열한다.
   - 실제 실행(미리보기 제외)은 성공·실패를 원장 `sync_runs`에 오류 코드와 함께 남긴다.
 - 2026-10-04 실제 계좌로 동기화 확인: 18종목 생성, 즉시 재실행 시 18종목 unchanged.
