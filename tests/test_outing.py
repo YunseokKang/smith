@@ -3,6 +3,7 @@ weather fit and the official sources' shapes (as called 2026-11-18). Every event
 import io
 import json
 import tempfile
+import time
 import unittest
 import urllib.error
 from datetime import date, datetime, timedelta, timezone
@@ -146,6 +147,53 @@ class RankTest(unittest.TestCase):
                 self.assertEqual(bool(out.picks), open_)
                 if not open_:
                     self.assertEqual(out.ruled_out, {"운영 시간이 평일뿐": 1})
+
+    def test_a_day_the_hours_close_or_leave_out_is_never_the_day_to_go(self) -> None:
+        cases = [
+            # (the hours text, the weekdays it closes, the weekdays it gives times for; 0 = Monday)
+            ("9:00~18:00 / 일, 월 및 한글날 휴무", {0, 6}, set()),       # The card of 2026-11-19 sent the client on a Sunday.
+            ("매주 월요일 휴관", {0}, set()),
+            ("토·일 운영, 월 휴관", {0}, set()),
+            ("주말 및 공휴일 휴관", {5, 6}, set()),
+            ("공휴일 휴관", set(), set()),                               # The 일 of 공휴일 is not Sunday.
+            ("화-금 10:30~20:00 / 토 10:30~19:00", set(), {1, 2, 3, 4, 5}),
+            ("토·일 15:00", set(), {5, 6}),
+            ("일 2회 공연(14:00, 17:00)", set(), set()),                 # Twice a day, not Sunday.
+            ("매일 10:00~20:00", set(), set()),
+            ("14:00", set(), set()),
+            # A wrongly removed open day is worse than a missed closure (Codex review 2026-11-19): a list joined by a
+            # word is read whole, and a closure on some weeks of the month or a day not understood limits nothing.
+            ("토요일 및 일요일 10:00~18:00", set(), {5, 6}),
+            ("토요일과 일요일은 쉽니다", {5, 6}, set()),
+            ("매월 첫째 일요일 휴관", set(), set()),
+            ("매월 셋째주 토요일 15:00", set(), set()),
+            ("월 1회 14:00", set(), set()),
+            ("월요일, 1월 1일 휴관", set(), set()),
+            ("11/21(토) 17:00", set(), {5}),
+            # Second review pass: a range is closed by a closure word like a list, a week of the month in figures and a
+            # negated closure close nothing.
+            ("토~일 휴관", {5, 6}, set()),
+            ("화~일 운영", set(), {1, 2, 3, 4, 5, 6}),
+            ("매월 2, 4주 일요일 휴관", set(), set()),
+            ("일요일 휴무 없음", set(), set()),
+        ]
+        for hours, closed, listed in cases:
+            with self.subTest(hours=hours):
+                self.assertEqual(outing.closed_weekdays(hours), closed)
+                self.assertEqual(outing.listed_weekdays(hours), listed)
+        for hours, days in (("9:00~18:00 / 일, 월 및 한글날 휴무", [SAT]), ("화-금 10:30~20:00 / 토 10:30~19:00", [SAT]),
+                            ("토 휴무, 일 10:00~17:00", [SUN]), ("주말 휴관", []), ("토~일 휴관", []),
+                            ("매월 2, 4주 일요일 휴관", [SAT, SUN]), ("일요일 휴무 없음", [SAT, SUN])):
+            with self.subTest(hours=hours):
+                item = Event("seoul", "h", "가을 기획전", SAT, SUN, "시립 전시관", "중구", "전시/미술", 37.56, 126.98, "무료",
+                             "누구나", hours)
+                self.assertEqual(outing.open_days(item, [SAT, SUN]), days)
+                self.assertEqual([p.day for p in rank([item]).picks], days[:1])
+        # The reader is one pass over the text: a long line of day names with no closure costs no more than its length
+        # (the first pattern took a second for eighteen of them).
+        began = time.perf_counter()
+        self.assertEqual(outing.read_hours("토 " * 5000 + "안내"), (set(), set()))
+        self.assertLess(time.perf_counter() - began, 0.5)
 
     def test_duplicates_keep_seouls_row_and_standing_programmes_sink(self) -> None:
         tour = event("봄 기획전", source="tour", category="EV030400", place="서울특별시 중구 1", id_="7")
@@ -309,7 +357,16 @@ class EveningCardTest(unittest.TestCase):
             self.assertEqual(search.call_args.args[2].utcoffset(), timedelta(hours=9))   # Household-local.
             card = getattr(evening_html, "_outing")(thursday)
             self.assertIn("이번 주말 나들이", card)
-            self.assertIn("1. [시립] 봄 기획전", card)
+            # The card reads as labelled rows (user review 2026-11-19): the organizer leaves the title for its own row,
+            # the kind and the day to go are pills, and the distance stands with the place instead of among the reasons.
+            self.assertIn(">봄 기획전</", card)
+            self.assertNotIn("[시립] 봄 기획전", card)
+            for label in ("어디", "언제", "추천 이유", "주최"):
+                self.assertIn(f">{label}</td>", card, label)
+            self.assertIn("요일 추천</span>", card)
+            self.assertIn(">시립</td>", card)
+            self.assertIn("찾은 범위: ", card)
+            self.assertNotIn("추천 날:", card)
             self.assertEqual(outing.recent_keys(outing.history_path(db), now.date()), set())   # Not sent yet.
             outing_evening.after_send(db, thursday, now.date())
             self.assertEqual(outing.recent_keys(outing.history_path(db), now.date()), {"seoul:9", "title:봄기획전"})

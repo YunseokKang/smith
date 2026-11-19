@@ -7,7 +7,7 @@ import logging
 import sqlite3
 from dataclasses import replace
 from collections.abc import Iterable
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, localcontext
 from typing import Any
 
@@ -72,6 +72,25 @@ def build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetim
                              baseline=None if baseline is None else local_time(baseline, tz), kind=kind,
                              household=perspective.household_for(household, audience), schedule=schedule,
                              audience=audience, client_household=household)
+
+
+def _series_last(conn: sqlite3.Connection, kind: str, as_of: datetime, audience: str = "self") -> datetime | None:
+    """When the last letter on this report's theme was sent to this reader before this one (household-local), or None.
+    Not the comparison baseline: the first letter of a theme is compared with the last letter of another theme, which
+    says nothing about whether this theme's reference tables were delivered this month (report design §49; Codex
+    review 2026-11-19). Each reader has their own history: the client's letters are the report runs, the spouse's are
+    the runs of the spouse's letter (a letter sent to the spouse alone, or one that failed, is that reader's alone)."""
+    series = editions.same_series(kind)
+    if audience == "self":
+        sent = [datetime.fromisoformat(r["as_of"]) for r in ledger.report_runs(conn, limit=1000)
+                if r["status"] == "sent" and r["kind"] in series and r["as_of"]]
+    else:
+        keys = tuple(f"{perspective.PARTNER_PRODUCT}:{name}:" for name in series)
+        sent = [r["created_at"] for r in ledger.daily_runs(conn, limit=1000, product=perspective.PARTNER_PRODUCT)
+                if r["status"] == "sent" and r["run_key"].startswith(keys)]
+    sent = [at if at.tzinfo is not None else at.replace(tzinfo=timezone.utc) for at in sent]
+    earlier = [at for at in sent if at < as_of]
+    return max(earlier).astimezone(as_of.tzinfo) if earlier else None
 
 
 def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetime,
@@ -154,6 +173,7 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     # The rows read the ledger itself, so their owner is the stored one: the reader's are the audience's (§42).
     own_moved = None if moved is None else [row for row in moved if row["owner"] == audience]
     data = {"kind": kind, "audience": audience, "as_of": as_of, "baseline": baseline, "kpis": kpis, "schedule": schedule,
+            "series_last": _series_last(conn, kind, as_of, audience),
             "change": change, "timeline": _timeline(view, pay), "sectors": sectors, "holdings": review,
             "own_holdings": own, "own_debt": own_debt,
             "holding_quantity_changes": None if moved is None else quantity_changes(moved),

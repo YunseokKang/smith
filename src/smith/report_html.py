@@ -706,10 +706,34 @@ def _split_bands(data: dict[str, Any], edition: editions.Edition, renderers: dic
     # The long-range tracks (home move, lease return, retirement) are the household's: under its group.
     if edition.strategy and advice["strategy"]:
         bands.append(_band(DARK, _strategy(advice["strategy"], story.get("direction", ""))))
-    reference = [part for part in (renderers[name]() for name in edition.reference) if part]
-    if reference:
-        bands += _cards(_group_title("참고", "매주 크게 바뀌지 않는 기준과 표입니다. 필요할 때 펼쳐 보십시오."), reference)
+    reference = [(name, part) for name in edition.reference for part in (renderers[name](),) if part]
+    if reference and _reference_due(data):
+        bands += _cards(_group_title("참고", "매주 크게 바뀌지 않는 기준과 표입니다. 매달 첫 레터에만 싣습니다."),
+                        [part for _, part in reference])
+    elif reference:
+        # The month's later letters name what the reference group holds in one line (user decision 2026-11-19, report
+        # design §49: "2번으로 해", the whole group only in the month's first letter of each theme).
+        names = ", ".join(dict.fromkeys(REFERENCE_TITLES.get(name, name) for name, _ in reference))
+        bands.append(_band(CANVAS, f'<tr><td style="font-size:13px;line-height:1.7;color:{BODY}"><b style="font-weight:600;'
+                                   f'color:{INK}">참고</b> · 매주 크게 바뀌지 않는 표({escape(names)})는 매달 첫 '
+                                   f'{escape(edition.label)} 레터에만 싣습니다. 이번 달 첫 레터에 전체가 있고, 필요하시면 답장으로 '
+                                   "물어 주십시오.</td></tr>", border=True))
     return bands
+
+
+# What each reference section is called in the one line that stands for the group.
+REFERENCE_TITLES = {"stress_summary": "스트레스 테스트", "stress": "스트레스 테스트", "macro": "금리 표와 공식 발표",
+                    "macro_brief": "시장 금리와 환율", "real_estate": "두 집의 시세", "tax": "세금 관점 전략",
+                    "holding_tax": "집 보유세", "annuity_review": "보유 연금보험 평가"}
+
+
+def _reference_due(data: dict[str, Any]) -> bool:
+    """Whether this letter carries its reference group in full: the first letter of its theme in the calendar month
+    (`series_last` is the last letter sent on the same theme, report_data._series_last; none, or one from an earlier
+    month, makes this the first). A letter missed in the month's first week is made up by the next one, since the rule
+    reads what was sent."""
+    last, now = data.get("series_last"), data["as_of"]
+    return last is None or (last.year, last.month) != (now.year, now.month)
 
 
 def _cards(title: str, parts: list[str]) -> list[str]:

@@ -5,7 +5,7 @@ import re
 import tempfile
 import unittest
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -68,6 +68,53 @@ class LayoutTests(unittest.TestCase):
         page = report_html.render(self.built["rates"])[1]
         self.assertLess(page.index("우리 집 금리·대출"), page.index("매주 크게 바뀌지 않는 기준과 표입니다."))
         self.assertLess(page.index("매주 크게 바뀌지 않는 기준과 표입니다."), page.index("거시 환경"))
+
+    def test_the_reference_group_is_whole_in_the_months_first_letter_and_one_line_in_the_others(self):
+        # (the last letter on the same theme, whether this letter carries the group in full)
+        cases = [(None, True), (AT - timedelta(days=7), False), (AT - timedelta(days=18), False),
+                 (AT - timedelta(days=21), True), (AT - timedelta(days=400), True)]   # 10/29 and last year: an earlier month.
+        for last, whole in cases:
+            with self.subTest(last=last):
+                page = report_html.render({**self.built["rates"], "series_last": last})[1]
+                self.assertEqual("매주 크게 바뀌지 않는 기준과 표입니다." in page, whole)
+                self.assertEqual("출처·관측일" in page, whole)                      # The rate table itself.
+                self.assertEqual("매달 첫 금리·대출 레터에만 싣습니다. 이번 달 첫 레터에 전체가 있고" in page, not whole)
+                self.assertIn("금리 표와 공식 발표", page) if not whole else None      # The line names what was left out.
+        # What counts is a letter sent on the same theme: the comparison baseline of a theme's first letter is another
+        # theme's letter and says nothing of this theme's tables (Codex review 2026-11-19).
+        page = report_html.render({**self.built["rates"], "baseline": AT - timedelta(days=1), "series_last": None})[1]
+        self.assertIn("출처·관측일", page)
+
+    def test_the_last_letter_of_the_same_theme_is_read_from_what_was_sent(self):
+        from smith.report_data import _series_last
+        conn = ledger.connect(":memory:")
+        self.addCleanup(conn.close)
+        tz = timezone(timedelta(hours=9))
+        now = datetime(2026, 11, 19, 6, 0, tzinfo=tz)
+
+        def sent(report_id, kind, at, status="sent"):
+            ledger.claim_report(conn, report_id=report_id, slot=None, kind=kind, trigger="manual", created_at=at, as_of=at,
+                                baseline=None, missed_slots=[])
+            if status == "sent":
+                ledger.start_sending(conn, report_id=report_id, now=at, subject="s", html_sha256="x")
+                ledger.finish_report(conn, report_id=report_id, status="sent", finished_at=at)
+        sent("p1", "property", datetime(2026, 11, 18, 21, 0, tzinfo=timezone.utc))
+        self.assertIsNone(_series_last(conn, "rates", now))                      # Another theme's letter does not count.
+        sent("r1", "rates", datetime(2026, 11, 11, 21, 0, tzinfo=timezone.utc))
+        sent("r2", "rates", datetime(2026, 11, 14, 21, 0, tzinfo=timezone.utc), status="claimed")   # Never sent.
+        last = _series_last(conn, "rates", now)
+        self.assertEqual((last.month, last.day, last.hour), (11, 12, 6))         # Household-local: 21:00 UTC is the 12th.
+        self.assertIsNone(_series_last(conn, "rates", datetime(2026, 11, 11, 21, 0, tzinfo=timezone.utc)))   # Not itself.
+        # The spouse has their own history: the client's letters say nothing of what the spouse received.
+        self.assertIsNone(_series_last(conn, "rates", now, "partner"))
+        for key, status in (("report-partner:rates:2026-11-12", "sent"), ("report-partner:rates:2026-11-13#manual-ab12cd", "failed"),
+                            ("report-partner:tax:2026-11-14", "sent")):
+            at = datetime.fromisoformat(key.split(":")[2][:10] + "T21:00:00+00:00") - timedelta(days=1)
+            token, _ = ledger.claim_daily_run(conn, run_key=key, day=at.date(), run_id=key, trigger="manual", now=at,
+                                              lease=timedelta(minutes=45), max_attempts=3, product="report-partner")
+            ledger.advance_daily_run(conn, run_key=key, token=token, from_status="building", status=status, finished_at=at)
+        last = _series_last(conn, "rates", now, "partner")
+        self.assertEqual((last.month, last.day), (11, 12))                       # The failed one and the tax letter are not it.
 
     def test_a_standing_card_delivered_for_two_weeks_says_only_why_and_what_would_change_it(self):
         for shown, short in ((STALE_AFTER - 1, False), (STALE_AFTER, True)):

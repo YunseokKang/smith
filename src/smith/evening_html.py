@@ -3,6 +3,8 @@ and traffic lights, a night-blue head card instead of the sand one, and lists in
 on the sofa). Every line comes from code; the writer's prose only replaces the weather and agenda sentences and adds
 gift ideas and the talk item.
 """
+import re
+from datetime import date
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -239,21 +241,76 @@ def _outing(data: dict[str, Any]) -> str:
         return ""
     if found.get("error"):
         return _card("이번 주말 나들이", "이번 주 행사 정보를 읽지 못했습니다. 'smith outing search'로 다시 볼 수 있습니다.", "")
-    head = "".join(f'<div style="font-size:13px;color:{MUTED};margin:2px 0">{escape(line)}</div>' for line in outing.summary_lines(found))
-    rows = []
-    for n, pick in enumerate(found.get("picks") or [], 1):
-        title = escape(f"{n}. {pick['title']}")
-        link = pick.get("link")
-        name = (f'<a href="{escape(link, quote=True)}" style="font-size:16px;font-weight:700;color:{INK};text-decoration:underline">'
-                f'{title}</a>') if link else f'<div style="font-size:16px;font-weight:700;color:{INK}">{title}</div>'
-        body = "".join(f'<div style="font-size:13px;line-height:1.55;color:{BODY}">{escape(line)}</div>'
-                       for line in outing.pick_detail(pick))
-        rows.append(f'<div style="padding:8px 0;border-bottom:1px solid #f0e6da">{name}{body}</div>')
+    # The weekend's weather as a tile per day, each pick as a block of labelled rows, and what the picks were fitted to
+    # in the small print (user review 2026-11-19: "카드가 너무 정신없다": three grey lines and every fact of a pick on
+    # one line joined by dots).
+    days = [date.fromisoformat(d) for d in found["days"]]
+    tiles = "".join(_outing_day(w, len(found["weather"])) for w in found.get("weather") or [])
+    head = (f'<div style="font-size:13px;color:{MUTED};margin:0 0 8px">{escape(outing.days_label(days))}</div>'
+            + (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>{tiles}</tr></table>' if tiles else ""))
+    rows = [_outing_pick(n, pick) for n, pick in enumerate(found.get("picks") or [], 1)]
     if not rows:
-        rows.append(f'<div style="font-size:14px;color:{BODY};padding:4px 0">이번 주말 범위 안에서 추천할 행사를 찾지 못했습니다.</div>')
+        rows.append(f'<div style="font-size:14px;color:{BODY};padding:12px 0 4px">이번 주말 범위 안에서 추천할 행사를 찾지 못했습니다.</div>')
+    taste = ("맞춘 취향: " + ", ".join(found["taste"]) + " (Smith가 기억하는 말에서)" if found.get("taste")
+             else "맞춘 취향: 아직 기억된 취향이 없어 고르게 봤습니다.")
+    source = found["weather"][0]["source"] if found.get("weather") else ""
     small = "".join(f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-top:6px">{escape(t)}</div>'
-                    for t in [*(found.get("notes") or []), outing.SOURCE_LINE])
-    return _card("이번 주말 나들이", "", head + "".join(rows) + small)
+                    for t in [f"찾은 범위: {found['range']}", taste, *(found.get("notes") or []),
+                              outing.SOURCE_LINE + (f" 날씨는 {source} 기준." if source else "")])
+    return _card("이번 주말 나들이", "", head + "".join(rows) + f'<div style="margin-top:10px">{small}</div>')
+
+
+def _outing_day(w: dict[str, Any], count: int) -> str:
+    """One weekend day's forecast as a tile: the day, the sky and the temperatures, then rain and fine dust."""
+    day = date.fromisoformat(w["day"])
+    if w.get("pop") is None and not w.get("sky"):
+        sky, rest = "아직 예보 없음", "미세먼지 못 읽음" if w.get("air_failed") else ""
+    else:
+        sky = w.get("sky") or "하늘 미상"
+        if w.get("tmin") is not None and w.get("tmax") is not None:
+            sky += f" · {w['tmin']:.0f}~{w['tmax']:.0f}도"
+        air = f"미세먼지 {w['air']}" if w.get("air") else "미세먼지 못 읽음" if w.get("air_failed") else "미세먼지 예보 전"
+        rest = " · ".join(([f"비 {w['pop']}%"] if w.get("pop") is not None else []) + [air])
+    return (f'<td style="width:{100 // max(count, 1)}%;padding:0 4px 0 0;vertical-align:top"><div style="background:#f6efe5;'
+            f'border-radius:14px;padding:10px 12px"><div style="font-size:12px;font-weight:700;color:{MUTED}">'
+            f'{WEEKDAY_SHORT[day.weekday()]}요일 {day.month}/{day.day}</div>'
+            f'<div style="font-size:15px;font-weight:700;color:{INK};margin-top:3px">{escape(sky)}</div>'
+            f'<div style="font-size:12px;color:{BODY};margin-top:2px">{escape(rest)}</div></div></td>')
+
+
+_ORGANIZER = re.compile(r"^\[([^\]]{2,30})\]\s*(?=\S)")   # "[동작문화재단] 2026 …": who holds it, in front of the title.
+
+
+def _outing_pick(n: int, pick: dict[str, Any]) -> str:
+    """One pick: its number, kind and the day to go as pills, the title as the link, then where, when, the fee and why,
+    each on a labelled row. The facts are the pick's own fields (outing.to_dict); nothing is reworded."""
+    start, end, day = (date.fromisoformat(pick[k]) for k in ("start", "end", "day"))
+    title = pick["title"]
+    organizer = _ORGANIZER.match(title)
+    if organizer:
+        title = title[organizer.end():]
+    link = pick.get("link")
+    style = f"font-size:16px;font-weight:700;line-height:1.4;color:{INK}"
+    name = (f'<a href="{escape(link, quote=True)}" style="{style};text-decoration:underline">{escape(title)}</a>' if link
+            else f'<span style="{style}">{escape(title)}</span>')
+    # The distance and the closing date are shown in their own places; the rest is why this pick.
+    reasons = [r for r in pick["reasons"] if not r.startswith("집에서 약") and not r.endswith("거의 마지막")]
+    closing = any(r.endswith("거의 마지막") for r in pick["reasons"])
+    pills = (f'<span style="display:inline-block;background:{INK};color:#ffffff;font-size:12px;font-weight:700;'
+             f'border-radius:100px;padding:3px 9px;margin-right:4px">{n}</span>{_pill(pick["kind"])} '
+             + _pill(f"{WEEKDAY_SHORT[day.weekday()]}요일 추천", "good")
+             + (" " + _pill(f"{end.month}/{end.day} 종료", "warn") if closing else ""))
+    where = " · ".join(x for x in (pick["place"] if pick["source"] == "seoul" else "", pick["district"],
+                                   f"집에서 약 {pick['km']:.0f}km" if pick.get("km") is not None else "") if x)
+    when = f"{start.month}/{start.day}" if start == end else f"{start.month}/{start.day}~{end.month}/{end.day}"
+    facts = [("어디", where), ("언제", when + (f" · {pick['hours']}" if pick.get("hours") else "")),
+             ("요금", pick.get("fee") or ""), ("추천 이유", " · ".join(reasons)), ("주최", organizer.group(1) if organizer else "")]
+    body = "".join(f'<tr><td style="width:58px;vertical-align:top;font-size:12px;font-weight:700;color:{MUTED};padding:3px 6px 3px 0">'
+                   f'{label}</td><td style="font-size:14px;line-height:1.5;color:{BODY};padding:3px 0">{escape(value)}</td></tr>'
+                   for label, value in facts if value)
+    return (f'<div style="padding:14px 0 12px;border-bottom:1px solid #f0e6da"><div>{pills}</div>'
+            f'<div style="margin:8px 0 6px">{name}</div>'
+            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{body}</table></div>')
 
 
 def _sleep(data: dict[str, Any]) -> str:

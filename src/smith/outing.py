@@ -208,9 +208,114 @@ def outdoor(event: Event) -> bool:
 
 
 def open_days(event: Event, days: list[date]) -> list[date]:
-    """The weekend days the event runs and, by its stated hours, opens (a weekday-only venue is not a Saturday)."""
+    """The weekend days the event runs and, by its stated hours, opens: a weekday-only venue is not a Saturday, and a
+    day the hours name as closed is not offered (the card of 2026-11-19 recommended a Sunday for a venue whose hours
+    read "일, 월 및 한글날 휴무")."""
     weekdays_only = bool(WEEKDAYS_ONLY.search(event.hours)) and not WEEKEND_OPEN.search(event.hours)
-    return [d for d in days if event.start <= d <= event.end and not (weekdays_only and d.weekday() >= 5)]
+    closed, listed = read_hours(event.hours)
+    return [d for d in days if event.start <= d <= event.end and not (weekdays_only and d.weekday() >= 5)
+            and d.weekday() not in closed and (not listed or d.weekday() in listed)]
+
+
+# The hours text ("화-금 10:30~20:00 / 토 10:30~19:00", "9:00~18:00 / 일, 월 및 한글날 휴무") read token by token in one
+# pass: every alternative matches a fixed short piece, so the time is linear in the text (Codex review 2026-11-19: the
+# first version's nested pattern took a second to reject eighteen repeated day names). A day name stands alone: the 일
+# of 공휴일, 매일 or "1일" is not Sunday.
+_HOURS_TOKEN = re.compile(
+    # A week of the month, in words or figures ("첫째", "2, 4주", "매월"): what follows holds on some weeks only.
+    r"(?P<nth>첫|둘째|셋째|넷째|다섯째|마지막|격주|짝수|홀수|매월|격월|\d{1,2}\s?(?:째|번째)?\s?주(?!말))"
+    r"|(?P<range>[-~])"
+    r"|(?P<time>\d{1,2}\s?(?::|시))"
+    r"|(?P<close>휴무|휴관|휴장|휴원|쉽니다|쉼)"
+    r"|(?P<negated>없음|없이|없습니다|없어|없는|아님)"
+    r"|(?P<open>운영|개관|오픈|관람|공연|상영|개방)"
+    r"|(?P<every>매일|연중|상시|무휴)"
+    r"|(?P<weekend>(?<![가-힣])주말)"
+    r"|(?P<day>(?<![\d가-힣])(?:[월화수목금토일]요일(?:은|는|이|가|에|도|만)?|[월화수목금토일](?![가-힣])))"
+    r"|(?P<sep>[,·]|및|과|와|그리고)"
+    r"|(?P<half>오전|오후|낮|저녁|밤)"
+    r"|(?P<stop>[./|;\n])"
+    r"|(?P<space>[\s()\[\]]+)"
+    r"|(?P<digit>\d+)"
+    r"|(?P<word>.)", re.S)
+MAX_HOURS_CHARS = 200   # More than any real opening-hours line; the rest is not read.
+CLOSURE_REACH = 12      # Plain characters allowed between a list of days and its closure word ("및 한글날").
+
+
+def read_hours(hours: str) -> tuple[set[int], set[int]]:
+    """(closed, listed): the weekdays (0 = Monday) the hours text closes, and those it gives opening times for.
+
+    A list or a range of days ("일, 월", "토요일과 일요일", "토~일", "주말") right before a closure word, with at most a
+    few plain words between, is closed. A list or a range right before a time, or a range before an opening word, is
+    listed. `listed` is empty, limiting nothing, when the text names no day, says every day, or names a day this
+    reader does not understand: a wrongly removed open day is worse than a missed closure, so a part-read list never
+    decides (Codex review). For the same reason a clause with a week of the month ("매월 첫째 일요일 휴관", "2, 4주
+    일요일 휴관") and a negated closure ("일요일 휴무 없음") close nothing."""
+    tokens = [(m.lastgroup, m.group()) for m in _HOURS_TOKEN.finditer(hours[:MAX_HOURS_CHARS]) if m.lastgroup != "space"]
+    closed: set[int] = set()
+    listed: set[int] = set()
+    loose = qualified = False
+    i = 0
+    while i < len(tokens):
+        kind, word = tokens[i]
+        if kind in ("stop", "nth", "every"):
+            qualified = kind == "nth" or (qualified and kind != "stop")
+            loose = loose or kind == "every"
+            i += 1
+            continue
+        if kind not in ("day", "weekend"):
+            i += 1
+            continue
+        run: set[int] = set()
+        ranged, last, j = False, None, i
+        while j < len(tokens):
+            kind, word = tokens[j]
+            following = tokens[j + 1][0] if j + 1 < len(tokens) else ""
+            if kind == "day":
+                last = WEEKDAYS_KO.index(word[0])
+                run.add(last)
+            elif kind == "weekend":
+                last = None
+                run |= {5, 6}
+            elif kind == "sep" and following in ("day", "weekend"):
+                pass
+            elif kind == "range" and last is not None and following == "day":
+                until = WEEKDAYS_KO.index(tokens[j + 1][1][0])
+                run |= {(last + step) % 7 for step in range((until - last) % 7 + 1)}
+                ranged, last, j = True, until, j + 1
+            else:
+                break
+            j += 1
+        after = j + 1 if j < len(tokens) and tokens[j][0] == "half" else j
+        reach = j
+        while reach < len(tokens) and reach - j < CLOSURE_REACH and tokens[reach][0] in ("word", "sep"):
+            reach += 1
+        follows = tokens[after][0] if after < len(tokens) else ""
+        closes = reach < len(tokens) and tokens[reach][0] == "close"
+        negated = closes and reach + 1 < len(tokens) and tokens[reach + 1][0] == "negated"
+        if qualified or negated:
+            loose = True
+        elif follows == "time":
+            listed |= run
+        elif closes:
+            closed |= run
+            j = reach + 1
+        elif ranged and follows in ("open", "stop", ""):
+            listed |= run
+        else:
+            loose = True
+        i = max(j, i + 1)
+    return closed, set() if loose else listed
+
+
+def closed_weekdays(hours: str) -> set[int]:
+    """The weekdays (0 = Monday) the hours text names as closed."""
+    return read_hours(hours)[0]
+
+
+def listed_weekdays(hours: str) -> set[int]:
+    """The weekdays (0 = Monday) the hours text gives opening times for; empty limits nothing (see `read_hours`)."""
+    return read_hours(hours)[1]
 
 
 def for_kids(event: Event) -> bool:
