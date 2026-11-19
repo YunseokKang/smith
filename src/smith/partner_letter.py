@@ -23,7 +23,7 @@ from typing import Any, Callable
 from smith import delivery, editions, gmail, ledger, perspective, proposals
 from smith.config import local_time, partner_recipient
 from smith.report_data import build_report
-from smith.report_html import render
+from smith.report_html import card_numbers, render
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +102,9 @@ def publish(db: Path, config: dict[str, Any], *, now: datetime, kind: str, trigg
                                         subject=subject, html_sha256=digest)
     if not held:
         return {"status": "skipped", "run_key": key, "subject": subject, "error_code": "claim-lost"}
-    shown = perspective.scoped([proposals.snapshot(p) for p in data["advice"]["proposals"]], AUDIENCE)
+    numbers = card_numbers(data)
+    shown = perspective.scoped([proposals.snapshot(p, numbers.get(p.identity or p.key))
+                                for p in data["advice"]["proposals"]], AUDIENCE)
     try:
         mail_html, images = delivery.inline_images(html)
         message_id = sender(credentials, recipient=recipient, subject=subject, html=mail_html,

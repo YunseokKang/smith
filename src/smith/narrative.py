@@ -1965,9 +1965,10 @@ def _percents(value: Any, key: str | None = None, unit: str | None = None, figur
 
 
 def _written_percents(text: str) -> set[Decimal]:
-    """Every "N%" (and "N%p") written in a text, with its sign."""
+    """Every "N%" (and "N%p") written in a text, with its sign; a unit spelled out after the figure ("N퍼센트",
+    "N퍼센트포인트") counts the same, as `korean.tidy` writes the prose."""
     return {Decimal(("-" if sign in ("-", "−") else "") + number.replace(",", ""))
-            for sign, number in _PERCENT.findall(text)}
+            for sign, number in _PERCENT.findall(korean.units(text))}
 
 
 def _formatted_amounts(payload: dict[str, Any]) -> set[str]:

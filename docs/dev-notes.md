@@ -460,3 +460,11 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
   재구성본에 같은 손상을 가한 결과가 손상된 파일과 바이트 단위로 같은 것을 확인한 뒤 썼다(그 사이 다른 세션의 편집이 없었음을 증명).
 - 예방: 여러 파일 치환은 Edit 도구나 Python으로 한다. PowerShell에서 쌍 목록이 필요하면 `,@('a','b')`처럼 앞에 쉼표를 붙이고,
   찾을 말이 없으면 아무것도 쓰지 않고 멈추게 한다.
+
+### TS-045 헤드리스 Edge 스크린샷이 임시 프로필을 남겨 C: 드라이브가 가득 참 (2026-11-19, 개발 중)
+
+- 증상: 미리보기를 폰 폭으로 찍던 중 `cat: write error: No space left on device`. C: 여유 공간이 0MB였다.
+- 원인: `msedge --headless=new --screenshot=...`을 실행할 때마다 `%TEMP%\HeadlessEdge<숫자>` 프로필 폴더(약 5MB)가 남는다.
+  하루에 68개, 362MB가 쌓였다. C:는 원래 여유가 거의 없었다.
+- 해결: `Get-ChildItem $env:TEMP -Directory -Filter "HeadlessEdge*" | Remove-Item -Recurse -Force`(Edge 헤드리스 프로세스가 없을 때).
+- 예방: 스크린샷 명령에 `--user-data-dir="<scratchpad>\edge-profile"`을 주어 한 폴더만 쓰고, 끝나면 그 폴더를 지운다.

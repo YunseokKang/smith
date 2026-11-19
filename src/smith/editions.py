@@ -46,7 +46,8 @@ class Edition:
     household: tuple[str, ...] = ()
     household_label: str = ""
     # A per-person letter's reference sections, under "참고" at its end (user review 2026-11-16: the Friday letter was
-    # too long; what reads the same every week goes below what changed and what to do).
+    # too long; what reads the same every week goes below what changed and what to do). Every themed day has one since
+    # the letter review of 2026-11-19 (report design §46: 72% of a Thursday letter repeated the week before).
     reference: tuple[str, ...] = ()
 
 
@@ -69,8 +70,9 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "FX and revaluations applied to what the household held (market_and_valuation, \"시장·평가 변동\") and what "
             "moved in or out (net_inflow); never let a market loss hide behind new entries in a single total.",
             personal=("my_overview", "follow_up"),
-            household=("change", "timeline", "stress_summary", "future_income", "household_follow_up", "requests"),
-            household_label="종합"),
+            household=("change", "timeline", "future_income", "household_follow_up", "requests"),
+            household_label="종합",
+            reference=("stress_summary",)),   # The same result until the household's money or loans change.
     Edition("markets", "투자·시장",
             "markets", ("holdings", "policy", "macro_brief"), ("goal-stocks-glide", "concentration-trim"),
             ("us_stocks", "kr_stocks", "rates"), True, False,
@@ -82,8 +84,9 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "the client's human capital and financial assets in one company (double concentration): manage it "
             "first and most carefully, with the code's trim schedule (portfolio_facts.concentration_plan).",
             opening=("week",),
-            personal=("my_week", "my_holdings", "policy"), household=("household_holdings", "macro_brief"),
-            household_label="투자"),
+            personal=("my_week", "my_holdings", "policy"), household=("household_holdings",),
+            household_label="투자",
+            reference=("macro_brief",)),   # The year's rate table; the week's rate news is the narrative's.
     Edition("property", "부동산",
             "property", ("move_targets", "real_estate", "lease_plan"), ("lease-return",),
             ("housing_market", "housing_policy", "jeonse", "home_tax", "target_market"), False, False,
@@ -98,8 +101,9 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "narrowed over six months, and how much of it the expected pay (by certainty) and the employer stock's "
             "price could close; from it, propose the order of selling the two homes (tax cases per home), the loan "
             "room and the tax moves, conditionally.", opening=("move_targets",),
-            personal=("my_real_estate",), household=("move_targets", "lease_plan", "real_estate"),
-            household_label="부동산"),
+            personal=("my_real_estate",), household=("move_targets", "lease_plan"),
+            household_label="부동산",
+            reference=("real_estate",)),   # The two homes' valuations: they move with a new official trade, not weekly.
     Edition("rates", "금리·대출",
             "rates", ("debt", "macro"), ("prepayment", "variable-rate", "refinance"),
             ("mortgage", "rates", "household_policy"), False, False,
@@ -111,7 +115,10 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "the stated months), whether extra repayment beats saving, and the policy-rate outlook. A credit line "
             "with nothing drawn (sector_metrics.debt.unused_credit_lines) costs nothing and is liquidity room, never "
             "a loan to repay.", opening=("debt",),
-            personal=("my_debt",), household=("household_debt", "macro"), household_label="금리·대출"),
+            personal=("my_debt",), household=("household_debt",), household_label="금리·대출",
+            # Eleven rates over a year, the exposure table and the announcements: the week's news on them is the
+            # narrative's ("눈여겨볼 변화"), the table itself hardly moves in a week.
+            reference=("macro",)),
     Edition("tax", "세금·연금",
             "tax", ("tax", "holding_tax", "annuity_review", "relationships"),
             ("pension-credit", "overseas-harvest", "isa-open", "insurance-review"),
@@ -167,8 +174,9 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "market or policy news is researched for this theme; work from the household's numbers and the client's "
             "statements.",
             personal=("my_month", "follow_up", "experiences"),
-            household=("cash", "spending", "stress", "goals", "household_follow_up", "requests"),
-            household_label="생활·목표"),
+            household=("cash", "spending", "goals", "household_follow_up", "requests"),
+            household_label="생활·목표",
+            reference=("stress",)),   # As on the overview: an extreme check that reads the same from week to week.
 )}
 
 # Proposals on the household's money rather than one member's (report design §42): the reserve, the month's surplus

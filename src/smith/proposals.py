@@ -6,12 +6,12 @@ reorder and explain these proposals with policy and market briefs, but it never 
 Text is formal Korean addressed to the client; terms are explained where they first appear.
 """
 from dataclasses import dataclass, field, replace
-from datetime import date
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from decimal import ROUND_CEILING, Decimal
 from typing import Any
 
 from smith import future_income, holdings, pension, tax
-from smith.fmt import percent, short_won
+from smith.fmt import josa, particle, percent, short_won
 from smith.payload import LedgerView, base_amount
 from smith.realestate import MIN_BASIS
 from smith.records import Kind
@@ -23,6 +23,11 @@ PENSION_CREDIT_LIMIT = Decimal(9_000_000)  # Pension savings + IRP combined annu
 PENSION_SAVINGS_LIMIT = Decimal(6_000_000)
 PENSION_CREDIT_RATE = Decimal("0.132")     # Above 55M won gross salary; 16.5% at or below.
 DECISION_LEAD_MONTHS = 6                    # Decide how to return a lease deposit this long before it is due.
+# Urgency (report design §45, user decision 2026-11-19). A proposal is urgent while it is new or its deadline is near;
+# after STALE_AFTER deliveries without a decision it asks for the decision instead of repeating "act now".
+STALE_AFTER = 4          # Deliveries (about two weeks: the themed day and the overview each week).
+DUE_SOON_DAYS = 30       # A deadline this near makes its proposal urgent again.
+ELSEWHERE_DUE_DAYS = 7   # A deadline this near is named on every day's letter, whatever its theme.
 LEASE_HORIZON_MONTHS = 48
 CD_SERIES, BASE_RATE_SERIES = "817Y002/010502000", "722Y001/0101000"
 # Deposit banks' weighted average mortgage rate on new loans (ECOS, monthly): the market band a household
@@ -59,8 +64,12 @@ class Proposal:
     # The form of the action when one rule has several (the reserve: sell stock, save monthly, a short top-up).
     # A change of form renews the instance, so a decision on one form never carries over to another.
     form: str = ""
+    # The last day the action still has its effect (a tax year's end, the day a decision is needed by); None when
+    # nothing is lost by waiting. Urgency reads it (`urgency`), never the free-text `timing`.
+    due: date | None = None
     tolerance: Decimal = Decimal("0.2")
     times_shown: int = 0  # Delivered reports that already carried this instance.
+    instance_id: str = ""  # The ledger instance this proposal continues ("" when new or renewed: delivery creates one).
     renewed: bool = True  # New identity or materially changed figures: a new instance when delivered.
     context: str = ""     # Market and policy context added by the narrative stage (verified, sourced).
     context_memo: str = ""  # A verification caveat on `context`, shown in the footer's system notes only.
@@ -153,7 +162,14 @@ def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
         elif current["status"] == "accepted":
             in_progress.append(proposal)
         elif current["status"] == "open":
-            proposals.append(replace(proposal, times_shown=current["times_shown"], renewed=False))
+            proposals.append(replace(proposal, times_shown=current["times_shown"], renewed=False,
+                                     instance_id=current.get("instance_id") or ""))
+        elif current["status"] == "declined" and _due_again(proposal, current, facts["today"], view.as_of.tzinfo):
+            proposals.append(replace(proposal, renewed=True))
+    # What presses comes first (report design §45): a near deadline, a new act-now proposal, a decision Smith waits
+    # for, then the rest; within each the priority and rule order above stand (the sort is stable).
+    rank = {"due": 0, "new": 1, "decide": 2, "": 3}
+    proposals.sort(key=lambda p: rank[urgency(p, facts["today"])])
     decided = [item for item in active.values() if item["status"] in ("declined", "done")]
     return {"proposals": proposals, "in_progress": in_progress, "decided": decided, "undetermined": undetermined,
             "strategy": _strategy(facts), "glide": facts["glide"], "spending_room": facts["spending_room"],
@@ -192,6 +208,45 @@ def _income_guard(view: LedgerView, facts: dict[str, Any]) -> list[tuple[str, di
     return found
 
 
+def urgency(proposal: Proposal, today: date) -> str:
+    """How a proposal presses on the reader today (report design §45): "due" (its deadline is within DUE_SOON_DAYS),
+    "new" (act-now, delivered fewer than STALE_AFTER times), "decide" (an action delivered STALE_AFTER times or more
+    without a decision: the letter asks for the decision) or "" (keep-or-review, or an action still being introduced).
+    A deadline that has passed presses no more; a keep-or-review proposal (priority 3) never asks for a decision."""
+    if proposal.priority > 2:
+        return ""
+    if proposal.due is not None and timedelta(0) <= proposal.due - today <= timedelta(days=DUE_SOON_DAYS):
+        return "due"
+    if proposal.times_shown >= STALE_AFTER:
+        return "decide"
+    return "new" if proposal.priority == 1 else ""
+
+
+def _due_again(proposal: Proposal, current: dict[str, Any], today: date, tz: tzinfo | None = None) -> bool:
+    """A put-off proposal whose deadline has come near since the decision: raised once more. A decision made inside
+    the window stands, so the same deadline never asks twice. The decision's day is read in the report's timezone
+    `tz` (the ledger keeps UTC: a decision at 01:00 in Seoul on the window's first day is the day before in UTC,
+    Codex review 2026-11-19)."""
+    if urgency(proposal, today) != "due":
+        return False
+    try:
+        at = datetime.fromisoformat(current.get("status_at") or "")
+    except ValueError:
+        return True   # No readable decision time: the deadline is said again rather than silently dropped.
+    at = at if at.tzinfo is not None else at.replace(tzinfo=timezone.utc)
+    decided = (at.astimezone(tz) if tz is not None else at).date()
+    return decided < proposal.due - timedelta(days=DUE_SOON_DAYS)
+
+
+# What a rule's proposals are about, in the reader's words: the follow-up of a decision names it by this (the ledger
+# keeps the rule key, never the title).
+RULE_LABELS = {
+    "lease-return": "전세보증금 반환 계획", "emergency-reserve": "비상금 채우기", "goal-stocks-glide": "이사 자금을 안전 자산으로",
+    "concentration-trim": "한 종목 비중 줄이기", "surplus-plan": "남는 돈 자동이체", "pension-credit": "연금 세액공제",
+    "overseas-harvest": "해외주식 양도세 공제", "isa-open": "ISA 계좌", "insurance-review": "보험료 점검",
+    "prepayment": "대출 미리 갚기", "variable-rate": "변동금리 점검", "refinance": "대환 검토", "spending-room": "쓸 수 있는 돈"}
+
+
 def fit_headline(text: str) -> str:
     """The status-line badge within HEADLINE_MAX characters, cut at a word with an ellipsis (review 2026-10-18: a
     holding name may be 100 characters, so a rule's headline had no bound)."""
@@ -227,11 +282,19 @@ def materially_changed(proposal: Proposal, anchor: dict[str, str]) -> bool:
     return False
 
 
-def snapshot(proposal: Proposal) -> dict[str, Any]:
-    """What the ledger keeps about a delivered proposal."""
-    return {"key": proposal.key, "identity": proposal.identity or proposal.key, "renewed": proposal.renewed,
-            "figures": {**{name: str(value) for name, value in proposal.figures.items()},
-                        **({"form": proposal.form} if proposal.form else {})}}
+def snapshot(proposal: Proposal, ask: int | None = None) -> dict[str, Any]:
+    """What the ledger keeps about a delivered proposal. `ask` is the number on its card in that letter
+    (report_html.card_numbers), kept with a short label so a reply "2번 보류" finds the proposal it answers (report
+    design §45); None for a proposal the letter only listed."""
+    found = {"key": proposal.key, "identity": proposal.identity or proposal.key, "renewed": proposal.renewed,
+             "figures": {**{name: str(value) for name, value in proposal.figures.items()},
+                         **({"form": proposal.form} if proposal.form else {})},
+             # The ledger instance the report read ("" for a new or renewed proposal): delivery counts the showing on
+             # it, not on an instance another report raised meanwhile.
+             "instance": proposal.instance_id}
+    if ask is not None:
+        found.update(ask=ask, label=proposal.headline or RULE_LABELS.get(proposal.key, proposal.key))
+    return found
 
 
 # --- facts ------------------------------------------------------------------------------------------------
@@ -376,7 +439,7 @@ def _lease_return(facts: dict[str, Any]) -> Proposal | Undetermined | None:
         if loan["amount"] is not None:
             figures["loan_capacity"] = loan["amount"]
     return Proposal(
-        key="lease-return", priority=priority, identity=f"lease-return:{lease['due']}",
+        key="lease-return", priority=priority, identity=f"lease-return:{lease['due']}", due=deadline,
         headline=f"전세보증금 반환 방법 결정({deadline:%Y.%m}까지)",
         watch=("need", "accumulated"), tolerance=Decimal("0.15"),
         title=title,
@@ -423,7 +486,7 @@ def _lease_sale(lease: dict[str, Any], plan: dict[str, Any]) -> Proposal:
     if priced:
         figures.update(need=shortfall, sale_net_inflow=inflow)
     return Proposal(
-        key="lease-return", priority=priority, identity=f"lease-return:{lease['due']}:sale",
+        key="lease-return", priority=priority, identity=f"lease-return:{lease['due']}:sale", due=deadline,
         headline=f"보증금 매도 대금 반환·일정 확정({deadline:%Y.%m})",
         watch=("sale_net_inflow",), tolerance=Decimal("0.15"),
         title=(f"{lease['due']:%Y년 %m월} 돌려드릴 전세보증금 {short_won(amount)}은 계획하신 대로 만기에 맞춰 집을 팔아 매도 대금으로 "
@@ -700,7 +763,7 @@ def _concentration_trim(facts: dict[str, Any]) -> Proposal | Undetermined | None
                "지수펀드(코어)로 옮기시길 권합니다."),
         # In figures, not "자산이 흔들립니다" (user review 2026-10-18): what a fall of that stock takes off the stocks.
         why=(f"{first['name']} 주가가 {percent(drop, 0)} 빠지면 주식 자산 전체가 {percent(first['share'] * drop, 1)} 줄어듭니다. "
-             f"지금 {first['name']}은 {short_won(first['value'])}로 주식의 {percent(first['share'], 0)}입니다." + double + others),
+             f"지금 {josa(first['name'], '은는')} {short_won(first['value'])}으로 주식의 {percent(first['share'], 0)}입니다." + double + others),
         effect=(f"한도 {limit} 안으로 낮추면 같은 {percent(drop, 0)} 하락에도 주식 자산이 줄어드는 폭이 {percent(plan['limit'] * drop, 1)}에 "
                 "그치고, 옮긴 돈은 넓은 지수펀드에서 시장 전체의 성장을 따릅니다. 실적 발표 뒤 주가가 좋은 구간에 나눠 팔면 한 시점의 "
                 "주가에 덜 좌우됩니다." + grant_rule),
@@ -840,6 +903,7 @@ def _pension_credit(facts: dict[str, Any]) -> Proposal | None:
     return Proposal(
         key="pension-credit", priority=(1 if today.month >= 10 else 2) if room else 2 if gain else 3,
         identity=f"pension-credit:{today.year}", headline=headline,
+        due=date(today.year, 12, 31) if room else None,   # The credit room is this tax year's; next year's split has no deadline.
         watch=("irp_room", "excess", "credit_gain"), tolerance=Decimal("0.2"),
         title=title,
         why=("연금저축과 IRP(개인형 퇴직연금)에 넣은 돈은 합해서 연 900만 원(연금저축만은 600만 원)까지 세금을 돌려받습니다"
@@ -896,6 +960,7 @@ def _overseas_harvest(facts: dict[str, Any]) -> Proposal | Undetermined | None:
                  "해외주식 양도세 기본공제를 쓰시길 권합니다. " + rest)
     return Proposal(
         key="overseas-harvest", priority=1 if today.month >= 11 else 3, identity=f"overseas-harvest:{today.year}",
+        due=trade_by,   # The deduction lapses with the year's last settlement. The "used" form below only says to wait.
         watch=("realize",), tolerance=Decimal("0.3"),
         headline=headline, title=title,
         why=(f"해외 주식(과세 대상 국내 주식 포함)은 한 해 이익 {short_won(tax.OVERSEAS_DEDUCTION)}까지 세금이 없고, 넘는 부분에 "
@@ -1002,9 +1067,9 @@ def _prepayment(facts: dict[str, Any]) -> Proposal | Undetermined | None:
     # A loan repaid at maturity in one sum has no prepayment running to keep (sample 2026-11-08: the spouse's credit
     # loan read "keep prepaying as now"): the advice is to repay principal early from spare money.
     bullet = loan.get("repayment") == "bullet"
-    titles = {"keep": (f"{label}은 만기에 한 번에 갚는 방식이니, 여유 자금이 생기면 원금을 먼저 줄이는 편이 예금보다 유리합니다."
+    titles = {"keep": (f"{josa(label, '은는')} 만기에 한 번에 갚는 방식이니, 여유 자금이 생기면 원금을 먼저 줄이는 편이 예금보다 유리합니다."
                        if bullet else f"{label} 원금을 미리 갚는 지금의 방식을 이어가시는 것이 합리적입니다."),
-              "deposit": f"{label}을 미리 갚기보다 예금·채권에 두는 편이 나은지 점검하시길 권합니다.",
+              "deposit": f"{josa(label, '을를')} 미리 갚기보다 예금·채권에 두는 편이 나은지 점검하시길 권합니다.",
               "close": f"{label} 추가 상환과 예금의 차이가 작으니, 꺼내 쓸 수 있는 쪽을 우선하셔도 됩니다."}
     effects = {"keep": "확실한 이자 절감이 예금 이자보다 뚜렷하게 큽니다. 주식 투자는 기대수익이 더 높을 수 있지만 손실 "
                        "가능성이 있어 확실한 절감과 직접 비교할 수는 없습니다.",
@@ -1315,7 +1380,8 @@ def _retirement_track(facts: dict[str, Any], home: dict[str, Any] | None) -> Tra
     need_text =", ".join(f"{a}세 {'최대 ' if n['upper_bound'] else ''}{short_won(n['total'])}" for a, n in needs if n is not None)
     gaps = [t for t in tiers if t["years_without_pension"]]
     names = {p["id"]: pension.row_label(p) for p in stack["pipelines"]}
-    lower = (f" {', '.join(names.get(k, k) for k in stack['unknown'])}은 수령액을 몰라, 준비율은 그 이상이고 연금 밖에서 "
+    unknown = ", ".join(names.get(k, k) for k in stack["unknown"])
+    lower = (f" {josa(unknown, '은는')} 수령액을 몰라, 준비율은 그 이상이고 연금 밖에서 "
              "준비할 돈은 최대치입니다." if stack["unknown"] else "")
     shared = "두 분 연금을 합친 " if len(stack.get("owners") or []) > 1 else ""
     # The home goal is the client's plan, drawing on the client's pay (report design §42): in the spouse's letter it

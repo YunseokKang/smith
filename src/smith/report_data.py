@@ -123,8 +123,11 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     advice = proposals.build(view, kpis, {**sectors, "debt": own_debt}, active=active, household=household, pay=pay,
                              dividends=yearly_dividends,
                              review=own, lease_plans=lease_plans, pension_stack=pension_stack)
-    # The status badge stays household-wide: urgent proposals of every area, whatever today's theme.
-    advice["household_urgent"] = [p.key for p in advice["proposals"] if p.priority == 1]
+    # The status follows the day's own theme (report design §45, user decision 2026-11-19: every subject read
+    # "대응 필요"). Only a deadline within days is named on every letter, whatever today's theme.
+    near = as_of.date() + timedelta(days=proposals.ELSEWHERE_DUE_DAYS)
+    advice["household_urgent"] = [p.key for p in advice["proposals"]
+                                  if proposals.urgency(p, as_of.date()) == "due" and p.due <= near]
     # A daily edition carries only its own proposal rules and their pending judgements; each rule belongs
     # to one themed day (the overview carries all of them).
     advice["proposals"] = [p for p in advice["proposals"] if editions.carries(kind, p.key)]

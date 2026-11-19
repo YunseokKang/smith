@@ -20,15 +20,16 @@ reasons, data status and sources moved out of the mail into `system_notes` (for 
 """
 import base64
 import re
-from datetime import datetime
+from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from html import escape
 from typing import Any
 
+from smith.fmt import josa, particle
 from smith.fmt import short_won as _short
 from smith import editions, korean, pension, pension_chart, picks, principles, proposals, stress, tax
 from smith.holdings import STANCES
-from smith.proposals import Track
+from smith.proposals import DUE_SOON_DAYS, ELSEWHERE_DUE_DAYS, RULE_LABELS, STALE_AFTER, Proposal, Track, urgency
 from smith.realestate import MIN_BASIS
 from smith.report_data import (CATEGORY_LABELS, CERTAINTY_LABELS, COMPONENT_LABELS, GROUP_LABELS, PAY_LABELS,
                                QUANTITY_CHANGES, option_status, option_text)
@@ -93,10 +94,10 @@ def render(data: dict[str, Any]) -> tuple[str, str]:
     full = data["kind"] != "thursday"
     advice = data.get("advice") or {"proposals": [], "strategy": [], "assumptions": []}
     story = data.get("narrative") or {}
-    bands = [_band(DARK, _header(data, action=_action(advice, status), pending=len(advice.get("undetermined") or []))
+    bands = [_band(DARK, _header(data, action=_action(data, status), pending=len(advice.get("undetermined") or []))
                    + _judgement(story)
                    + _composition_bar(data, None) + _overview(data)),
-             _band(CANVAS, _proposals(advice, full), border=True)]
+             _band(CANVAS, _proposals(advice, full, data=data), border=True)]
     changes = _changes_outside(story)
     if changes:
         bands.append(_band(CANVAS, changes, border=True))
@@ -585,7 +586,7 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
     overview = edition.key == "overview"
     # No "today's one thing" box under the tiles (user review 2026-10-18): the badge names the action and the
     # first proposal card, open right below, explains it.
-    hero = (_header(data, action=_action(advice, status), pending=len(advice.get("undetermined") or []))
+    hero = (_header(data, action=_action(data, status), pending=len(advice.get("undetermined") or []))
             + _judgement(story)
             + _composition_bar(data, edition) + _tile_grid(_tiles(data, edition)))
     bands = [_band(DARK, hero)]
@@ -642,7 +643,7 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
         if opening:
             bands.append(_band(CANVAS, opening, border=True))
         if advice["proposals"] or advice.get("undetermined") or overview:
-            bands.append(_band(CANVAS, _proposals(advice, not overview, edition=edition), border=True))
+            bands.append(_band(CANVAS, _proposals(advice, not overview, edition=edition, data=data), border=True))
         title = "이번 주 눈여겨볼 변화" if overview else f"{edition.label} — 눈여겨볼 변화"
         changes = _changes_outside(story, title)
         if changes:
@@ -656,7 +657,7 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
     notes = pension_notes(data.get("pension_stack")) if "pension_stack" in shown else []
     reader = data.get("audience", "self")
     bands.append(_band(SOFT, _footer(_system_warnings(data), week=_week_line(data), corrections=_corrections_line(data),
-                                     notes=notes, reader=reader,
+                                     notes=notes, reader=reader, terms=glossary(bands),
                                      doubtful=_doubtful(data, story) if reader != "self" else ())))
     return _subject(data, status), _page(bands)
 
@@ -686,9 +687,10 @@ def _split_bands(data: dict[str, Any], edition: editions.Edition, renderers: dic
     both = {**advice, "undetermined": [],
             "proposals": [p for p in advice["proposals"] if p.key in editions.HOUSEHOLD_PROPOSALS]}
     full = edition.key != "overview"   # The overview carries every proposal briefly, pointing to its themed day.
-    proposals = (_proposals(own, full, edition=edition) if own["proposals"] or advice.get("undetermined") else "")
-    household_proposals = (_proposals(both, full, edition=edition, heading="두 분께 드리는 제안") if both["proposals"]
-                           else "")
+    proposals = (_proposals(own, full, edition=edition, data=data) if own["proposals"] or advice.get("undetermined")
+                 else "")
+    household_proposals = (_proposals(both, full, edition=edition, heading="두 분께 드리는 제안", data=data)
+                           if both["proposals"] else "")
     ours = group(edition.household)
     bands = _cards(_group_title(f"나의 {edition.label}", "고객님 명의의 계좌·집·대출·연금·보험만 봅니다."),
                    [*mine[:1], proposals, *mine[1:]])
@@ -860,7 +862,7 @@ def _my_pensions(data: dict[str, Any]) -> str:
             f"<b>{_short(total)}</b>입니다" + (f"(우리 집 연금의 {_pct(share, 0)})" if share is not None else "") + ".")
     missing = [p for p in mine if p["net_monthly"] is None]
     if missing:
-        lead += f" {', '.join(_sub_label(p) for p in missing)}은 아직 수령액을 몰라 뺐습니다."
+        lead += f" {josa(', '.join(_sub_label(p) for p in missing), '은는')} 아직 수령액을 몰라 뺐습니다."
     # The reader's own charts beside the household's (user request 2026-11-08), each pipeline in the household's colour.
     colors = _pipeline_colors(stack)
     known = [p for p in mine if p["net_monthly"] is not None and p["start_age"] is not None]
@@ -879,16 +881,32 @@ def _opened(section: str) -> str:
     return section.replace("<details style", "<details open style", 1)
 
 
-def _action(advice: dict[str, Any], status: str) -> str:
-    """The short badge beside the status (report design §20): the first proposal's headline (its title only when
-    a rule has none), or which report explains another area's urgent proposal. Never the system reasons."""
-    proposals = advice.get("proposals") or []
-    if proposals:
-        return proposals[0].headline or proposals[0].title
-    elsewhere = [editions.home(k) for k in advice.get("household_urgent", [])]
+def _pressing(data: dict[str, Any]) -> dict[str, list[Proposal]]:
+    """The day's proposals by how they press on the reader today (proposals.urgency): due, new, decide, or "" for
+    the rest. The subject, the status and the hero line all read this one grouping (report design §45)."""
+    today = data["as_of"].date()
+    found: dict[str, list[Proposal]] = {"due": [], "new": [], "decide": [], "": []}
+    for p in (data.get("advice") or {}).get("proposals") or []:
+        found[urgency(p, today)].append(p)
+    return found
+
+
+def _action(data: dict[str, Any], status: str) -> str:
+    """The hero's one line (report design §20, §45): what to do this week when something presses (a deadline, a new
+    act-now proposal), the decision Smith is waiting for when the same action has been said many times, this month's
+    proposal otherwise; or which report explains another area's deadline. Empty when the day only confirms what is
+    kept as it is: the header then says there is nothing new to do. Never the system reasons."""
+    pressing = _pressing(data)
+    urgent = pressing["due"] + pressing["new"]
+    if urgent:
+        return f"⚡ 금주 핵심 액션: {urgent[0].headline or urgent[0].title}"
+    elsewhere = [editions.home(k) for k in (data.get("advice") or {}).get("household_urgent", [])]
     if status == "act" and any(elsewhere):
-        return " · ".join(e.label for e in elsewhere if e) + " 보고의 제안 확인"
-    return ""
+        return "⚡ " + " · ".join(dict.fromkeys(e.label for e in elsewhere if e)) + " 보고의 기한이 가까운 제안 확인"
+    if pressing["decide"]:
+        return f"결정을 기다립니다: {pressing['decide'][0].headline or pressing['decide'][0].title}"
+    actions = [p for p in pressing[""] if p.priority <= 2]
+    return f"이번 달 제안: {actions[0].headline or actions[0].title}" if actions else ""
 
 
 def _tiles(data: dict[str, Any], edition: editions.Edition) -> list[tuple[str, str, str]]:
@@ -986,23 +1004,29 @@ def _tiles(data: dict[str, Any], edition: editions.Edition) -> list[tuple[str, s
 
 
 def _status(data: dict[str, Any], *, requests_shown: bool = True) -> tuple[str, list[str]]:
-    """(status, reasons). 대응 필요: a proposal to act on now. 주의: data that failed, is incomplete or
-    stale, or a missing input the judgements need (a "must" request). 안정 only when none of these hold.
+    """(status, reasons). 대응 필요: a proposal of this day's theme that presses now, by a deadline within
+    DUE_SOON_DAYS or as a new act-now proposal. 주의: data that failed, is incomplete or stale, or a missing input the
+    judgements need (a "must" request). 안정 only when none of these hold.
 
-    The status is household-wide on every daily edition: an urgent proposal of another area still makes
-    it 대응 필요 (and says where it is explained), and a judgement this day could not make makes it at
-    least 주의. `requests_shown`: whether this report lists the requests itself."""
+    The status follows the day's theme (report design §45, user decision 2026-11-19: every subject of forty days read
+    "대응 필요", so it said nothing). Another area makes it 대응 필요 only by a deadline within ELSEWHERE_DUE_DAYS (and
+    says where it is explained). An action said many times without a decision does not raise the status: the letter
+    asks for the decision instead. A judgement this day could not make makes it at least 주의. `requests_shown`:
+    whether this report lists the requests itself."""
     advice = data.get("advice") or {}
-    here = [p for p in advice.get("proposals") or [] if p.priority == 1]
+    pressing = _pressing(data)
+    here = pressing["due"] + pressing["new"]
     elsewhere = [k for k in advice.get("household_urgent", []) if k not in {p.key for p in here}]
     themed = editions.of(data["kind"]) is not None
     pending = (advice.get("undetermined") or []) if themed else []
     must = [r for r in data.get("requests") or [] if r.priority == "must"]
     reasons = []
-    if here:
-        reasons.append(f"지금 실행을 권하는 제안이 {len(here)}건 있습니다.")
+    if pressing["due"]:
+        reasons.append(f"기한이 {DUE_SOON_DAYS}일 안에 있는 제안이 {len(pressing['due'])}건 있습니다.")
+    if pressing["new"]:
+        reasons.append(f"지금 실행을 권하는 새 제안이 {len(pressing['new'])}건 있습니다.")
     if elsewhere:
-        reasons.append(f"다른 분야에 지금 실행을 권하는 제안이 {len(elsewhere)}건 있습니다"
+        reasons.append(f"다른 분야에 기한이 {ELSEWHERE_DUE_DAYS}일 안에 있는 제안이 {len(elsewhere)}건 있습니다"
                        f"({', '.join(editions.home(k).label for k in elsewhere if editions.home(k))} 보고에서 자세히).")
     if pending:
         reasons.append(f"자료가 부족해 판단하지 못한 항목이 {len(pending)}건 있습니다(아래 제안 끝).")
@@ -1015,11 +1039,10 @@ def _status(data: dict[str, Any], *, requests_shown: bool = True) -> tuple[str, 
         reasons.append(f"스트레스 테스트에서는 현금만으로 {stress['months_cash']:.1f}개월밖에 버티지 못합니다.")
     if STRESS_LEASE_FLAG in stress.get("flags", ()):
         reasons.append(f"스트레스 테스트에서는 {stress['lease']['due']:%Y년 %m월} 보증금 반환에 필요한 돈이 부족합니다.")
-    if here or elsewhere:
-        return "act", reasons
-    if reasons:
-        return "watch", reasons
-    return "stable", ["데이터가 최신이고, 판단에 꼭 필요한 자료가 갖춰져 있습니다."]
+    status = "act" if here or elsewhere else "watch" if reasons else "stable"
+    if pressing["decide"]:   # Said for the e-mail answers; waiting for a decision is not a warning.
+        reasons.append(f"여러 번 안내드려 결정을 기다리는 제안이 {len(pressing['decide'])}건 있습니다.")
+    return status, reasons or ["데이터가 최신이고, 판단에 꼭 필요한 자료가 갖춰져 있습니다."]
 
 
 def _system_warnings(data: dict[str, Any]) -> list[str]:
@@ -1039,14 +1062,39 @@ def _system_warnings(data: dict[str, Any]) -> list[str]:
 def _subject(data: dict[str, Any], status: str) -> str:
     day = data["as_of"].strftime("%m/%d")  # as_of is already in the household timezone.
     edition = editions.title(data["kind"], data["as_of"].date())
-    proposals = (data.get("advice") or {}).get("proposals") or []
-    change = data["kpis"]["net_worth_change"]
-    themed = editions.of(data["kind"]) is not None and data["kind"] != "overview"
-    lead = f"제안 {len(proposals[:3])}건" if proposals else (
-        "새 제안 없음" if themed else "기준선 보고" if change is None else f"순자산 {_signed_short(change)}")
+    # The status word is said only when it asks for attention (report design §45): "안정" on every quiet day was noise.
+    label = "" if status == "stable" else f" · {STATUS[status][1]}"
     # A report whose prose failed says so before it is opened (user decision 2026-11-03): its opinions are missing.
     failed = ((data.get("narrative") or {}).get("status") or {}).get("outcome") == "failure"
-    return f"[Smith] {day} {edition} · {STATUS[status][1]} · {lead}" + (" · 해설 없음" if failed else "")
+    return f"[Smith] {day} {edition}{label} · {_subject_lead(data, status)}" + (" · 해설 없음" if failed else "")
+
+
+def _subject_lead(data: dict[str, Any], status: str) -> str:
+    """What the reader has to do, in the subject's last words (report design §45): the nearest deadline, a new act-now
+    proposal, the decisions Smith is waiting for, this month's proposals, or that there is nothing to do."""
+    pressing = _pressing(data)
+    if pressing["due"]:
+        first = min(p.due for p in pressing["due"])
+        return f"{first.month}/{first.day}까지 {len(pressing['due'])}건"
+    if pressing["new"]:
+        return f"새 제안 {len(pressing['new'])}건"
+    if status == "act":   # Only another area's deadline (within ELSEWHERE_DUE_DAYS) is left.
+        return "다른 분야 기한 임박"
+    if pressing["decide"]:
+        # The requests the reader can answer by number: those with a card (all of them when none has one).
+        numbers = card_numbers(data)
+        carded = [p for p in pressing["decide"] if (p.identity or p.key) in numbers]
+        return f"결정 요청 {len(carded or pressing['decide'])}건"
+    actions = [p for p in pressing[""] if p.priority <= 2]
+    if actions:
+        return f"제안 {len(actions)}건"
+    themed = editions.of(data["kind"]) is not None and data["kind"] != "overview"
+    pending = (data.get("advice") or {}).get("undetermined") or []
+    if themed:
+        # A judgement a rule could not make is not "nothing to do" (review 2026-10-18).
+        return f"판단 보류 {len(pending)}건" if pending else "할 일 없음"
+    change = data["kpis"]["net_worth_change"]
+    return "기준선 보고" if change is None else f"순자산 {_signed_short(change)}"
 
 
 # --- formatting -------------------------------------------------------------------------------------------
@@ -1056,7 +1104,12 @@ def _signed_short(amount: Decimal) -> str:
 
 
 def _won(amount: Decimal | None) -> str:
-    return "미상" if amount is None else f"{amount:,.0f}원"
+    """An amount in a table: the letter's short form (2.2억 원, 931만 원) from a million won up, the exact figure below
+    it, where rounding to 만 would hide part of a small amount. The tables read "230,000,000원" beside a text that said
+    "2.3억 원" (letter review 2026-11-19); the exact figures stay in the ledger and the e-mail answers."""
+    if amount is None:
+        return "미상"
+    return f"{amount:,.0f}원" if abs(amount) < 1_000_000 else _short(amount)
 
 
 def _pct(ratio: Decimal | None, places: int = 1) -> str:
@@ -1102,7 +1155,8 @@ def _bars(rows: list[tuple[str, Decimal | None, bool]], *, value_text: Any = _sh
     for label, value, strong in rows:
         width = max(1, int(abs(value) / peak * 100))
         color = ACCENT if strong else MUTED_BAR
-        cells.append(f'<tr><td style="width:160px;font-size:13px;color:{BODY};padding:4px 8px 4px 0;white-space:nowrap">{escape(label)}</td>'
+        # The label wraps: "비상금 채우기(주식 일부 정리로 일시 충당)" on one line widened a phone screen (2026-11-19).
+        cells.append(f'<tr><td style="width:160px;font-size:13px;line-height:1.4;color:{BODY};padding:4px 8px 4px 0">{escape(label)}</td>'
                      f'<td><div style="background:{color};height:12px;width:{width}%;border-radius:0 100px 100px 0"></div></td>'
                      f'<td style="width:100px;text-align:right;font-family:{MONO};font-size:12px;color:{INK};padding-left:8px;'
                      f'white-space:nowrap">{value_text(value)}</td></tr>')
@@ -1192,7 +1246,7 @@ def _header(data: dict[str, Any], *, action: str = "", pending: int = 0) -> str:
     named instead of "nothing to do" (review 2026-10-18: a report that could not judge read as reassurance)."""
     edition = editions.title(data["kind"], data["as_of"].date())
     line = (f'<span style="display:inline-block;background:{DARK_RAISED};color:{ON_DARK};font-weight:600;'
-            f'border-radius:100px;padding:4px 12px;margin-top:4px">⚡ 금주 핵심 액션: {escape(action)}</span>'
+            f'border-radius:100px;padding:4px 12px;margin-top:4px">{escape(action)}</span>'
             if action else f"확정한 실행안은 없고, 자료가 부족해 판단을 보류한 것이 {pending}건 있습니다" if pending
             else "오늘 새로 실행하실 일은 없습니다")
     note = ""
@@ -1385,11 +1439,69 @@ def _tile_grid(tiles: list[tuple[Any, ...]]) -> str:
             f'cellspacing="0">{grid}</table></td></tr>')
 
 
+CARDS = 3  # Proposal cards in one block; the rest are listed by their headlines.
+
+
+def _card_blocks(data: dict[str, Any]) -> list[list[Proposal]]:
+    """The proposals a letter shows as cards, block by block: a per-person letter has the reader's own and then the
+    household's (editions.HOUSEHOLD_PROPOSALS, report design §42), every other report has one block."""
+    found = (data.get("advice") or {}).get("proposals") or []
+    edition = editions.of(data["kind"])
+    if edition is not None and edition.personal:
+        return [[p for p in found if p.key not in editions.HOUSEHOLD_PROPOSALS][:CARDS],
+                [p for p in found if p.key in editions.HOUSEHOLD_PROPOSALS][:CARDS]]
+    return [found[:CARDS]]
+
+
+def card_numbers(data: dict[str, Any]) -> dict[str, int]:
+    """The number on each proposal card by the proposal's identity, counted through the whole letter so a reply
+    "2번 보류" names one card (report design §45: the two blocks of a per-person letter both began at 1). Delivery keeps
+    the same numbers in the ledger (proposals.snapshot), which is how a reply finds its proposal."""
+    cards = [p for block in _card_blocks(data) for p in block]
+    return {p.identity or p.key: number for number, p in enumerate(cards, 1)}
+
+
+def _badge(text: str, kind: str = "plain", *, first: bool = False) -> str:
+    background, color = {"plain": (STRONG, INK), "due": PILLS["bad"][:2], "decide": PILLS["warn"][:2],
+                         "new": PILLS["good"][:2]}[kind]
+    return (f'<span style="display:inline-block;background:{background};color:{color};font-size:12px;font-weight:600;'
+            f'border-radius:100px;padding:4px 12px{"" if first else ";margin-left:6px"}">{escape(text)}</span>')
+
+
+def _urgency_badges(p: Proposal, state: str, today: date | None) -> str:
+    """What presses about a card (report design §45): its deadline and the days left, that Smith waits for a decision,
+    or the plain priority; a proposal delivered for the first time is marked new. The count of earlier deliveries is
+    said only on a decision request (user review 2026-11-19: "22번째 보고" on an unchanged card only read as nagging)."""
+    if state == "due" and today is not None:
+        left = (p.due - today).days
+        found = _badge(f"기한 {p.due.month}월 {p.due.day}일", "due", first=True) + _badge("오늘까지" if left == 0 else f"{left}일 남음")
+    elif state == "decide":
+        found = _badge("결정 요청", "decide", first=True)
+    else:
+        found = _badge(PRIORITY_LABELS.get(p.priority, ""), first=True)
+    return found + (_badge("새 제안", "new") if p.times_shown == 0 and today is not None else "")
+
+
+def _decision_line(p: Proposal, number: int, asks: bool) -> str:
+    """Under a decision-request card: how often it was said and how to answer. The client answers by a reply that code
+    reads (smith.proposal_reply); the spouse's replies record nothing (§42.11), so that letter asks to pass it on."""
+    how = (f"답장으로 「{number}번 할게」, 「{number}번 보류」, 「{number}번 했어」 가운데 하나를 보내 주십시오. 기록해 두고, 수치가 크게 "
+           "바뀌거나 기한이 가까워질 때만 다시 말씀드립니다." if asks else
+           "하실지 미루실지 정하시면 배우자분께 전해 주십시오.")
+    return (f'<div style="background:{SOFT};border-radius:12px;padding:10px 12px;margin-top:10px;font-size:13px;'
+            f'line-height:1.6;color:{BODY}"><b style="font-weight:700;color:{INK}">{p.times_shown}번 안내드렸습니다.</b> {how}</div>')
+
+
 def _proposals(advice: dict[str, Any], full: bool, edition: editions.Edition | None = None,
-               heading: str = "고객님께 드리는 제안") -> str:
+               heading: str = "고객님께 드리는 제안", *, data: dict[str, Any] | None = None) -> str:
     """The proposal cards: why now, effect, risks, timing, what would change the judgement, certainty.
-    Thursday cards are short but keep the certainty label. Judgements stopped by unknown inputs follow."""
+    Thursday cards are short but keep the certainty label. Judgements stopped by unknown inputs follow.
+    With `data` (the report this block belongs to) a card carries its letter-wide number, what presses about it, and
+    on a decision request how to answer (report design §45)."""
     proposals = advice.get("proposals") or []
+    today = None if data is None else data["as_of"].date()
+    numbers = {} if data is None else card_numbers(data)
+    asks = data is not None and data.get("audience", "self") == "self"
     themed = edition is not None and edition.key != "overview"
     head = f'<tr><td>{_eyebrow("오늘의 제안" if themed else "이번 주 제안")}{_heading(heading, size=28)}</td></tr>'
     pending = _undetermined(advice)  # A daily edition carries only its own rules' pending judgements.
@@ -1400,23 +1512,26 @@ def _proposals(advice: dict[str, Any], full: bool, edition: editions.Edition | N
                 "새 제안이 없습니다. 제안이 없는 것도 판단입니다. 다음 보고에서 변화가 있으면 다시 말씀드리겠습니다.")
         return head + f'<tr><td style="font-size:15px;line-height:1.6;color:{BODY}">{text}</td></tr>' + pending
     cards = []
-    for number, p in enumerate(proposals[:3], 1):
+    for place, p in enumerate(proposals[:CARDS], 1):
+        number = numbers.get(p.identity or p.key, place)
+        state = "" if today is None else urgency(p, today)
         badge = (f'<span style="display:inline-block;background:{BLUE};color:#ffffff;font-size:12px;font-weight:600;'
                  f'border-radius:100px;padding:4px 11px;margin-right:6px">{number}</span>'
-                 f'<span style="display:inline-block;background:{STRONG};color:{INK};font-size:12px;font-weight:600;'
-                 f'border-radius:100px;padding:4px 12px">{PRIORITY_LABELS.get(p.priority, "")}</span>')
-        if p.times_shown:
-            badge += (f'<span style="display:inline-block;background:{STRONG};color:{MUTED};font-size:12px;font-weight:600;'
-                      f'border-radius:100px;padding:4px 12px;margin-left:6px">이 제안을 안내드린 {p.times_shown + 1}번째 보고</span>')
+                 + _urgency_badges(p, state, today))
         title = (f'<div style="font-size:18px;font-weight:600;line-height:1.4;color:{INK};margin:12px 0 8px">'
                  f'{escape(p.title)}</div>')
         if full:
             # One sentence per row (user review 2026-10-18: a quarter of the text); the full reasoning is kept for
             # the e-mail answers.
-            rows = [("왜 지금", escape(_first_sentence(p.why)))]
+            # A standing "keep as is" card the reader has seen for two weeks says why and what would change it; the
+            # effect, risks and certainty were read then and are an e-mail answer away (report design §46).
+            settled = p.priority > 2 and p.times_shown >= STALE_AFTER and today is not None
+            rows = [("왜 유지" if settled else "왜 지금", escape(_first_sentence(p.why)))]
             if p.context:  # A verification caveat on the context is a footer system note, not prose.
                 rows.append(("시장·정책 맥락", escape(_first_sentence(p.context)) + _sources(p.links)))
-            if number == 1:
+            if settled:
+                rows.append(("다시 판단할 조건", escape(_first_sentence(p.reconsider))))
+            elif place == 1 and state != "decide":   # A decision request has been explained already: why and when.
                 rows += [("예상 효과", escape(_first_sentence(p.effect))), ("위험과 대안", escape(_first_sentence(p.risks))),
                          ("시점", escape(p.timing)), ("다시 판단할 조건", escape(_first_sentence(p.reconsider))),
                          ("근거의 성격", escape(p.certainty))]
@@ -1448,21 +1563,30 @@ def _proposals(advice: dict[str, Any], full: bool, edition: editions.Edition | N
         elif p.key in (advice.get("pending_products") or ()):
             detail += (f'<div style="font-size:12px;color:{MUTED};margin-top:10px">옮길 상품 1~3순위는 검토 팀의 확인이 끝나는 대로 '
                        "다음 보고서에 싣습니다.</div>")
+        if state == "decide":
+            detail += _decision_line(p, number, asks)
         # One card open at a time (user review 2026-10-18): the first proposal shows its detail, the others
         # show the badges and the title until tapped.
-        state = " open" if number == 1 else ""
+        opened = " open" if place == 1 else ""
         cards.append(f'<tr><td style="padding-top:12px"><div style="background:{CANVAS};border:1px solid {HAIRLINE};'
-                     f'border-radius:24px;padding:18px 20px"><details{state} style="margin:0">'
+                     f'border-radius:24px;padding:18px 20px"><details{opened} style="margin:0">'
                      f'<summary style="cursor:pointer;outline:none">{badge}{title}{_expand_hint(block=True)}</summary>'
                      f'<div style="margin-top:8px">{detail}</div></details></div></td></tr>')
-    rest = proposals[3:]
+    rest = proposals[CARDS:]
     more = ""
+    carded = [p for block in _card_blocks(data) for p in block] if asks else []
+    if (asks and numbers.get(proposals[0].identity or proposals[0].key) == 1
+            and any(urgency(p, today) != "decide" for p in carded)):
+        # Said once in a letter, under its first block: any card can be answered, not only a decision request (those
+        # say it themselves, so a letter of decision requests alone does not repeat it).
+        more = (f'<tr><td style="padding-top:12px;font-size:13px;line-height:1.6;color:{MUTED}">제안은 답장으로 정하실 수 있습니다. '
+                '「1번 할게」는 진행 중으로, 「1번 보류」는 다시 권하지 않는 것으로, 「1번 했어」는 완료로 기록합니다.</td></tr>')
     if rest:
         # The rest by their short headlines (user review 2026-10-18: nine full sentences read long).
         items = "".join(f'<div style="font-size:13px;line-height:1.6;color:{BODY};margin:4px 0">· {escape(p.headline or p.title)}</div>'
                         for p in rest)
-        more = (f'<tr><td style="padding-top:16px"><details style="margin:0"><summary style="{SUMMARY}font-size:14px">'
-                f'{_expand_hint()}함께 검토한 다른 제안 {len(rest)}건</summary>'
+        more += (f'<tr><td style="padding-top:16px"><details style="margin:0"><summary style="{SUMMARY}font-size:14px">'
+                 f'{_expand_hint()}함께 검토한 다른 제안 {len(rest)}건</summary>'
                 f'<div style="margin-top:6px">{items}</div></details></td></tr>')
     if not full and edition is None:  # The overview cards point to their themed day themselves.
         more += (f'<tr><td style="padding-top:12px;font-size:12px;color:{MUTED}">목요 보고는 요약입니다. 근거와 위험은 월요 '
@@ -1767,7 +1891,7 @@ def _follow_up(advice: dict[str, Any], *, household: bool | None = None) -> str:
     labels = {"declined": "보류하기로 하셨습니다", "done": "완료하셨습니다"}
     rows = [f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin:4px 0">· <b style="font-weight:600;color:{INK}">'
             f'진행 중</b> — {escape(p.title)}</div>' for p in in_progress]
-    rows += [f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin:4px 0">· {escape(e["key"])}: '
+    rows += [f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin:4px 0">· {escape(RULE_LABELS.get(e["key"], e["key"]))}: '
              # The ledger keeps a decision's time as `status_at` (Codex review 2026-11-08: the old field name crashed
              # any letter with a decision on record).
              f'{labels[e["status"]]}({(e.get("status_at") or "")[:10]})</div>' for e in decided]
@@ -2180,10 +2304,10 @@ def _debt(debt: dict[str, Any], refinance: dict[str, Any] | None = None, policy:
     unused = debt.get("unused_credit")
     for line in debt.get("credit_lines", []):
         if line["drawn"] == 0:
-            lead += (f" {line['label']}은 잔액 0원이라 이자가 없고, <b>{_short(line['limit'])}</b> 한도는 유사시 바로 쓸 수 있어 "
+            lead += (f" {josa(line['label'], '은는')} 잔액 0원이라 이자가 없고, <b>{_short(line['limit'])}</b> 한도는 유사시 바로 쓸 수 있어 "
                      "유동성 방어에 긍정적입니다(상환 대상 아님).")
         elif line["drawn"] is not None and line["limit"] is not None:
-            lead += f" {line['label']}은 한도 {_short(line['limit'])} 중 {_short(line['drawn'])}을 쓰고 있습니다."
+            lead += f" {josa(line['label'], '은는')} 한도 {_short(line['limit'])} 중 {_short(line['drawn'])}을 쓰고 있습니다."
     verdict = ""
     if refinance is not None:
         verdict = _refinance_block(refinance)
@@ -2409,17 +2533,17 @@ def _holdings(data: dict[str, Any], story: dict[str, Any], full: bool, *, quanti
     if len(listed) > 4:
         segments.append((f"기타({len(listed) - 4}종)", sum((p["value"] for p in listed[4:]), Decimal(0)), ""))
     inner = _stacked(segments) + '<div style="height:8px"></div>'
-    inner += _table(["종목", "평가액", "비중", "수익률", "Smith 의견"],
-                    [[_named(p), _short(p["value"]), _pct(p["share"]), _return_cell(p["return_on_cost"]),
-                      Raw(_pill("Hermes 운용", "neutral")) if p["hermes"] else
-                      Raw(_stance(_of(opinions, p)["stance"])) if _of(opinions, p).get("stance") else "의견 없음"]
-                     for p in positions])
+    inner += _holding_rows(positions, opinions)
     if quantities:
         inner += _quantity_changes(data)
     # The employer's stock and any holding above the limit come first: the double concentration is the
     # first investment matter (report design §17.4).
     active.sort(key=lambda p: (not p.get("must_opine"), -(p["value"] or 0)))
-    inner += "".join(_opinion_card(p, _of(opinions, p)) for p in active)
+    # A card for what weighs on the portfolio; the small holdings share one block (letter review 2026-11-19, report
+    # design §46: the smallest holding had the same card as the employer stock, a thousand times its size).
+    small = _small_holdings(active, opinions)
+    inner += "".join(_opinion_card(p, _of(opinions, p)) for p in active if p not in small)
+    inner += _small_opinions(small, opinions, asks=data.get("audience", "self") == "self")
     held = [p for p in positions if _of(opinions, p).get("stance") == "hold"]
     if held:
         rows = "".join(f'<div style="font-size:13px;line-height:1.6;color:{BODY};margin:3px 0">· <b style="font-weight:600;'
@@ -2435,6 +2559,64 @@ def _holdings(data: dict[str, Any], story: dict[str, Any], full: bool, *, quanti
             counts[stance] = counts.get(stance, 0) + 1
     note = f"{len(positions)}개 종목 상세 점검" + "".join(f" · {STANCES[s]} {n}" for s, n in counts.items() if s != "hold")
     return _section("보유 종목 점검", _holdings_lead(review, sec, opined), inner, note=escape(note))
+
+
+SMALL_SHARE = Decimal("0.02")  # Under this share of the listed holdings an opinion is one line, not a card.
+
+
+def _holding_rows(positions: list[dict[str, Any]], opinions: dict[str, Any]) -> str:
+    """Every holding in two columns that fit a phone: the name with its value and share (beside it, or under it when
+    the name is long), and the return with Smith's opinion on the right. The former five-column table widened a 375px screen (letter review 2026-11-19)."""
+    def opinion(p: dict[str, Any]) -> str:
+        if p["hermes"]:
+            return _pill("Hermes 운용", "neutral")
+        stance = _of(opinions, p).get("stance")
+        return _stance(stance) if stance else f'<span style="font-size:12px;color:{MUTED}">의견 없음</span>'
+    rows = "".join(
+        f'<tr><td style="padding:7px 8px 7px 0;border-bottom:1px solid {STRONG}">'
+        f'<span style="font-size:14px;line-height:1.5;color:{INK}">{escape(_named(p))}</span> '
+        f'<span style="display:inline-block;white-space:nowrap;font-family:{MONO};font-size:12px;color:{MUTED}">'
+        f'{escape(_short(p["value"]))} · {escape(_pct(p["share"]))}</span></td>'
+        f'<td style="text-align:right;white-space:nowrap;vertical-align:middle;font-size:13px;padding:7px 0;'
+        f'border-bottom:1px solid {STRONG}">{_return_cell(p["return_on_cost"])} {opinion(p)}</td></tr>' for p in positions)
+    head = (f'<tr><td style="font-size:12px;font-weight:600;color:{MUTED};padding:6px 0;border-bottom:1px solid {HAIRLINE}">'
+            f'종목 · 평가액 · 비중</td><td style="text-align:right;white-space:nowrap;font-size:12px;font-weight:600;color:{MUTED};'
+            f'padding:6px 0;border-bottom:1px solid {HAIRLINE}">수익률 · 의견</td></tr>')
+    return f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px">{head}{rows}</table>'
+
+
+def _small_holdings(active: list[dict[str, Any]], opinions: dict[str, Any]) -> list[dict[str, Any]]:
+    """The holdings with an opinion that share one block: under SMALL_SHARE of the listed holdings, never the employer's
+    stock or one above the limit (`must_opine`), never an opinion with a precondition (the block's one line would drop
+    it and a conditional "add" would read as unconditional, report design §12.6; Codex review 2026-11-19), and only
+    when there are two or more (one alone keeps its card)."""
+    small = [p for p in active if not p.get("must_opine") and p["share"] is not None and p["share"] < SMALL_SHARE
+             and not _of(opinions, p).get("condition")]
+    return small if len(small) >= 2 else []
+
+
+def _small_opinions(small: list[dict[str, Any]], opinions: dict[str, Any], *, asks: bool) -> str:
+    """The opinions on the small holdings in one block: what they come to together, then one line each (the opinion,
+    the value and return, the first sentence of the reason). The whole opinion stays in the report's data for the
+    e-mail answers; the spouse's replies are not answered (§42.3), so that letter does not offer it."""
+    if not small:
+        return ""
+    total = sum((p["value"] or Decimal(0) for p in small), Decimal(0))
+    share = sum((p["share"] for p in small), Decimal(0))
+    rows = "".join(
+        f'<div style="font-size:14px;line-height:1.6;color:{BODY};padding:8px 0;border-top:1px solid {STRONG}">'
+        f'<b style="font-weight:600;color:{INK}">{escape(str(p["name"]))}</b> {_stance(_of(opinions, p)["stance"])} '
+        f'<span style="font-family:{MONO};font-size:12px;color:{MUTED}">{escape(_short(p["value"]))} · '
+        f'{escape(_return(p["return_on_cost"]))}</span><br>{escape(_first_sentence(_of(opinions, p)["reason"]))}</div>'
+        for p in small)
+    more = " 종목별 대안과 다시 판단할 조건은 답장으로 물어 주시면 드립니다." if asks else ""
+    return (f'<div style="border:1px solid {HAIRLINE};border-radius:24px;padding:18px 20px;margin-top:12px">'
+            f'<div style="font-size:16px;font-weight:600;color:{INK}">소액 종목 {len(small)}개</div>'
+            f'<div style="font-family:{MONO};font-size:12px;color:{MUTED};margin:4px 0 6px">합계 {escape(_short(total))} · '
+            f'비중 {escape(_pct(share))}</div>'
+            f'<div style="font-size:13px;line-height:1.6;color:{MUTED};margin-bottom:8px">한 종목이 보유 주식의 '
+            f'{SMALL_SHARE * 100:.0f}%에 못 미쳐, 판단이 달라져도 전체에 미치는 영향이 작습니다. 의견과 핵심 이유만 적습니다.{more}</div>'
+            f'{rows}</div>')
 
 
 def _holdings_week(data: dict[str, Any], story: dict[str, Any] | None = None) -> str:
@@ -2664,7 +2846,7 @@ def _holdings_lead(review: dict[str, Any], sec: dict[str, Any], opined: bool) ->
         lead += " 이번에는 종목별 의견을 만들지 못해 숫자만 보여 드립니다."
     employer = [p for p in positions if p.get("employer")]
     if employer:
-        lead += (f" {', '.join(escape(str(p['name'])) for p in employer)}은 월급과 주식 보상이 나오는 회사의 주식이라, 앞으로 벌 소득과 "
+        lead += (f" {', '.join(escape(str(p['name'])) for p in employer)}{particle(str(employer[-1]['name']), '은는')} 월급과 주식 보상이 나오는 회사의 주식이라, 앞으로 벌 소득과 "
                  "지금 가진 자산이 한 회사에 함께 묶인 <b>이중 집중</b> 상태입니다. 가장 먼저 관리할 종목입니다.")
     if review["concentrated"]:
         names = ", ".join(escape(str(p["name"])) for p in positions if p["concentrated"])
@@ -2705,8 +2887,18 @@ def _policy(data: dict[str, Any], story: dict[str, Any], full: bool) -> str:
         rows = "".join(f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin:4px 0">· {_check_status(c.status)} '
                        f'<b style="font-weight:600;color:{INK}">{escape(c.title)}</b> — {escape(c.current)}</div>' for c in off)
         return _section("투자 기준 점검", "지금 상황에서 조정을 검토할 항목만 보여 드립니다. 원칙과 근거는 월요 보고에 있습니다.", rows)
-    table = _table(["기준", "우리 집 기준", "지금", "판정"],
-                   [[c.title, c.standard, c.current, Raw(_check_status(c.status))] for c in checks])
+    # One block per check that asks for a look, and the met ones on a single line: the four-column table was the widest
+    # thing in the markets letter and pushed the whole letter past a phone's width (letter review 2026-11-19).
+    met = [c for c in checks if c.status == "ok"]
+    table = "".join(
+        f'<div style="padding:10px 0;border-bottom:1px solid {STRONG}">'
+        f'<div style="font-size:14px;font-weight:600;line-height:1.5;color:{INK}">{_check_status(c.status)} {escape(c.title)}</div>'
+        f'<div style="font-size:13px;line-height:1.6;color:{BODY};margin-top:4px">지금 {escape(c.current)}</div>'
+        f'<div style="font-size:12px;line-height:1.6;color:{MUTED}">우리 집 기준: {escape(c.standard)}</div></div>'
+        for c in checks if c.status != "ok")
+    if met:
+        table += (f'<div style="font-size:13px;line-height:1.6;color:{BODY};padding:10px 0">{_check_status("ok")} '
+                  f'{escape(", ".join(c.title for c in met))}</div>')
     view = ""
     if story.get("portfolio"):
         view = (f'<div style="background:{SOFT};border-radius:24px;padding:18px 20px;margin-top:14px">'
@@ -2885,10 +3077,10 @@ def _move_targets(data: dict[str, Any]) -> str:
         named = f"{t['alias']} · {t['label']}"
         bars.append((named, t["cost_with_fees"], False))
         hold = t["change_hold"]
-        rows.append([named, f"{_short(t['price'])} · {t['price_basis']}",
+        rows.append((named, f"{_short(t['price'])} · {t['price_basis']}",
                      f"판단 보류(최근 {hold['recent']}·이전 {hold['older']}건)" if hold else _delta_pct(t["change_6m"]),
                      _short(t["spread"]), _short(t["spread_with_pay"]),
-                     "판단 보류" if t["trend_hold"] else trends.get(t["trend"], "-")])
+                     "판단 보류" if t["trend_hold"] else trends.get(t["trend"], "-")))
     nearest = min((t for t in plan["targets"] if t["spread"] is not None), key=lambda t: t["spread"], default=None)
     if nearest is not None:
         # First (pre-review check 2026-10-18): the gap to the nearest target and what the expected pay closes of it
@@ -2901,7 +3093,19 @@ def _move_targets(data: dict[str, Any]) -> str:
                 + (", 세전 기준으로 6개월 전보다 차이가 " + trends[nearest["trend"]] + "입니다." if nearest["trend"] else "입니다.")
                 + " " + lead)
     lead += " 핵심 변수는 성과급·자사주 유입과 그 주가, 그리고 매도 순서에 따른 양도세입니다."
-    table = _table(["후보 단지", "시세(기준)", "6개월 전 대비", "필요 추가 자금", f"{whose}예정 소득 반영 후", "추이(세전)"], rows)
+    # One card per target: the six-column table at 12px pushed the letter 63px past a phone's width (letter review
+    # 2026-11-19, report design §46).
+    table = "".join(
+        f'<div style="border:1px solid {HAIRLINE};border-radius:16px;padding:12px 14px;margin-top:8px">'
+        f'<div style="font-size:14px;font-weight:600;line-height:1.5;color:{INK}">{escape(named)}</div>'
+        f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-top:2px">시세 {escape(price)}'
+        + ("" if change == "-" else f" · 6개월 전 대비 {escape(change)}") + "</div>"
+        f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin-top:6px">필요 추가 자금 <b style="font-family:{MONO};'
+        f'color:{INK}">{escape(spread)}</b><br>{escape(whose)}예정 소득 반영 후 <b style="font-family:{MONO};color:{INK}">'
+        f'{escape(with_pay)}</b></div>'
+        + ("" if trend_text in ("-", "판단 보류") else
+           f'<div style="font-size:12px;color:{MUTED};margin-top:4px">추이(세전): {escape(trend_text)}</div>') + "</div>"
+        for named, price, change, spread, with_pay, trend_text in rows)
     # The spread trend (user review 2026-10-18): each target's gap six months ago against now, both before tax.
     trend = _paired_bars([(f"{t['alias']} · {t['label']}", t["spread_6m_ago"], t["spread_before_tax"])
                           for t in plan["targets"] if not t["trend_hold"]])
@@ -2967,8 +3171,8 @@ def _pension_stack(data: dict[str, Any]) -> str:
                  f"({_pct(stack['later_ratio'], 0)})로 줄어듭니다.")
     if stack["unknown"]:
         missing = [p for p in stack["pipelines"] if p["net_monthly"] is None]
-        lead += (f" {', '.join(pension.row_label(p) for p in missing)}은 아직 수령액을 몰라 뺀 하한이며, 답장으로 알려 주시면 바로 "
-                 "반영합니다: " + " ".join(f"{pension.row_label(p)}는 {p['missing']}." for p in missing if p["missing"]))
+        lead += (f" {josa(', '.join(pension.row_label(p) for p in missing), '은는')} 아직 수령액을 몰라 뺀 하한이며, 답장으로 알려 주시면 바로 "
+                 "반영합니다: " + " ".join(f"{josa(pension.row_label(p), '은는')} {p['missing']}." for p in missing if p["missing"]))
     head_tier = next((t for t in tiers if t["retire_age"] == head), None)
     inner = (_tier_table(tiers, None if head_tier is None else pension.need_words(head_tier, target)) + _gauge(f"{head}세 은퇴 기준 목표 월 생활비 대비 준비율", stack["ratio"], "")
              + _pension_timeline(stack) + _family_table(stack))
@@ -3040,16 +3244,28 @@ def _family_table(stack: dict[str, Any], colors: dict[str, str] | None = None) -
     rows = []
     for key, label, members in _families(stack):
         if not members:
-            rows.append([Raw(f'<span style="color:{_FAMILY_SHADES[key][0]}">●</span> <b>{escape(label)}</b>'),
-                         f"가입 없음({pension.CATEGORY_EXAMPLES[key]})", "-", "-", "-"])
+            rows.append((f'<span style="color:{_FAMILY_SHADES[key][0]}">●</span> <b>{escape(label)}</b>',
+                         f"가입 없음({pension.CATEGORY_EXAMPLES[key]})", "-"))
             continue
         for i, p in enumerate(members):
             family = f"<b>{escape(label)}</b> › " if i == 0 else "└ "
             basis = (("입력값" if p["basis_text"].startswith("알려 주신") else "추정") if p["net_monthly"] is not None
                      else f"입력 필요: {p['missing']}")
-            rows.append([Raw(f'<span style="color:{colors[p["id"]]}">●</span> {family}{escape(_sub_label(p))}'),
-                         _product_text(p), _period(p), _short(p["net_monthly"]), basis])
-    return _table(["분류", "가입 상품", "수령 기간", "월 세후", "근거"], rows)
+            rows.append((f'<span style="color:{colors[p["id"]]}">●</span> {family}{escape(_sub_label(p))}',
+                         " · ".join(part for part in (_product_text(p), _period(p), basis) if part and part != "-"),
+                         _short(p["net_monthly"])))
+    # Two columns that fit a phone: the pipeline over its product, payout period and basis, and the monthly figure. The
+    # five-column table pushed the Friday letter 123px past a phone's width (letter review 2026-11-19).
+    head = (f'<tr><td style="font-size:12px;font-weight:600;color:{MUTED};padding:6px 0;border-bottom:1px solid {HAIRLINE}">'
+            f'분류 · 가입 상품 · 수령 기간 · 근거</td><td style="text-align:right;font-size:12px;font-weight:600;color:{MUTED};'
+            f'padding:6px 0;border-bottom:1px solid {HAIRLINE};white-space:nowrap">월 세후</td></tr>')
+    body = "".join(
+        f'<tr><td style="padding:7px 8px 7px 0;border-bottom:1px solid {STRONG}">'
+        f'<div style="font-size:13px;line-height:1.5;color:{INK}">{name}</div>'
+        f'<div style="font-size:12px;line-height:1.5;color:{MUTED};margin-top:2px">{escape(detail)}</div></td>'
+        f'<td style="text-align:right;white-space:nowrap;vertical-align:top;font-family:{MONO};font-size:13px;color:{INK};'
+        f'padding:7px 0;border-bottom:1px solid {STRONG}">{escape(monthly)}</td></tr>' for name, detail, monthly in rows)
+    return f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px">{head}{body}</table>'
 
 
 def _pension_timeline(stack: dict[str, Any]) -> str:
@@ -3097,7 +3313,7 @@ def _pension_charts(pipelines: list[dict[str, Any]], rows: list[dict[str, Any]],
     ending = [_chart_label(p) for p in order if p.get("end_age") == drop_age]
     note = (f"{retire_age}세 은퇴 기준, 세후, 오늘 돈 가치입니다."
             + (f" {drop_age}세에 {'·'.join(ending)}이 끝나 연 {_short(by_age[drop_age - 1]['total'])}에서 "
-               f"{_short(by_age[drop_age]['total'])}로 줄어듭니다."
+               f"{_short(by_age[drop_age]['total'])}으로 줄어듭니다."
                if drop_age in by_age and drop_age - 1 in by_age and ending else ""))
     return (title + chart + f'<div style="font-size:13px;color:{INK};margin-top:6px;line-height:1.9">{legend}</div>'
             + f'<div style="{_NOTE}">{escape(note)}</div>')
@@ -3126,16 +3342,27 @@ def _tier_table(tiers: list[dict[str, Any]], words: str | None = None) -> str:
         need = t["outside_need"]
         bound = need is not None and need["upper_bound"]
         more = " 이상" if t["unknown"] else ""
-        row = [f"{t['retire_age']}세", "-" if gap is None else f"{gap}년({t['first_income_age']}세까지)" if gap else "없음",
-               _short(t["total_net"]) + more, _pct(t["ratio"], 0) + more]
+        lines = [("연금 없는 기간", "-" if gap is None else f"{gap}년({t['first_income_age']}세까지)" if gap else "없음"),
+                 ("모든 연금 개시 후 세후 월", _short(t["total_net"]) + more)]
         if later:
-            row.append("-" if t["later_net"] is None else f"{_short(t['later_net'])}{more}({t['later_age']}세~)")
-        rows.append(row + ["미상" if need is None else ("최대 " if bound else "") + _short(need["total"])])
+            lines.append(("기간 연금 끝난 뒤 세후 월",
+                          "-" if t["later_net"] is None else f"{_short(t['later_net'])}{more}({t['later_age']}세~)"))
+        lines.append(("연금 밖에서 준비할 돈", "미상" if need is None else ("최대 " if bound else "") + _short(need["total"])))
+        rows.append((f"{t['retire_age']}세 은퇴", "준비율 " + _pct(t["ratio"], 0) + more, lines))
     note = words or "연금 밖에서 준비할 돈은 연금만으로 모자라는 생활비를 메우려고 은퇴할 때 갖고 있어야 할 돈(오늘 돈 가치)입니다."
     if any(t["unknown"] for t in tiers) and not words:
         note += " 수령액을 모르는 연금이 있어 실제보다 크게 잡힌 최대치입니다."
-    headers = ["은퇴 나이", "연금 없는 기간", "모든 연금 개시 후 세후 월", "준비율"] + (["기간 연금 끝난 뒤 세후 월"] if later else [])
-    return _table(headers + ["연금 밖에서 준비할 돈"], rows) + f'<div style="{_NOTE}">{escape(note)}</div>'
+    # One card per retirement age: the five- or six-column table pushed the letter past a phone's width (letter review
+    # 2026-11-19, report design §46).
+    cards = "".join(
+        f'<div style="border:1px solid {HAIRLINE};border-radius:16px;padding:12px 14px;margin-top:8px">'
+        f'<div style="font-size:14px;font-weight:600;line-height:1.5;color:{INK}">{escape(age)} {_pill(ratio)}</div>'
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:4px">'
+        + "".join(f'<tr><td style="font-size:13px;line-height:1.5;color:{BODY};padding:3px 8px 3px 0">{escape(label)}</td>'
+                  f'<td style="text-align:right;font-family:{MONO};font-size:13px;color:{INK};padding:3px 0">{escape(value)}</td></tr>'
+                  for label, value in lines)
+        + "</table></div>" for age, ratio, lines in rows)
+    return cards + f'<div style="{_NOTE};margin-top:10px">{escape(note)}</div>'
 
 
 def pension_notes(stack: dict[str, Any] | None) -> list[str]:
@@ -3159,7 +3386,7 @@ def pension_notes(stack: dict[str, Any] | None) -> list[str]:
                  "동안 나눠 받는다고 보아 그 뒤에는 그래프에서 빠집니다. 국민연금은 물가만큼 오르므로 오늘 돈 가치로 평평합니다.")
     for p in stack["pipelines"]:
         if p.get("nominal_monthly") is not None:
-            notes.append(f"{_sub_label(p)}은 금액이 정해진 연금이라(약관상 연금기준금액 × 고정 지급률) 물가만큼 오르지 않습니다. "
+            notes.append(f"{josa(_sub_label(p), '은는')} 금액이 정해진 연금이라(약관상 연금기준금액 × 고정 지급률) 물가만큼 오르지 않습니다. "
                          f"{p.get('start_year', '')}년 금액 월 {_short(p['nominal_monthly'])}은 오늘 돈 가치로 월 "
                          f"{_short(p['net_monthly'])}이고, 받는 동안 해마다 물가만큼 가치가 줄어듭니다.")
     notes.append("분류: 공적연금(국민연금), 퇴직연금(DB형·DC형·IRP), 개인연금(연금저축, 공제 밖 납입을 모으는 ISA 등), 비과세 "
@@ -3379,9 +3606,38 @@ def _requests(requests: list[Any], full: bool, rest_where: str = "월요 보고"
     return _section("다음에 확인할 것", lead, "".join(rows))
 
 
+# The terms a letter may use without saying what they are, each in one plain line (letter review 2026-11-19, report
+# design §46: 리밸런싱, 코픽스, 대환, LTV, 가이던스, 잉여현금흐름 and 감액완납 stood unexplained; the prompt's "explain a
+# term in a parenthesis" was not kept, and a glossary section had been cut in v3.0). Only the terms a letter actually
+# uses are listed, at its end.
+GLOSSARY = (
+    ("리밸런싱", "많이 오른 자산을 일부 팔고 모자란 자산을 채워, 정해 둔 비중으로 되돌리는 일입니다."),
+    ("코픽스", "은행들이 예금 등으로 돈을 마련하는 데 든 평균 금리입니다. 변동금리 대출 이자가 이 금리를 따라 움직입니다."),
+    ("대환", "지금 대출을 조건이 더 좋은 다른 대출로 갈아타는 일입니다."),
+    ("LTV", "집값에 견준 대출금의 비율입니다. 70%라면 10억 원짜리 집에 7억 원까지 빌릴 수 있습니다."),
+    ("DSR", "한 해 소득에 견준, 그해 갚을 모든 대출 원금과 이자의 비율입니다. 대출 한도를 정하는 기준입니다."),
+    ("가이던스", "회사가 직접 밝힌 다음 분기나 다음 해의 실적 전망입니다."),
+    ("잉여현금흐름", "회사가 영업으로 번 현금에서 설비 투자에 쓴 돈을 뺀 나머지입니다. 배당과 자사주 매입이 여기서 나옵니다."),
+    ("감액완납", "보험료를 더 내지 않고, 그동안 쌓인 돈에 맞춰 보장을 줄여 계약을 유지하는 방법입니다."),
+    ("역전세", "새 세입자의 보증금이 지금 보증금보다 낮아, 집주인이 그 차액을 따로 마련해야 하는 상황입니다."),
+    ("스프레드", "두 가격이나 두 금리의 차이입니다."),
+    ("세액공제", "내야 할 세금에서 바로 빼 주는 금액입니다."),
+    ("%p", "두 비율의 차이를 재는 단위(퍼센트포인트)입니다. 3%가 4%가 되면 1%p 오른 것입니다."),
+)
+GLOSSARY_LINES = 5   # At most this many, in the order the letter uses them.
+_TAGS = re.compile(r"<[^>]+>")
+
+
+def glossary(bands: list[str]) -> list[tuple[str, str]]:
+    """The GLOSSARY terms the letter's bands use, in the order they first appear, at most GLOSSARY_LINES."""
+    text = _TAGS.sub(" ", "".join(bands))
+    found = sorted((text.find(term), term, meaning) for term, meaning in GLOSSARY if term in text)
+    return [(term, meaning) for _, term, meaning in found[:GLOSSARY_LINES]]
+
+
 def _footer(warnings: list[str] | tuple[str, ...] = (), week: str = "", corrections: str = "",
             notes: list[str] | tuple[str, ...] = (), law: bool = True, shared: bool = False, reader: str = "self",
-            doubtful: list[str] | tuple[str, ...] = ()) -> str:
+            doubtful: list[str] | tuple[str, ...] = (), terms: list[tuple[str, str]] | tuple[()] = ()) -> str:
     """One line (report design §18.1): what Smith never does, and that the reasons are a reply away. A problem
     with the report itself (stale data, no narrative) adds one warning line above it; a daily edition adds the
     week's plan (`week`, HTML) so a reader of one day knows where the other areas are (§27); `corrections` is the
@@ -3390,7 +3646,8 @@ def _footer(warnings: list[str] | tuple[str, ...] = (), week: str = "", correcti
     caveat out of a mail that computes no tax (a filing note without a dividend); `shared` says the mail also went to
     the configured family address and that only the client's own replies are answered (FR-51); `doubtful` names the
     parts of the spouse's letter kept with a verification caveat (user decision 2026-11-08: at the letter's end, not
-    under each paragraph). The footer reads in body ink at 13px: grey small print was hard to read."""
+    under each paragraph); `terms` are the letter's terms with their meanings (`glossary`). The footer reads in body
+    ink at 13px: grey small print was hard to read."""
     warn = ("" if not warnings else
             f'<div style="font-size:13px;line-height:1.6;color:{INK};margin-bottom:8px">▲ 확인 필요: '
             f'{escape(" · ".join(warnings))}. 자세한 사유는 이 메일에 답장으로 물어 주십시오.</div>')
@@ -3402,6 +3659,10 @@ def _footer(warnings: list[str] | tuple[str, ...] = (), week: str = "", correcti
     basis = ("" if not notes else
              f'<div style="{small};margin-bottom:12px"><div style="font-weight:600;margin-bottom:4px">계산 기준</div>'
              + "".join(f'<div style="margin:0 0 4px">· {escape(n)}</div>' for n in notes) + "</div>")
+    if terms:
+        basis = (f'<div style="{small};margin-bottom:12px"><div style="font-weight:600;margin-bottom:4px">용어 풀이</div>'
+                 + "".join(f'<div style="margin:0 0 4px">· <b style="font-weight:600;color:{INK}">{escape(term)}</b>: '
+                           f'{escape(meaning)}</div>' for term, meaning in terms) + "</div>") + basis
     guide = "" if not week else f'<div style="{small};margin-bottom:6px">{week}</div>'
     checked = "" if not corrections else f'<div style="{small};margin-bottom:6px">{escape(corrections)}</div>'
     caveat = f"세금·법령은 {tax.RULES_YEAR}년 기준으로 계산했으니 실행 전 현행 법령을 확인하십시오. " if law else ""

@@ -24,7 +24,7 @@ from smith import editions, gmail, ledger
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.proposals import snapshot
 from smith.report_data import build_report
-from smith.report_html import render
+from smith.report_html import card_numbers, render
 
 _WEEKDAY_INDEX = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6}
 LATE_AFTER = timedelta(minutes=30)
@@ -202,7 +202,8 @@ def publish(db: Path, *, recipient: str, credentials: tuple[str, str, str], now:
         # Fencing: this run outlived its lease and was recovered or superseded; another run owns the slot.
         return {"report_id": report_id, "status": "skipped", "subject": subject, "error_code": "claim-lost"}
     # The proposals the message carried are recorded in the same transaction as its final status.
-    shown = [snapshot(p) for p in data["advice"]["proposals"]]
+    numbers = card_numbers(data)   # The card numbers the letter printed: a reply names its proposal by one (§45).
+    shown = [snapshot(p, numbers.get(p.identity or p.key)) for p in data["advice"]["proposals"]]
     # The ledger time this report was built on and its comparison baseline go on to the spouse's letter of a per-person
     # edition (report design §42), built on the same snapshot so the household figures and the week's changes of the
     # two letters agree (sample 2026-11-08: without a baseline it read "첫 보고서" every week); it narrates itself.

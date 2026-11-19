@@ -43,6 +43,11 @@ _SIGN_DASH = re.compile(rf"(?<![^\s(\[~,:/]){_DASH}(?=\d)")
 _EDGE_DASH = re.compile(rf"^\s*{_DASH}\s*|\s*{_DASH}\s*$")
 _INNER_DASH = re.compile(rf"\s*{_DASH}\s*")
 
+# A unit spelled out after a figure takes the sign the code's own sentences and tables use: 1퍼센트포인트 -> 1%p,
+# 3퍼센트 -> 3% (letter review 2026-11-19: one letter read "1퍼센트포인트" and "1%p" a paragraph apart).
+_POINTS = re.compile(r"(?<=\d)\s*퍼센트\s*포인트")
+_PERCENT = re.compile(r"(?<=\d)\s*퍼센트")
+
 # (kind, pattern, what to write instead) for passages that need rewording: a block with one is rewritten once.
 PATTERNS = (
     ("calque", re.compile(r"[을를]\s*통해(?:서)?(?![가-힣])|[을를]\s*통한(?![가-힣])"), "~을 통해 -> ~로, ~해서"),
@@ -62,7 +67,7 @@ PATTERNS = (
 )
 # What the records and the mail call each kind of correction.
 LABELS = {"double-passive": "이중 피동", "range-dash": "범위 대시", "sign-dash": "부호 대시", "dash": "대시",
-          "calque": "번역 칼크", "cliche": "상투구", "hedge": "겹친 완곡", "slang": "구어"}
+          "calque": "번역 칼크", "cliche": "상투구", "hedge": "겹친 완곡", "slang": "구어", "unit": "단위 표기"}
 
 # The prompt rule every writer carries (appended to its system prompt). English like the prompts, Korean examples.
 _NATURAL = """Natural Korean (code fixes a double passive and a dash in place, asks one rewrite for the other marked
@@ -133,7 +138,8 @@ def _single_passive(match: re.Match[str]) -> str:
 
 # The steps of `tidy`, in order: (kind, pattern, replacement).
 _STEPS = (("double-passive", _DOUBLE_PASSIVE, _single_passive), ("range-dash", _RANGE_DASH, "~"),
-          ("sign-dash", _SIGN_DASH, "-"), ("dash", _EDGE_DASH, ""), ("dash", _INNER_DASH, ", "))
+          ("sign-dash", _SIGN_DASH, "-"), ("dash", _EDGE_DASH, ""), ("dash", _INNER_DASH, ", "),
+          ("unit", _POINTS, "%p"), ("unit", _PERCENT, "%"))
 
 
 def tidy(text: str, found: list[dict[str, str]] | None = None) -> str:
@@ -147,6 +153,13 @@ def tidy(text: str, found: list[dict[str, str]] | None = None) -> str:
             return new
         text = pattern.sub(substitute, text)
     return text
+
+
+def units(text: str) -> str:
+    """`text` with a spelled-out percent after a figure in its sign, as `tidy` writes it. The number check reads its
+    evidence through this, so prose that `tidy` changed ("0.25퍼센트포인트" -> "0.25%p") is still grounded in a source
+    that spells the unit out (Codex review 2026-11-19)."""
+    return _PERCENT.sub("%", _POINTS.sub("%p", text))
 
 
 def fixes(text: str) -> list[dict[str, str]]:

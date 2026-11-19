@@ -1035,11 +1035,71 @@ def _record_shown(conn: sqlite3.Connection, report_id: str, at: datetime, shown:
                          (instance_id, proposal["key"], proposal["identity"], figures, _db_time(at), _db_time(at),
                           _db_time(at), report_id))
         else:
-            instance_id = current["instance_id"]
-            conn.execute("UPDATE proposal_instances SET times_shown = times_shown + 1, last_shown_at = ?, "
-                         "last_report_id = ? WHERE instance_id = ?", (_db_time(at), report_id, instance_id))
-        conn.execute("INSERT INTO proposal_events (instance_id, at, event, report_id, figures) VALUES (?, ?, 'shown', "
-                     "?, ?)", (instance_id, _db_time(at), report_id, figures))
+            # The report showed the figures of the instance it was built on (`instance`, proposals.snapshot). If
+            # another report renewed the proposal while this one was being built, this delivery belongs to that
+            # earlier, now superseded instance: its card number stays there (an answer to the card is refused rather
+            # than put on figures the client never saw) and the new instance is not counted as shown again (Codex
+            # review 2026-11-19).
+            built_on = proposal.get("instance")
+            late = bool(built_on) and built_on != current["instance_id"] and conn.execute(
+                "SELECT 1 FROM proposal_instances WHERE instance_id = ?", (built_on,)).fetchone() is not None
+            instance_id = built_on if late else current["instance_id"]
+            if not late:
+                conn.execute("UPDATE proposal_instances SET times_shown = times_shown + 1, last_shown_at = ?, "
+                             "last_report_id = ? WHERE instance_id = ?", (_db_time(at), report_id, instance_id))
+        # The number on the proposal's card in that letter and a short label (proposals.snapshot): `asked_proposal`
+        # reads them back when the client answers the card by its number (report design §45).
+        note = f"{ASK_PREFIX}{int(proposal['ask'])} {str(proposal.get('label') or '')[:80]}" if proposal.get("ask") else None
+        conn.execute("INSERT INTO proposal_events (instance_id, at, event, report_id, figures, note) VALUES (?, ?, 'shown', "
+                     "?, ?, ?)", (instance_id, _db_time(at), report_id, figures, note))
+
+
+ASK_PREFIX = "ask:"   # A 'shown' event's note: "ask:<card number> <label>".
+
+
+def asked_proposal(conn: sqlite3.Connection, *, report_id: str, number: int) -> dict[str, Any] | None:
+    """The proposal a delivered report showed as card `number`: its instance, key, current status and the label
+    kept at delivery. None when that report had no such card (or was sent before cards were recorded). The instance
+    is the one the report was built on, which may be superseded by now (`decide_instance` then refuses)."""
+    row = conn.execute("SELECT e.instance_id, e.note, i.key, i.status FROM proposal_events e JOIN proposal_instances i "
+                       "USING (instance_id) WHERE e.report_id = ? AND e.event = 'shown' AND e.note LIKE ? "
+                       "ORDER BY e.event_id DESC LIMIT 1", (report_id, f"{ASK_PREFIX}{int(number)} %")).fetchone()
+    if row is None:
+        return None
+    return {"instance_id": row[0], "label": row[1].split(" ", 1)[1], "key": row[2], "status": row[3]}
+
+
+def decide_instance(conn: sqlite3.Connection, *, instance_id: str, status: str, decided_at: datetime,
+                    note: str | None = None, source: str | None = None) -> str:
+    """Record the client's decision on one delivered instance (the card a reply named). Returns "recorded",
+    "unchanged" (the instance already has that decision, or this `source` was applied before), "superseded" (the
+    proposal was raised anew since, so the decision would land on figures the client did not see) or "missing".
+
+    `source` names what the decision came from (a reply's message id). A source decides an instance once, whatever
+    its first outcome was: its retry after a failed confirmation never puts its decision back over a later one, so
+    even a decision that changed nothing is kept as an event (Codex review 2026-11-19)."""
+    if status not in PROPOSAL_DECISIONS:
+        raise ValueError(f"status must be one of {', '.join(PROPOSAL_DECISIONS)}")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute("SELECT status FROM proposal_instances WHERE instance_id = ?", (instance_id,)).fetchone()
+        kept = None if not source else f"{note or ''} {source}".strip()   # The event's note ends with the source.
+        applied = kept is not None and conn.execute(
+            "SELECT 1 FROM proposal_events WHERE instance_id = ? AND event IN ('accepted', 'declined', 'done') "
+            "AND note = ?", (instance_id, kept)).fetchone() is not None
+        outcome = ("missing" if row is None else "superseded" if row[0] == "superseded" else
+                   "unchanged" if row[0] == status or applied else "recorded")
+        if outcome == "recorded":
+            conn.execute("UPDATE proposal_instances SET status = ?, status_at = ? WHERE instance_id = ?",
+                         (status, _db_time(decided_at), instance_id))
+        if outcome == "recorded" or (outcome == "unchanged" and kept is not None and not applied):
+            conn.execute("INSERT INTO proposal_events (instance_id, at, event, note) VALUES (?, ?, ?, ?)",
+                         (instance_id, _db_time(decided_at), status, kept or note))
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+    return outcome
 
 
 def decide_proposal(conn: sqlite3.Connection, *, key: str, status: str, decided_at: datetime,

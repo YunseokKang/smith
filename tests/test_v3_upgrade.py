@@ -1539,7 +1539,7 @@ class ReviewFixTests(Upgrade):
         self.assertNotEqual(status, "stable")
         self.assertTrue(any("AI 해석을 만들지 못해" in r for r in reasons))
         page = render(data)[1]
-        footer = page.rsplit("Smith는 조회 전용 자문입니다", 1)[0][-700:]
+        footer = page.rsplit("Smith는 조회 전용 자문입니다", 1)[0][-1500:]   # The footer also explains the letter's terms.
         self.assertIn("▲ 확인 필요: 이번에는 AI 해석을 만들지 못해 계산 결과만으로 작성했습니다", footer)
 
     def test_a_stale_market_mortgage_rate_settles_nothing(self):

@@ -221,6 +221,22 @@ class QaTests(unittest.TestCase):
         self.assertNotIn("기억해 두겠습니다", self.sent[1]["html"])
         self.assertEqual(len(memory.load(folder)), 2)
 
+    def test_a_reply_that_only_decides_is_recorded_by_code_without_a_model_call(self):
+        with closing(ledger.connect(self.db)) as conn:   # The report carried one numbered proposal card.
+            ledger.record_proposals_shown(conn, report_id="r1", at=AT, shown=[
+                {"key": "emergency-reserve", "identity": "emergency-reserve", "renewed": True, "figures": {},
+                 "ask": 1, "label": "비상금 채우기"}])
+        self.thread[1] = message("question01", text="1번 보류\n\n2026년 10월 5일 (월) 오전 6:00, Smith님이 작성:\n> 원문")
+
+        def no_model(args, **kwargs):
+            raise AssertionError("a decision reply must not reach the model")
+        results = self.poll(runner=no_model)
+        self.assertEqual([(r["status"], r.get("decisions")) for r in results], [("answered", 1)])
+        self.assertIn("1번(비상금 채우기): 보류로 기록했습니다.", self.sent[0]["text"])
+        with closing(ledger.connect_read_only(self.db)) as conn:
+            self.assertEqual(ledger.active_proposals(conn)["emergency-reserve"]["status"], "declined")
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM advice_runs").fetchone()[0], 0)
+
     def test_quotes_are_stripped(self):
         self.assertEqual(qa.strip_quote("질문입니다\n> 인용\nOn Mon, Oct 5, 2026 at 6:00 AM Smith wrote:\n원문"), "질문입니다")
 
