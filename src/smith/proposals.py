@@ -758,12 +758,14 @@ def _concentration_trim(facts: dict[str, Any]) -> Proposal | Undetermined | None
         key="concentration-trim", priority=1 if employer else 2, identity=f"concentration-trim:{first['key']}",
         watch=("excess",), tolerance=Decimal("0.25"),
         headline=f"{_short_name(first['name'])} 초과분 1차 리밸런싱(분기 {short_won(first['per_quarter'])})",
-        title=(f"{first['name']} 비중이 주식의 {percent(first['share'], 0)}로 한 종목 한도 {limit}를 넘습니다. 초과분 약 "
+        # The base is named and the share has one decimal, as in the holdings list: the letter of 2026-11-17 gave this
+        # share as 39%, 39.5% and 40%, beside the household's 23% with no word on whose holdings each was.
+        title=(f"{first['name']} 비중이 고객님 명의 주식의 {percent(first['share'], 1)}로 한 종목 한도 {limit}를 넘습니다. 초과분 약 "
                f"{short_won(first['excess'])}을 {quarters}분기에 걸쳐 분기마다 약 {short_won(first['per_quarter'])}씩 정리해 넓은 "
                "지수펀드(코어)로 옮기시길 권합니다."),
         # In figures, not "자산이 흔들립니다" (user review 2026-10-18): what a fall of that stock takes off the stocks.
         why=(f"{first['name']} 주가가 {percent(drop, 0)} 빠지면 주식 자산 전체가 {percent(first['share'] * drop, 1)} 줄어듭니다. "
-             f"지금 {josa(first['name'], '은는')} {short_won(first['value'])}으로 주식의 {percent(first['share'], 0)}입니다." + double + others),
+             f"지금 {josa(first['name'], '은는')} {short_won(first['value'])}으로 고객님 명의 주식의 {percent(first['share'], 1)}입니다." + double + others),
         effect=(f"한도 {limit} 안으로 낮추면 같은 {percent(drop, 0)} 하락에도 주식 자산이 줄어드는 폭이 {percent(plan['limit'] * drop, 1)}에 "
                 "그치고, 옮긴 돈은 넓은 지수펀드에서 시장 전체의 성장을 따릅니다. 실적 발표 뒤 주가가 좋은 구간에 나눠 팔면 한 시점의 "
                 "주가에 덜 좌우됩니다." + grant_rule),

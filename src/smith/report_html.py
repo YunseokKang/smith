@@ -749,7 +749,7 @@ def _household_holdings(data: dict[str, Any]) -> str:
     segments = [(str(p["name"])[:12], p["value"], "") for p in top]
     if rest:
         segments.append((f"기타({len(rest)}종)", sum((p["value"] for p in rest), Decimal(0)), ""))
-    inner = _stacked(segments) + '<div style="height:8px"></div>'
+    inner = _stacked(segments, places=1) + '<div style="height:8px"></div>'
     inner += _table(["종목", "평가액", "비중", "보유"], [[_named(p), _short(p["value"]), _pct(p["share"]), whose(p)]
                                                      for p in listed[:10]])
     both = [str(p["name"]) for p in listed if len(p.get("owners") or []) > 1]
@@ -925,8 +925,8 @@ def _tiles(data: dict[str, Any], edition: editions.Edition) -> list[tuple[str, s
         return [(f"{mine}보유 종목 평가액", amount(f[p + "listed_value"]), f"{f[p + 'listed_count']}개 종목 · Hermes 운용분 제외"),
                 ("미실현 손익", "미상" if f[p + "listed_gain"] is None else _signed_short(f[p + "listed_gain"]),
                  "팔지 않아 확정되지 않은 손익" + partial),
-                ("해외 상장 비중", _pct(review["overseas_share"], 0), "보유 증권 전체 기준"),
-                ("가장 큰 종목 비중", _pct(review["top1_share"], 0), str(top)[:16])]
+                ("해외 상장 비중", _pct(review["overseas_share"]), f"{mine}보유 종목 기준"),
+                ("가장 큰 종목 비중", _pct(review["top1_share"]), f"{str(top)[:16]} · {mine}보유 종목 기준")]
     if edition.tiles == "property":
         # A per-person property day (§42) shows the reader's own homes in the hero; the household's follow below.
         own = bool(edition.personal) and data.get("own_real_estate") is not None
@@ -1294,7 +1294,8 @@ def _composition_bar(data: dict[str, Any], edition: editions.Edition | None) -> 
     if edition is not None and edition.tiles == "tax":   # Family hues, the shortfall in neutral grey.
         hue = {label: _FAMILY_SHADES[key][0] for key, label in pension.CATEGORIES}
         colors = [hue.get(label, MUTED_BAR) for label, value, _ in segments if value is not None and value > 0]
-    bar = _stacked(segments, on_dark=True, colors=colors)
+    bar = _stacked(segments, on_dark=True, colors=colors,
+                   places=1 if edition is not None and edition.tiles == "markets" else 0)
     if not bar:
         return ""
     foot = f'<div style="font-size:12px;color:{ON_DARK};margin-top:6px">{escape(note)}</div>' if note else ""
@@ -1365,11 +1366,20 @@ def _hero_segments(data: dict[str, Any], tiles: str | None) -> tuple[str, list[t
 
 
 def _stacked(segments: list[tuple[str, Decimal | None, str]], *, on_dark: bool = False,
-             colors: list[str] | None = None) -> str:
+             colors: list[str] | None = None, places: int = 0) -> str:
     """One stacked bar with a legend: each segment in its fixed colour, a 2px gap between fills, the share
     and an optional note beside each label. Unknown or zero segments are left out; nothing without a total.
-    `colors` (one per segment, all segments positive) replaces the palette, e.g. a family's shades."""
+    `colors` (one per segment, all segments positive) replaces the palette, e.g. a family's shades. `places`: the
+    decimals of the shares; the holdings bars take one, like every other place a holding's share is printed (a share
+    of 39.495% read 39%, 39.5% and 40% in one letter, letter review 2026-11-19). A single item is named with its
+    amount and no bar: a full bar reading "100%" says nothing."""
     rows = [(label, value, note) for label, value, note in segments if value is not None and value > 0]
+    if len(rows) == 1:
+        label, value, note = rows[0]
+        extra = f' <span style="font-family:{MONO}">({escape(note)})</span>' if note else ""
+        return (f'<div style="font-size:13px;line-height:1.6;color:{ON_DARK if on_dark else INK}"><span style="color:'
+                f'{(colors or SEGMENTS)[0]}">●</span> {escape(label)} <span style="font-family:{MONO}">{escape(_short(value))}'
+                f'</span>{extra}</div>')
     palette = colors or SEGMENTS
     if colors is None and len(rows) > len(SEGMENTS):  # Hues are never cycled: the tail folds into one segment.
         rows = rows[:len(SEGMENTS) - 1] + [("기타", sum((v for _, v, _ in rows[len(SEGMENTS) - 1:]), Decimal(0)), "")]
@@ -1392,7 +1402,7 @@ def _stacked(segments: list[tuple[str, Decimal | None, str]], *, on_dark: bool =
         dot = f'<span style="color:{palette[i % len(palette)]}">●</span> '
         extra = f' <span style="font-family:{MONO}">({escape(note)})</span>' if note else ""
         items.append(f'<span style="display:inline-block;white-space:nowrap;margin:6px 12px 0 0;font-size:12px;color:{ink}">'
-                     f'{dot}{escape(label)} <span style="font-family:{MONO}">{_pct(value / total, 0)}</span>{extra}</span>')
+                     f'{dot}{escape(label)} <span style="font-family:{MONO}">{_pct(value / total, places)}</span>{extra}</span>')
     return bar + f'<div style="line-height:1.8">{divider.join(items)}</div>'
 
 
@@ -2199,8 +2209,8 @@ def _future_income(data: dict[str, Any], *, overview: bool = False) -> str:
         received = ("스톡옵션을 행사해 주식으로 보유하면(행사 대금은 현금으로, 세금만큼은 주식을 팔아 낸다고 보면)" if stock.get("option")
                     else "예정된 주식 보상과 자사주로 받는 성과급(기준, 세후)을 받으면")
         inner += (f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin-top:10px">회사 주식 집중: '
-                  f'{escape(stock.get("name") or stock["symbol"])}의 비중은 지금 주식의 <b>{_pct(stock["share_now"], 0)}</b>이고, '
-                  f'{received} <b>{_pct(stock["share_with_grants"], 0)}</b>가 됩니다. 받는 대로 일부를 분산하는 '
+                  f'{escape(stock.get("name") or stock["symbol"])}의 비중은 지금 우리 집 전체 주식의 <b>{_pct(stock["share_now"])}</b>이고, '
+                  f'{received} <b>{_pct(stock["share_with_grants"])}</b>가 됩니다. 받는 대로 일부를 분산하는 '
                   "원칙을 정해 두시길 권합니다.</div>")
     return _section("앞으로 들어올 돈", lead, inner)
 
@@ -2532,7 +2542,7 @@ def _holdings(data: dict[str, Any], story: dict[str, Any], full: bool, *, quanti
     segments = [(str(p["name"])[:12], p["value"], "") for p in listed[:4]]
     if len(listed) > 4:
         segments.append((f"기타({len(listed) - 4}종)", sum((p["value"] for p in listed[4:]), Decimal(0)), ""))
-    inner = _stacked(segments) + '<div style="height:8px"></div>'
+    inner = _stacked(segments, places=1) + '<div style="height:8px"></div>'
     inner += _holding_rows(positions, opinions)
     if quantities:
         inner += _quantity_changes(data)

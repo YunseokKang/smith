@@ -587,6 +587,10 @@ class ChangeTests(unittest.TestCase):
         payload = narrative.build_payload(data["view"], data, None)
         self.assertEqual(payload["change_since_last_report"]["market_and_valuation"], "-260000")
         self.assertEqual(payload["change_since_last_report"]["from"], "2026-10-10")
+        # The week's net-worth change is the overview's: a themed day's narrative is not given it (report design §47).
+        themed = build_report(conn, as_of=t1, known_at=t1, baseline=t0, kind="rates")
+        self.assertIsNotNone(themed["change"])
+        self.assertIsNone(narrative.build_payload(themed["view"], themed, None)["change_since_last_report"])
 
 
 class LoanTests(Upgrade):

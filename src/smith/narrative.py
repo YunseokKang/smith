@@ -66,7 +66,7 @@ logger = logging.getLogger(__name__)
 # v32: no per-sentence law caveat; the footer says it once (user decision 2026-11-02); the check no longer asks for it.
 # v33: holdings[].week_change and index_moves; a holding that moved 10% or more opens its reason with why (2026-11-03).
 # v34: tax.realized_this_year, this year's sales with their estimated gains and the deduction left (2026-11-03).
-PROMPT_VERSION = "narrative-v43"   # v43: relationships and close_people on the tax day (§43); v42: replies_recorded (the spouse's replies are answered, their facts not kept); v41: the money needed outside the pensions in the client's wording; v40: the overview per person, whose pay; v39: property and life days per person (§42).
+PROMPT_VERSION = "narrative-v44"   # v44: the week's net-worth change only on the overview, whose holdings a share is of (§47); v43: relationships and close_people on the tax day (§43); v42: replies_recorded (the spouse's replies are answered, their facts not kept); v41: the money needed outside the pensions in the client's wording; v40: the overview per person, whose pay; v39: property and life days per person (§42).
 MODEL = headless.MODEL
 # A runaway guard, not a cost limit (flat-rate subscription): the markets day cost 4.39 USD on 2026-10-27 and, with a
 # payload a fifth larger, ran past 5.00 on 2026-11-03 (error_max_budget_usd), so that report went out without opinions.
@@ -246,7 +246,8 @@ Input JSON:
 - strategy: long-range goal tracks computed by code.
 - undetermined: judgements code could not make because an input is unknown. Never describe these areas
   as fine or under control; say the judgement is pending the missing information.
-- change_since_last_report: the net-worth change from `from` to `to` (dates), split into market_and_valuation
+- change_since_last_report (the overview only; null on a themed day, which then says nothing of the week's net-worth
+  change): the net-worth change from `from` to `to` (dates), split into market_and_valuation
   (market prices, FX and revaluations, including manual property revaluations, applied to what the household
   already held) and net_inflow (trades and deposits, cash saved, debt repaid, records newly entered). Brief
   both figures with the dates, calling the first "시장·평가 변동"; a market loss is never averaged away into a
@@ -480,7 +481,9 @@ Write:
   opinion applies (for example BUF-CIRCLE for a company the client may not understand, BUF-INDEX for a
   broad fund). When `per_person_letter` is true, holdings, holding_quantity_changes, policy_checks and
   portfolio_facts are the client's own (share, value and gain of the client's own portfolio), while
-  household_portfolio_facts adds the spouse's holdings for the household paragraph. Opinions must agree with the policy: do not advise adding to a holding that breaches the
+  household_portfolio_facts adds the spouse's holdings for the household paragraph. One stock has two shares, so say
+  whose holdings a share is of every time you write one ("고객님 명의 주식의 39.5%", "두 분 합산 주식의 22.8%") and
+  keep the one decimal the figures have. Opinions must agree with the policy: do not advise adding to a holding that breaches the
   single-company limit, and do not justify an opinion by a price forecast alone (BUF-NO-MACRO,
   BUF-MR-MARKET). A holding with must_opine true (above the limit, or the employer's stock) must get an
   opinion, written first and in the most depth: the double concentration, the trim schedule from
@@ -545,6 +548,10 @@ def build_payload(view: Any, data: dict[str, Any], brief: dict[str, Any] | None,
     # A per-person edition (report design §42) is narrated once per member, each call on the reader's own holdings,
     # and also writes the household paragraph of its "우리 집 …" section.
     payload["per_person_letter"] = bool(edition.personal)
+    if edition.key != "overview":
+        # The week's net-worth change is the overview's (report design §47): every themed letter opened with it as its
+        # second sentence, on the property and rates days too, against "no weight on a short-term move".
+        payload["change_since_last_report"] = None
     if edition.personal:
         # The spouse's replies are answered but what they state is not recorded (report design §42.11): that letter never
         # asks for a fact (sample 2026-11-08).

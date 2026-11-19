@@ -128,6 +128,27 @@ class LayoutTests(unittest.TestCase):
             self.assertIn(text, cards, text)
 
 
+    def test_a_holdings_share_reads_the_same_wherever_it_is_printed_and_names_whose_holdings_it_is_of(self):
+        data = self.built["markets"]
+        trim = next(p for p in data["advice"]["proposals"] if p.key == "concentration-trim")
+        self.assertIn("BIG 비중이 고객님 명의 주식의 90.0%로", trim.title)
+        self.assertIn("고객님 명의 주식의 90.0%입니다.", trim.why)
+        page = report_html.render(data)[1]
+        self.assertEqual(report_html._tiles(data, editions.EDITIONS["markets"])[3][:2], ("가장 큰 종목 비중", "90.0%"))
+        self.assertIn('BIG <span style="font-family:' + report_html.MONO + '">90.0%</span>', page)      # The bar's legend.
+        self.assertNotIn(">90%<", page)
+
+    def test_a_single_item_is_named_with_its_amount_instead_of_a_full_bar(self):
+        one = report_html._stacked([("주택담보대출", Decimal("230000000"), ""), ("신용대출", None, "")])
+        self.assertIn("주택담보대출", one)
+        self.assertIn("2.3억 원", one)
+        self.assertNotIn("100%", one)
+        self.assertNotIn("<table", one)
+        two = report_html._stacked([("가", Decimal(395), ""), ("나", Decimal(605), "")], places=1)
+        self.assertIn("39.5%", two)
+        self.assertIn("<table", two)
+
+
 class WordingTests(unittest.TestCase):
     def test_a_particle_follows_the_last_sound_of_the_word_before_it(self):
         cases = [("삼성전자", "은는", "삼성전자는"), ("셀트리온", "은는", "셀트리온은"), ("150만 원", "로", "150만 원으로"),
