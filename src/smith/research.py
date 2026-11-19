@@ -30,7 +30,7 @@ from smith import editions, headless, holdings, ledger, sources
 from smith.payload import LedgerView, check_outbound, mask_identifiers
 from smith.records import Kind
 
-PROMPT_VERSION = "research-v3"  # v3: the rates topic asks for the latest meeting's vote and the governor's guidance.
+PROMPT_VERSION = "research-v4"  # v4: no personal page as the source of a forecast or of results (report design §48); v3: the rates topic asks for the latest meeting's vote and the governor's guidance.
 MODEL = headless.MODEL
 BUDGET_USD = "10.00"
 TIMEOUT_SECONDS = 1800
@@ -42,6 +42,16 @@ MAX_ITEM_AGE = timedelta(days=730)  # Older findings are history, not this week'
 # else (news, banks, blogs) is "secondary": usable for context, outlooks and market colour.
 OFFICIAL_SUFFIXES = (".go.kr", "korea.kr", "bok.or.kr", "reb.or.kr", "fss.or.kr", "kdi.re.kr", "kif.re.kr",
                      "assembly.go.kr", "federalreserve.gov", ".gov")
+
+# Pages anyone publishes without an editor: blogs, communities, social posts, video channels. A finding from one is
+# kept (doubts are flagged, not deleted) but its source is marked in the letter (letter review 2026-11-19: a rate
+# outlook rested on a personal blog).
+PERSONAL_HOSTS = ("blog.naver.com", "post.naver.com", "cafe.naver.com", "cafe.daum.net", "tistory.com", "brunch.co.kr",
+                  "velog.io", "medium.com", "substack.com", "blogspot.com", "wordpress.com", "reddit.com", "youtube.com",
+                  "dcinside.com", "clien.net", "x.com", "twitter.com", "facebook.com", "threads.net")
+PERSONAL_MARK = "(개인 글)"
+UNNAMED_SOURCE = "이름 미확인 매체"
+_MASK = mask_identifiers("010-1234-5678")   # What payload.mask_identifiers leaves in place of an identifier.
 
 _TEXT = lambda limit: {"type": "string", "maxLength": limit}  # noqa: E731 - schema shorthand
 PER_HOLDING_ITEMS = 3
@@ -70,7 +80,14 @@ def brief_schema(max_items: int, max_gaps: int = 10) -> dict[str, Any]:
 
 BRIEF_SCHEMA = brief_schema(80, 30)
 
-SYSTEM_PROMPT = """You are the research analyst of Smith, a read-only private wealth adviser for one Korean
+# Carried by both research prompts (the topics' and the holdings'): the holdings call is the one that looks up results
+# and guidance (Codex review 2026-11-19).
+NO_PERSONAL_PAGES = """- Never take a forecast, an outlook or a company's results from a personal blog, an online community, a social post
+  or a video channel. Cite the page that first said it (the central bank, the filing on DART or SEC EDGAR, the
+  company's own release, the research house) or an established daily; when only such a personal page says it,
+  leave the finding out."""
+
+SYSTEM_PROMPT = f"""You are the research analyst of Smith, a read-only private wealth adviser for one Korean
 household. Your only job is to find current, verifiable facts about the listed topics. You know nothing
 about the household's money and must not guess it.
 
@@ -79,6 +96,7 @@ Method:
   기획재정부, 한국은행, 국세청, 국가법령정보센터, 서울특별시·경기도·해당 시군구 보도자료, 한국부동산원(R-ONE),
   국토교통부 실거래가 공개시스템, KB부동산 통계. Use major news outlets only for context or when no
   primary source exists, and say so in `kind` ("opinion" for commentary, "forecast" for outlooks).
+{NO_PERSONAL_PAGES}
 - Focus on the last 90 days relative to `today`, plus rules currently in force that matter for the topic.
 - Laws, taxes, loan rules and regulated areas must come from an official publisher's page (go.kr,
   korea.kr, bok.or.kr, reb.or.kr, fss.or.kr, or a foreign .gov) whenever one exists; items from other
@@ -110,6 +128,7 @@ Method:
   CNBC, 연합뉴스, 한국경제, 매일경제) and brokerage research summaries for consensus and context.
   kind: "fact" for reported results and events, "forecast" for guidance, estimates and target prices,
   "opinion" for commentary and ratings.
+{NO_PERSONAL_PAGES}
 - Every item must come from a page you actually opened: put its exact URL in source_url, its title in
   source_title, the publishing organization in publisher, and its date in published_on (YYYY-MM-DD,
   YYYY-MM if only the month is shown, or "" if the page shows none). kind is exactly one of fact, policy,
@@ -307,7 +326,7 @@ def clean_items(raw: list[dict[str, str]], topic_refs: set[str], today: date) ->
         url = item["source_url"].strip()
         kept.append({"ref": f"R{len(kept) + 1}", "topic": item["topic"].strip(), "headline": _clean(item["headline"], 200),
                      "detail": _clean(item["detail"], 1200), "published_on": item["published_on"].strip(),
-                     "publisher": _clean(item["publisher"], 100), "source_title": _clean(item["source_title"], 300),
+                     "publisher": publisher(item["publisher"], url), "source_title": _clean(item["source_title"], 300),
                      "source_url": url, "kind": _kind(item["kind"]), "tier": tier(url)})
     return kept, reasons
 
@@ -324,6 +343,29 @@ def _cap_per_topic(items: list[dict[str, str]], reasons: dict[str, int]) -> list
             continue
         kept.append(dict(item, ref=f"R{len(kept) + 1}"))
     return kept
+
+
+def personal(url: str) -> bool:
+    """Whether the page's host is one of PERSONAL_HOSTS (or under one: a blog's own subdomain)."""
+    host = (urlsplit(url).hostname or "").lower()
+    return any(host == name or host.endswith("." + name) for name in PERSONAL_HOSTS)
+
+
+def publisher(name: str, url: str) -> str:
+    """The source's name as the letter prints it. A name the identifier rules cut ("24/7 Wall St." read as
+    "24/[식별정보 제거].") or an empty one gives way to the page's host, which the link shows anyway; a personal page is
+    marked unless the name already says so."""
+    text = _clean(name, 100)
+    if not text or _MASK in text:
+        host = (urlsplit(url).hostname or "").lower()
+        text = host[4:] if host.startswith("www.") else host
+        if not text or mask_identifiers(text) != text:
+            # A host that itself reads as an identifier (a phone number as a blog's subdomain) would stop the whole
+            # narrative at the outbound check (Codex review 2026-11-19): a fixed name instead.
+            text = UNNAMED_SOURCE
+    if personal(url) and not any(word in text for word in ("블로그", "커뮤니티", "개인")):
+        text += PERSONAL_MARK
+    return text
 
 
 def tier(url: str) -> str:

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from smith import editions, fmt, korean, ledger, narrative, report_html
+from smith import editions, fmt, korean, ledger, narrative, report_html, research
 from smith.importer import parse_import
 from smith.proposals import STALE_AFTER, Proposal
 from smith.report_data import build_report
@@ -167,6 +167,35 @@ class WordingTests(unittest.TestCase):
         # The number check reads a source that spells the unit out the same way, so the tidied prose stays grounded.
         self.assertEqual(narrative._written_percents("기준금리를 0.25퍼센트포인트 내렸고 물가는 2.1퍼센트입니다."),
                          {Decimal("0.25"), Decimal("2.1")})
+
+    def test_a_source_is_named_by_its_publisher_never_by_a_masked_name_and_a_personal_page_is_marked(self):
+        cases = [("24/7 Wall St.", "https://www.247wallst.com/a", "247wallst.com"),       # The identifier rules cut the name.
+                 ("", "https://www.example.co.kr/a", "example.co.kr"),
+                 ("한국은행", "https://www.bok.or.kr/a", "한국은행"),
+                 ("Sky Atlas", "https://skyatlas.tistory.com/1", "Sky Atlas(개인 글)"),
+                 ("네이버 블로그", "https://blog.naver.com/x/1", "네이버 블로그"),           # Already says what it is.
+                 ("매일경제", "https://www.mk.co.kr/news/1", "매일경제"),
+                 # A host that reads as an identifier is never put back: a fixed name, with the personal mark.
+                 ("", "https://01012345678.tistory.com/1", "이름 미확인 매체(개인 글)"),
+                 ("문의 010-1234-5678", "https://01012345678.tistory.com/1", "이름 미확인 매체(개인 글)"),
+                 ("경제지", "https://blog.naver.com.example.org/1", "경제지")]             # Not under a personal host.
+        for name, url, expected in cases:
+            with self.subTest(name=name, url=url):
+                self.assertEqual(research.publisher(name, url), expected)
+        kept, _ = research.clean_items([{"topic": "T1", "headline": "금리 전망", "detail": "내년 인상 전망.",
+                                         "published_on": "2026-11-10", "publisher": "24/7 Wall St.", "source_title": "Outlook",
+                                         "source_url": "https://www.247wallst.com/a", "kind": "forecast"}],
+                                       {"T1"}, AT.date())
+        self.assertEqual(kept[0]["publisher"], "247wallst.com")
+        for prompt in (research.SYSTEM_PROMPT, research.HOLDINGS_PROMPT):     # Both research calls carry the rule.
+            self.assertIn(research.NO_PERSONAL_PAGES, prompt)
+
+    def test_the_letter_keeps_labels_small_and_sets_sentences_and_table_cells_at_reading_size(self):
+        table = report_html._table(["항목", "금액"], [["월 수입", "456만 원"]])
+        self.assertIn('<td style="font-size:13px', table)
+        self.assertIn('<th style="text-align:left;font-size:12px', table)            # A column head is a label.
+        self.assertIn("font-size:13px", report_html._sources([("한국은행 2026-11-10", "https://www.bok.or.kr/a")]))
+        self.assertIn("font-size:12px", report_html._pill("유지"))
 
     def test_a_table_amount_reads_short_from_a_million_won_and_exact_below(self):
         cases = [(Decimal("230000000"), "2.3억 원"), (Decimal("4560000"), "456만 원"), (Decimal("240000"), "240,000원"),

@@ -468,3 +468,4 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
   하루에 68개, 362MB가 쌓였다. C:는 원래 여유가 거의 없었다.
 - 해결: `Get-ChildItem $env:TEMP -Directory -Filter "HeadlessEdge*" | Remove-Item -Recurse -Force`(Edge 헤드리스 프로세스가 없을 때).
 - 예방: 스크린샷 명령에 `--user-data-dir="<scratchpad>\edge-profile"`을 주어 한 폴더만 쓰고, 끝나면 그 폴더를 지운다.
+  `Start-Process -Wait`는 Edge의 crashpad-handler가 남으면 끝나지 않는다(5분 제한에 걸렸다). `-Wait` 없이 띄우고 스크린샷 파일이 생길 때까지 기다린 뒤, 명령줄에 그 프로필 폴더가 있는 `msedge` 프로세스만 종료한다.

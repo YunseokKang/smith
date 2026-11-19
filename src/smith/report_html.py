@@ -467,7 +467,7 @@ def _company_card(c: dict[str, Any]) -> str:
                        for n, url in enumerate((r or {}).get("sources") or [], 1))
     notes = ("* 표시한 문장의 수치 일부는 출처 페이지에서 자동 확인하지 못했습니다. " if r and r.get("unchecked_figures") else "")
     tail = ("" if not notes and not links else
-            f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-top:4px">{escape(notes)}{links}</div>')
+            f'<div style="font-size:13px;line-height:1.6;color:{MUTED};margin-top:4px">{escape(notes)}{links}</div>')
     return (f'<div style="margin:12px 0;padding:14px 16px;border:1px solid {HAIRLINE};border-radius:16px">'
             f'<div style="font-size:16px;font-weight:700;line-height:1.4;color:{INK}">{escape(c["name"])}</div>'
             + (f'<div style="font-family:{MONO};font-size:12px;color:{MUTED};margin:2px 0 4px">{escape(held)}</div>' if held else "")
@@ -1208,7 +1208,7 @@ def _table(headers: list[str], rows: list[list[str | tuple[str, str]]]) -> str:
     """The table twin every chart carries; values are exact. A (text, url) cell becomes a source link."""
     head = "".join(f'<th style="text-align:left;font-size:12px;font-weight:600;color:{MUTED};padding:6px;'
                    f'border-bottom:1px solid {HAIRLINE}">{escape(h)}</th>' for h in headers)
-    body = "".join("<tr>" + "".join(f'<td style="font-size:12px;padding:6px;color:{BODY};border-bottom:1px solid {STRONG};'
+    body = "".join("<tr>" + "".join(f'<td style="font-size:13px;padding:6px 5px;color:{BODY};border-bottom:1px solid {STRONG};'
                                     f'{"font-family:" + MONO + ";" if _numeric(c) else ""}'
                                     f'{"white-space:nowrap" if len(_text_of(c)) <= 10 else ""}">{_cell(c)}</td>'
                                     for c in row) + "</tr>" for row in rows)
@@ -1298,7 +1298,7 @@ def _composition_bar(data: dict[str, Any], edition: editions.Edition | None) -> 
                    places=1 if edition is not None and edition.tiles == "markets" else 0)
     if not bar:
         return ""
-    foot = f'<div style="font-size:12px;color:{ON_DARK};margin-top:6px">{escape(note)}</div>' if note else ""
+    foot = f'<div style="font-size:13px;color:{ON_DARK};margin-top:6px">{escape(note)}</div>' if note else ""
     return (f'<tr><td style="padding-top:16px"><div style="font-size:12px;font-weight:600;color:{ON_DARK};'
             f'margin-bottom:8px">{escape(title)}</div>{bar}{foot}</td></tr>')
 
@@ -1442,7 +1442,7 @@ def _tile_grid(tiles: list[tuple[Any, ...]]) -> str:
                 f'<div style="font-size:12px;font-weight:600;color:{ON_DARK_SOFT}">{escape(title)}</div>'
                 f'<div style="font-family:{MONO};font-weight:500;font-size:22px;color:{color};margin:8px 0 2px">'
                 f'{escape(value)}</div>'
-                f'<div style="font-size:12px;color:{ON_DARK_SOFT}">{escape(sub)}</div></div></td>')
+                f'<div style="font-size:13px;color:{ON_DARK_SOFT}">{escape(sub)}</div></div></td>')
     # Two by two so the tiles stay readable on a phone.
     grid = "".join(f"<tr>{tile(*a)}{tile(*b)}</tr>" for a, b in (tiles[:2], tiles[2:]))
     return (f'<tr><td style="padding-top:18px"><table role="presentation" width="100%" cellpadding="0" '
@@ -1557,7 +1557,7 @@ def _proposals(advice: dict[str, Any], full: bool, edition: editions.Edition | N
             # report has no such day, so it keeps the certainty label.
             pointer = f"자세히: {escape(home.label)} 보고" if home else f"근거의 성격: {escape(p.certainty)}"
             detail = (f'<div style="font-size:14px;line-height:1.6;color:{BODY}">{escape(_first_sentence(p.why))}</div>'
-                      f'<div style="font-size:12px;color:{MUTED};margin-top:6px">{pointer}</div>')
+                      f'<div style="font-size:13px;color:{MUTED};margin-top:6px">{pointer}</div>')
         if p.table:
             # The researched products the action moves money into (client request 2026-10-20).
             step = p.figures.get("per_quarter")
@@ -1568,10 +1568,10 @@ def _proposals(advice: dict[str, Any], full: bool, edition: editions.Edition | N
                        + ("1순위" if count == 1 else f"1~{count}순위")
                        + (f" · 분기 {_short(step)}" if step is not None else "") + "</div>"
                        + _pick_cards(p.table[1:]) + _sources(p.table_links)
-                       + f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-top:6px">수량은 분기 금액을 1순위에 모두 '
+                       + f'<div style="font-size:13px;line-height:1.6;color:{MUTED};margin-top:6px">수량은 분기 금액을 1순위에 모두 '
                        f"넣을 때입니다. {others}가격은 조사 시점 종가라 주문 전 다시 확인하십시오.</div>")
         elif p.key in (advice.get("pending_products") or ()):
-            detail += (f'<div style="font-size:12px;color:{MUTED};margin-top:10px">옮길 상품 1~3순위는 검토 팀의 확인이 끝나는 대로 '
+            detail += (f'<div style="font-size:13px;color:{MUTED};margin-top:10px">옮길 상품 1~3순위는 검토 팀의 확인이 끝나는 대로 '
                        "다음 보고서에 싣습니다.</div>")
         if state == "decide":
             detail += _decision_line(p, number, asks)
@@ -1599,7 +1599,7 @@ def _proposals(advice: dict[str, Any], full: bool, edition: editions.Edition | N
                  f'{_expand_hint()}함께 검토한 다른 제안 {len(rest)}건</summary>'
                 f'<div style="margin-top:6px">{items}</div></details></td></tr>')
     if not full and edition is None:  # The overview cards point to their themed day themselves.
-        more += (f'<tr><td style="padding-top:12px;font-size:12px;color:{MUTED}">목요 보고는 요약입니다. 근거와 위험은 월요 '
+        more += (f'<tr><td style="padding-top:12px;font-size:13px;color:{MUTED}">목요 보고는 요약입니다. 근거와 위험은 월요 '
                  '보고에서 자세히 말씀드립니다.</td></tr>')
     return head + "".join(cards) + more + pending
 
@@ -1614,7 +1614,7 @@ def _pick_cards(rows: tuple[tuple[str, ...], ...]) -> str:
         pill = _pill(f"{rank}순위", "good" if rank == "1" else "neutral")
         cards.append(f'<div style="border:1px solid {HAIRLINE};border-radius:16px;padding:12px 14px;margin-top:8px">'
                      f'<div style="font-size:14px;font-weight:600;line-height:1.5;color:{INK}">{pill} {escape(product)}</div>'
-                     f'<div style="font-size:12px;color:{MUTED};margin-top:4px">{escape(meta)}</div>'
+                     f'<div style="font-size:13px;color:{MUTED};margin-top:4px">{escape(meta)}</div>'
                      f'<div style="font-size:14px;font-weight:600;font-family:{MONO};color:{INK};margin-top:8px">{escape(size)}</div>'
                      f'<div style="font-size:13px;line-height:1.65;color:{BODY};margin-top:6px">{escape(reason)}</div></div>')
     return "".join(cards)
@@ -1655,7 +1655,7 @@ def _judgement(story: dict[str, Any]) -> str:
     if brief:
         basis = f"{brief['created_at']:%m월 %d일 %H시} 조사 자료 기준" + (" (이번 보고에서 새로 조사하지 못해 다시 사용)"
                                                                      if brief.get("reused") else "")
-        basis = f'<div style="font-size:12px;color:{ON_DARK_SOFT};margin-top:6px">{escape(basis)}</div>'
+        basis = f'<div style="font-size:13px;color:{ON_DARK_SOFT};margin-top:6px">{escape(basis)}</div>'
     links = "".join(f' · <a href="{escape(url, quote=True)}" style="color:{ON_DARK_SOFT}">{escape(title)}</a>'
                     for url, title in dict((u, t) for t, u in story.get("situation_links", [])).items()
                     if _plain_link(url))
@@ -1665,7 +1665,7 @@ def _judgement(story: dict[str, Any]) -> str:
             f'margin-bottom:8px">Smith의 판단</div>'
             f'<div style="font-family:{SANS};font-weight:400;font-size:22px;line-height:1.35;letter-spacing:-0.4px;'
             f'color:{ON_DARK}">{escape(headline)}</div>{body}{basis}'
-            + (f'<div style="font-size:12px;color:{ON_DARK_SOFT};margin-top:4px">출처{links}</div>' if links else "")
+            + (f'<div style="font-size:13px;color:{ON_DARK_SOFT};margin-top:4px">출처{links}</div>' if links else "")
             + '</td></tr>')
 
 
@@ -1717,7 +1717,7 @@ def _sources(links: Any) -> str:
     items = [_cell((title, url)) for url, title in reversed(list(unique.items()))][:4]
     if not items:
         return ""
-    return (f'<div style="font-size:12px;color:{MUTED};margin-top:4px">출처: ' + " · ".join(items) + "</div>")
+    return (f'<div style="font-size:13px;color:{MUTED};margin-top:4px">출처: ' + " · ".join(items) + "</div>")
 
 
 def _changes_outside(story: dict[str, Any], title: str = "이번 주 눈여겨볼 변화") -> str:
@@ -1789,7 +1789,7 @@ def _law_watch(data: dict[str, Any], rules: str) -> tuple[str, str]:
                    f'({a["promulgated"]} 공포, {a["effective"]} 시행): {escape(a["about"])}</div>' for a in found)
     notice = (f'<div style="margin:4px 0 12px;padding:10px 12px;border-left:3px solid {INK}">'
               f'<div style="font-size:14px;font-weight:600;color:{INK};margin-bottom:4px">세법 개정 공포: Smith 계산에 아직 반영 전'
-              f'</div>{rows}<div style="font-size:12px;color:{MUTED};margin-top:4px">아래 금액은 개정 전 규칙으로 계산했습니다. '
+              f'</div>{rows}<div style="font-size:13px;color:{MUTED};margin-top:4px">아래 금액은 개정 전 규칙으로 계산했습니다. '
               f'시행일 전에 계산 규칙을 고칩니다.</div></div>')
     return notice, note
 
@@ -1818,7 +1818,7 @@ def _holding_tax(data: dict[str, Any]) -> str:
                         f"공시가격 {_short(h['price'])}{'(추정)' if h['estimated'] else ''} · 재산세 연 <b>{_short(p['total'])}</b>"
                         + (f" ({bills})" if bills else "")
                         + ("" if h["one_home"] else " · 1주택 특례 없이 계산"))
-                     + f'</div><div style="font-size:12px;color:{MUTED}">{escape(h["basis"])}</div></div>')
+                     + f'</div><div style="font-size:13px;color:{MUTED}">{escape(h["basis"])}</div></div>')
     owners = found["owners"]
     comprehensive = {o: v["comprehensive"]["total"] for o, v in owners.items() if v["comprehensive"] is not None}
     if comprehensive and all(v == 0 for v in comprehensive.values()) and len(comprehensive) == len(owners):
@@ -1854,7 +1854,7 @@ def _holding_tax(data: dict[str, Any]) -> str:
     notice, checked = _law_watch(data, "holding")
     inner = notice + "".join(lines) + "".join(f'<div style="font-size:13px;line-height:1.6;color:{BODY};margin-top:6px">'
                                               f'{escape(n)}</div>' for n in notes)
-    inner += (f'<div style="font-size:12px;color:{MUTED};margin-top:8px">근거(보유세 기준 {rules.RULES_YEAR}년, '
+    inner += (f'<div style="font-size:13px;color:{MUTED};margin-top:8px">근거(보유세 기준 {rules.RULES_YEAR}년, '
               f'{rules.RULES_CHECKED} 확인{escape(checked)}): ' + " · ".join(_cell(item) for item in rules.sources())
               + " · " + escape("; ".join(rules.assumptions())) + "</div>")
     return _section("집 보유세: 재산세·종합부동산세", lead, inner)
@@ -1882,7 +1882,7 @@ def _tax(advice: dict[str, Any], data: dict[str, Any], full: bool) -> str:
     from smith import tax as tax_rules
     notice, checked = _law_watch(data, "tax")
     inner = notice + inner
-    inner += (f'<div style="font-size:12px;color:{MUTED};margin-top:8px">근거(세법 기준 {tax_rules.RULES_YEAR}년, '
+    inner += (f'<div style="font-size:13px;color:{MUTED};margin-top:8px">근거(세법 기준 {tax_rules.RULES_YEAR}년, '
               f'{tax_rules.RULES_CHECKED} 확인{escape(checked)}): '
               + " · ".join(_cell(item) for item in tax_rules.sources()) + "</div>")
     return _section("세금 관점 전략", lead, inner)
@@ -2326,15 +2326,26 @@ def _debt(debt: dict[str, Any], refinance: dict[str, Any] | None = None, policy:
     bars = ""
     if any(value for _, value in moves):
         bars = (_diverging(moves)
-                + f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin:4px 0 10px">{_meeting_note(debt, policy)}'
+                + f'<div style="font-size:13px;line-height:1.6;color:{MUTED};margin:4px 0 10px">{_meeting_note(debt, policy)}'
                   '지금 잔액에 금리 변화만 적용한 월 이자의 변화이며, 금리 전망이 아닙니다. 금리가 내리면 예금 이자도 함께 낮아지므로, '
                   '미리 갚을지는 대출 금리와 세후 예금 금리의 차이로 판단합니다.</div>')
-    table = _table(["대출", "잔액", "금리", "방식", "만기"],
-                   [[l["label"], _short(l["amount"]) + (f"(한도 {_short(l['credit_limit'])} 미사용)" if l.get("credit_limit") is not None
-                                                        and l["amount"] == 0 else ""),
-                     f"{l['rate'] * 100:.2f}%", RATE_TYPE_LABELS.get(l["rate_type"], l["rate_type"]),
-                     l["maturity"][:7].replace("-", ".") if l["maturity"] else "-"]
-                    for l in debt["loans"]])
+    # Two columns that fit a phone: the loan over its rate, rate type and maturity, and the balance (five columns at
+    # reading size were a pixel wider than a 375px screen, report design §48).
+    head = (f'<tr><td style="font-size:12px;font-weight:600;color:{MUTED};padding:6px 0;border-bottom:1px solid {HAIRLINE}">'
+            f'대출 · 금리 · 방식 · 만기</td><td style="text-align:right;font-size:12px;font-weight:600;color:{MUTED};padding:6px 0;'
+            f'border-bottom:1px solid {HAIRLINE}">잔액</td></tr>')
+    rows = "".join(
+        f'<tr><td style="padding:7px 8px 7px 0;border-bottom:1px solid {STRONG}">'
+        f'<div style="font-size:14px;line-height:1.4;color:{INK}">{escape(l["label"])}</div>'
+        f'<div style="font-family:{MONO};font-size:12px;color:{MUTED};margin-top:2px">{l["rate"] * 100:.2f}% · '
+        f'{escape(RATE_TYPE_LABELS.get(l["rate_type"], l["rate_type"]))}'
+        + (f' · 만기 {escape(l["maturity"][:7].replace("-", "."))}' if l["maturity"] else "") + "</div></td>"
+        f'<td style="text-align:right;vertical-align:top;font-family:{MONO};font-size:13px;color:{INK};padding:7px 0;'
+        f'border-bottom:1px solid {STRONG}">{escape(_short(l["amount"]))}'
+        + (f'<div style="font-size:12px;color:{MUTED}">한도 {escape(_short(l["credit_limit"]))} 미사용</div>'
+           if l.get("credit_limit") is not None and l["amount"] == 0 else "") + "</td></tr>"
+        for l in debt["loans"])
+    table = f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px">{head}{rows}</table>'
     note = "" if one is None or not one["monthly_change"] else f"금리 ±1%p에 월 이자 ±{_short(one['monthly_change'])}"
     if refinance is not None and refinance["verdict"] != "unknown":
         note += (" · " if note else "") + ("대환 없이 유지 유리" if refinance["verdict"] == "keep" else "대환 검토")
@@ -2692,7 +2703,7 @@ def _holdings_week(data: dict[str, Any], story: dict[str, Any] | None = None) ->
     repriced = [r for r in data["view"].records if r.fields.get("statement_price")] if data.get("view") else []
     if repriced:
         notes.append(f"직접 입력한 계좌의 {len(repriced)}개 보유분은 그 종목의 토스 시세로 다시 매겼습니다(수량은 마지막 입력 기준).")
-    foot = "".join(f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-top:4px">{escape(n)}</div>' for n in notes)
+    foot = "".join(f'<div style="font-size:13px;line-height:1.6;color:{MUTED};margin-top:4px">{escape(n)}</div>' for n in notes)
     if moves["stale"]:
         # A stale price hides that holding's move; said where it is read, not in the grey notes.
         lots = ", ".join(f"{s['name']} {_qty(s['quantity'])}주({s['priced_at']:%m/%d} 가격)" for s in moves["stale"])
@@ -2717,7 +2728,7 @@ def _benchmarks(ratio: Decimal | None, indices: list[dict[str, Any]], since: str
         shown = (f'<span style="font-family:{MONO};color:{MUTED}">미상</span>' if value is None else
                  _toned_text(value, _delta_pct(value)))
         return (f'<tr><td style="font-size:14px;color:{INK};padding:6px 8px 6px 0;border-bottom:1px solid {STRONG}">{escape(label)}'
-                f'<div style="font-size:12px;color:{MUTED}">{escape(note)}</div></td>'
+                f'<div style="font-size:13px;color:{MUTED}">{escape(note)}</div></td>'
                 f'<td style="text-align:right;white-space:nowrap;font-size:15px;padding:6px 0;border-bottom:1px solid {STRONG}">'
                 f'{shown}</td></tr>')
     rows = line("내 보유 종목", ratio, f"{since} 이후 · 원화, 환율 포함") + "".join(
@@ -2772,7 +2783,7 @@ def _week_stats(stats: list[tuple[str, Decimal | None, str]]) -> str:
         return (f'<td style="width:50%;padding:5px;vertical-align:top"><div style="border-radius:16px;padding:14px 16px;'
                 f'background:{SOFT}"><div style="font-size:13px;font-weight:600;color:{MUTED}">{escape(label)}</div>'
                 f'<div style="margin:6px 0 2px">{value}</div>'
-                f'<div style="font-size:12px;line-height:1.5;color:{MUTED}">{escape(sub)}</div></div></td>')
+                f'<div style="font-size:13px;line-height:1.5;color:{MUTED}">{escape(sub)}</div></div></td>')
     return (f'<tr><td style="padding-top:14px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0">'
             f'<tr>{"".join(tile(*s) for s in stats)}</tr></table></td></tr>')
 
@@ -2812,14 +2823,14 @@ def _quantity_changes(data: dict[str, Any]) -> str:
                       [[c["name"], f"{_qty(c['quantity_start'])} → {_qty(c['quantity_end'])}",
                         QUANTITY_CHANGES[c["change"]], "미상" if c["amount"] is None else _signed_short(c["amount"])]
                        for c in mine])
-        body += (f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-top:6px">원장에 기록된 수량 기준입니다. '
+        body += (f'<div style="font-size:13px;line-height:1.6;color:{MUTED};margin-top:6px">원장에 기록된 수량 기준입니다. '
                  "직접 사고판 것 외에 주식 보상 입고, 액면분할, 처음 등록한 계좌도 여기에 잡힙니다. 평가액 변화분은 바뀐 수량을 "
                  "지금 가격·환율로 환산한 값입니다(전량 정리는 비교 시점 가격).</div>")
     if hermes:
-        body += (f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-top:4px">Hermes 운용분은 {hermes}개 종목의 '
+        body += (f'<div style="font-size:13px;line-height:1.6;color:{MUTED};margin-top:4px">Hermes 운용분은 {hermes}개 종목의 '
                  "수량이 바뀌었습니다(Hermes 몫이라 따로 보지 않습니다).</div>")
     if uncompared:
-        body += (f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-top:4px">수량 기록이 없어 비교하지 못한 종목 '
+        body += (f'<div style="font-size:13px;line-height:1.6;color:{MUTED};margin-top:4px">수량 기록이 없어 비교하지 못한 종목 '
                  f"{len(uncompared)}개: {escape(', '.join(str(n) for n in uncompared))}.</div>")
     return title + body
 
@@ -2904,7 +2915,7 @@ def _policy(data: dict[str, Any], story: dict[str, Any], full: bool) -> str:
         f'<div style="padding:10px 0;border-bottom:1px solid {STRONG}">'
         f'<div style="font-size:14px;font-weight:600;line-height:1.5;color:{INK}">{_check_status(c.status)} {escape(c.title)}</div>'
         f'<div style="font-size:13px;line-height:1.6;color:{BODY};margin-top:4px">지금 {escape(c.current)}</div>'
-        f'<div style="font-size:12px;line-height:1.6;color:{MUTED}">우리 집 기준: {escape(c.standard)}</div></div>'
+        f'<div style="font-size:13px;line-height:1.6;color:{MUTED}">우리 집 기준: {escape(c.standard)}</div></div>'
         for c in checks if c.status != "ok")
     if met:
         table += (f'<div style="font-size:13px;line-height:1.6;color:{BODY};padding:10px 0">{_check_status("ok")} '
@@ -2935,7 +2946,7 @@ def _principle_chips(cited: list[Any]) -> str:
     if not cited:
         return ""
     items = " · ".join(_cell((f"{p.investor} · {p.title}", p.url)) for p in cited)
-    return f'<div style="font-size:12px;color:{MUTED};margin-top:6px">근거 원칙: {items}</div>'
+    return f'<div style="font-size:13px;color:{MUTED};margin-top:6px">근거 원칙: {items}</div>'
 
 
 def _return(ratio: Decimal | None) -> str:
@@ -2975,7 +2986,7 @@ def _opinion_card(position: dict[str, Any], opinion: dict[str, Any]) -> str:
         badge += (f' <span style="display:inline-block;background:{STRONG};color:{INK};font-size:11px;font-weight:600;'
                   f'border-radius:100px;padding:2px 10px;margin-left:6px">이중 집중</span>')
     source = ("" if not opinion.get("by_code") else
-              f'<div style="font-size:12px;color:{MUTED};margin-top:8px">이 의견은 Smith의 집중도 기준에 따라 계산으로 작성했습니다.</div>')
+              f'<div style="font-size:13px;color:{MUTED};margin-top:8px">이 의견은 Smith의 집중도 기준에 따라 계산으로 작성했습니다.</div>')
     return (f'<div style="border:1px solid {HAIRLINE};border-radius:24px;padding:18px 20px;margin-top:12px">'
             f'<div style="font-size:16px;font-weight:600;color:{INK}">{escape(position["name"])} {_stance(opinion["stance"])}{badge}</div>'
             f'<div style="font-family:{MONO};font-size:12px;color:{MUTED};margin:4px 0 6px">{escape(figures)}</div>'
@@ -3108,20 +3119,20 @@ def _move_targets(data: dict[str, Any]) -> str:
     table = "".join(
         f'<div style="border:1px solid {HAIRLINE};border-radius:16px;padding:12px 14px;margin-top:8px">'
         f'<div style="font-size:14px;font-weight:600;line-height:1.5;color:{INK}">{escape(named)}</div>'
-        f'<div style="font-size:12px;line-height:1.6;color:{MUTED};margin-top:2px">시세 {escape(price)}'
+        f'<div style="font-size:13px;line-height:1.6;color:{MUTED};margin-top:2px">시세 {escape(price)}'
         + ("" if change == "-" else f" · 6개월 전 대비 {escape(change)}") + "</div>"
         f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin-top:6px">필요 추가 자금 <b style="font-family:{MONO};'
         f'color:{INK}">{escape(spread)}</b><br>{escape(whose)}예정 소득 반영 후 <b style="font-family:{MONO};color:{INK}">'
         f'{escape(with_pay)}</b></div>'
         + ("" if trend_text in ("-", "판단 보류") else
-           f'<div style="font-size:12px;color:{MUTED};margin-top:4px">추이(세전): {escape(trend_text)}</div>') + "</div>"
+           f'<div style="font-size:13px;color:{MUTED};margin-top:4px">추이(세전): {escape(trend_text)}</div>') + "</div>"
         for named, price, change, spread, with_pay, trend_text in rows)
     # The spread trend (user review 2026-10-18): each target's gap six months ago against now, both before tax.
     trend = _paired_bars([(f"{t['alias']} · {t['label']}", t["spread_6m_ago"], t["spread_before_tax"])
                           for t in plan["targets"] if not t["trend_hold"]])
     # A trend needs MIN_BASIS deals in both half-years on both sides; the counts say why it is withheld.
     homes_hold = "; ".join(f"{h['label']}의 실거래가 최근 6개월 {h['recent']}건·이전 6개월 {h['older']}건" for h in pr["hold"])
-    withheld = (f'<div style="font-size:12px;color:{MUTED};margin-top:4px">6개월 추이는 판단 보류: '
+    withheld = (f'<div style="font-size:13px;color:{MUTED};margin-top:4px">6개월 추이는 판단 보류: '
                 + (f"{escape(homes_hold)}으로" if homes_hold else "일부 단지의 실거래가")
                 + f" 비교에 필요한 {MIN_BASIS}건에 못 미칩니다.</div>" if any(t["trend_hold"] for t in plan["targets"]) else "")
     trend = (f'<div style="font-size:13px;font-weight:600;color:{INK};margin:14px 0 6px">필요 추가 자금 추이(세전, 6개월 전 → 지금)'
@@ -3145,7 +3156,7 @@ def _move_holding(plan: dict[str, Any], data: dict[str, Any]) -> str:
                    + '</div>' for t in targets)
     head = "새 집의 보유세(연)" + (f": 지금 집들은 연 약 {_short(now)}" if now is not None else "")
     return (f'<div style="font-size:13px;font-weight:600;color:{INK};margin:14px 0 6px">{escape(head)}</div>{rows}'
-            f'<div style="font-size:12px;color:{MUTED};margin-top:4px">종합부동산세는 사람별로 매겨져, 혼인신고 뒤 공동명의면 '
+            f'<div style="font-size:13px;color:{MUTED};margin-top:4px">종합부동산세는 사람별로 매겨져, 혼인신고 뒤 공동명의면 '
             f'각자 9억 원씩 공제됩니다. 국회 심의 중인 개편안이 통과되면 달라집니다.</div>')
 
 
@@ -3272,7 +3283,7 @@ def _family_table(stack: dict[str, Any], colors: dict[str, str] | None = None) -
     body = "".join(
         f'<tr><td style="padding:7px 8px 7px 0;border-bottom:1px solid {STRONG}">'
         f'<div style="font-size:13px;line-height:1.5;color:{INK}">{name}</div>'
-        f'<div style="font-size:12px;line-height:1.5;color:{MUTED};margin-top:2px">{escape(detail)}</div></td>'
+        f'<div style="font-size:13px;line-height:1.5;color:{MUTED};margin-top:2px">{escape(detail)}</div></td>'
         f'<td style="text-align:right;white-space:nowrap;vertical-align:top;font-family:{MONO};font-size:13px;color:{INK};'
         f'padding:7px 0;border-bottom:1px solid {STRONG}">{escape(monthly)}</td></tr>' for name, detail, monthly in rows)
     return f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px">{head}{body}</table>'
@@ -3424,7 +3435,7 @@ def _experiences(story: dict[str, Any]) -> str:
     cards = "".join(f'<div style="border:1px solid {HAIRLINE};border-radius:16px;padding:16px 18px;margin-top:10px">'
                     f'<div style="font-size:16px;font-weight:600;color:{INK}">{escape(e["title"])}</div>'
                     f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin-top:6px">{escape(e["body"])}</div>'
-                    f'<div style="font-size:12px;color:{MUTED};margin-top:6px">{escape(e["when"])}</div>'
+                    f'<div style="font-size:13px;color:{MUTED};margin-top:6px">{escape(e["when"])}</div>'
                     f'{_sources(e.get("links") or [])}</div>' for e in items)
     lead = ("숫자와 저축 너머, 고객님의 삶과 지평을 넓혀 줄 경험(전시, 인문 독서, 여행, 미식, 테니스 같은 웰니스)을 이번 주에 "
             "한두 가지 골랐습니다. 선택은 고객님의 몫입니다.")
@@ -3445,7 +3456,7 @@ def _relationships(story: dict[str, Any]) -> str:
     cards = "".join(f'<div style="border:1px solid {HAIRLINE};border-radius:16px;padding:16px 18px;margin-top:10px">'
                     f'<div style="font-size:16px;font-weight:600;color:{INK}">{escape(e["title"])}</div>'
                     f'<div style="font-size:14px;line-height:1.6;color:{BODY};margin-top:6px">{escape(e["body"])}</div>'
-                    f'<div style="font-size:12px;color:{MUTED};margin-top:6px">{escape(e["when"])}</div>'
+                    f'<div style="font-size:13px;color:{MUTED};margin-top:6px">{escape(e["when"])}</div>'
                     f'{_sources(e.get("links") or [])}</div>' for e in items)
     lead = ("퇴직하면 직장에서 맺은 관계부터 줄어듭니다. 이서연 교수는 그래서 관계를 연금처럼 미리 쌓아 두는 '관계 자산'으로 "
             "봅니다. 이번 주에 해 볼 만한 일을 한두 가지 골랐고, 고르시는 건 고객님입니다.")

@@ -66,7 +66,7 @@ logger = logging.getLogger(__name__)
 # v32: no per-sentence law caveat; the footer says it once (user decision 2026-11-02); the check no longer asks for it.
 # v33: holdings[].week_change and index_moves; a holding that moved 10% or more opens its reason with why (2026-11-03).
 # v34: tax.realized_this_year, this year's sales with their estimated gains and the deduction left (2026-11-03).
-PROMPT_VERSION = "narrative-v44"   # v44: the week's net-worth change only on the overview, whose holdings a share is of (§47); v43: relationships and close_people on the tax day (§43); v42: replies_recorded (the spouse's replies are answered, their facts not kept); v41: the money needed outside the pensions in the client's wording; v40: the overview per person, whose pay; v39: property and life days per person (§42).
+PROMPT_VERSION = "narrative-v45"   # v45: a single annuity is "보유 연금보험", not "연금보험 1" (§48); v44: the week's net-worth change only on the overview, whose holdings a share is of (§47); v43: relationships and close_people on the tax day (§43); v42: replies_recorded (the spouse's replies are answered, their facts not kept); v41: the money needed outside the pensions in the client's wording; v40: the overview per person, whose pay; v39: property and life days per person (§42).
 MODEL = headless.MODEL
 # A runaway guard, not a cost limit (flat-rate subscription): the markets day cost 4.39 USD on 2026-10-27 and, with a
 # payload a fifth larger, ran past 5.00 on 2026-11-03 (error_max_budget_usd), so that report went out without opinions.
@@ -311,7 +311,8 @@ Input JSON:
   assumes the credit-maximizing split (projected_monthly_contributions; the part no credit covers kept in an ISA
   or similar), the same split the tax proposal makes; headline_net_with_current_contributions is the total if
   the client keeps contributing as now.
-  sector_metrics.pension_insurance.annuity_reviews: each insurer's annuity (by number) on its own
+  sector_metrics.pension_insurance.annuity_reviews: each insurer's annuity (under its `policy` name: write that name as
+  given, "보유 연금보험" or "연금보험 2", never a number of your own) on its own
   illustration: what is still paid and what comes back for life, the forward internal rate of return by
   lifespan, the same money in a broad index fund at 4/6/8%, the break-even return (or which side of the
   search range it lies on), the payout in today's won now and at 85, the code's verdict (strong_keep,
@@ -704,7 +705,7 @@ def sector_metrics(view: Any, data: dict[str, Any]) -> dict[str, Any]:
                               "surrender_values_known": pension["surrender_values_known"],
                               "insurance_review": _insurance_metrics(advice.get("insurance_review")),
                               "pension_stack": _stack_metrics(view, data.get("pension_stack")),
-                              "annuity_reviews": [_annuity_metrics(r, i) for i, r in enumerate(data.get("annuity_reviews") or [], 1)]},
+                              "annuity_reviews": _annuity_reviews(data.get("annuity_reviews") or [])},
         "stress": _stress_metrics(data["stress"]),
         "spending_room": _spending_metrics(advice.get("spending_room")),
         "fx": _fx_metrics(s["macro"].get("fx")),
@@ -794,11 +795,23 @@ def _move_metrics(view: Any, plan: dict[str, Any] | None) -> dict[str, Any] | No
             "assumptions": plan["assumptions"]}
 
 
-def _annuity_metrics(r: dict[str, Any], number: int) -> dict[str, Any]:
-    """One insurer's annuity reviewed on its own illustration (report design §19), named by number only."""
+def _annuity_reviews(reviews: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every reviewed annuity under the name the prose may use: "보유 연금보험" when there is one, numbered when
+    there are several. The product's name stays out of the model context; the letter of 2026-11-13 read "연금보험 1은
+    …" for the household's only policy (letter review 2026-11-19)."""
+    if len(reviews) == 1:
+        return [_annuity_metrics(reviews[0], ANNUITY_NAME)]
+    return [_annuity_metrics(r, f"연금보험 {i}") for i, r in enumerate(reviews, 1)]
+
+
+ANNUITY_NAME = "보유 연금보험"
+
+
+def _annuity_metrics(r: dict[str, Any], name: str) -> dict[str, Any]:
+    """One insurer's annuity reviewed on its own illustration (report design §19), under `name`, never the product's."""
     from smith.product_review import verdict_text
     sentence, flip = verdict_text(r)
-    return {"policy": f"연금보험 {number}", "remaining_premiums": won(r["remaining_premiums"]), "remaining_months": r["remaining_months"],
+    return {"policy": name, "remaining_premiums": won(r["remaining_premiums"]), "remaining_months": r["remaining_months"],
             "paid_so_far": won(r["paid_so_far"]), "surrender_now": won(r["surrender_now"]),
             "loss_if_surrendered": won(r["loss_if_surrendered"]), "annuity_monthly_nominal": won(r["annuity_monthly_nominal"]),
             "annuity_start": r["annuity_start"].isoformat(), "annuity_real_now": won(r["annuity_real_now"]),

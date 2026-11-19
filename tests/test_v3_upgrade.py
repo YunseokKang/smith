@@ -740,7 +740,9 @@ class PensionTests(Upgrade):
         self.assertIn("보유 연금보험 평가", page)
         self.assertIn("매몰비용", page)
         metrics = narrative.sector_metrics(data["view"], data)["pension_insurance"]["annuity_reviews"][0]
-        self.assertEqual((metrics["verdict"], metrics["policy"]), (review["verdict"], "연금보험 1"))
+        self.assertEqual((metrics["verdict"], metrics["policy"]), (review["verdict"], "보유 연금보험"))   # One policy: no number.
+        both = narrative._annuity_reviews([review, review])
+        self.assertEqual([m["policy"] for m in both], ["연금보험 1", "연금보험 2"])
         with self.assertRaises(ImportRejected):
             self.apply("v7", [flow("bad2", "salary", "1", "inflow", price_basis="nominal")])
 
