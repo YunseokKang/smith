@@ -481,18 +481,18 @@ def _sync_official_prices(db: Path, config: dict[str, Any], now: datetime) -> No
 
 def _sync_spending(db: Path, config: dict[str, Any], now: datetime) -> None:
     """The month's card statement, once a day while one may be waiting in the mail (FR-60); never raises."""
-    from smith import spending_command
+    from smith import spending, spending_command
     from smith.config import local_time
 
     try:
-        today = local_time(now, config["app"]["timezone"]).date()
-        if not spending_command.sync_due(spending_command.folder(db), today):
-            return
-        result = spending_command.sync(spending_command.folder(db), today=today)
-        if result["stored"] or not result["ok"]:
-            _say(db, f"Spending sync: {result['message']}")
-        for line in spending_command.classify(spending_command.folder(db)) if result["stored"] else []:
-            _say(db, f"Spending classify: {line}")
+        today, where = local_time(now, config["app"]["timezone"]).date(), spending_command.folder(db)
+        if spending_command.sync_due(where, today):
+            result = spending_command.sync(where, today=today)   # payment days and error codes only
+            if result["stored"] or not result["ok"]:
+                _say(db, f"Spending sync: {result['message']}")
+        counted = spending_command.classify_scheduled(where, today) if spending.stored_days(where) else None
+        if counted:
+            _say(db, f"Spending classify: {counted}")   # counts, never merchant names
     except Exception as error:  # noqa: BLE001 - a statement read must never block the scheduled task.
         _say(db, f"Spending sync crashed: {type(error).__name__}")
 

@@ -33,6 +33,14 @@ class ParseTest(unittest.TestCase):
             spending.parse(_raw([_row("스타벅스코리아", "11,000")], "21,000"))
         self.assertEqual(caught.exception.code, "totals-mismatch")
 
+    def test_a_reading_without_its_total_or_without_a_purchase_section_is_refused(self) -> None:
+        cases = {"total-missing": _raw([_row("스타벅스코리아", "11,000")], ""),
+                 "statement-shape": {"settled": "20261121", "period": "26. 10. 9 ~ 26. 11. 8", "sections": []}}
+        for code, raw in cases.items():
+            with self.subTest(code), self.assertRaises(spending.SpendingError) as caught:
+                spending.parse(raw)
+            self.assertEqual(caught.exception.code, code)
+
     def test_overseas_detail_is_not_counted_twice(self) -> None:
         detail = "접수일 26.10.20 업종/국가 택시요금/미국 현지 이용금액 4 USD 접수금액 4.05 USD"
         extra = [{"key": "DE", "total": "5,662", "rows": [_row("UBER TRIP", "5,662", detail=detail)]}]
@@ -108,12 +116,54 @@ class LetterTest(unittest.TestCase):
 
     def test_a_paragraph_with_an_amount_the_payload_lacks_is_dropped(self) -> None:
         from smith import spending_letter
-        sent = '{"amount": 179000, "count": 2}'
+        page = "https://www.samsungcard.com/x"
+        sent = '{"amount": 179000, "count": 2, "public_card_terms": [{"text": "전월 실적 50만 원부터 적립됩니다."}]}'
         note = spending_letter.verify({"headline": "고깃집 18만 원이 가장 컸습니다", "points": [
             {"title": "근거 있음", "text": "동네고깃집에서 18만 원을 쓰셨습니다."},
             {"title": "근거 없음", "text": "커피에 55만 원을 쓰셨습니다."},
-            {"title": "공개 조건", "text": "전월 실적 50만 원부터 적립됩니다.", "source_url": "https://www.samsungcard.com/x"}]}, sent)
-        self.assertEqual([p["title"] for p in note["points"]], ["근거 있음", "공개 조건"])
+            # A link the payload did not hold excuses no amount, and an amount in a title is checked like any other.
+            {"title": "링크만 붙임", "text": "커피에 55만 원을 쓰셨습니다.", "source_url": "https://example.invalid/not-fetched"},
+            {"title": "제목에 77만 원", "text": "동네고깃집에서 18만 원을 쓰셨습니다."},
+            {"title": "공개 조건", "text": "전월 실적 50만 원부터 적립됩니다.", "source_url": page},
+            {"title": "모르는 출처", "text": "18만 원을 쓰셨습니다.", "source_url": "https://example.invalid/other"}]},
+            sent, frozenset({page}))
+        self.assertEqual([p["title"] for p in note["points"]], ["근거 있음", "공개 조건", "모르는 출처"])
+        self.assertEqual([p.get("source_url") for p in note["points"]], [None, page, None])
+
+    def test_the_web_lookup_knows_the_card_name_only_and_the_note_has_no_tools(self) -> None:
+        import json
+        import tempfile
+        from datetime import date, datetime, timezone
+        from pathlib import Path
+        from unittest import mock
+        from smith import spending_letter
+        with tempfile.TemporaryDirectory() as tmp:
+            db, where = Path(tmp) / "smith.db", Path(tmp) / "spending"
+            fee = [{"key": "D5", "total": "30,000", "rows": [_row("가상카드 연회비", "30,000")]}]
+            spending.save_raw(where, _raw([_row("스타벅스코리아", "11,000"), _row("동네고깃집", "179,000")], "190,000", extra=fee))
+            spending_letter._keep(where, {"week": "2026-W48", "settled": "2026-11-21", "angle": "feel",
+                                          "note": {"headline": "h", "points": [{"title": "t", "text": "x"}]}})
+            calls = []
+
+            def run(prompt: str, **options: object):
+                calls.append((prompt, tuple(options.get("tools", ()))))
+                if options["schema"] is spending_letter.TERMS_SCHEMA:
+                    return {"terms": [{"text": "연회비는 3만 원입니다.", "source_url": "https://www.samsungcard.com/card"},
+                                      {"text": "매달 99만 원을 돌려줍니다.", "source_url": "https://blog.example.org/card"}]}, None
+                return {"headline": "연회비 3만 원을 따져 볼 때입니다", "points": [
+                    {"title": "연회비", "text": "연회비는 3만 원입니다.", "source_url": "https://www.samsungcard.com/card"},
+                    {"title": "외식", "text": "동네고깃집에서 179,000원을 쓰셨습니다."}]}, None
+
+            with mock.patch.object(spending_letter.headless, "run", run), \
+                    mock.patch.object(spending_letter.headless, "find_claude", lambda: Path("claude.exe")):
+                result = spending_letter.write(db, today=date(2026, 12, 5), now=datetime(2026, 12, 5, tzinfo=timezone.utc),
+                                               secrets=[])
+            self.assertEqual(result["outcome"], "written")
+            (lookup, lookup_tools), (note, note_tools) = calls
+            self.assertEqual((lookup_tools, note_tools), (spending_letter.headless.WEB_TOOLS, ()))
+            self.assertEqual(json.loads(lookup), {"cards": [{"issuer": "삼성카드", "card_as_printed": "가상카드 연회비"}]})
+            self.assertNotIn("blog.example.org", note)   # a term from another host never reaches the note
+            self.assertIn("스타벅스코리아", note)   # the household's figures go to the call without tools only
 
     def test_payload_leaves_out_names_that_point_at_a_home(self) -> None:
         import json
@@ -171,6 +221,26 @@ class SyncDueTest(unittest.TestCase):
             (folder / "sync.json").write_text('{"checked": "2026-12-12"}', encoding="utf-8")
             self.assertFalse(spending_command.sync_due(folder, date(2026, 12, 12)))
             self.assertTrue(spending_command.sync_due(folder, date(2026, 12, 13)))
+
+    def test_the_scheduled_classification_retries_daily_and_logs_counts_only(self) -> None:
+        import tempfile
+        from datetime import date
+        from pathlib import Path
+        from smith import google_places, spending_command
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "spending"
+            spending.save_raw(folder, _raw([_row("처음 보는 술집", "40,000")], "40,000"))
+
+            def failing(name: str, *, key: str):
+                raise google_places.GoogleError("timeout")
+            line = spending_command.classify_scheduled(folder, date(2026, 12, 12), lookup=failing, key="k")
+            self.assertNotIn("술집", line)
+            self.assertIn("0 merchant(s) looked up", line)
+            found = lambda name, *, key: (name, ["bar"], "")   # noqa: E731
+            self.assertIsNone(spending_command.classify_scheduled(folder, date(2026, 12, 12), lookup=found, key="k"))
+            line = spending_command.classify_scheduled(folder, date(2026, 12, 13), lookup=found, key="k")
+            self.assertEqual(line, "1 merchant(s) looked up, 1 sorted")
+            self.assertIsNone(spending_command.classify_scheduled(folder, date(2026, 12, 14), lookup=found, key="k"))
 
 
 if __name__ == "__main__":

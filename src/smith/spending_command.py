@@ -77,11 +77,20 @@ def sync_due(target: Path, today: date) -> bool:
     stored = spending.stored_days(target)
     if stored and (today.day < _CHECK_FROM_DAY or max(stored)[:6] >= f"{today:%Y%m}"):
         return False
+    return _state(target).get("checked") != today.isoformat()
+
+
+def _state(target: Path) -> dict[str, Any]:
     try:
-        checked = json.loads((target / "sync.json").read_text(encoding="utf-8")).get("checked")
-    except (OSError, ValueError, AttributeError):
-        checked = None
-    return checked != today.isoformat()
+        state = json.loads((target / "sync.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def _mark(target: Path, key: str, today: date) -> None:
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "sync.json").write_text(json.dumps({**_state(target), key: today.isoformat()}), encoding="utf-8")
 
 
 def sync(target: Path, *, back: int = 0, now: float | None = None, today: date | None = None) -> dict[str, Any]:
@@ -91,8 +100,7 @@ def sync(target: Path, *, back: int = 0, now: float | None = None, today: date |
     marks the day's scheduled check as done (`sync_due`), whatever it found.
     """
     if today is not None:
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "sync.json").write_text(json.dumps({"checked": today.isoformat()}), encoding="utf-8")
+        _mark(target, "checked", today)
     birth, chrome, grant = credentials.load_card_birth(), samsungcard.find_chrome(), credentials.load_gmail()
     if not birth or chrome is None or grant is None:
         return _failed("setup-missing (smith spending status)")
@@ -163,11 +171,29 @@ def _show(target: Path, months: int, as_json: bool) -> int:
 _LOOKUPS_A_RUN = 40   # merchants looked up in one run; each is one Google call inside the dining allowance
 
 
+def classify_scheduled(target: Path, today: date, *, lookup: Any = None, key: str | None = None) -> str | None:
+    """The scheduled run's turn, once a day: merchants a failed call or the run's limit left unsorted are taken up
+    again without a command. Returns a line for the run log, or None when there was nothing to ask. The line carries
+    counts and a reason only: where the client shops belongs in data/spending, never in a log."""
+    if _state(target).get("classified") == today.isoformat():
+        return None
+    _mark(target, "classified", today)
+    lines = classify(target, lookup=lookup, key=key)
+    if not lines:
+        return None
+    stopped = [line for line in lines if line.startswith("classify ")]
+    asked = len(lines) - len(stopped)
+    found = sum(not line.endswith("찾지 못함") for line in lines if not line.startswith("classify "))
+    reason = f"; {stopped[0].split('(')[0].strip()}" if stopped else ""
+    return f"{asked} merchant(s) looked up, {found} sorted{reason}"
+
+
 def classify(target: Path, *, now: datetime | None = None, lookup: Any = None, key: str | None = None) -> list[str]:
     """Look up the stored merchants no table or rule knows, once each, and keep the answer. Never raises.
 
     The request carries the merchant's name only. A name already looked up (found or not) is not asked again; the
-    household's own table always wins over what a search found.
+    household's own table always wins over what a search found. The returned lines name merchants: they are for the
+    client's own console (`smith spending classify`), not for a log.
     """
     from smith import dining_log, google_places
 
