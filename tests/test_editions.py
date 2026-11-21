@@ -38,8 +38,8 @@ RECORDS = [
 ]
 # Every proposal rule (proposals.py). Each belongs to exactly one themed day; the overview carries all.
 PROPOSAL_KEYS = {"lease-return", "emergency-reserve", "goal-stocks-glide", "concentration-trim", "surplus-plan",
-                 "pension-credit", "overseas-harvest", "isa-open", "insurance-review", "prepayment", "variable-rate",
-                 "refinance", "spending-room"}
+                 "pension-credit", "pension-split", "overseas-harvest", "isa-open", "insurance-review", "prepayment",
+                 "variable-rate", "refinance", "spending-room"}
 EXTRA = [
     rec("lease", "liability", category="lease_deposit_obligation", currency="KRW", outstanding_principal="300000000",
         annual_rate="0", rate_type="fixed", repayment_method="bullet", maturity="2028-08-07", collateral_record_id="home"),

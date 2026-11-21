@@ -898,7 +898,80 @@ def _my_pensions(data: dict[str, Any]) -> str:
                              whose="고객님 명의, ")
     # No table of the reader's pipelines: the household's table below lists each of them, marked 본인 or 배우자 (user
     # review 2026-11-16: the same rows twice in one letter).
-    return _section("나의 연금", lead, charts, brief=None, note=escape(f"세후 월 {_short(total)}"))
+    return _section("나의 연금", lead, charts + _pension_tax(mine, stack["retirement_age"]), brief=None,
+                    note=escape(f"세후 월 {_short(total)}"))
+
+
+def _pension_tax(mine: list[dict[str, Any]], retire_age: int) -> str:
+    """The tax on the reader's own pensions by age (user request 2026-11-21: the letter showed what the pensions pay
+    over the years and never the tax): one row per span of ages with the year's income before tax, the tax and what
+    is left (pension.tax_by_age), then one note on the private pensions against the separate-taxation limit, which
+    is where the timing and the payout period change the tax (pension.private_limit). Tax is each member's own, so
+    the table is the reader's, never the household's; empty without a payout."""
+    rows = pension.tax_by_age(mine)
+    if not rows:
+        return ""
+    head = "".join(f'<td style="font-size:12px;font-weight:600;color:{MUTED};padding:6px 0;border-bottom:1px solid {HAIRLINE};'
+                   f'text-align:{"left" if i == 0 else "right"};white-space:nowrap">{label}</td>'
+                   for i, label in enumerate(("나이", "세전(연)", "세금(연)", "세후(연)")))
+    cell = (f'text-align:right;white-space:nowrap;vertical-align:top;font-family:{MONO};font-size:13px;color:{INK};'
+            f'padding:7px 0 7px 6px;border-bottom:1px solid {STRONG}')
+    body = "".join(
+        f'<tr><td style="font-size:13px;line-height:1.5;color:{INK};padding:7px 0;border-bottom:1px solid {STRONG};'
+        f'white-space:nowrap;vertical-align:top">{escape(_age_span(r))}</td>'
+        f'<td style="{cell}">{escape(_short(r["gross"]))}</td>'
+        f'<td style="{cell}">{escape(_short(r["tax"]))}<div style="font-size:12px;color:{MUTED}">{_pct(r["rate"])}</div></td>'
+        f'<td style="{cell}">{escape(_short(r["net"]))}</td></tr>' for r in rows)
+    title = (f'<div style="font-size:15px;font-weight:600;color:{INK};margin:18px 0 4px">나이대별 세금(고객님 명의, '
+             f'{retire_age}세 은퇴 기준, 오늘 돈 가치)</div>')
+    table = f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>{head}</tr>{body}</table>'
+    return title + table + f'<div style="{_NOTE};margin-top:10px">{escape(_limit_note(pension.private_limit(mine), rows))}</div>'
+
+
+def _age_span(row: dict[str, Any]) -> str:
+    """A span of ages as the table reads it: 55~64세, one year alone, or the last span running on."""
+    if row["to"] is None:
+        return f"{row['from']}세 이후"
+    return f"{row['from']}세" if row["to"] - row["from"] == 1 else f"{row['from']}~{row['to'] - 1}세"
+
+
+def _limit_note(limit: dict[str, Any] | None, rows: list[dict[str, Any]]) -> str:
+    """What the tax table means for a decision: whether the reader's taxable private payouts (pension savings, IRP)
+    stay within the yearly limit that closes their tax at the low withheld rate, how the years over it were taxed,
+    and the payout period that would bring every year within it."""
+    # Never the readiness card's title word for word: a layout test finds each card by its title's first occurrence.
+    base = ("표는 구간마다 한 해 평균이고 연금소득세·퇴직소득세와 지방소득세만 셌습니다. 건강보험료는 가구 단위로 내므로 이 표가 "
+            "아니라 우리 집 준비율에서 뺍니다.")
+    if limit is None:
+        return base
+    # The limit is said as its amount and what it does, never as "기준" alone (user 2026-11-21: "기준이 뭐야").
+    line = _short(limit["limit"])
+    rule = (f"연금저축·IRP에서 한 해에 받는 과세 대상 금액이 {line} 이하면 낮은 세율(5.5%, 70세부터 4.4%, 80세부터 3.3%)만 내고 "
+            "세금이 끝납니다.")
+    # An account whose payout is unknown could not be counted: the note never says "within" then (Codex review 2026-11-21).
+    if not limit["over"] and limit["incomplete"]:
+        return (f"{rule} 고객님은 금액을 아는 것만 한 해 최대 약 {_short(limit['yearly'])}이고, 수령액을 모르는 연금 계좌가 있어 "
+                f"이 금액 안인지는 아직 알 수 없습니다. {base}")
+    if not limit["over"]:
+        return f"{rule} 고객님은 한 해 최대 약 {_short(limit['yearly'])}이라 이 금액 안입니다. {base}"
+    over = [r for r in rows if r["over_limit"]]
+    chosen = [r["together"] for r in over]
+    way = "종합과세" if chosen and all(chosen) else "16.5% 분리과세" if not any(chosen) else "해마다 더 낮은 쪽"
+    text = (f"{rule} 고객님은 {limit['from_age']}~{limit['until_age'] - 1}세에 한 해 약 {_short(limit['yearly'])}을 받아 이 금액을 "
+            "넘습니다." + (" 수령액을 모르는 연금 계좌는 빼고 본 금액입니다." if limit["incomplete"] else "")
+            + " 넘는 해에는 받은 금액 전부에 16.5%를 내는 분리과세와 다른 소득과 합쳐 세율표대로 내는 종합과세 중 고릅니다.")
+    if over:
+        text += f" 표는 둘 중 낮은 쪽({way})으로 계산했습니다."
+        if any(r["ceiling"] for r in over):
+            text += " 국민연금 수령액을 모르는 나이부터는 종합과세 세금을 계산할 수 없어 상한인 16.5%로 두었습니다."
+    else:   # Only figures entered after tax: the table's tax is backed out with the assumed rate, neither way applied.
+        text += " 세후로 입력하신 금액이라 표의 세금은 가정 세율로 거꾸로 계산한 값입니다."
+    if limit["fit_years"]:
+        text += (f" {limit['payout_years']}년 대신 {limit['fit_years']}년에 걸쳐 나눠 받으면 한 해 받는 금액이 {line} 아래로 "
+                 "내려갑니다.")
+    elif limit["payout_years"]:
+        text += f" 받는 기간을 {pension.PLAN_AGE}세까지 늘려도 한 해 받는 금액이 {line} 아래로 내려가지 않습니다."
+    return f"{text} {base}"
 
 
 def _opened(section: str) -> str:
@@ -996,7 +1069,8 @@ def _tiles(data: dict[str, Any], edition: editions.Edition) -> list[tuple[str, s
         stack = data.get("pension_stack")
         others = [] if stack is None else [t for t in _retirement_tiers(stack) if t["retire_age"] != stack["retirement_age"]]
         first = (("올해 연금 납입(예상)", _short(plan["savings_paid"] + plan["irp_paid"]), "연금저축 + IRP" + lower) if stack is None
-                 else ("노후 준비율(연금 세후)", _pct(stack["ratio"], 0),
+                 else ("노후 준비율(세금·건보료 뺀 연금)" if stack.get("health") is not None else "노후 준비율(연금 세후)",
+                       _pct(stack["ratio"], 0),
                        f"{stack['retirement_age']}세 은퇴 기준 · "
                        + " · ".join(f"{t['retire_age']}세 {_pct(t['ratio'], 0)}" for t in others)
                        + (f" · {len(stack['unknown'])}개 미상 제외" if stack["unknown"] else "")))
@@ -1363,10 +1437,13 @@ def _hero_segments(data: dict[str, Any], tiles: str | None) -> tuple[str, list[t
                                  if p["net_monthly"] is not None), Decimal(0)), "")
                     for _, label, members in _families(stack)]
         segments = [s for s in segments if s[1] > 0]
-        gap = stack["target"] - stack["total_net"]
+        # The premium comes out of the pensions before they meet the target (§50): the shortfall is against what is left.
+        health = None if stack.get("health") is None else stack["health"]["total"]
+        gap = stack["target"] - (stack["total_net"] if health is None else stack["spendable"])
         if gap > 0:
             segments.append(("목표까지 부족", gap, ""))
-        note = f"세후 월 수령액 합계 {_short(stack['total_net'])} / 목표 월 {_short(stack['target'])}"
+        note = (f"세후 월 수령액 합계 {_short(stack['total_net'])}" + (f"(건강보험료 월 {_short(health)} 빼기 전)" if health is not None else "")
+                + f" / 목표 월 {_short(stack['target'])}")
         return (f"노후 월 현금흐름 준비({stack['retirement_age']}세 은퇴 기준)", segments,
                 note + (f" · 미상 {len(stack['unknown'])}개 제외" if stack["unknown"] else ""))
     if tiles == "life":
@@ -3277,11 +3354,16 @@ def _pension_stack(data: dict[str, Any]) -> str:
              f"{head}세 기준입니다.")
             # The household stack (user decision 2026-11-08): both members' pensions against one target.
             + (" 배우자의 연금도 같은 나이에 함께 은퇴한다고 보고 더했습니다." if shared else "")
-            + f" 은퇴 후 {'가구 ' if shared else ''}월 <b>{_short(target)}</b>(세후, 현재 가치) 목표에 모든 연금이 나온 뒤의 세후 월 합계는 "
-            + ", ".join(f"{t['retire_age']}세 은퇴 <b>{_short(t['total_net'])}</b>({_pct(t['ratio'], 0)})" for t in tiers)
-            + "입니다.")
+            )
+    # The target is what is left to spend after every tax and the health-insurance premium (user decision 2026-11-21).
+    counted = stack.get("health") is not None
+    basis, left = (("세금·건강보험료를 뺀 금액", "세금과 건강보험료를 뺀 월 합계") if counted else ("세후", "세후 월 합계"))
+    lead += (f" 은퇴 후 {'가구 ' if shared else ''}월 <b>{_short(target)}</b>({basis}, 현재 가치) 목표에 모든 연금이 나온 뒤의 {left}는 "
+             + ", ".join(f"{t['retire_age']}세 은퇴 <b>{_short(t['spendable'] if counted else t['total_net'])}</b>"
+                         f"({_pct(t['ratio'], 0)})" for t in tiers) + "입니다.")
     if stack["later_net"] is not None:
-        lead += (f" 기간을 정해 받는 연금이 끝나는 {stack['later_age']}세부터는 세후 월 <b>{_short(stack['later_net'])}</b>"
+        after = stack["later_spendable"] if counted else stack["later_net"]
+        lead += (f" 기간을 정해 받는 연금이 끝나는 {stack['later_age']}세부터는 {'' if counted else '세후 '}월 <b>{_short(after)}</b>"
                  f"({_pct(stack['later_ratio'], 0)})로 줄어듭니다.")
     if stack["unknown"]:
         missing = [p for p in stack["pipelines"] if p["net_monthly"] is None]
@@ -3456,16 +3538,26 @@ def _tier_table(tiers: list[dict[str, Any]], words: str | None = None) -> str:
         need = t["outside_need"]
         bound = need is not None and need["upper_bound"]
         more = " 이상" if t["unknown"] else ""
-        lines = [("연금 없는 기간", "-" if gap is None else f"{gap}년({t['first_income_age']}세까지)" if gap else "없음"),
-                 ("모든 연금 개시 후 세후 월", _short(t["total_net"]) + more)]
+        lines = [("연금 없는 기간", "-" if gap is None else f"{gap}년({t['first_income_age']}세까지)" if gap else "없음")]
+        # With the household's health-insurance premium counted (§50), the figures are what is left to spend.
+        counted = t.get("health") is not None
+        if counted:
+            lines += [("모든 연금 개시 후 월(세금·건보료 뺀)", _short(t["spendable"]) + more),
+                      ("뺀 건강보험료(추정)", "월 " + _short(t["health"]["total"]) + (" 이상" if t.get("health_partial") else ""))]
+        else:
+            lines.append(("모든 연금 개시 후 세후 월", _short(t["total_net"]) + more))
         if later:
-            lines.append(("기간 연금 끝난 뒤 세후 월",
-                          "-" if t["later_net"] is None else f"{_short(t['later_net'])}{more}({t['later_age']}세~)"))
+            after = t["later_spendable"] if counted else t["later_net"]
+            lines.append(("기간 연금 끝난 뒤 월(세금·건보료 뺀)" if counted else "기간 연금 끝난 뒤 세후 월",
+                          "-" if after is None else f"{_short(after)}{more}({t['later_age']}세~)"))
         lines.append(("연금 밖에서 준비할 돈", "미상" if need is None else ("최대 " if bound else "") + _short(need["total"])))
         rows.append((f"{t['retire_age']}세 은퇴", "준비율 " + _pct(t["ratio"], 0) + more, lines))
     note = words or "연금 밖에서 준비할 돈은 연금만으로 모자라는 생활비를 메우려고 은퇴할 때 갖고 있어야 할 돈(오늘 돈 가치)입니다."
     if any(t["unknown"] for t in tiers) and not words:
         note += " 수령액을 모르는 연금이 있어 실제보다 크게 잡힌 최대치입니다."
+    if any(t.get("health_partial") for t in tiers) and not words:
+        note += (" 공시가격을 모르는 주택이 있어 건강보험료의 재산분을 빼지 못했습니다. 준비율은 실제보다 높게, 연금 밖에서 준비할 돈은 "
+                 "실제보다 적게 잡혔습니다.")
     # One card per retirement age: the five- or six-column table pushed the letter past a phone's width (letter review
     # 2026-11-19, report design §46).
     cards = "".join(
@@ -3488,14 +3580,28 @@ def pension_notes(stack: dict[str, Any] | None) -> list[str]:
     notes = ["연금 없는 기간은 은퇴부터 첫 연금(연금 계좌는 55세부터, 국민연금은 65세)까지입니다. 연금 밖에서 준비할 돈은 은퇴부터 "
              f"{pension.PLAN_AGE}세가 될 때까지 해마다 연금으로 모자라는 생활비를 은퇴 시점의 오늘 돈 가치로 합한 것이며, "
              f"{pension.PLAN_AGE}세 이후 몫과 부동산은 넣지 않았습니다."]
+    health = stack.get("health")
+    if health is not None:
+        # The premium the readiness ratio takes off (report design §50): its parts at the age every pension has started.
+        from smith import nhis
+        parts = (f"소득분 {_short(health['income'])}, 재산분 {_short(health['property'])}" if health["property"] is not None
+                 else f"소득분 {_short(health['income'])}, 재산분은 주택 공시가격을 몰라 뺀 하한")
+        notes.append(f"목표 월 생활비는 세금과 건강보험료를 뺀 금액입니다. {stack['retirement_age']}세 은퇴 기준 모든 연금이 나온 뒤의 "
+                     f"건강보험료는 월 약 {_short(health['total'])}({parts}, 장기요양보험료 {_short(health['care'])})으로 보았습니다. "
+                     + " ".join(f"{text}." for text in nhis.assumptions()))
     if len(stack.get("owners") or []) > 1:
-        notes.append("두 분의 연금을 합쳤습니다. 배우자도 같은 나이에 함께 은퇴한다고 보았고, 목표 월 생활비는 가구 기준 세후 금액입니다. "
+        notes.append("두 분의 연금을 합쳤습니다. 배우자도 같은 나이에 함께 은퇴한다고 보았고, 목표 월 생활비는 가구 기준 "
+                     + ("세금과 건강보험료를 뺀 금액입니다. " if health is not None else "세후 금액입니다. ") +
                      "연금소득세와 사적연금 연 1,500만 원 기준은 사람마다 따로 적용했습니다. 배우자 연금 계좌에 월 납입 기록이 없으면 지금 "
                      "잔액만 불린 값입니다."
                      + (" 표와 그래프의 나이는 고객님 나이이며, 배우자 연금은 같은 해에 맞춰 옮겨 놓았습니다(수령 기간 칸은 배우자 본인 나이)."
                         if any(p.get("age_offset") for p in stack["pipelines"]) else ""))
     if any(p["key"] == "isa" for p in stack["pipelines"]):
-        notes.append("ISA 등 줄은 세액공제 한도를 넘는 납입을 주택 자금에 쓰지 않고 노후까지 남긴다는 Smith의 가정입니다.")
+        # The projection follows the ledger's standing transfers: a move between the two members is the reader's
+        # decision (report design §50), so it shows here only once the transfers change.
+        notes.append("ISA 등 줄은 세액공제 한도를 넘는 납입을 주택 자금에 쓰지 않고 노후까지 남긴다는 Smith의 가정입니다."
+                     + (" 이 돈을 배우자 명의 연금계좌로 돌리시면, 원장의 자동이체를 바꾼 뒤부터 전망이 그 계좌를 따라갑니다."
+                        if len(stack.get("owners") or []) > 1 else ""))
     notes.append(f"연금저축·IRP·퇴직금은 계좌에 정한 수령 기간(정하지 않았으면 정부 '내연금'과 같은 {pension.ACCOUNT_PAYOUT_YEARS}년) "
                  "동안 나눠 받는다고 보아 그 뒤에는 그래프에서 빠집니다. 국민연금은 물가만큼 오르므로 오늘 돈 가치로 평평합니다.")
     for p in stack["pipelines"]:
@@ -3513,9 +3619,11 @@ def pension_notes(stack: dict[str, Any] | None) -> list[str]:
                      + (f", 공제 밖 월 {_short(c['isa'])}은 ISA 등" if c["isa"] else "") + "으로 나눈다고 계산했습니다. 지금처럼 "
                      f"연금저축 월 {_short(now['pension_savings'])}, IRP 월 {_short(now['irp'])}을 계속 넣으면 "
                      f"{stack['retirement_age']}세 은퇴 기준 세후 합계는 약 {_short(stack['current_split']['total_net'])}입니다.")
-    notes.append("세후는 국민연금 약 3%, 퇴직금으로 받는 연금 약 3.5%(퇴직소득세 30% 감면), 연금저축·IRP 5.5%(한 해 1,500만 원을 넘는 "
-                 "해는 16.5%, 세액공제를 받지 않은 원금은 비과세), 연금보험 비과세를 가정했습니다. 중앙노후준비지원센터 '내연금' "
-                 "그래프는 세전이고 그해 금액이라 국민연금이 해마다 높아져 보입니다.")
+    notes.append("세후는 국민연금 약 3%, 퇴직금으로 받는 연금 약 3.5%(퇴직소득세 30% 감면), 연금저축·IRP 5.5%(70세부터 4.4%, "
+                 "80세부터 3.3%, 세액공제를 받지 않은 원금은 비과세), 연금보험 비과세를 가정했습니다. 연금저축·IRP 과세분이 한 해 "
+                 "1,500만 원을 넘는 해는 전액 16.5% 분리과세와 종합과세 중 낮은 쪽이며, 종합과세는 연금소득공제와 본인 기본공제만 "
+                 "빼고 함께 과세되는 다른 소득은 국민연금뿐이라고 보았습니다(이자·배당이 연 2,000만 원을 넘거나 근로·사업소득이 있으면 "
+                 "세금이 커집니다). 중앙노후준비지원센터 '내연금' 그래프는 세전이고 그해 금액이라 국민연금이 해마다 높아져 보입니다.")
     return notes
 
 

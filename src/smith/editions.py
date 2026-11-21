@@ -121,13 +121,15 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             reference=("macro",)),
     Edition("tax", "세금·연금",
             "tax", ("tax", "holding_tax", "annuity_review", "relationships"),
-            ("pension-credit", "overseas-harvest", "isa-open", "insurance-review"),
+            ("pension-credit", "pension-split", "overseas-harvest", "isa-open", "insurance-review"),
             ("pension_tax", "home_tax", "relationship"), False, False,
             "tax and pensions: the pension stack first (sector_metrics.pension_insurance.pension_stack: every "
             "pipeline's after-tax monthly payout and start age against the monthly retirement target, the readiness "
             "ratio at each retirement age (retirement_age_tiers: 50, 55, 60, with the years without a pension and what "
             "must be held outside the pensions), and which pipeline still lacks a figure, asked for in a private "
-            "banker's words), this year's "
+            "banker's words), the tax the reader's own pensions meet by age and whether their private pensions pass "
+            "the yearly limit of the low rate (pension_stack.own_tax_by_age, own_private_pension_limit: when and over "
+            "how many years to draw is the tax decision), this year's "
             "pension credit room, overseas capital-gains deduction, ISA, the year-end settlement checklist, "
             "marriage-registration and home-tax timing, and whether the insurance premiums "
             "(sector_metrics.pension_insurance.insurance_review) are an efficient use of the monthly cash flow. The "

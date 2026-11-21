@@ -258,6 +258,14 @@ class TaxTests(unittest.TestCase):
         self.assertEqual(track.status, "unknown")
         self.assertIn("최대 ", track.detail)
 
+    def test_pensions_taxed_together_meet_the_pension_deduction_then_the_basic_rates(self):
+        # (year's taxable pensions, tax with local tax): the deduction covers a small pension whole (516만 leaves
+        # 99.6만, under the person's own 150만), then 6% and 15% bands, and the deduction stops at 900만.
+        cases = [(3_000_000, 0), (5_160_000, 0), (7_000_000, 39_600), (21_980_000, "883212"), (100_000_000, 17_473_500)]
+        for pensions, expected in cases:
+            with self.subTest(pensions=pensions):
+                self.assertEqual(tax.pension_income_tax(Decimal(pensions)), Decimal(expected))
+
     def test_capital_gains_estimates(self):
         D = Decimal
         # One home at 1.65bn bought for 1.0bn, held and lived 5 years: taxed share (0.45/1.65), 40% deduction.

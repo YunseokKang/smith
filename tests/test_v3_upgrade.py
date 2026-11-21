@@ -13,7 +13,8 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from smith import editions, evidence, ledger, narrative, pension, proposals, report_html, research, tax
+from smith import (editions, evidence, ledger, narrative, nhis, payload, pension, proposals, report_data, report_html,
+                   research, tax)
 from smith.config import load_config
 from smith.fmt import short_won
 from smith.importer import parse_import
@@ -516,7 +517,7 @@ class LayoutTests(Upgrade):
         self.assertIn(spacer, between("나의 연금", "고객님께 드리는 제안"))
         self.assertNotIn(">연금·보험<", tax_page)
         self.assertNotIn("분류가입 상품", re.sub(r"<[^>]+>", "", between("나의 연금", "고객님께 드리는 제안")))
-        self.assertIn("노후 준비율(연금 세후)", tax_page)
+        self.assertIn("노후 준비율(세금·건보료 뺀 연금)", tax_page)   # The target is net of both (user decision 2026-11-21).
 
     def test_opinions_and_policy_checks_are_colour_pills(self):
         data = self.report("markets")
@@ -665,24 +666,44 @@ class PensionTests(Upgrade):
         self.assertEqual((savings["start_age"], savings["end_age"]), (60, 80))
         # This year's IRP above the credit (60만) comes back tax-free: the IRP pays tax on a taxable share below one.
         self.assertLess(irp["taxable_share"], 1)
-        self.assertEqual(irp["net_monthly"], irp["gross_monthly"] * (1 - pension.PRIVATE_HIGH_TAX * irp["taxable_share"]))
-        # Pension savings and IRP together pay out more than the separate-taxation limit a year: the high rate.
-        self.assertGreater((savings["gross_monthly"] + irp["gross_monthly"]) * 12, pension.PRIVATE_SEPARATE_LIMIT)
+        # Pension savings and IRP together pay out more than the separate-taxation limit a year. The whole of it is
+        # then taxed at the flat 16.5% or with the member's other pensions (none known here), whichever is lower.
+        taxable = (savings["gross_monthly"] + irp["gross_monthly"] * irp["taxable_share"]) * 12
+        self.assertGreater(taxable, pension.PRIVATE_SEPARATE_LIMIT)
         self.assertTrue(savings["high_private_tax"])
-        self.assertEqual(savings["net_monthly"], savings["gross_monthly"] * (1 - pension.PRIVATE_HIGH_TAX))
+        rate = tax.pension_income_tax(taxable) / taxable
+        self.assertLess(rate, pension.PRIVATE_HIGH_TAX)
+        self.assertEqual(savings["net_monthly"], savings["gross_monthly"] * (1 - rate))
+        self.assertEqual(irp["net_monthly"], irp["gross_monthly"] * (1 - rate * irp["taxable_share"]))
         self.assertEqual(annuity["gross_monthly"], Decimal(40_000_000) * growth * tax.WITHDRAWAL_RATE / 12)
         self.assertEqual(annuity["net_monthly"], annuity["gross_monthly"])            # Tax-free by assumption.
         self.assertFalse(annuity["premiums_counted"])                                 # 240,000 a month: cover, not savings.
         self.assertEqual(stack["unknown"], ["national"])
-        self.assertEqual(stack["total_net"], annuity["net_monthly"] + savings["net_monthly"] + irp["net_monthly"]
-                         + isa["net_monthly"])
+        # The total is read at 65, when the national pension of unknown amount has started too: from then the bracket
+        # the accounts meet is unknown, so they carry the flat rate as a ceiling and the lower bound stays one.
+        head = next(t for t in stack["tiers"] if t["retire_age"] == 60)
+        self.assertEqual(head["all_on_age"], 65)
+        self.assertEqual(pension.monthly_at(savings, 65), savings["gross_monthly"] * (1 - pension.PRIVATE_HIGH_TAX))
+        self.assertEqual(stack["total_net"], annuity["net_monthly"] + pension.monthly_at(savings, 65)
+                         + pension.monthly_at(irp, 65) + isa["net_monthly"])
         # The accounts end at 80; the annuity and the ISA draw go on.
         self.assertEqual((stack["later_age"], stack["later_net"]), (80, annuity["net_monthly"] + isa["net_monthly"]))
         self.assertEqual([t["retire_age"] for t in stack["tiers"]], [50, 55, 60])
         # The national pension is unknown, not zero: what must be held outside the pensions is only a ceiling.
         self.assertTrue(all(t["outside_need"]["upper_bound"] for t in stack["tiers"]))
         self.assertIn("최대 ", render(data)[1])
-        self.assertEqual(stack["ratio"], stack["total_net"] / Decimal(5_500_000))
+        # The target is what is left after tax and the household's health-insurance premium (user decision 2026-11-21):
+        # no public pension is known, so the income part is the minimum and the homes' property points come on top.
+        health = stack["health"]
+        self.assertEqual(health["income"], nhis.MINIMUM)
+        self.assertGreater(health["property"], 0)
+        self.assertEqual(health["total"], (health["income"] + health["property"]) * (1 + nhis.CARE_RATIO))
+        self.assertEqual(stack["spendable"], stack["total_net"] - health["total"])
+        self.assertEqual(stack["ratio"], stack["spendable"] / Decimal(5_500_000))
+        self.assertIn("모든 연금 개시 후 월(세금·건보료 뺀)", render(data)[1])
+        # Without a premium (a caller that knows no homes) nothing is taken off.
+        bare = pension.stack(payload.load_view(self.conn, as_of=AT, known_at=AT), HOUSEHOLD, AT.date())
+        self.assertEqual((bare["health"], bare["spendable"]), (None, bare["total_net"]))
         self.assertIn("pension-pipelines", [r.key for r in data["requests"]])
         page = render(data)[1]
         self.assertIn("연금 종류별 스택", page)
@@ -746,6 +767,80 @@ class PensionTests(Upgrade):
         with self.assertRaises(ImportRejected):
             self.apply("v7", [flow("bad2", "salary", "1", "inflow", price_basis="nominal")])
 
+
+    def test_contributions_no_credit_covers_go_to_the_other_members_unused_room(self):
+        """User decision 2026-11-21 (§50): spreading contributions over the couple is a proposal, never left out."""
+        def keys(data):
+            return [p.key for p in data["advice"]["proposals"]]
+        alone = keys(self.report("tax"))                       # 30만 + 50만 a month: 5만 is above the credit limit.
+        self.assertIn("pension-credit", alone)                 # Alone, the ISA is where that part can go.
+        self.assertNotIn("pension-split", alone)
+        self.apply("family", [
+            rec("irp-partner", "asset", "partner", category="fund", account_type="irp", currency="KRW", value="10000000",
+                valuation_method="statement", liquidity="restricted"),
+            flow("salary-partner", "salary", "4000000", "inflow", owner="partner")])
+
+        def built(audience="self", **settings):
+            return build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="tax", audience=audience,
+                                household=dict(HOUSEHOLD, partner_birth_year=1990, **settings))
+        data = built(partner_annual_gross_salary=48_000_000)
+        split = self.proposal(data, "pension-split")
+        self.assertEqual(split.figures, {"monthly": Decimal(50_000), "gain": Decimal(50_000) * 12 * tax.CREDIT_RATE_LOW})
+        self.assertIn("고객님이 세액공제 한도를 넘게 넣는 월 5만 원을 배우자분 명의 연금계좌로", split.title)
+        self.assertIn("혼인신고 전", split.risks)             # Not registered: a transfer between the two is a gift.
+        self.assertNotIn("pension-credit", keys(data))         # The same 5만 is not sent to an ISA in a second card.
+        # The spouse's pay is not in the settings: the lower rate, said as an assumption.
+        assumed = self.proposal(built(), "pension-split")
+        self.assertEqual(assumed.figures["gain"], Decimal(50_000) * 12 * tax.CREDIT_RATE_HIGH)
+        self.assertIn("가정", assumed.effect)
+        # The spouse's own letter reads the same move from their side.
+        theirs = self.proposal(built("partner", partner_annual_gross_salary=48_000_000), "pension-split")
+        self.assertIn("배우자분이 세액공제 한도를 넘게 넣는 월 5만 원을 고객님 명의 연금계좌로", theirs.title)
+
+    def test_the_couples_split_and_the_premium_never_read_a_missing_fact_as_settled(self):
+        """Codex review 2026-11-21 of the split proposal and the health premium (§50)."""
+        def keys(data):
+            return [p.key for p in data["advice"]["proposals"]]
+
+        def built(**settings):
+            return build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="tax",
+                                household=dict(HOUSEHOLD, partner_birth_year=1990, **settings))
+        # A spouse with a tax-free annuity and no pay has no income tax for a credit to come off: no proposal, until
+        # the settings say they are paid.
+        self.apply("family", [
+            rec("irp-partner", "asset", "partner", category="fund", account_type="irp", currency="KRW", value="10000000",
+                valuation_method="statement", liquidity="restricted"),
+            flow("annuity-partner", "pension_income", "1000000", "inflow", owner="partner", pension_source="insurance_annuity",
+                 amount_basis="net")])
+        self.assertNotIn("pension-split", keys(built()))
+        self.assertIn("pension-split", keys(built(partner_annual_gross_salary=48_000_000)))
+        # The money the split sends to the spouse is not also sent to an ISA by the credit card.
+        own = {"pension_savings_paid": Decimal(12_000_000), "irp_paid": Decimal(0), "pension_monthly": Decimal(1_000_000),
+               "savings_monthly": Decimal(1_000_000), "irp_monthly": Decimal(0), "married": True}
+        other = {"pension_savings_paid": Decimal(0), "irp_paid": Decimal(0), "pension_monthly": Decimal(0)}
+        facts = {"today": AT.date(), "pension_accounts": 1, "tax": own, "tax_others": {"partner": other},
+                 "household": {}, "salaried": {"partner"}}
+        self.assertEqual(proposals.pension_split(facts)["monthly"], Decimal(250_000))
+        card = proposals._pension_credit(facts)
+        self.assertNotIn("ISA에 넣으면", card.effect)
+        self.assertIn("공제 밖 월 25만 원은 배우자분 명의 연금계좌로 돌리는 제안을 따로 드립니다.", card.effect)
+        self.assertEqual(card.figures["next_rest"], Decimal(0))
+        self.assertIn("ISA에 넣으면", proposals._pension_credit({**facts, "salaried": set()}).effect)   # No split: the ISA stays.
+        # A premium whose property part is unknown is a lower bound: the need says so and never reads as covered.
+        view = payload.load_view(self.conn, as_of=AT, known_at=AT)
+        stack = pension.stack(view, HOUSEHOLD, AT.date(), premium=lambda public: nhis.regional_premium(public, None))
+        head = next(t for t in stack["tiers"] if t["retire_age"] == stack["retirement_age"])
+        self.assertTrue(stack["health_partial"] and head["outside_need"]["premium_partial"])
+        self.assertIn("재산분은 주택 공시가격을 몰라 빼지 못했으므로", pension.need_words(head, stack["target"]))
+        covered = {"retire_age": 55, "outside_need": {"total": Decimal(0), "health": True, "premium_partial": True}}
+        self.assertIn("확정할 수는 없습니다", pension.need_words(covered, Decimal(1_000_000)))
+        self.assertIn("월 2만 원 이상", report_html._tier_table([head]))
+        # The premium's property part reads the homes handed to it (today's), one base per home.
+        data = built()
+        homes = data["sectors"]["real_estate"]["properties"]
+        both = report_data._premium_base(self.conn, homes, HOUSEHOLD, AT.year)
+        self.assertEqual(both, sum(report_data._premium_base(self.conn, [home], HOUSEHOLD, AT.year) for home in homes))
+        self.assertEqual(data["pension_stack"]["health"]["property"], nhis.property_points(both) * nhis.POINT_VALUE)
 
     def test_the_partner_pensions_join_the_household_stack_against_one_target(self):
         # User decision 2026-11-08: the spouse's pensions are added to the client's, both retiring at the same age.
@@ -1079,14 +1174,108 @@ class PensionTests(Upgrade):
                  "start_age": 55, "end_age": 75, "net_monthly": None}]
         pension._apply_tax(rows)
         irp = rows[1]
-        self.assertEqual(pension.monthly_at(irp, 60), Decimal(1_000_000) * (1 - pension.PRIVATE_HIGH_TAX))
+        both = Decimal(24_000_000)
+        self.assertEqual(pension.monthly_at(irp, 60), Decimal(1_000_000) * (1 - tax.pension_income_tax(both) / both))
         self.assertEqual(pension.monthly_at(irp, 65), Decimal(1_000_000) * (1 - pension.TAX_FACTORS["irp"]))
+        self.assertEqual(pension.monthly_at(irp, 70), Decimal(1_000_000) * (1 - Decimal("0.044")))   # The rate from 70.
         # A fixed won annuity already paying is not deflated for the years before today.
         self.apply("r3", [flow("old", "pension_income", "1000000", "inflow", pension_source="other", amount_basis="net",
                                start_date="2020-01-01", price_basis="nominal")])
         other = next(p for p in self.report("tax")["pension_stack"]["pipelines"] if p["key"] == "other")
         self.assertEqual(pension.monthly_at(other, 36), Decimal(1_000_000))          # 1990 client, 2026.
         self.assertEqual(pension.monthly_at(other, 37), Decimal(1_000_000) / (1 + pension.INFLATION))
+
+    def test_the_tax_by_age_takes_the_lower_way_over_the_limit_and_names_the_period_that_fits(self):
+        """User request 2026-11-21: the letter showed what the pensions pay by age and never the tax (§50)."""
+        def rows(monthly):
+            found = [{"key": "pension_savings", "gross_monthly": Decimal(monthly), "taxable_share": Decimal(1),
+                      "start_age": 55, "end_age": 75, "net_monthly": None, "payout_years": 20},
+                     {"key": "national", "gross_monthly": Decimal(1_500_000), "taxable_share": Decimal(1),
+                      "start_age": 65, "net_monthly": None}]
+            pension._apply_tax(found)
+            return found
+        mine = rows(2_000_000)                                   # 2,400만 a year from the account: over the limit.
+        private, public = Decimal(24_000_000), Decimal(18_000_000)
+        alone = tax.pension_income_tax(private)
+        stacked = tax.pension_income_tax(private + public) - tax.pension_income_tax(public)
+        first, second, last = spans = pension.tax_by_age(mine)
+        self.assertEqual([(s["from"], s["to"]) for s in spans], [(55, 65), (65, 75), (75, None)])
+        # Before the national pension little else is taxed with the account; from 65 the two share the brackets, and
+        # either way the flat 16.5% on the whole would have cost more.
+        self.assertAlmostEqual(first["gross"], private, places=4)
+        self.assertAlmostEqual(first["tax"], alone, places=4)
+        self.assertAlmostEqual(second["tax"], stacked + public * pension.TAX_FACTORS["national"], places=4)
+        self.assertLess(alone, stacked)
+        self.assertLess(stacked, private * pension.PRIVATE_HIGH_TAX)
+        self.assertEqual([(s["over_limit"], s["together"]) for s in spans], [(True, True), (True, True), (False, False)])
+        self.assertAlmostEqual(last["gross"], public, places=4)
+        limit = pension.private_limit(mine)
+        self.assertEqual((limit["yearly"], limit["over"], limit["from_age"], limit["until_age"], limit["payout_years"]),
+                         (private, True, 55, 75, 20))
+        balance = private / (tax.REAL_RETURN / (1 - (1 + tax.REAL_RETURN) ** -20))
+
+        def paid(years):
+            return balance * tax.REAL_RETURN / (1 - (1 + tax.REAL_RETURN) ** -years)
+        self.assertLessEqual(paid(limit["fit_years"]), pension.PRIVATE_SEPARATE_LIMIT)
+        self.assertGreater(paid(limit["fit_years"] - 1), pension.PRIVATE_SEPARATE_LIMIT)
+        card = report_html._pension_tax(mine, 55)
+        for text in ("나이대별 세금", "55~64세", "75세 이후", f"20년 대신 {limit['fit_years']}년에 걸쳐", "(종합과세)"):
+            self.assertIn(text, card, text)
+        self.assertNotIn("<th", card)                            # Four short columns of cells: a phone holds them.
+        # A payout so large that the brackets cost more than the flat rate keeps the flat rate (the ceiling).
+        large = rows(20_000_000)
+        self.assertEqual(pension.monthly_at(large[0], 60), Decimal(20_000_000) * (1 - pension.PRIVATE_HIGH_TAX))
+        self.assertFalse(pension.tax_by_age(large)[0]["together"])
+        self.assertIn("(16.5% 분리과세)", report_html._pension_tax(large, 55))
+        # Within the limit the withheld rate closes the tax: nothing to choose, and the note says it is within.
+        small = rows(1_000_000)
+        self.assertEqual(pension.monthly_at(small[0], 60), Decimal(1_000_000) * (1 - pension.TAX_FACTORS["pension_savings"]))
+        self.assertFalse(pension.private_limit(small)["over"])
+        self.assertIn("안입니다", report_html._pension_tax(small, 55))
+
+    def test_the_pension_tax_never_reads_an_unknown_or_after_tax_pension_as_nothing(self):
+        """Codex review 2026-11-21 of the tax table (§50): three ways a missing figure read as zero."""
+        def account(key="pension_savings", monthly=2_000_000, **more):
+            return {"key": key, "gross_monthly": Decimal(monthly), "taxable_share": Decimal(1), "start_age": 55,
+                    "end_age": 75, "net_monthly": None, "payout_years": 20, **more}
+
+        def national(monthly):
+            return {"key": "national", "gross_monthly": None if monthly is None else Decimal(monthly),
+                    "taxable_share": Decimal(1), "start_age": 65, "net_monthly": None}
+        # A national pension of unknown amount: from 65 the bracket the account meets is unknown, so the flat rate
+        # stands as a ceiling and the letter says so; before 65 nothing else is taxed with the account.
+        rows = [account(), national(None)]
+        pension._apply_tax(rows)
+        alone = tax.pension_income_tax(Decimal(24_000_000)) / 24_000_000
+        self.assertEqual(pension.monthly_at(rows[0], 60), Decimal(2_000_000) * (1 - alone))
+        self.assertEqual(pension.monthly_at(rows[0], 65), Decimal(2_000_000) * (1 - pension.PRIVATE_HIGH_TAX))
+        spans = pension.tax_by_age(rows)
+        self.assertEqual([(s["from"], s["to"], s["ceiling"]) for s in spans], [(55, 65, False), (65, 75, True)])
+        self.assertIn("상한인 16.5%", report_html._pension_tax(rows, 55))
+        # A private pension entered after tax keeps its figure and still counts toward the limit.
+        stated = {"key": "pension_savings", "gross_monthly": None, "net_monthly": Decimal(1_500_000), "stated_net": True,
+                  "taxable_share": Decimal(1), "start_age": 55, "end_age": 75}
+        rows = [stated, account("irp", 1_000_000)]
+        pension._apply_tax(rows)
+        limit = pension.private_limit(rows)
+        self.assertEqual(limit["yearly"], (Decimal(1_500_000) / (1 - Decimal("0.055")) + 1_000_000) * 12)
+        self.assertEqual((limit["over"], limit["fit_years"], stated["net_monthly"]), (True, None, Decimal(1_500_000)))
+        self.assertTrue(rows[1]["high_private_tax"])
+        self.assertNotIn("이 금액 안입니다", report_html._pension_tax(rows, 55))
+        # A private pension of unknown amount: the limit cannot be called kept.
+        rows = [account("irp", 1_000_000), {"key": "pension_savings", "gross_monthly": None, "net_monthly": None,
+                                           "taxable_share": Decimal(1), "start_age": 55}]
+        pension._apply_tax(rows)
+        self.assertEqual([pension.private_limit(rows)[k] for k in ("over", "incomplete")], [False, True])
+        card = report_html._pension_tax(rows, 55)
+        self.assertIn("아직 알 수 없습니다", card)
+        self.assertNotIn("이 금액 안입니다", card)
+        # A payout ending after the chart's last age still cuts a span: only the national pension is left from 95.
+        rows = [account(monthly=1_000_000, end_age=95, payout_years=40), national(1_000_000)]
+        pension._apply_tax(rows)
+        spans = pension.tax_by_age(rows)
+        self.assertEqual([(s["from"], s["to"]) for s in spans], [(55, 65), (65, 70), (70, 80), (80, 95), (95, None)])
+        self.assertAlmostEqual(spans[-1]["gross"], Decimal(12_000_000), places=4)
 
     def test_a_birth_month_gives_the_age_in_full_years(self):
         for birth, when, age in [((1991, 7), date(2057, 1, 3), 65), ((1991, None), date(2057, 1, 3), 66),

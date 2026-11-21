@@ -66,7 +66,7 @@ logger = logging.getLogger(__name__)
 # v32: no per-sentence law caveat; the footer says it once (user decision 2026-11-02); the check no longer asks for it.
 # v33: holdings[].week_change and index_moves; a holding that moved 10% or more opens its reason with why (2026-11-03).
 # v34: tax.realized_this_year, this year's sales with their estimated gains and the deduction left (2026-11-03).
-PROMPT_VERSION = "narrative-v45"   # v45: a single annuity is "보유 연금보험", not "연금보험 1" (§48); v44: the week's net-worth change only on the overview, whose holdings a share is of (§47); v43: relationships and close_people on the tax day (§43); v42: replies_recorded (the spouse's replies are answered, their facts not kept); v41: the money needed outside the pensions in the client's wording; v40: the overview per person, whose pay; v39: property and life days per person (§42).
+PROMPT_VERSION = "narrative-v46"   # v46: the reader's pension tax by age, the private-pension limit, the target net of the health-insurance premium (§50); v45: a single annuity is "보유 연금보험", not "연금보험 1" (§48); v44: the week's net-worth change only on the overview, whose holdings a share is of (§47); v43: relationships and close_people on the tax day (§43); v42: replies_recorded (the spouse's replies are answered, their facts not kept); v41: the money needed outside the pensions in the client's wording; v40: the overview per person, whose pay; v39: property and life days per person (§42).
 MODEL = headless.MODEL
 # A runaway guard, not a cost limit (flat-rate subscription): the markets day cost 4.39 USD on 2026-10-27 and, with a
 # payload a fifth larger, ran past 5.00 on 2026-11-03 (error_max_budget_usd), so that report went out without opinions.
@@ -296,7 +296,15 @@ Input JSON:
   household_member_1: each pipeline's `owner` and `ref` say whose it is, and the household target counts both,
   retiring at the same age) with its start age, gross and after-tax monthly payout in today's won, the
   basis (stated by the client, estimated by code, or unknown with what is missing), the monthly target and
-  the readiness ratio over the known pipelines (a lower bound while any is unknown). The retirement age is
+  the readiness ratio over the known pipelines (a lower bound while any is unknown). The target is what is left
+  to spend after every tax and the health-insurance premium (the client's definition, 2026-11-21): when
+  health_insurance_monthly_estimate is present the readiness ratio is of monthly_left_after_tax_and_health_insurance,
+  the pensions after tax less that premium (the household's, as regional subscribers once nobody is employed, on
+  the public pensions and the homes held today; without health_insurance_property_part_known the property part is
+  missing and the premium is a lower bound: the ratio is then too high and the money to hold outside the pensions
+  too low, so never say the target is met or that nothing more is needed). Say "세금과 건강보험료를 뺀" for those
+  figures, never plain "세후".
+  The retirement age is
   undecided unless retirement_age_chosen_by_client: retirement_age_tiers gives the stack at 50, 55 and 60
   (contributions stop at retirement, pension accounts pay from 55, the national pension shrinks with the
   contribution months lost), the years without any pension and what must be held outside the pensions at
@@ -307,7 +315,15 @@ Input JSON:
   money is drawn (kept at the 3% real return while the shortfall is drawn, until age 100; nothing is kept for after
   100), the retirement age, then the amount. held_outside_in_clients_words is the code's sentence for each age: use
   it or its figures. Never describe the amount as a 4% withdrawal: it is not one, and the client could not follow
-  "연 4% 인출을 가정해". The projection
+  "연 4% 인출을 가정해". own_tax_by_age is the tax on the reader's own pensions by age span at the headline
+  retirement age (each member is a taxpayer), and own_private_pension_limit sets the reader's taxable payouts from
+  pension savings and IRP against the yearly limit under which their tax ends at the low withheld rate: in a year
+  over it the whole payout is taxed at 16.5% or together with the reader's other income, and the code applied the
+  lower. When over_limit, say once in plain words what it costs and what changes it (a longer payout period:
+  payout_years_that_fit_the_limit; drawing more in the years before the national pension starts, when little
+  else is taxed with it), as a choice for the reader. Every tax figure is the code's: never compute one. A span with
+  tax_is_ceiling_national_pension_unknown is a ceiling (say "최대"), and with some_private_payouts_unknown never
+  say the payouts are within the limit. The projection
   assumes the credit-maximizing split (projected_monthly_contributions; the part no credit covers kept in an ISA
   or similar), the same split the tax proposal makes; headline_net_with_current_contributions is the total if
   the client keeps contributing as now.
@@ -853,11 +869,13 @@ def _stack_metrics(view: Any, stack: dict[str, Any] | None) -> dict[str, Any] | 
                            "basis": p["basis"], "basis_text": p["basis_text"], "missing": p["missing"]}
                           for p in stack["pipelines"]],
             "total_net_monthly_known": won(stack["total_net"]), "readiness_ratio": f"{stack['ratio']:.4f}",
+            **_health_metrics(stack),
             "net_monthly_after_fixed_term_pensions_end": won(stack["later_net"]), "fixed_term_pensions_end_age": stack["later_age"],
             "unknown_pipelines": [refs.get(k, k) for k in stack["unknown"]], "lower_bound": not stack["complete"],
             # Report design §30: the stack at each retirement age, and the contributions it assumes.
             "retirement_age_tiers": [
                 {"retirement_age": t["retire_age"], "net_monthly_once_all_started": won(t["total_net"]),
+                 **_health_metrics(t),
                  "readiness_ratio": f"{t['ratio']:.4f}", "first_pension_age": t["first_income_age"],
                  "years_without_pension": t["years_without_pension"],
                  "held_outside_pensions_at_retirement": None if t["outside_need"] is None else won(t["outside_need"]["total"]),
@@ -875,7 +893,41 @@ def _stack_metrics(view: Any, stack: dict[str, Any] | None) -> dict[str, Any] | 
                                                 "irp": won(contributions["irp"]), "isa_or_similar": won(contributions["isa"])},
             "current_monthly_contributions": {k: won(v) for k, v in contributions["current"].items()},
             "headline_net_with_current_contributions": (None if stack["current_split"] is None
-                                                        else won(stack["current_split"]["total_net"]))}
+                                                        else won(stack["current_split"]["total_net"])),
+            **_own_tax_metrics([p for p in stack["pipelines"] if p.get("owner", "self") == "self"])}
+
+
+def _health_metrics(tier: dict[str, Any]) -> dict[str, Any]:
+    """The household's health-insurance premium once retired and what the pensions leave after tax and that premium
+    (report design §50): the readiness ratio is of the latter. Empty when no premium was counted."""
+    health = tier.get("health")
+    if health is None:
+        return {}
+    return {"health_insurance_monthly_estimate": won(health["total"]),
+            "health_insurance_property_part_known": health["property"] is not None,
+            "monthly_left_after_tax_and_health_insurance": won(tier["spendable"]),
+            "monthly_left_after_fixed_term_pensions_end": won(tier["later_spendable"])}
+
+
+def _own_tax_metrics(mine: list[dict[str, Any]]) -> dict[str, Any]:
+    """The reader's own pension tax by age and their private pensions against the separate-taxation limit (report
+    design §50), at the headline retirement age: the yearly figures the letter's tax table prints, in whole won."""
+    limit = pension.private_limit(mine)
+    return {"own_tax_by_age": [{"from_age": r["from"], "until_age": None if r["to"] is None else r["to"] - 1,
+                                "yearly_before_tax": won(r["gross"]), "yearly_tax": won(r["tax"]),
+                                "yearly_after_tax": won(r["net"]), "tax_share": f"{r['rate']:.4f}",
+                                "private_pensions_over_limit": r["over_limit"],
+                                "taxed_with_other_pensions": r["together"],
+                                # The national pension's amount is unknown: the flat 16.5% stands as a ceiling.
+                                "tax_is_ceiling_national_pension_unknown": r["ceiling"]}
+                               for r in pension.tax_by_age(mine)],
+            "own_private_pension_limit": None if limit is None else {
+                "yearly_taxable_private_payout": won(limit["yearly"]), "yearly_limit": won(limit["limit"]),
+                # A private payout of unknown amount is not counted: then never "within the limit".
+                "some_private_payouts_unknown": limit["incomplete"],
+                "over_limit": limit["over"], "over_from_age": limit["from_age"],
+                "over_until_age": None if limit["until_age"] is None else limit["until_age"] - 1,
+                "payout_years_now": limit["payout_years"], "payout_years_that_fit_the_limit": limit["fit_years"]}}
 
 
 def _swap_metrics(swap: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -1635,7 +1687,7 @@ def with_blocks(output: dict[str, Any]) -> dict[str, Any]:
     """The output with every scalar block present: an optional block left out (`household` outside a per-person
     edition, or an output written before it existed) reads as an empty block."""
     return {**output, **{field: output.get(field) or dict(_EMPTY_BLOCK) for field in SCALAR_BLOCKS}}
-TAX_PROPOSALS = ("pension-credit", "overseas-harvest", "isa-open")  # Proposals computed by Smith's tax rules.
+TAX_PROPOSALS = ("pension-credit", "pension-split", "overseas-harvest", "isa-open")  # Proposals computed by Smith's tax rules.
 # A daily edition's lists are cut in code too, not only asked for in the prompt (overview, other days).
 EDITION_LIMITS = {"insights": (2, 1), "watch": (2, 2), "experiences": (0, 2),
                   "relationships": (0, 2)}  # (overview, themed day)

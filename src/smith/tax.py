@@ -27,6 +27,9 @@ SOURCES = {
     "year_end": ("국세청 연말정산 안내(혼인세액공제 포함)",
                  "https://www.nts.go.kr/nts/cm/cntnts/cntntsView.do?cntntsId=7875&mi=6467"),
     "earned": ("소득세법 제47조(근로소득공제)·제55조(세율)", "https://www.law.go.kr/법령/소득세법/제55조"),
+    # Checked 2026-11-21 against the text in force from 2026-07-01 (the rest of the table: RULES_CHECKED).
+    "pension_income": ("소득세법 제47조의2(연금소득공제)·제14조·제64조의4(사적연금 분리과세)·제129조(원천징수세율)",
+                       "https://www.law.go.kr/법령/소득세법/제47조의2"),
 }
 MARRIAGE_CREDIT = Decimal(500_000)    # Per person, once, for marriages registered in 2024-2026.
 # Pension accounts (소득세법 제59조의3): credit base 6M for pension savings, 9M with IRP; 13.2% effective
@@ -34,6 +37,7 @@ MARRIAGE_CREDIT = Decimal(500_000)    # Per person, once, for marriages register
 PENSION_SAVINGS_LIMIT = Decimal(6_000_000)
 PENSION_TOTAL_LIMIT = Decimal(9_000_000)
 CREDIT_RATE_HIGH, CREDIT_RATE_LOW = Decimal("0.132"), Decimal("0.165")
+CREDIT_PAY_LINE = Decimal(55_000_000)   # Gross pay at or below this earns the 16.5% rate.
 # Overseas listed shares: 22% (incl. local tax) on net gains above a 2.5M won yearly basic deduction.
 OVERSEAS_DEDUCTION, OVERSEAS_RATE = Decimal(2_500_000), Decimal("0.22")
 # ISA (general type): 2M won of net income tax-free after three years, 9.9% above; 20M won yearly payment
@@ -63,6 +67,13 @@ ASSUMED_MARGINAL_RATE = Decimal("0.38")
 # Employee health, long-term care and employment insurance on extra pay (about 5%); the national pension is
 # assumed to be at its monthly ceiling already, so a bonus adds none.
 PAYROLL_INSURANCE_RATE = Decimal("0.05")
+# Pensions taxed with the person's other income (종합과세, 소득세법 제47조의2): the pension-income deduction by band of
+# the year's taxable pensions (band upper bound, deduction at the band's floor, rate on the part above the floor),
+# capped at 9M won; then the person's own basic deduction (제50조).
+PENSION_DEDUCTION = ((3_500_000, 0, "1"), (7_000_000, 3_500_000, "0.4"), (14_000_000, 4_900_000, "0.2"),
+                     (None, 6_300_000, "0.1"))
+PENSION_DEDUCTION_CAP = Decimal(9_000_000)
+PERSONAL_DEDUCTION = Decimal(1_500_000)
 _MONTHS = {"monthly": 1, "quarterly": 3, "annual": 12}
 
 
@@ -87,6 +98,22 @@ def earned_income_tax(pay: Decimal) -> Decimal:
             break
         lower = Decimal(upper)
     return progressive(max(Decimal(0), pay - min(deduction, EARNED_DEDUCTION_CAP))) * Decimal("1.1")
+
+
+def pension_income_tax(pensions: Decimal) -> Decimal:
+    """Income tax plus local tax on a year's taxable pensions taxed together (종합과세) when they are the person's
+    only such income: after the pension-income deduction and the person's own basic deduction, nothing else.
+
+    Other deductions and credits are left out (the result is a little high), and so is any other income taxed
+    together (pay, a business, interest and dividends above their threshold), which would lift the bracket."""
+    deduction, floor = Decimal(0), Decimal(0)
+    for upper, base, rate in PENSION_DEDUCTION:
+        if upper is None or pensions <= upper:
+            deduction = Decimal(base) + (pensions - floor) * Decimal(rate)
+            break
+        floor = Decimal(upper)
+    taxable = pensions - min(deduction, PENSION_DEDUCTION_CAP) - PERSONAL_DEDUCTION
+    return progressive(max(Decimal(0), taxable)) * Decimal("1.1")
 
 
 def extra_pay_withholding(amount: Decimal, *, pay_before: Decimal | None) -> tuple[Decimal, str]:
@@ -258,6 +285,12 @@ def pension_plan(t: dict[str, Any]) -> dict[str, Decimal]:
             "monthly": t["pension_monthly"], "savings_monthly": now_savings, "irp_monthly": now_irp,
             "next_savings": next_savings, "next_irp": next_irp, "next_rest": rest,
             "credit_gain": yearly_credit_base(next_savings, next_irp) - yearly_credit_base(now_savings, now_irp)}
+
+
+def credit_rate(gross_pay: Any) -> Decimal:
+    """The pension credit rate, local tax included, for a year's gross pay: 16.5% at or below CREDIT_PAY_LINE, 13.2%
+    above it, and 13.2% (the lower) while the pay is unknown."""
+    return CREDIT_RATE_LOW if gross_pay and Decimal(gross_pay) <= CREDIT_PAY_LINE else CREDIT_RATE_HIGH
 
 
 def credit_split(savings: Decimal, irp: Decimal) -> tuple[Decimal, Decimal, Decimal]:

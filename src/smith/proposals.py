@@ -103,8 +103,8 @@ class Undetermined:
 
 # The proposal rules in `build`, in order. A rule's proposals and undetermined judgements carry its key.
 RULE_KEYS = ("lease-return", "emergency-reserve", "goal-stocks-glide", "concentration-trim", "surplus-plan",
-             "pension-credit", "overseas-harvest", "isa-open", "insurance-review", "prepayment", "variable-rate",
-             "refinance", "spending-room")
+             "pension-credit", "pension-split", "overseas-harvest", "isa-open", "insurance-review", "prepayment",
+             "variable-rate", "refinance", "spending-room")
 SPENDING_FILL_MONTHS = 12  # Assumption (§16.3): an emergency-reserve gap is filled within a year.
 # Assumption (§17.1): when assets sellable within days are at least this many times the reserve gap, the gap
 # is filled by moving money between assets once, not by diverting the monthly surplus for months.
@@ -145,8 +145,17 @@ def build(view: LedgerView, kpis: dict[str, Any], sectors: dict[str, Any],
     facts["glide"] = _glide(facts)
     facts["reserve_swap"] = reserve_swap(facts)
     facts["spending_room"] = spending_room(facts)
+    # Every other member's tax facts, and the settings their pay is in: the couple's pension split reads both (§50).
+    facts["tax_others"] = {owner: tax.facts(view, facts["today"], household, owner=owner)
+                           for owner in pension.owners(view) if owner != "self"}
+    facts["household"] = household or {}
+    # Who is paid a salary today: a pension credit comes off the tax on pay, which a tax-free annuity or any other
+    # inflow does not carry (Codex review 2026-11-21).
+    facts["salaried"] = {r.owner_id for r in view.records if r.kind is Kind.CASHFLOW and r.fields["category"] == "salary"
+                         and r.fields["direction"] == "inflow" and recurring_active(r.fields, facts["today"])}
     rules = (_lease_return, _emergency_reserve, _goal_stocks_glide, _concentration_trim, _surplus_plan, _pension_credit,
-             _overseas_harvest, _isa, _insurance_review, _prepayment, _variable_rate, _refinance, _spending_room)
+             _pension_split, _overseas_harvest, _isa, _insurance_review, _prepayment, _variable_rate, _refinance,
+             _spending_room)
     outcomes = [(i, rule(facts)) for i, rule in enumerate(rules)]
     found = [(i, p) for i, p in outcomes if isinstance(p, Proposal)]
     undetermined = [replace(p, key=RULE_KEYS[i]) for i, p in outcomes if isinstance(p, Undetermined)]
@@ -243,6 +252,7 @@ def _due_again(proposal: Proposal, current: dict[str, Any], today: date, tz: tzi
 RULE_LABELS = {
     "lease-return": "전세보증금 반환 계획", "emergency-reserve": "비상금 채우기", "goal-stocks-glide": "이사 자금을 안전 자산으로",
     "concentration-trim": "한 종목 비중 줄이기", "surplus-plan": "남는 돈 자동이체", "pension-credit": "연금 세액공제",
+    "pension-split": "연금 납입 부부 분산",
     "overseas-harvest": "해외주식 양도세 공제", "isa-open": "ISA 계좌", "insurance-review": "보험료 점검",
     "prepayment": "대출 미리 갚기", "variable-rate": "변동금리 점검", "refinance": "대환 검토", "spending-room": "쓸 수 있는 돈"}
 
@@ -882,6 +892,14 @@ def _pension_credit(facts: dict[str, Any]) -> Proposal | None:
     if not plan["irp_room"] and not gain and not rest:
         return None
     room = bool(plan["irp_room"])
+    # Only the part no credit covers is left to place, and the other member has credit room for it: the split
+    # proposal says where it goes (with the ISA as its alternative), so this one does not say it a second way.
+    split = pension_split(facts)
+    moved = split["monthly"] if split is not None and split["giver"] == "self" else Decimal(0)
+    if not room and not gain and moved:
+        return None
+    # What the split sends to the other member is not also sent to an ISA here (Codex review 2026-11-21).
+    rest -= moved
     if room:
         title = f"{today.year}년 12월 31일까지 IRP에 {short_won(plan['irp_room'])}을 넣어 세액공제 한도를 채우시길 권합니다."
         headline = f"연내 IRP {short_won(plan['irp_room'])} 납입(세액공제)"
@@ -902,6 +920,8 @@ def _pension_credit(facts: dict[str, Any]) -> Proposal | None:
     elsewhere = (f" 공제 밖 월 {short_won(rest)}을 ISA에 넣으면 이익 {short_won(tax.ISA_TAX_FREE)}까지 비과세이고, 3년 만기 뒤 연금 "
                  f"계좌로 옮기면 옮긴 돈의 10%(최대 {short_won(tax.ISA_TRANSFER_CREDIT_CAP)})를 더 공제받습니다. 연금저축에 그대로 두어도 "
                  "원금은 비과세이고 이익은 연금으로 받을 때 낮은 세율이라, 손해가 아니라 선택입니다." if rest else "")
+    if moved:
+        elsewhere += f" 공제 밖 월 {short_won(moved)}은 배우자분 명의 연금계좌로 돌리는 제안을 따로 드립니다."
     return Proposal(
         key="pension-credit", priority=(1 if today.month >= 10 else 2) if room else 2 if gain else 3,
         identity=f"pension-credit:{today.year}", headline=headline,
@@ -922,6 +942,85 @@ def _pension_credit(facts: dict[str, Any]) -> Proposal | None:
         certainty=(f"계산(정기 이체를 공제 대상 납입으로 가정) + 세법 기준 {tax.RULES_YEAR}년"),
         figures={"irp_room": plan["irp_room"], "excess": plan["excess"], "refund_gain": plan["refund_gain"],
                  "credit_gain": gain, "next_rest": rest})
+
+
+def pension_split(facts: dict[str, Any]) -> dict[str, Any] | None:
+    """Whose pension contributions should go into the other member's accounts (report design §50, user decision
+    2026-11-21: tax-saving moves such as spreading contributions over the couple must be in the letter). The
+    credit limit and the low-rate limit on payouts are each person's own, so the money one member pays above their
+    credit limit (`next_rest`) earns a credit in the other member's unused room, as far as that room goes.
+
+    Keys: giver, receiver (owner ids), monthly, rate (the receiver's credit rate), rate_assumed (their pay is not
+    in the settings), gain (yearly), room_this_year (the receiver's credit room left this year). None unless the
+    household has exactly one other member, one of the two pays above their limit while the other has room, and the
+    receiver has pay to take a credit from (their gross pay in the settings, or a salary running in the ledger)."""
+    others = facts.get("tax_others") or {}
+    if len(others) != 1:
+        return None
+    (other, theirs), = others.items()
+    household = facts.get("household") or {}
+    members = {"self": facts["tax"], other: theirs}
+    plans = {owner: tax.pension_plan(t) for owner, t in members.items()}
+    found = None
+    for giver, receiver in (("self", other), (other, "self")):
+        room = tax.PENSION_TOTAL_LIMIT / 12 - plans[receiver]["next_savings"] - plans[receiver]["next_irp"]
+        monthly = min(plans[giver]["next_rest"], room)
+        prefix = pension.MEMBER_PREFIX.get(receiver)
+        pay = None if prefix is None else household.get(f"{prefix}annual_gross_salary")
+        # Without pay there is no income tax for the credit to come off.
+        if monthly <= 0 or not (pay or receiver in facts.get("salaried", ())):
+            continue
+        if found is None or monthly > found["monthly"]:
+            rate = tax.credit_rate(pay)
+            found = {"giver": giver, "receiver": receiver, "monthly": monthly, "rate": rate, "rate_assumed": not pay,
+                     "gain": monthly * 12 * rate, "room_this_year": plans[receiver]["irp_room"]}
+    return found
+
+
+def _pension_split(facts: dict[str, Any]) -> Proposal | None:
+    """Move the contributions no credit covers into the other member's pension accounts (`pension_split`)."""
+    split = pension_split(facts)
+    if split is None:
+        return None
+    today, monthly = facts["today"], split["monthly"]
+
+    def who(owner: str) -> str:
+        return "고객님" if owner == "self" else "배우자분"
+    giver, receiver = who(split["giver"]), who(split["receiver"])
+    stack = facts.get("pension_stack") or {}
+    limits = {owner: pension.private_limit([p for p in stack.get("pipelines", []) if p.get("owner", "self") == owner])
+              for owner in (split["giver"], split["receiver"])}
+    paying, taking = limits[split["giver"]], limits[split["receiver"]]
+    later = ""
+    if paying and taking and paying["over"] and not taking["over"] and not taking["incomplete"]:
+        later = (f" 받을 때도 {giver}의 연금저축·IRP는 한 해 약 {short_won(paying['yearly'])}으로 그 기준을 넘고, {receiver}은 약 "
+                 f"{short_won(taking['yearly'])}으로 여유가 있습니다.")
+    married = facts["tax"]["married"]
+    gift = ("혼인신고 전에는 배우자 사이 증여 공제(10년간 6억 원)가 적용되지 않아, 한 사람의 돈을 상대 계좌에 직접 넣으면 증여로 볼 수 "
+            f"있습니다. {receiver} 본인 급여에서 납입하고 생활비 분담을 그만큼 조정하는 방식이 안전합니다." if married is False else
+            f"부부 사이에 옮기는 돈은 증여이지만 10년간 6억 원까지 공제됩니다. {receiver} 본인 급여에서 납입하고 생활비 분담을 "
+            "조정하면 옮길 필요도 없습니다.")
+    rate = f"{percent(split['rate'], 1)}" + ("로 가정(총급여를 몰라 낮은 쪽)" if split["rate_assumed"] else "")
+    this_year = (f" 올해 12월 31일까지 {receiver} 명의로 넣는 돈도 올해 공제에 들어갑니다(올해 한도 {short_won(split['room_this_year'])} 남음)."
+                 if split["room_this_year"] else "")
+    return Proposal(
+        key="pension-split", priority=2, identity=f"pension-split:{today.year}", headline="연금 납입 부부 분산",
+        watch=("monthly", "gain"), tolerance=Decimal("0.2"),
+        # The saving is in the title: a themed letter prints the title, one sentence of `why` and the timing only.
+        title=(f"{giver}이 세액공제 한도를 넘게 넣는 월 {short_won(monthly)}을 {receiver} 명의 연금계좌로 돌려, 세금을 해마다 최대 약 "
+               f"{short_won(split['gain'])} 줄이시길 권합니다."),
+        why=("연금저축·IRP에 넣을 때 세금을 돌려받는 한도(연 900만 원)와, 연금으로 받을 때 낮은 세율로 끝나는 기준(연 1,500만 원)은 "
+             f"사람마다 따로입니다. {giver}은 한도를 다 채우고도 월 {short_won(monthly)}을 더 넣어 그 돈은 공제를 받지 못하는데, "
+             f"{receiver} 명의 한도는 비어 있습니다." + later),
+        effect=(f"월 {short_won(monthly)}(연 {short_won(monthly * 12)})을 {receiver} 명의 연금저축이나 IRP에 넣으면 {receiver}의 세금이 "
+                f"해마다 최대 약 {short_won(split['gain'])} 줄어듭니다(공제율 {rate}). 나중에 연금으로 받을 때는 두 분의 기준을 "
+                "나눠 쓰게 됩니다." + this_year),
+        risks=(gift + " 연금 계좌의 돈은 55세 전에 꺼내면 공제받은 세금을 다시 냅니다. 가까운 주택 자금으로 쓸 돈이라면 3년 뒤 꺼낼 수 "
+               "있는 ISA에 두는 쪽이 맞습니다."),
+        timing=f"{today.year + 1}년 1월 납입부터",
+        reconsider=f"{receiver}의 급여가 없어져 공제받을 세금이 없거나, 두 분의 납입 계획이 바뀌면 다시 계산합니다.",
+        certainty=f"계산(정기 이체를 공제 대상 납입으로 가정) + 세법 기준 {tax.RULES_YEAR}년",
+        figures={"monthly": monthly, "gain": split["gain"]})
 
 
 def _overseas_harvest(facts: dict[str, Any]) -> Proposal | Undetermined | None:
@@ -1397,7 +1496,8 @@ def _retirement_track(facts: dict[str, Any], home: dict[str, Any] | None) -> Tra
     added = None if birth is None else tax.set_aside(share, int(birth) + head["retire_age"])
     need = head["outside_need"]
     # An upper bound above zero cannot say the plan falls short: the unknown pension may cover it (unknown, not zero).
-    status = ("unknown" if need is None else "on_track" if need["total"] <= 0
+    # Nor can a premium whose property part is unknown say the plan is met: the true premium is larger.
+    status = ("unknown" if need is None else ("unknown" if need.get("premium_partial") else "on_track") if need["total"] <= 0
               else "unknown" if need["upper_bound"] else "attention")
     if need is not None and need["upper_bound"]:
         need = None  # The expected-pay share of a ceiling would understate what the pay covers: left out.
@@ -1405,7 +1505,9 @@ def _retirement_track(facts: dict[str, Any], home: dict[str, Any] | None) -> Tra
     words = pension.need_words(head, stack["target"])
     return Track(
         "노후 준비", status,
-        f"월 {short_won(stack['target'])}(세후, 현재 가치) 목표에 {shared}연금 세후 준비율은 은퇴 나이별로 {ratios}",
+        (f"월 {short_won(stack['target'])}(세금·건강보험료를 뺀 금액, 현재 가치) 목표에 {shared}연금(세금·건강보험료를 뺀 금액) 준비율은 "
+         f"은퇴 나이별로 {ratios}" if stack.get("health") is not None else
+         f"월 {short_won(stack['target'])}(세후, 현재 가치) 목표에 {shared}연금 세후 준비율은 은퇴 나이별로 {ratios}"),
         ((f"{words} " if words else "")
          + (f"연금 밖에서 준비할 돈은 은퇴 나이별로 {need_text}입니다. " if need_text else "")
          + (f"{gaps[0]['retire_age']}세에 은퇴하면 첫 연금까지 {gaps[0]['years_without_pension']}년이 비어 그동안의 생활비가 "

@@ -36,7 +36,7 @@ _MAX_PAGES = 5
 # (law name exactly as 법령명한글, what Smith computes from it, the rule set it was checked for). Names are those of
 # the laws the tax and holding-tax rules cite.
 WATCHED = (
-    ("소득세법", "연금계좌 세액공제·근로소득세·양도소득세·금융소득 종합과세", "tax"),
+    ("소득세법", "연금계좌 세액공제·연금소득 과세·근로소득세·양도소득세·금융소득 종합과세", "tax"),
     ("소득세법 시행령", "1세대1주택 비과세·고가주택·저축성보험 비과세", "tax"),
     ("조세특례제한법", "ISA 등 조세특례", "tax"),
     ("조세특례제한법 시행령", "ISA 등 조세특례", "tax"),

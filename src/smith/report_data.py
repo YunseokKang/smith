@@ -12,7 +12,7 @@ from decimal import Decimal, localcontext
 from typing import Any
 
 from smith import (cases, checklist, dividends, editions, evidence, fundamentals, future_income, holding_tax, holdings,
-                   insiders, law_watch, lease, ledger, move_plan, official_price, pension, perspective, picks, principles,
+                   insiders, law_watch, lease, ledger, move_plan, nhis, official_price, pension, perspective, picks, principles,
                    product_review, proposals, realestate, stress, tax)
 from smith.config import DEFAULT_TIMEZONE, local_time
 from smith.payload import LedgerView, base_amount, load_view, unrealized_gain
@@ -131,7 +131,12 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
     # member's split is their own (§42), so the household figures are the same in either member's letter.
     plans = {owner: tax.pension_plan(tax.facts(view, as_of.date(), household, owner=owner))
              for owner in pension.owners(view) if owner != "self"}
-    pension_stack = pension.stack(view, household, as_of.date(), plan=tax.pension_plan(plan), plans=plans)
+    # The target is what is left after every tax and the health-insurance premium (user decision 2026-11-21, report
+    # design §50): the premium of the retired household as regional subscribers, on the homes it holds today at their
+    # property-tax base. A home without an official price leaves the property part unknown (a lower bound).
+    property_base = _premium_base(conn, sectors["real_estate"]["properties"], household, as_of.year)
+    pension_stack = pension.stack(view, household, as_of.date(), plan=tax.pension_plan(plan), plans=plans,
+                                  premium=lambda public: nhis.regional_premium(public, property_base))
     # Each owner's yearly dividends from the dividend evidence as known at the report (FR-45).
     yearly_dividends = dividends.yearly(view, dividends.load(conn, known_at), as_of.date())
     # Each letter reads its own proposal history (the spouse's is scoped, smith.perspective).
@@ -652,6 +657,18 @@ def _official_holding(plan: dict[str, Any] | None, store: dict[str, Any], *, yea
             target["holding"] = {**target["holding"],
                                  "basis": f"공시가격은 시세의 {round(holding_tax.REALIZATION_RATE * 100)}%로 추정"}
     return plan
+
+
+def _premium_base(conn: sqlite3.Connection, properties: list[dict[str, Any]], household: dict[str, Any] | None,
+                  year: int) -> Decimal | None:
+    """The property-tax base of the homes the household holds today, every home added, for the health-insurance
+    premium of the retired household (report design §50); None when a home has no official price or estimate. Today's
+    homes, never the holding tax's: that one keeps a home sold after the assessment day for the year's bill, which
+    the premium of a later decade must not carry (Codex review 2026-11-21)."""
+    homes = holding_tax.homes(properties, household, official_price.store_for(conn), year=year)
+    rows = holding_tax.household(homes, household, year=year, projected=True)["homes"]
+    bases = [None if row["property"] is None else row["property"]["base"] for row in rows]
+    return None if None in bases else sum(bases, Decimal(0))
 
 
 def _holding_tax(conn: sqlite3.Connection, properties: list[dict[str, Any]], household: dict[str, Any] | None,
