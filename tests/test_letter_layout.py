@@ -186,6 +186,9 @@ class LayoutTests(unittest.TestCase):
                                                       audience="self", client_household=None)
             self.assertEqual(moved(after, AT - timedelta(days=7)), ["비상금 확보율 60% → 72%", "확인할 자료 2건 → 1건"])
             self.assertEqual(moved(before, AT - timedelta(days=7)), [])
+            # A figure that can no longer be computed moved too: never "nothing changed" (Codex review 2026-11-21).
+            lost = {**before, "sectors": {"cash": {"reserve_target": Decimal(100), "immediate": None}}}
+            self.assertEqual(moved(lost, AT - timedelta(days=7)), ["비상금 확보율 60% → 계산 불가"])
             self.assertTrue(all(call.kwargs["nested"] for call in built.call_args_list))   # It never looks further back.
             # The month's first letter prints the cards in full and a theme without a digest claims nothing.
             self.assertIsNone(moved(after, None))

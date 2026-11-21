@@ -269,7 +269,7 @@ def _reference_changes(conn: sqlite3.Connection, data: dict[str, Any], *, househ
     letter's own wording; an empty list when nothing did. None when the edition has no digest, when this is the
     theme's first letter of the month (the cards are printed in full then) or when no earlier letter exists: the
     letter then makes no claim. The earlier figures are the same build at that letter's time, with the ledger as it
-    was known when that letter was made."""
+    was known when that letter was made. A figure known on one side only is said as "계산 불가"."""
     digest = _DIGESTS.get(data["kind"])
     last, now = data["series_last"], data["as_of"]
     if digest is None or last is None or (last.year, last.month) != (now.year, now.month):
@@ -285,8 +285,11 @@ def _reference_changes(conn: sqlite3.Connection, data: dict[str, Any], *, househ
     earlier = _build_report(conn, as_of=last, known_at=known, baseline=None, kind=data["kind"], household=household,
                             schedule=schedule, audience=audience, client_household=client_household, nested=True)
     before, after = digest(earlier), digest(data)
-    return [f"{name} {before[name]} → {value}" for name, value in after.items()
-            if value is not None and before.get(name) is not None and before[name] != value]
+    # A figure that could be computed then and cannot now (or the reverse) moved too: it is never left out as
+    # "nothing changed" (Codex review 2026-11-21; unknown is not the same as unchanged).
+    unknown = "계산 불가"
+    return [f"{name} {before.get(name) or unknown} → {after.get(name) or unknown}"
+            for name in dict.fromkeys([*before, *after]) if before.get(name) != after.get(name)]
 
 
 def _property_figures(props: list[dict[str, Any]]) -> dict[str, Any]:

@@ -149,6 +149,22 @@ class StressAndSpendingTests(Household):
         proposal = self.proposal(data, "surplus-plan")
         self.assertIn("자동이체로 약 340만 원을 먼저 묶고, 남는 약 60만 원만 쓰시길 권합니다.", proposal.title)
         self.assertEqual((proposal.figures["transfer"], proposal.figures["free"]), (Decimal(3_400_000), Decimal(600_000)))
+        # The split is watched (Codex review 2026-11-21): a transfer that moved under the same surplus, or an instance
+        # raised before the split existed, is a changed recommendation and never a waiting line of the old one.
+        self.assertEqual(proposal.watch, ("surplus", "transfer"))
+        self.assertFalse(proposals.materially_changed(proposal, {"surplus": "4000000", "transfer": "3400000"}))
+        self.assertTrue(proposals.materially_changed(proposal, {"surplus": "4000000", "transfer": "1700000"}))
+        self.assertTrue(proposals.materially_changed(proposal, {"surplus": "4000000"}))
+        # Under the surplus plan's threshold nothing is split off: the card and the spending-room proposal both say
+        # the whole room, never two amounts for the same money.
+        self.load([rec("more-rent", "cashflow", category="living_expense", direction="outflow", currency="KRW",
+                       amount="3600000", frequency="monthly", start_date="2026-01-01")])
+        small = self.report()
+        self.assertEqual([small["advice"]["spending_room"][k] for k in ("surplus", "transfer", "free")],
+                         [Decimal(400_000), Decimal(0), Decimal(400_000)])
+        self.assertNotIn("surplus-plan", self.keys(small))
+        self.assertIn("40만 원", self.proposal(small).title)
+        self.assertIn("쓰셔도 되는 돈 40만 원", render(small)[1])
         page = render(data)[1]
         self.assertIn("남는 돈의 쓰임", page)
         self.assertIn("자동이체 먼저(권고)", page)

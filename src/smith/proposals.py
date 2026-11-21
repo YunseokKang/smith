@@ -111,6 +111,9 @@ SPENDING_FILL_MONTHS = 12  # Assumption (§16.3): an emergency-reserve gap is fi
 # (the surplus card always said "80~90%"); what is left after it is the reader's to spend (report design §51).
 TRANSFER_SHARE = Decimal("0.85")
 TRANSFER_STEP = Decimal(100_000)   # The transfer is said in 10만 원 steps.
+# Below this unallocated surplus no surplus plan is raised and no transfer is split off: the whole room is the
+# reader's to spend, as the spending-room card then says (Codex review 2026-11-21: the two gave different amounts).
+SURPLUS_PLAN_MIN = Decimal(500_000)
 # Assumption (§17.1): when assets sellable within days are at least this many times the reserve gap, the gap
 # is filled by moving money between assets once, not by diverting the monthly surplus for months.
 SWAP_MULTIPLE = Decimal(3)
@@ -863,7 +866,7 @@ def _surplus_plan(facts: dict[str, Any]) -> Proposal | Undetermined | None:
         return Undetermined("매월 남는 돈의 쓰임새", "월 현금흐름 가운데 원화로 환산하지 못한 항목이 있습니다.")
     allocated = summary.monthly_transfers
     surplus = facts["unallocated"]  # Transfers (for example pension contributions) are already allocated.
-    if surplus < Decimal(500_000):
+    if surplus < SURPLUS_PLAN_MIN:
         return None
     already = (f" 이 가운데 {short_won(allocated)}은 연금 등으로 이미 매월 이체되고 있고, 나머지는" if allocated
                else " 그런데 이 돈이")
@@ -875,7 +878,10 @@ def _surplus_plan(facts: dict[str, Any]) -> Proposal | Undetermined | None:
     tail = (f"{where}자동이체로 약 {short_won(room['transfer'])}을 먼저 묶고, 남는 약 {short_won(room['free'])}만 쓰시길 권합니다."
             if split else "자동이체로 묶어 두시길 권합니다.")
     return Proposal(
-        key="surplus-plan", priority=2, watch=("surplus",),
+        # The split is watched too: a transfer that moved while the surplus stood still (the reserve or a deposit
+        # taking more of it) is another recommendation, never a line in the waiting list or an old decision's
+        # (Codex review 2026-11-21). An instance raised before the split existed renews once for the same reason.
+        key="surplus-plan", priority=2, watch=("surplus", "transfer") if split else ("surplus",),
         # Named as the part of the monthly surplus without a destination: the letter of 2026-11-02 showed 321만
         # (the tile), this 97만 and the spending room 9만 all as "월 여유" (user review).
         headline=(f"월 {short_won(surplus)}: 자동이체 {short_won(room['transfer'])} 먼저" if split
@@ -1385,7 +1391,8 @@ def spending_room(facts: dict[str, Any]) -> dict[str, Any] | None:
     # "tie it up", "free to spend" and "all for the move" at once): a standing transfer first, toward the nearest
     # planned goal that still needs money, and what is left after it to spend.
     room = surplus - committed_total
-    transfer = max(Decimal(0), (room * TRANSFER_SHARE) // TRANSFER_STEP * TRANSFER_STEP)
+    transfer = (Decimal(0) if surplus < SURPLUS_PLAN_MIN
+                else max(Decimal(0), (room * TRANSFER_SHARE) // TRANSFER_STEP * TRANSFER_STEP))
     target = next((label for label, amount in planned if amount > 0), None)
     return {"surplus": surplus, "committed": committed, "reserve_fill_months": fill_over, "planned": planned, "committed_total": committed_total,
             "transfer": transfer, "free": max(Decimal(0), room - transfer), "transfer_target": target,
