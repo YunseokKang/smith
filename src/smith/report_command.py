@@ -94,6 +94,9 @@ def run(args: argparse.Namespace) -> int:
     except (sqlite3.Error, ledger.LedgerError) as error:
         print(f"Ledger error ({type(error).__name__}): not a readable Smith ledger.")
         return 1
+    if not narrate and "self" in letters:
+        from smith import spending_letter
+        spending_letter.attach(args.db, letters["self"], now=now)   # The card without a new note (no model call).
     if narrate:
         narrator = _narrator(args.db, now, brief_id, args.pipeline or "single")
         for audience in shown:
@@ -354,6 +357,11 @@ def _narrator(db: Path, now: datetime, brief_id: str | None = None, pipeline: st
     first_reader, missing = reader.installed()
 
     def narrate(data: dict[str, Any]) -> None:
+        # The life letter's card-spending note is a call of its own (FR-60); it never stops the letter.
+        from smith import spending_letter
+        problem = spending_letter.attach(db, data, now=now, secrets=secrets)
+        if problem:
+            _say(db, problem)
         narrative.narrate(db, data["view"], data, now=now, secrets=secrets, brief_id=brief_id, pipeline=pipeline,
                           first_reader=first_reader)
         status = data["narrative"]["status"]
@@ -469,6 +477,24 @@ def _sync_official_prices(db: Path, config: dict[str, Any], now: datetime) -> No
                  + (f"; {', '.join(failed)}" if failed else ""))
     except Exception as error:  # noqa: BLE001 - the yearly refresh must never block the scheduled task.
         _say(db, f"Official prices crashed: {type(error).__name__}")
+
+
+def _sync_spending(db: Path, config: dict[str, Any], now: datetime) -> None:
+    """The month's card statement, once a day while one may be waiting in the mail (FR-60); never raises."""
+    from smith import spending_command
+    from smith.config import local_time
+
+    try:
+        today = local_time(now, config["app"]["timezone"]).date()
+        if not spending_command.sync_due(spending_command.folder(db), today):
+            return
+        result = spending_command.sync(spending_command.folder(db), today=today)
+        if result["stored"] or not result["ok"]:
+            _say(db, f"Spending sync: {result['message']}")
+        for line in spending_command.classify(spending_command.folder(db)) if result["stored"] else []:
+            _say(db, f"Spending classify: {line}")
+    except Exception as error:  # noqa: BLE001 - a statement read must never block the scheduled task.
+        _say(db, f"Spending sync crashed: {type(error).__name__}")
 
 
 def _sync_law(db: Path, now: datetime) -> None:
@@ -633,6 +659,7 @@ def _publish_once(args: argparse.Namespace) -> int:
             _sync_dividends(args.db, config, now)   # Weekly, never while a report is due (FR-45).
             _sync_fundamentals(args.db, config, now)   # The holdings' official quarters, weekly as well.
             _sync_law(args.db, now)   # The tax-law watch (FR-54), weekly.
+            _sync_spending(args.db, config, now)   # The month's card statement mail (FR-60), around its arrival.
             _sync_official_prices(args.db, config, now)   # The year's official prices (FR-53), from 1 May.
             upcoming = delivery.slots_between(config["reports"], tz, now, now + PREPARE_AHEAD)
             if upcoming:

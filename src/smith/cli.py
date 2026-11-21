@@ -66,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
                        dining_command,
                        dividends_command, doctor_command, fundamentals_command, evening_command, events_command, evernote_command,
                        followup_command, health_command, keep_command, law_command, mail_command, people_command, picks_command,
-                       memory_command, outing_command, realestate_command, report_command, trade_command,
+                       memory_command, outing_command, realestate_command, report_command, spending_command, trade_command,
                        weather_command)
     agenda_command.add_parser(sub)
     contacts_command.add_parser(sub, DEFAULT_DB)
@@ -94,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
     ask_command.add_parser(sub, DEFAULT_DB)
     dining_command.add_parser(sub, DEFAULT_DB)
     outing_command.add_parser(sub, DEFAULT_DB)
+    spending_command.add_parser(sub, DEFAULT_DB)
     args = parser.parse_args(argv)
     commands = {"check-config": _check_config, "import": _import, "records": _records, "toss": _toss,
                 "summary": _summary, "evidence": _evidence, "advise": advise_command.run,
@@ -105,7 +106,8 @@ def main(argv: list[str] | None = None) -> int:
                 "daily": daily_command.run, "keep": keep_command.run, "evernote": evernote_command.run, "contacts": contacts_command.run,
                 "health": health_command.run, "evening": evening_command.run, "dividends": dividends_command.run,
                 "fundamentals": fundamentals_command.run, "trade": trade_command.run, "ask": ask_command.run,
-                "dining": dining_command.run, "outing": outing_command.run}
+                "dining": dining_command.run, "outing": outing_command.run,
+                "spending": spending_command.run}
     return commands[args.command](args)
 
 

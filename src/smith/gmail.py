@@ -6,7 +6,9 @@ Verified against Google's docs on 2026-10-04: desktop OAuth uses the loopback re
 Answering the client's e-mail replies (FR-18, opt-in) additionally needs `gmail.readonly`, a
 restricted scope: Smith then reads only the threads of mails it sent itself, never the inbox, plus two searches of the
 client's own sent mail (message ids only): a trade-approval code (`sent_containing`) and the counsel mails the client
-writes to themselves under a subject prefix (`sent_with_subject`, FR-49).
+writes to themselves under a subject prefix (`sent_with_subject`, FR-49). One exception to "never the inbox" (FR-60,
+user decision 2026-11-21): the card company's statement mails, found by a fixed sender (`statements_from`) and read
+for their one attachment only (`attachment`).
 
 A request that may have reached Google but returned no answer has an unknown outcome; it is
 reported as such and never retried automatically, so a report is not sent twice.
@@ -257,6 +259,37 @@ def sent_with_subject(token: str, words: str, *, after: int, getter: Getter = ge
         if not page:
             break
     return ids
+
+
+def statements_from(token: str, sender: str, *, after: int, getter: Getter = get) -> list[str]:
+    """Ids of received mails with an attachment from one fixed sender address after an epoch second, newest first.
+
+    The sender is a constant of the calling adapter (a card company's billing address), never a model's or a mail's
+    word. Ids only; no body is read here.
+    """
+    if not re.fullmatch(r"[a-z0-9._-]+@[a-z0-9.-]+", sender or ""):
+        raise MailError("invalid-query")
+    query = urllib.parse.quote(f"from:{sender} has:attachment after:{int(after)}")
+    found = _read(token, f"messages?q={query}&maxResults=10", getter)
+    return [str(m.get("id")) for m in found.get("messages", []) or [] if isinstance(m, dict)]
+
+
+def attachment(token: str, message_id: str, name: re.Pattern[str], *, getter: Getter = get) -> tuple[str, bytes] | None:
+    """(file name, content) of the first attachment of one message whose name fully matches `name`; None without one."""
+    payload = _read(token, f"messages/{_checked(message_id)}?format=full", getter).get("payload", {})
+    parts = [payload]
+    while parts:
+        part = parts.pop()
+        parts += [p for p in part.get("parts", []) or [] if isinstance(p, dict)]
+        filename, body = str(part.get("filename") or ""), part.get("body") or {}
+        if not name.fullmatch(filename):
+            continue
+        data = body.get("data")
+        if not data and re.fullmatch(r"[0-9A-Za-z_-]{10,2000}", str(body.get("attachmentId") or "")):
+            data = _read(token, f"messages/{message_id}/attachments/{body['attachmentId']}", getter).get("data")
+        if data:
+            return filename, base64.urlsafe_b64decode(str(data) + "=" * (-len(str(data)) % 4))
+    return None
 
 
 def _checked(identifier: str) -> str:

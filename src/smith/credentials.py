@@ -24,6 +24,7 @@ LAW_PROVIDERS = ("law",)
 LEISURE_PROVIDERS = ("seoul",)
 # The authenticator secret that approves trades (trading design §5). Only the trade approval check reads it.
 _TRADE_TOTP = "smith.trade-totp"
+_CARD = "smith.samsungcard"
 
 
 def load_toss_client() -> tuple[str, str] | None:
@@ -52,6 +53,20 @@ def all_secrets() -> list[str]:
     return [*toss, *gmail, *health, load_trade_totp() or "",
             *(load_api_key(p) or "" for p in EVIDENCE_PROVIDERS + REAL_ESTATE_PROVIDERS + DISCLOSURE_PROVIDERS
                                                + LAW_PROVIDERS + LEISURE_PROVIDERS)]
+
+
+def load_card_birth() -> str | None:
+    """The birth date (YYMMDD) that opens the card company's e-mailed statement (FR-60). Read only by the statement
+    reader; it is a personal identifier, so it lives here and never in a file, a log or a model payload."""
+    return keyring.get_password(_CARD, "birth") or None
+
+
+def save_card_birth(birth: str) -> None:
+    keyring.set_password(_CARD, "birth", birth)
+
+
+def delete_card_birth() -> None:
+    _delete(_CARD, ("birth",))
 
 
 def load_trade_totp() -> str | None:

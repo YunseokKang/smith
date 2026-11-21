@@ -173,7 +173,8 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "quality, matched to the preferences in client_memory, offered freely as choices, each with its refs. No "
             "market or policy news is researched for this theme; work from the household's numbers and the client's "
             "statements.",
-            personal=("my_month", "follow_up", "experiences"),
+            # "my_spending": the reader's card statements from one angle a week (FR-60); absent without a statement.
+            personal=("my_month", "my_spending", "follow_up", "experiences"),
             household=("cash", "spending", "goals", "household_follow_up", "requests"),
             household_label="생활·목표",
             reference=("stress",)),   # As on the overview: an extreme check that reads the same from week to week.

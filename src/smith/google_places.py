@@ -67,6 +67,37 @@ def lookup(name: str, area: str | None, *, key: str, poster: Poster | None = Non
     return None
 
 
+KIND_MASK = "places.displayName,places.formattedAddress,places.primaryType,places.types"
+
+
+def kind(name: str, *, key: str, poster: Poster | None = None) -> tuple[str, list[str], str] | None:
+    """(Google's name, its place types, address) for a card merchant's name (FR-60): the first result whose name
+    matches; None when none does. The request carries the merchant's name only. Raises GoogleError on a failed call.
+
+    A card statement names no district, so a name shared by shops in several towns may match another branch; the type
+    (bar, cafe, restaurant) is what the caller wants and is usually the same."""
+    body = json.dumps({"textQuery": name, "languageCode": "ko", "regionCode": "KR", "pageSize": RESULTS},
+                      ensure_ascii=False).encode("utf-8")
+    headers = {"Content-Type": "application/json", "X-Goog-Api-Key": key, "X-Goog-FieldMask": KIND_MASK}
+    data = (poster or _post)(ENDPOINT, body, headers, TIMEOUT)
+    found = data.get("places") if isinstance(data, dict) else None
+    for item in found[:RESULTS] if isinstance(found, list) else []:
+        shown = item.get("displayName") if isinstance(item, dict) else None
+        title = shown.get("text") if isinstance(shown, dict) else None
+        if not isinstance(title, str) or not (naver_place.same_name(name, title) or _contains(name, title)):
+            continue
+        types = [t for t in [item.get("primaryType"), *(item.get("types") or [])] if isinstance(t, str)]
+        address = item.get("formattedAddress")
+        return title.strip()[:80], types[:12], address[:120] if isinstance(address, str) else ""
+    return None
+
+
+def _contains(merchant: str, google: str) -> bool:
+    """A statement writes "새벽식당 역삼점" or "주식회사 새벽식당" where Google writes the shop's name alone, or the reverse."""
+    a, b = naver_place.name_key(merchant), naver_place.name_key(google)
+    return len(a) >= 2 and len(b) >= 2 and (a in b or b in a)
+
+
 def _same_branch(naver: str, google: str, area: str, address: str) -> bool:
     """The two sources spell a branch differently ("요쇼쿠 서울숲 본점" / "요쇼쿠 성수", live 2026-11-16): the names agree
     once the branch words are gone, and Google's address carries the Naver area's 동, not just its 구."""

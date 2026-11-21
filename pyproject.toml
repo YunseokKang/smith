@@ -11,7 +11,9 @@ requires-python = ">=3.11"
 # keyring: broker credentials live in the OS credential store, never in files or env vars.
 # korean-lunar-calendar: lunar birthdays and 설·추석 converted offline with the KASI tables (FR-32).
 # Pillow draws the health letter's line charts (health design §3); mail clients drop SVG, so the charts are PNG.
-dependencies = ["tzdata", "keyring", "korean-lunar-calendar", "Pillow"]
+# cryptography + websocket-client: the card statement mail is SEED-encrypted and its page is read through a headless
+# Chrome over the DevTools protocol (FR-60, docs/spending-design.md).
+dependencies = ["tzdata", "keyring", "korean-lunar-calendar", "Pillow", "cryptography", "websocket-client"]
 
 [project.scripts]
 smith = "smith.cli:main"
