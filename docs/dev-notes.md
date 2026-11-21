@@ -469,3 +469,12 @@ editable 설치 후에는 `PYTHONPATH` 설정이 필요 없다.
 - 해결: `Get-ChildItem $env:TEMP -Directory -Filter "HeadlessEdge*" | Remove-Item -Recurse -Force`(Edge 헤드리스 프로세스가 없을 때).
 - 예방: 스크린샷 명령에 `--user-data-dir="<scratchpad>\edge-profile"`을 주어 한 폴더만 쓰고, 끝나면 그 폴더를 지운다.
   `Start-Process -Wait`는 Edge의 crashpad-handler가 남으면 끝나지 않는다(5분 제한에 걸렸다). `-Wait` 없이 띄우고 스크린샷 파일이 생길 때까지 기다린 뒤, 명령줄에 그 프로필 폴더가 있는 `msedge` 프로세스만 종료한다.
+
+### TS-046 Bash 도구의 긴 인라인 Python(heredoc)이 실행 전에 파싱 오류로 멈춤 (2026-11-21, 개발 중)
+
+- 증상: Git Bash에서 python - <<'EOF' 로 여러 줄 패치 스크립트를 넘기면 unexpected EOF while looking for matching 오류가 나고
+  스크립트는 한 줄도 실행되지 않는다. 짧은 heredoc은 된다.
+- 원인: 정확한 원인은 확인하지 못했다. 삼중 따옴표와 역따옴표, 작은따옴표가 섞인 수십 줄짜리 본문에서 두 번 재현됐다.
+- 해결: 스크립트를 스크래치패드에 파일로 쓰고(Write) 그 파일을 실행한다.
+- 예방: 여러 군데를 고치는 치환은 처음부터 파일 스크립트로 하고, 찾을 문자열이 정확히 한 번 나오는지 assert한 뒤 마지막에 한 번만 쓴다
+  (중간에 실패하면 아무것도 바뀌지 않는다). 치환 순서 때문에 앞선 치환이 뒤 치환의 기준 문자열을 바꾸는 경우도 같은 assert가 잡는다.

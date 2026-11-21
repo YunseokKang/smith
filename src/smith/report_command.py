@@ -409,6 +409,7 @@ def _publish(args: argparse.Namespace) -> int:
             _events_after_report(args)   # After the daily mail: a filing's reading takes minutes (FR-44).
         _run_health(args)  # And the weekly health letter after the daily mail (health design §9).
         _run_memory_review(args)  # The monthly memory check (FR-52), after the letters.
+        _run_letter_review(args)  # The review of Smith's own letters (FR-63); its Sunday slot has no report.
         _run_evening(args)  # The evening 내일 준비 mail (daily design §16); its slot never meets the others'.
     return code
 
@@ -587,6 +588,22 @@ def _run_memory_review(args: argparse.Namespace) -> None:
             _say(args.db, line)
     except Exception as error:  # noqa: BLE001 - the memory check must never block or fail the scheduled task.
         _say(args.db, f"Memory check crashed: {type(error).__name__}")
+
+
+def _run_letter_review(args: argparse.Namespace) -> None:
+    """The letter review (FR-63) on the same scheduled task; never raises."""
+    from smith import credentials, letter_review
+    from smith.config import load_config
+
+    try:
+        config = load_config(args.config)
+        if not letter_review.settings(config)["enabled"]:
+            return
+        for line in letter_review.run_due(args.db, config, now=datetime.now(timezone.utc),
+                                          recipient=config.get("mail", {}).get("recipient"), credentials_=credentials.load_gmail()):
+            _say(args.db, line)
+    except Exception as error:  # noqa: BLE001 - the letter review must never block or fail the scheduled task.
+        _say(args.db, f"Letter review crashed: {type(error).__name__}")
 
 
 def _run_trades(args: argparse.Namespace, config: dict[str, Any]) -> None:

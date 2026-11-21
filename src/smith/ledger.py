@@ -1697,6 +1697,69 @@ def sent_daily_runs(conn: sqlite3.Connection, *, since: datetime, product: str =
     return [_daily_row(row) for row in rows]
 
 
+def letter_review_counts(conn: sqlite3.Connection, *, since: datetime, until: datetime, stale_after: int) -> dict[str, Any]:
+    """What the weekly letter review (FR-63) counts in [since, until): the client's open proposals (how many, how many
+    shown `stale_after` times or more, the most shown), decisions recorded, the pre-send reader's notes by kind on the
+    client's own letters, questions asked by reply to a report, and failed syncs by source. The spouse's proposals
+    (keys under "partner:") have their own history and stay out."""
+    window = (_db_time(since), _db_time(until))
+    shown = [row[0] for row in conn.execute(
+        "SELECT times_shown FROM proposal_instances WHERE status = 'open' AND key NOT LIKE 'partner:%'")]
+    decisions = conn.execute(
+        "SELECT COUNT(*) FROM proposal_events e JOIN proposal_instances i USING (instance_id) WHERE e.event IN "
+        "('accepted', 'declined', 'done') AND i.key NOT LIKE 'partner:%' AND e.at >= ? AND e.at < ?", window).fetchone()[0]
+    notes: dict[str, int] = {}
+    for (advice,) in conn.execute("SELECT advice FROM advice_runs WHERE use_case = 'report-reader' AND outcome = 'success' "
+                                  "AND advice IS NOT NULL AND created_at >= ? AND created_at < ?", window):
+        try:
+            found = json.loads(advice).get("notes") or []
+        except (ValueError, AttributeError):
+            continue   # An unreadable audit row counts no note; the letters themselves are read separately.
+        for note in found:
+            kind = str(note.get("problem", "")) if isinstance(note, dict) else ""
+            if kind:
+                notes[kind] = notes.get(kind, 0) + 1
+    questions = conn.execute("SELECT COUNT(*) FROM mail_questions WHERE product = 'report' AND received_at >= ? "
+                             "AND received_at < ?", window).fetchone()[0]
+    failures = dict(conn.execute("SELECT source, COUNT(*) FROM sync_runs WHERE outcome = 'failure' AND attempted_at >= ? "
+                                 "AND attempted_at < ? GROUP BY source", window).fetchall())
+    return {"proposals_open": len(shown), "proposals_undecided": sum(1 for n in shown if n >= stale_after),
+            "proposals_most_shown": max(shown, default=0), "decisions": decisions, "reader_notes": notes,
+            "questions": questions, "sync_failures": failures}
+
+
+def record_field_history(conn: sqlite3.Connection) -> list[tuple[str, dict[str, Any]]]:
+    """(source, fields) of every revision ever recorded, whatever its status: what the letter review must be able to
+    hide in a letter sent before a record was closed or renamed (FR-63)."""
+    found = []
+    for source, fields in conn.execute("SELECT DISTINCT source, fields FROM record_revisions"):
+        try:
+            parsed = json.loads(fields)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            found.append((source, parsed))
+    return found
+
+
+def advice_call_stats(conn: sqlite3.Connection, *, since: datetime, until: datetime) -> list[dict[str, Any]]:
+    """Every model call type audited in [since, until), most calls first: how many, how many failed and the average
+    size of the input (letter review, FR-63). The spouse's letters ("@partner") stay out."""
+    rows = conn.execute(
+        "SELECT use_case, COUNT(*), SUM(outcome = 'failure'), CAST(AVG(LENGTH(payload)) AS INTEGER) FROM advice_runs "
+        "WHERE created_at >= ? AND created_at < ? AND use_case NOT LIKE '%@partner' GROUP BY use_case "
+        "ORDER BY COUNT(*) DESC, use_case", (_db_time(since), _db_time(until))).fetchall()
+    return [{"use_case": use_case, "calls": calls, "failures": failures or 0, "avg_chars": chars or 0}
+            for use_case, calls, failures, chars in rows]
+
+
+def latest_advice_input(conn: sqlite3.Connection, use_case: str, *, until: datetime) -> dict[str, str] | None:
+    """The input, prompt version and model of the latest successful call of one type before `until`."""
+    row = conn.execute("SELECT payload, prompt_version, model FROM advice_runs WHERE use_case = ? AND outcome = 'success' "
+                       "AND created_at < ? ORDER BY created_at DESC LIMIT 1", (use_case, _db_time(until))).fetchone()
+    return None if row is None else {"payload": row[0], "prompt_version": row[1], "model": row[2]}
+
+
 def shown_reminder_keys(conn: sqlite3.Connection, keys: list[str]) -> set[str]:
     if not keys:
         return set()

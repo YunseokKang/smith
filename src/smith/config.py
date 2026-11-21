@@ -53,6 +53,8 @@ KNOWN_KEYS = {
     "counsel": {"enabled", "prefix", "max_notes", "reader"},
     # The monthly memory check (FR-52): the first `weekday` of each month at `time`, `size` facts per mail.
     "memory_review": {"enabled", "weekday", "time", "size"},
+    # The letter review (FR-63): every `every_weeks` weeks on `weekday` at `time` the finance letters are read from outside.
+    "letter_review": {"enabled", "weekday", "time", "every_weeks"},
     # Restaurant picks (FR-55, daily design §17): picks for tomorrow's places in the evening mail, the Google
     # cross-check when a key is stored, and areas never read (home, the office).
     "dining": {"evening", "google", "skip_areas"},
@@ -151,6 +153,7 @@ def load_config(path: Path) -> dict:
     _check_evernote(config.get("evernote", {}))
     _check_counsel(config.get("counsel", {}))
     _check_memory_review(config.get("memory_review", {}))
+    _check_letter_review(config.get("letter_review", {}))
     _check_dining(config.get("dining", {}))
     _check_outing(config.get("outing", {}))
     if "properties" in config or "targets" in config:
@@ -456,6 +459,17 @@ def _check_memory_review(table: object) -> None:
     size = table.get("size", 12)
     if not isinstance(size, int) or isinstance(size, bool) or not 3 <= size <= 30:
         raise ValueError("memory_review.size must be a whole number from 3 to 30")
+
+
+def _check_letter_review(table: object) -> None:
+    """Optional `[letter_review]` (FR-63): the review of Smith's own letters, on `weekday` at `time` every
+    `every_weeks` weeks (default 2)."""
+    if not isinstance(table, dict):
+        raise ValueError("letter_review must be a table")
+    _check_letter_slot("letter_review", table, "sunday", "09:00")
+    weeks = table.get("every_weeks", 2)
+    if not isinstance(weeks, int) or isinstance(weeks, bool) or not 1 <= weeks <= 8:
+        raise ValueError("letter_review.every_weeks must be a whole number from 1 to 8")
 
 
 def _check_letter_slot(where: str, table: dict, default_day: str, default_time: str) -> None:

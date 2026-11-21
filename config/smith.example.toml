@@ -176,3 +176,15 @@ enabled = false
 weekday = "sunday"
 time = "10:00"
 size = 12
+
+# The letter review (FR-63): every `every_weeks` weeks on `weekday` at `time`, the client's own finance letters of the
+# last seven days are read back from Gmail and reviewed from outside: code measures (repeats against the week before,
+# undecided proposals, how old the checked rule dates are), a web research of recent rule changes without household
+# data, a reading by another vendor's model (Codex), and a review of the model calls' own context (system prompt and
+# a value-free outline of the input). Smith mails the findings and changes nothing itself.
+# Needs the Gmail read grant (`smith mail login --read`).
+[letter_review]
+enabled = false
+weekday = "sunday"
+time = "09:00"
+every_weeks = 2

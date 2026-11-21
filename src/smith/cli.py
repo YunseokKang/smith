@@ -66,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
                        dining_command,
                        dividends_command, doctor_command, fundamentals_command, evening_command, events_command, evernote_command,
                        followup_command, health_command, keep_command, law_command, mail_command, people_command, picks_command,
-                       memory_command, outing_command, realestate_command, report_command, spending_command, trade_command,
+                       letter_review_command, memory_command, outing_command, realestate_command, report_command, spending_command, trade_command,
                        weather_command)
     agenda_command.add_parser(sub)
     contacts_command.add_parser(sub, DEFAULT_DB)
@@ -81,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
     dividends_command.add_parser(sub, DEFAULT_DB)
     fundamentals_command.add_parser(sub, DEFAULT_DB)
     memory_command.add_parser(sub, DEFAULT_DB)
+    letter_review_command.add_parser(sub, DEFAULT_DB)
     people_command.add_parser(sub, DEFAULT_DB)
     backup_command.add_parser(sub, DEFAULT_DB)
     doctor_command.add_parser(sub, DEFAULT_DB)
@@ -101,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
                 "report": report_command.run, "mail": mail_command.run,
                 "research": followup_command.run_research, "proposal": followup_command.run_proposal,
                 "realestate": realestate_command.run, "law": law_command.run, "doctor": doctor_command.run, "backup": backup_command.run,
-                "memory": memory_command.run, "picks": picks_command.run, "events": events_command.run,
+                "memory": memory_command.run, "letter-review": letter_review_command.run, "picks": picks_command.run, "events": events_command.run,
                 "people": people_command.run, "agenda": agenda_command.run, "weather": weather_command.run,
                 "daily": daily_command.run, "keep": keep_command.run, "evernote": evernote_command.run, "contacts": contacts_command.run,
                 "health": health_command.run, "evening": evening_command.run, "dividends": dividends_command.run,

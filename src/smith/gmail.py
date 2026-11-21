@@ -224,6 +224,29 @@ def message_body(token: str, message_id: str, *, getter: Getter = get) -> dict[s
     return _read(token, f"messages/{_checked(message_id)}?format=full", getter).get("payload", {})
 
 
+def sent_letter_html(token: str, message_id: str, *, getter: Getter = get) -> str:
+    """The HTML of one letter Smith itself sent, by the id recorded at sending (the weekly letter review, FR-63, reads
+    the letters as the client received them). Only Smith's own mail is returned: the message must be in SENT and
+    carry the header every Smith mail is sent with.
+
+    Raises:
+        MailError: "not-smith-mail" for any other message, "no-html" when it has no HTML part.
+    """
+    message = _read(token, f"messages/{_checked(message_id)}?format=full", getter)
+    payload = message.get("payload") or {}
+    headers = {str(h.get("name", "")).lower(): str(h.get("value", "")) for h in payload.get("headers", []) or [] if isinstance(h, dict)}
+    if "SENT" not in (message.get("labelIds") or []) or headers.get(SMITH_HEADER.lower()) != "1":
+        raise MailError("not-smith-mail")
+    parts = [payload]
+    while parts:
+        part = parts.pop(0)
+        parts += [p for p in part.get("parts", []) or [] if isinstance(p, dict)]
+        data = (part.get("body") or {}).get("data")
+        if part.get("mimeType") == "text/html" and data:
+            return base64.urlsafe_b64decode(str(data) + "=" * (-len(str(data)) % 4)).decode("utf-8", errors="replace")
+    raise MailError("no-html")
+
+
 def sent_containing(token: str, text: str, *, after: int, before: int, getter: Getter = get) -> list[str]:
     """Ids of the client's sent messages between two epoch seconds whose text contains `text` (digits only).
 
@@ -299,7 +322,8 @@ def _checked(identifier: str) -> str:
 
 
 def _read(token: str, path: str, getter: Getter) -> dict[str, Any]:
-    """The only Gmail read: messages or threads by id, and the two sent-mail searches above (ids only)."""
+    """The only Gmail read: messages or threads by id (a question's body, a statement's attachment, a letter Smith
+    itself sent), and the searches above (ids only)."""
     try:
         status, payload = getter(f"{API_URL}/{path}", {"Authorization": f"Bearer {token}"})
     except (OSError, http.client.HTTPException):
