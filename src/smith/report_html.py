@@ -2540,8 +2540,10 @@ def _my_spending(view: dict[str, Any] | None) -> str:
             parts.append(f'<div style="font-size:15px;line-height:1.6;font-weight:600;color:{INK};margin:0 0 8px">{escape(note["headline"])}</div>')
         for point in note["points"]:
             source = point.get("source_url")
-            link = (f' <a href="{escape(source)}" style="color:{ACCENT};font-size:12px">출처(공개 자료, 조건은 직접 확인)</a>'
-                    if source else "")
+            # An unconfirmed link: the page is the issuer's, but code did not find the figure on it.
+            label = ("출처(카드사 페이지, Smith가 수치를 확인하지 못했습니다)" if point.get("unconfirmed")
+                     else "출처(카드사 공개 자료, 조건은 직접 확인)")
+            link = f' <a href="{escape(source)}" style="color:{ACCENT};font-size:12px">{label}</a>' if source else ""
             parts.append(f'<div style="font-size:14px;line-height:1.65;color:{BODY};margin:0 0 10px"><b>{escape(point["title"])}</b><br>'
                          f'{escape(point["text"])}{link}</div>')
         if note.get("try_this_week"):

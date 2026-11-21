@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from smith import headless, korean, ledger, memory, spending
+from smith import headless, korean, ledger, memory, sources, spending
 from smith.payload import PayloadRejected, check_outbound
 
 logger = logging.getLogger(__name__)
@@ -98,7 +98,9 @@ same statement already said: do not repeat them.
 Rules:
 - Every won amount and count you write must be a figure in the input (rounding to 만 원 is fine). Do not add, average
   or project figures yourself; `average_3m` and `usual_before_latest` are given. A card's term may come only from
-  `public_card_terms`, with its `source_url` in that point; you have no web access and must not recall terms.
+  `public_card_terms`, with its `source_url` in that point; you have no web access and must not recall terms. A term
+  with `"confirmed": false` was not seen on the page by Smith: write it as something for the reader to check on the
+  issuer's page ("~라고 안내되어 있는지 확인해 보시기 바랍니다"), never as a settled fact or the basis of a sum.
 - Name real things: the area, the shop, the count, the amount. No "지출이 많습니다" without the figure beside it.
 - An observation is not a verdict. Never scold; never use 위반, 과소비, 낭비. Say what the pattern is and what a small
   change would give.
@@ -212,8 +214,14 @@ def card_terms(db: Path, settled: str, card: list[dict[str, Any]], *, now: datet
     """The card's published terms from the issuer's own pages, looked up once a statement. Never raises.
 
     This is the one call with web tools, and it is given the card's name only: no spending, no merchant, no health
-    or memory fact, so nothing of the household can leave through a search or a fetched page. A term whose page is
-    not on the issuer's own host is not kept. A failed lookup returns [] and is tried again with the next letter.
+    or memory fact, so nothing of the household can leave through a search or a fetched page. A failed lookup
+    returns [] and is tried again with the next letter.
+
+    The model's word is not the evidence. Each term's page is fetched by code (`sources.check`: public address,
+    redirects checked hop by hop) and must end on the issuer's own host. "confirmed" is true only when the term's
+    figures are in that page; a page that is gone, or that holds none of the figures, drops the term. A page code
+    could not read (script-rendered, blocked) keeps the term as unconfirmed: the note may say what to check there,
+    and the letter says Smith did not see the figure itself (doubts are flagged, not deleted).
     """
     where = folder(db)
     kept = _terms_file(where)
@@ -229,9 +237,7 @@ def card_terms(db: Path, settled: str, card: list[dict[str, Any]], *, now: datet
         output, cost = headless.run(text, system_prompt=TERMS_PROMPT, schema=TERMS_SCHEMA,
                                     executable=executable or headless.find_claude(), model=model, budget_usd=BUDGET_USD,
                                     timeout_seconds=TIMEOUT_SECONDS, runner=runner, tools=headless.WEB_TOOLS)
-        fixes: list[dict[str, str]] = []
-        terms = [{"text": korean.tidy(str(t["text"]), fixes), "source_url": str(t["source_url"])}
-                 for t in output.get("terms", []) if _official(str(t.get("source_url") or "")) and t.get("text")]
+        terms = [term for found in output.get("terms", []) if (term := _checked_term(found, now)) is not None]
         outcome = "success"
     except PayloadRejected:
         error_code = "payload-rejected"
@@ -251,27 +257,47 @@ def card_terms(db: Path, settled: str, card: list[dict[str, Any]], *, now: datet
     return terms
 
 
-def verify(output: dict[str, Any], sent_text: str, sources: frozenset[str] = frozenset()) -> dict[str, Any] | None:
+def _checked_term(found: dict[str, Any], now: datetime) -> dict[str, Any] | None:
+    text, url = str(found.get("text") or ""), str(found.get("source_url") or "")
+    if not text or not _official(url):
+        return None
+    try:
+        record = sources.check({"source_url": url, "headline": text, "detail": ""}, now=now)
+    except sources.SourceRejected:
+        return None
+    if record["status"] == "mismatch" or not _official(str(record.get("final_url") or url)):
+        return None
+    return {"text": korean.tidy(text, []), "source_url": url, "confirmed": record["status"] == "matched"}
+
+
+def verify(output: dict[str, Any], sent_text: str, cited: dict[str, bool] | None = None,
+           unproven: str = "") -> dict[str, Any] | None:
     """The note with every paragraph whose won amounts, in its title and its text, the payload holds; None when no
-    paragraph is left. A source link is kept only when it is one of `sources`, the pages the payload's public terms
-    came from: a URL the model wrote on its own proves nothing and excuses no amount."""
+    paragraph is left. `sent_text` is the payload without its unconfirmed terms and `unproven` is their text: an
+    amount found only there passes in a paragraph that links that term's page, and the link is marked unconfirmed.
+    A source link is kept only when it is a key of `cited` (page of a public term -> figures seen on it by code): a
+    URL the model wrote on its own proves nothing and excuses no amount."""
     from smith import narrative
 
+    cited = cited or {}
     evidence = narrative._amounts(sent_text)
+    loose = evidence | narrative._amounts(unproven)
 
-    def held(text: str) -> bool:
-        return all(any(abs(value - known) <= max(precision, known * Decimal("0.03")) for known in evidence)
+    def held(text: str, known_amounts: set[Decimal] | None = None) -> bool:
+        pool = evidence if known_amounts is None else known_amounts
+        return all(any(abs(value - known) <= max(precision, known * Decimal("0.03")) for known in pool)
                    for _, _, value, precision in narrative._money(text) if value >= 1000)
 
     fixes: list[dict[str, str]] = []
     points = []
     for point in output.get("points", []):
         source = str(point.get("source_url") or "")
-        cited = source in sources
-        if not (held(point["title"]) and held(point["text"])):
+        doubtful = cited.get(source) is False
+        pool = loose if doubtful else evidence
+        if not (held(point["title"], pool) and held(point["text"], pool)):
             continue
         points.append({"title": korean.tidy(point["title"], fixes), "text": korean.tidy(point["text"], fixes),
-                       **({"source_url": source} if cited else {})})
+                       **({"source_url": source} if source in cited else {}), **({"unconfirmed": True} if doubtful else {})})
     if not points:
         return None
     note = {"headline": korean.tidy(output["headline"], fixes) if held(output["headline"]) else "", "points": points}
@@ -311,7 +337,13 @@ def write(db: Path, *, today: date, now: datetime, secrets: list[str], executabl
         output, cost = headless.run(text, system_prompt=SYSTEM_PROMPT, schema=SCHEMA,
                                     executable=executable or headless.find_claude(), model=model, budget_usd=BUDGET_USD,
                                     timeout_seconds=TIMEOUT_SECONDS, runner=runner)   # no tools: it sees the household
-        note = verify(output, text, frozenset(t["source_url"] for t in terms))
+        # Figures of an unconfirmed term are evidence only for the paragraph that links its page, marked as such.
+        proven = text if all(t["confirmed"] for t in terms) else json.dumps(
+            {**json.loads(text), "public_card_terms": [t for t in terms if t["confirmed"]]}, ensure_ascii=False)
+        cited: dict[str, bool] = {}
+        for term in terms:   # a page is confirmed only when every term taken from it is
+            cited[term["source_url"]] = cited.get(term["source_url"], True) and term["confirmed"]
+        note = verify(output, proven, cited, " ".join(t["text"] for t in terms if not t["confirmed"]))
         outcome, error_code = ("success", None) if note else ("failure", "no-supported-paragraph")
     except PayloadRejected:
         error_code = "payload-rejected"

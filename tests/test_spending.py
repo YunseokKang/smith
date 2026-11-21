@@ -35,11 +35,14 @@ class ParseTest(unittest.TestCase):
 
     def test_a_reading_without_its_total_or_without_a_purchase_section_is_refused(self) -> None:
         cases = {"total-missing": _raw([_row("스타벅스코리아", "11,000")], ""),
-                 "statement-shape": {"settled": "20261121", "period": "26. 10. 9 ~ 26. 11. 8", "sections": []}}
+                 "statement-shape": {"settled": "20261121", "period": "26. 10. 9 ~ 26. 11. 8", "sections": []},
+                 # A fee section alone is a partly rendered page, not a month without purchases.
+                 "statement-shape ": {"settled": "20261121", "period": "26. 10. 9 ~ 26. 11. 8", "sections": [
+                     {"key": "D5", "total": "30,000", "rows": [_row("가상카드 연회비", "30,000")]}]}}
         for code, raw in cases.items():
             with self.subTest(code), self.assertRaises(spending.SpendingError) as caught:
                 spending.parse(raw)
-            self.assertEqual(caught.exception.code, code)
+            self.assertEqual(caught.exception.code, code.strip())
 
     def test_overseas_detail_is_not_counted_twice(self) -> None:
         detail = "접수일 26.10.20 업종/국가 택시요금/미국 현지 이용금액 4 USD 접수금액 4.05 USD"
@@ -126,9 +129,18 @@ class LetterTest(unittest.TestCase):
             {"title": "제목에 77만 원", "text": "동네고깃집에서 18만 원을 쓰셨습니다."},
             {"title": "공개 조건", "text": "전월 실적 50만 원부터 적립됩니다.", "source_url": page},
             {"title": "모르는 출처", "text": "18만 원을 쓰셨습니다.", "source_url": "https://example.invalid/other"}]},
-            sent, frozenset({page}))
+            sent, {page: True})
         self.assertEqual([p["title"] for p in note["points"]], ["근거 있음", "공개 조건", "모르는 출처"])
         self.assertEqual([p.get("source_url") for p in note["points"]], [None, page, None])
+
+    def test_an_unconfirmed_term_passes_only_beside_its_link_and_is_marked(self) -> None:
+        from smith import spending_letter
+        page = "https://www.samsungcard.com/y"
+        output = {"headline": "확인할 조건이 있습니다", "points": [
+            {"title": "확인할 조건", "text": "전월 실적 70만 원 조건이 안내되어 있는지 확인해 보시기 바랍니다.", "source_url": page},
+            {"title": "링크 없이", "text": "전월 실적 70만 원부터 적립됩니다."}]}
+        note = spending_letter.verify(output, '{"amount": 179000}', {page: False}, "전월 실적 70만 원부터 적립됩니다.")
+        self.assertEqual([(p["title"], p.get("unconfirmed")) for p in note["points"]], [("확인할 조건", True)])
 
     def test_the_web_lookup_knows_the_card_name_only_and_the_note_has_no_tools(self) -> None:
         import json
@@ -149,12 +161,19 @@ class LetterTest(unittest.TestCase):
                 calls.append((prompt, tuple(options.get("tools", ()))))
                 if options["schema"] is spending_letter.TERMS_SCHEMA:
                     return {"terms": [{"text": "연회비는 3만 원입니다.", "source_url": "https://www.samsungcard.com/card"},
-                                      {"text": "매달 99만 원을 돌려줍니다.", "source_url": "https://blog.example.org/card"}]}, None
+                                      {"text": "매달 99만 원을 돌려줍니다.", "source_url": "https://blog.example.org/card"},
+                                      {"text": "매달 88만 원을 돌려줍니다.", "source_url": "https://www.samsungcard.com/invented"}]}, None
                 return {"headline": "연회비 3만 원을 따져 볼 때입니다", "points": [
                     {"title": "연회비", "text": "연회비는 3만 원입니다.", "source_url": "https://www.samsungcard.com/card"},
                     {"title": "외식", "text": "동네고깃집에서 179,000원을 쓰셨습니다."}]}, None
 
+            def check(item: dict, *, now: object) -> dict:   # code reads the cited page; the invented one says nothing
+                fetched.append(item["source_url"])
+                return {"status": "mismatch" if "invented" in item["source_url"] else "matched", "final_url": item["source_url"]}
+
+            fetched: list[str] = []
             with mock.patch.object(spending_letter.headless, "run", run), \
+                    mock.patch.object(spending_letter.sources, "check", check), \
                     mock.patch.object(spending_letter.headless, "find_claude", lambda: Path("claude.exe")):
                 result = spending_letter.write(db, today=date(2026, 12, 5), now=datetime(2026, 12, 5, tzinfo=timezone.utc),
                                                secrets=[])
@@ -163,6 +182,8 @@ class LetterTest(unittest.TestCase):
             self.assertEqual((lookup_tools, note_tools), (spending_letter.headless.WEB_TOOLS, ()))
             self.assertEqual(json.loads(lookup), {"cards": [{"issuer": "삼성카드", "card_as_printed": "가상카드 연회비"}]})
             self.assertNotIn("blog.example.org", note)   # a term from another host never reaches the note
+            self.assertNotIn("blog.example.org", " ".join(fetched))   # nor is its page fetched
+            self.assertNotIn("88만", note)   # a term whose page does not hold its figure is not evidence
             self.assertIn("스타벅스코리아", note)   # the household's figures go to the call without tools only
 
     def test_payload_leaves_out_names_that_point_at_a_home(self) -> None:

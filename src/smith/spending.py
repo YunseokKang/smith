@@ -55,6 +55,7 @@ _BENEFIT = re.compile(r"(청구할인|포인트사용|온누리상품권)\s*-([\
 _FOREIGN = re.compile(r"업종/국가 (\S+?)/(\S+) 현지 이용금액 ([\d,.]+ [A-Z]{3})")
 _OVERSEAS_KEY = "DE"   # the overseas detail repeats rows of the purchase sections; it is read for detail only
 _FEE_KEY = "D5"
+_PURCHASE_KEY = "D0"   # 일시불: every statement read so far has it
 _REFUND_KEY = "DF"     # refunds of earlier months: the one section the page gives no total
 _SMALL = 10_000
 
@@ -99,8 +100,10 @@ def parse(raw: dict[str, Any]) -> Statement:
     sections = {str(s.get("key")): s for s in raw.get("sections", []) if isinstance(s, dict)}
     foreign = {(row.get("date"), row.get("merchant"), row.get("amount")): _FOREIGN.search(str(row.get("detail", "")))
                for row in sections.get(_OVERSEAS_KEY, {}).get("rows", [])}
-    # A page that rendered no purchase section (slow load, changed markup) is not a month without spending.
-    if not any(key not in (_OVERSEAS_KEY, _REFUND_KEY) for key in sections):
+    # A page that rendered no purchase section (slow load, changed markup) is not a month without spending, and a fee
+    # section alone is such a page. A month truly without a purchase is refused too: it stays visible as a failed
+    # sync instead of a month of zero.
+    if _PURCHASE_KEY not in sections:
         raise SpendingError("statement-shape")
     entries: list[Entry] = []
     for key, section in sections.items():
