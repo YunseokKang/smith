@@ -12,8 +12,16 @@ def _row(merchant: str, amount: str, date: str = "26. 10. 9", detail: str = "") 
 
 
 def _raw(rows: list[dict[str, str]], total: str, **more: object) -> dict[str, object]:
-    return {"settled": "20261121", "period": "26. 10. 9 ~ 26. 11. 8",
+    return {"settled": more.get("settled", "20261121"), "period": more.get("period", "26. 10. 9 ~ 26. 11. 8"),
             "sections": [{"key": "D0", "total": total, "rows": rows}, *more.get("extra", [])]}
+
+
+def _two_months(folder: object) -> None:
+    """September: two dinners of 20,000. October: three, one of them 60,000."""
+    spending.save_raw(folder, _raw([_row("동네식당", "20,000", "26. 9. 10"), _row("동네식당", "20,000", "26. 9. 20")], "40,000",
+                                   settled="20261021", period="26. 9. 9 ~ 26. 10. 8"))
+    spending.save_raw(folder, _raw([_row("동네식당", "20,000"), _row("동네식당", "20,000", "26. 10. 16"),
+                                    _row("큰 식당", "60,000", "26. 10. 23")], "100,000"))
 
 
 class ParseTest(unittest.TestCase):
@@ -197,6 +205,71 @@ class LetterTest(unittest.TestCase):
         self.assertNotIn("어느마을", text)
         self.assertNotIn("처음 보는 건물", text)
         self.assertIn("200000", text)   # the amount stays; only the name goes
+
+
+class VerdictTest(unittest.TestCase):
+    """The note judges every week, against figures code computed (client 2026-11-21: figures alone are not feedback)."""
+
+    def setUp(self) -> None:
+        import tempfile
+        from pathlib import Path
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.folder = Path(self._tmp.name)
+        _two_months(self.folder)
+
+    def test_yardsticks_are_the_own_past_the_price_of_one_purchase_and_the_income_share(self) -> None:
+        sticks = spending.yardsticks(spending.load(self.folder), {}, income=1_000_000)
+        (dining,) = sticks["areas"]
+        self.assertEqual((dining["amount"], dining["count"], dining["each"], dining["per_week"]), (100_000, 3, 33_333, 0.7))
+        self.assertEqual(dining["large"], {"from": 50_000, "count": 1, "amount": 60_000})
+        self.assertEqual(dining["usual"], {"months": 1, "amount": 40_000, "count": 2.0, "each": 20_000})
+        self.assertEqual((dining["over_usual"], dining["over_usual_pct"]), (60_000, 150))
+        self.assertEqual((sticks["income"]["share"], sticks["income"]["average_share"]), (0.1, 0.07))
+        self.assertNotIn("income", spending.yardsticks(spending.load(self.folder), {}))   # unknown income: no share
+
+    def test_one_verdict_a_kind_with_figures_and_percentages_the_payload_holds(self) -> None:
+        import json
+        from smith import spending_letter
+        sent = json.dumps({"yardsticks": {"areas": [{"amount": 100000, "over_usual": 60000, "over_usual_pct": 150}],
+                                          "income": {"share": 0.1}}})
+        verdict = lambda kind, text: {"kind": kind, "subject": "외식", "category": "식비·외식", "text": text}   # noqa: E731
+        note = spending_letter.verify({"headline": "외식이 평소보다 6만 원 늘었습니다", "points": [], "verdicts": [
+            verdict("adjust", "외식이 평소보다 6만 원, 150% 늘었습니다. 큰 식사를 한 번 줄여 보시기를 권합니다."),
+            verdict("adjust", "같은 종류의 두 번째 판정입니다."),
+            verdict("keep", "월 소득의 10%로 유지하셔도 좋습니다."),
+            verdict("check", "월 소득의 45%에 이릅니다."),          # a share the payload does not hold
+            verdict("check", "외식에 77만 원을 쓰셨습니다.")]}, sent)   # an amount it does not hold
+        self.assertEqual([(v["kind"], v["category"]) for v in note["verdicts"]], [("keep", "dining"), ("adjust", "dining")])
+
+    def test_figures_written_in_words_are_checked_like_the_rest(self) -> None:
+        import json
+        from smith import spending_letter
+        sent = json.dumps({"yardsticks": {"areas": [{"each": 6274}, {"each": 50571}], "income": {"share": 0.1}}})
+        cases = {"한 잔에 약 6천 원이고 한 끼는 5만 1천 원, 월 소득의 10퍼센트입니다.": True,
+                 "한 잔에 약 9천 원입니다.": False, "한 끼에 7만 2천 원입니다.": False, "월 소득의 99퍼센트입니다.": False,
+                 "월 소득의 99프로입니다.": False}
+        for text, kept in cases.items():
+            with self.subTest(text):
+                note = spending_letter.verify({"headline": "h", "points": [], "verdicts": [
+                    {"kind": "keep", "subject": "커피", "category": "커피·간식", "text": text}]}, sent)
+                self.assertEqual(note is not None, kept)
+
+    def test_the_next_statement_shows_what_the_last_one_was_asked_to_adjust(self) -> None:
+        from datetime import date
+        from smith import report_html, spending_letter
+        asked = {"headline": "h", "points": [], "verdicts": [
+            {"kind": "adjust", "subject": "큰 식사", "category": "dining", "text": "한 번 줄여 보시기를 권합니다."},
+            {"kind": "keep", "subject": "외식", "category": "dining", "text": "유지하셔도 좋습니다."}]}
+        spending_letter._keep(self.folder, {"week": "2026-W43", "settled": "2026-10-21", "angle": "trim", "note": asked})
+        view = spending_letter.picture(self.folder, date(2026, 11, 28), income=1_000_000)
+        self.assertEqual(view["follow_up"], [{"category": "dining", "subject": "큰 식사",
+                                              "then": {"label": "9/9~10/8", "amount": 40_000, "count": 2},
+                                              "now": {"label": "10/9~11/8", "amount": 100_000, "count": 3}}])
+        view["note"] = {**asked, "headline": "큰 식사가 늘었습니다"}
+        page = report_html._my_spending(view)
+        for shown in ("조정", "유지", "큰 식사", "월 소득의 <b>10%</b>", "1회 평균 33,333원", "지난 명세서에서 짚은 것"):
+            self.assertIn(shown, page)
 
 
 class LookupTest(unittest.TestCase):

@@ -2510,46 +2510,68 @@ def _stress_summary(st: dict[str, Any], estate: dict[str, Any] | None = None) ->
 
 
 def _my_spending(view: dict[str, Any] | None) -> str:
-    """The reader's card spending from this week's angle (FR-60, spending design §5). The category bars come with the
-    statement's first week only (what reads the same every week is not repeated); later weeks open on the note."""
+    """The reader's card spending (FR-60, spending design §5): the week's judgment first (three verdicts: keep, adjust,
+    check), then the week's angle. The category bars and what the last statement was asked to adjust come with the
+    statement's first week only (what reads the same every week is not repeated)."""
     from smith import spending, spending_letter
 
     if not view:
         return ""
     latest, usual, note = view["latest"], view["usual"], view.get("note")
+    sticks = view.get("yardsticks") or {}
     chosen = Decimal(latest["spent"] - latest["fixed"])
     lead = (f"삼성카드 {escape(latest['label'])} 명세서 기준으로 <b>{_short(Decimal(latest['spent']))}</b>을 쓰셨고, 그중 관리비·세금 같은 "
             f"고정 지출을 뺀 금액은 <b>{_short(chosen)}</b>입니다.")
-    groups = [(key, group) for key, group in latest["categories"].items()
-              if key not in spending.FIXED and group["amount"] > 0]
-    body = ""
-    if view.get("first_week") or not note:
-        rows = [(spending.CATEGORIES[key], Decimal(group["amount"]), i < 3) for i, (key, group) in enumerate(groups)]
-        lines = []
-        for key, group in groups[:8]:
-            before = usual.get(key)
-            against = "" if not before else f" · 평소 {_short(Decimal(before))}"
-            names = ", ".join(m["name"] for m in group["merchants"][:2]) if key != "other" else ""
-            lines.append([spending.CATEGORIES[key], f"{_won(Decimal(group['amount']))} · {group['count']}건{against}"
-                          + (f" · {names}" if names else "")])
-        body += _bars(rows) + _table(["분야", "이번 명세서"], lines)
-    if note:
-        parts = [f'<div style="font-size:12px;font-weight:600;color:{MUTED};margin:14px 0 4px">이번 주 관점 · '
-                 f'{escape(spending_letter.ANGLE_LABEL[view["angle"]])}</div>']
-        if note.get("headline"):
-            parts.append(f'<div style="font-size:15px;line-height:1.6;font-weight:600;color:{INK};margin:0 0 8px">{escape(note["headline"])}</div>')
+    income = sticks.get("income")
+    if income:
+        share = lambda key: f"{income[key] * 100:.0f}%"   # noqa: E731
+        early = (f" 선결제한 금액을 빼면 {share('without_paid_early_share')}이고," if income["without_paid_early_share"] != income["share"]
+                 else "")
+        lead += (f" 장부에 적힌 고객님 월 소득의 <b>{share('share')}</b>입니다.{early} 최근 {income['average_months']}개 명세서 평균은 "
+                 f"{share('average_share')}입니다.")
+    text = f"font-size:14px;line-height:1.65;color:{BODY}"
+    parts = []
+    if note and note.get("headline"):
+        parts.append(f'<div style="font-size:15px;line-height:1.6;font-weight:600;color:{INK};margin:12px 0 10px">{escape(note["headline"])}</div>')
+    tags = {"keep": ("유지", "good"), "adjust": ("조정", "warn"), "check": ("확인", "neutral")}
+    for verdict in (note or {}).get("verdicts", []):
+        tag, kind = tags[verdict["kind"]]
+        parts.append(f'<div style="margin:0 0 12px">{_pill(tag, kind)} <b style="font-size:14px;color:{INK}">{escape(verdict["subject"])}</b>'
+                     f'<div style="{text};margin-top:4px">{escape(verdict["text"])}</div></div>')
+    if note and note.get("points"):
+        parts.append(f'<div style="font-size:12px;font-weight:600;color:{MUTED};margin:14px 0 4px">이번 주 관점 · '
+                     f'{escape(spending_letter.ANGLE_LABEL[view["angle"]])}</div>')
         for point in note["points"]:
             source = point.get("source_url")
             # An unconfirmed link: the page is the issuer's, but code did not find the figure on it.
             label = ("출처(카드사 페이지, Smith가 수치를 확인하지 못했습니다)" if point.get("unconfirmed")
                      else "출처(카드사 공개 자료, 조건은 직접 확인)")
             link = f' <a href="{escape(source)}" style="color:{ACCENT};font-size:12px">{label}</a>' if source else ""
-            parts.append(f'<div style="font-size:14px;line-height:1.65;color:{BODY};margin:0 0 10px"><b>{escape(point["title"])}</b><br>'
-                         f'{escape(point["text"])}{link}</div>')
-        if note.get("try_this_week"):
-            parts.append(f'<div style="font-size:14px;line-height:1.6;color:{INK};background:{CANVAS};border-radius:12px;'
-                         f'padding:10px 12px;margin:4px 0 8px"><b>이번 주에 해볼 것</b> · {escape(note["try_this_week"])}</div>')
-        body = "".join(parts) + body
+            parts.append(f'<div style="{text};margin:0 0 10px"><b>{escape(point["title"])}</b><br>{escape(point["text"])}{link}</div>')
+    if note and note.get("try_this_week"):
+        parts.append(f'<div style="font-size:14px;line-height:1.6;color:{INK};background:{CANVAS};border-radius:12px;'
+                     f'padding:10px 12px;margin:4px 0 8px"><b>이번 주에 해볼 것</b> · {escape(note["try_this_week"])}</div>')
+    body = "".join(parts)
+    if view.get("first_week") or not note:
+        moved = [[spending.CATEGORIES[row["category"]],
+                  f"{row['then']['label']} {_won(Decimal(row['then']['amount']))} · {row['then']['count']}건 → "
+                  f"{row['now']['label']} {_won(Decimal(row['now']['amount']))} · {row['now']['count']}건"]
+                 for row in view.get("follow_up", [])]
+        if moved:   # What the last statement's note asked to adjust, as figures; the note says what to make of it.
+            body += _table(["지난 명세서에서 짚은 것", "그때 → 이번"], moved)
+        groups = [(key, group) for key, group in latest["categories"].items()
+                  if key not in spending.FIXED and group["amount"] > 0]
+        each = {area["category"]: area["each"] for area in sticks.get("areas", [])}
+        rows = [(spending.CATEGORIES[key], Decimal(group["amount"]), i < 3) for i, (key, group) in enumerate(groups)]
+        lines = []
+        for key, group in groups[:8]:
+            before = usual.get(key)
+            against = "" if not before else f" · 평소 {_short(Decimal(before))}"
+            unit = f" · 1회 평균 {_won(Decimal(each[key]))}" if key in each and group["count"] > 1 else ""
+            names = ", ".join(m["name"] for m in group["merchants"][:2]) if key != "other" else ""
+            lines.append([spending.CATEGORIES[key], f"{_won(Decimal(group['amount']))} · {group['count']}건{unit}{against}"
+                          + (f" · {names}" if names else "")])
+        body += _bars(rows) + _table(["분야", "이번 명세서"], lines)
     body += (f'<div style="font-size:12px;line-height:1.5;color:{MUTED};margin-top:8px">삼성카드 한 장의 명세서만 본 것입니다(다른 카드·현금·'
              f'계좌이체 제외). 선결제한 금액도 쓴 돈에 넣었고, 나눠 낸 자리의 대표 결제는 전액이 잡힙니다.</div>')
     return _section("나의 카드 소비", lead, body, note=escape(f"{latest['label']} · {_short(Decimal(latest['spent']))}"), brief=None)

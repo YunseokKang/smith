@@ -14,6 +14,7 @@ issuer's own pages, and handed to the note as part of that payload.
 import json
 import logging
 import os
+import re
 import subprocess
 import uuid
 from contextlib import closing
@@ -32,7 +33,9 @@ MODEL = headless.MODEL
 BUDGET_USD = "2.00"
 TIMEOUT_SECONDS = 600
 # v2: rounded amounts, a short headline (first sample 2026-11-21). v3: no web tool; public terms arrive in the input.
-PROMPT_VERSION = "spending-note-v3"
+# v4: three verdicts every week, judged against `yardsticks` (client 2026-11-21: "이 소비에 대한 피드백이 없는 것 같다").
+PROMPT_VERSION = "spending-note-v4"
+VERDICTS = ("keep", "adjust", "check")   # the order the card shows them in
 TERMS_PROMPT_VERSION = "spending-card-terms-v1"
 _OFFICIAL = ("samsungcard.com",)   # a published term counts only from the issuer's own pages
 ANGLES = ("feel", "benefits", "wellbeing", "trim")
@@ -40,8 +43,8 @@ ANGLE_LABEL = {"feel": "어디에 얼마나 쓰는가", "benefits": "같은 돈�
                "trim": "보탤 것과 뺄 것"}
 _BRIEF = {
     "feel": "Give the reader a feel for where the money goes: the three or four areas that matter, what drives each "
-            "(many small purchases or a few large ones), and how the newest month differs from the usual one. No advice "
-            "to cut anything this week; the point is the picture.",
+            "(many small purchases or a few large ones: `each`, `per_week`, `large`), and how the newest month differs "
+            "from the usual one. The points paint the picture; the verdicts say what to make of it.",
     "benefits": "Same money, better spent. `public_card_terms` holds the card's published terms as looked up on the "
                 "issuer's own pages; use only those, and put the term's `source_url` in the point that relies on it. "
                 "Say which of the reader's real spending areas earn or miss a benefit, whether the annual fee pays for "
@@ -59,10 +62,14 @@ _BRIEF = {
 }
 _TEXT = lambda n: {"type": "string", "maxLength": n}  # noqa: E731
 SCHEMA = {
-    "type": "object", "additionalProperties": False, "required": ["headline", "points"],
+    "type": "object", "additionalProperties": False, "required": ["headline", "verdicts", "points"],
     "properties": {
         "headline": _TEXT(110),
-        "points": {"type": "array", "minItems": 2, "maxItems": 4, "items": {
+        "verdicts": {"type": "array", "minItems": 3, "maxItems": 3, "items": {
+            "type": "object", "additionalProperties": False, "required": ["kind", "subject", "category", "text"],
+            "properties": {"kind": {"type": "string", "enum": list(VERDICTS)}, "subject": _TEXT(24),
+                           "category": {"type": "string", "enum": list(spending.CATEGORIES.values())}, "text": _TEXT(170)}}},
+        "points": {"type": "array", "minItems": 1, "maxItems": 3, "items": {
             "type": "object", "additionalProperties": False, "required": ["title", "text"],
             "properties": {"title": _TEXT(30), "text": _TEXT(280), "source_url": _TEXT(300)}}},
         "try_this_week": _TEXT(140),
@@ -95,6 +102,30 @@ and `client_notes` says why some of them are not the reader's own consumption (s
 about one angle only, given in `angle` and `angle_brief`. `earlier_this_statement` lists what earlier notes on the
 same statement already said: do not repeat them.
 
+The reader asked for feedback, not a tidy ledger: every week, whatever the angle, the note judges. `yardsticks` is
+what you judge against, computed for you:
+- `areas`: each chosen area's amount, purchases, price of one purchase (`each`), purchases a week (`per_week`),
+  purchases of `large.from` won or more (`large`), the same over the reader's earlier months (`usual`), and how far
+  the newest month is above or below that (`over_usual`, `over_usual_pct`).
+- `income`: the statement as a share of the reader's monthly income (`share`; `chosen_share` without fixed costs;
+  `without_paid_early_share` leaving out purchases paid early, some of which were shared bills or insured costs;
+  `average_share` over the last statements). Absent when the income is not known: then do not speak of income.
+- `every_month`: what is charged every month, with its `yearly` cost.
+- `follow_up`: what an earlier statement's note asked the reader to adjust, then and now. When it is there, one
+  verdict or point says plainly whether it moved.
+
+verdicts: exactly three, one of each kind, each on a different subject.
+- keep: spending that serves this reader well and is worth protecting. Say why, with its figure.
+- adjust: the one change with the largest effect. Say what to change and by how much in the reader's own units (one
+  fewer large dinner, a cheaper plan), and what it is worth using given figures only (`over_usual`, `large.amount`,
+  `yearly`). A suggestion, never a fault.
+- check: something the statement cannot settle and the reader can, in one step: a benefit to look up, a subscription
+  to confirm they still use, whose share a large bill was.
+Each verdict names its yardstick in plain words (평소보다, 한 번에 평균, 한 주에 몇 번, 월 소득의 몇 %, 1년이면). Be
+decisive: "유지하셔도 좋습니다", "한 달에 한 번 줄여 보시기를 권합니다", not "고려해 볼 수 있습니다". Prefer subjects
+`earlier_this_statement` has not judged yet; return to one only when nothing else matters as much. `category` is the
+area the verdict is about.
+
 Rules:
 - Every won amount and count you write must be a figure in the input (rounding to 만 원 is fine). Do not add, average
   or project figures yourself; `average_3m` and `usual_before_latest` are given. A card's term may come only from
@@ -106,8 +137,12 @@ Rules:
   change would give.
 - Write an amount of 100,000 won or more rounded to 만 원 ("71만 원"), smaller ones as they are ("27,000원"). A point
   carries at most three or four figures: the ones that make the pattern visible, not every line of the statement.
-- headline: one short sentence (under 50 Korean characters) that carries the week's finding. points: two to four, each a short title and two or three
-  sentences. try_this_week: one small thing the reader could do in the coming week, or leave it out.
+- A percentage you write must be one the input gives (a share written 0.314 is 31%); never work one out.
+- An average (`each`) reads better rounded: "한 번에 약 5만 원", "한 잔에 약 6천 원", not 50,571원.
+- headline: one short sentence (under 50 Korean characters) that carries the week's judgment, not a statistic alone.
+  verdicts: a subject of a few words and one or two sentences each. points: one to three on the week's angle, each a
+  short title and two or three sentences, adding what the verdicts did not say. try_this_week: one small thing the
+  reader could do in the coming week (usually the first step of the adjust verdict), or leave it out.
 - Korean, 합쇼체 addressed to 고객님, no emoji, no markdown.
 
 """ + korean.STYLE
@@ -130,19 +165,42 @@ def _week(day: date) -> str:
     return f"{year}-W{week:02d}"
 
 
-def picture(where: Path, today: date) -> dict[str, Any] | None:
+def _follow_up(noted: list[dict[str, Any]], months: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """What the statement before the newest one was asked to adjust, then and now: one row an area, in the order the
+    notes raised them. Empty with a single statement or when no earlier note asked for anything."""
+    if len(months) < 2:
+        return []
+    previous, latest = months[-2], months[-1]
+    rows: list[dict[str, Any]] = []
+    for week in noted:
+        note = week.get("note") if week.get("settled") == previous["settled"] else None
+        for verdict in (note or {}).get("verdicts", []) if isinstance(note, dict) else []:
+            key = verdict.get("category")
+            if verdict.get("kind") != "adjust" or key not in spending.CATEGORIES or key in {r["category"] for r in rows}:
+                continue
+            side = lambda m: {"label": m["label"], "amount": m["categories"].get(key, {}).get("amount", 0),  # noqa: E731
+                              "count": m["categories"].get(key, {}).get("count", 0)}
+            rows.append({"category": key, "subject": str(verdict.get("subject") or ""), "then": side(previous),
+                         "now": side(latest)})
+    return rows
+
+
+def picture(where: Path, today: date, income: int | None = None) -> dict[str, Any] | None:
     """What the card shows this week, or None without a stored statement.
 
-    {"months": the newest three, "latest", "usual", "average", "angle", "first_week", "note": this week's note or None}.
+    {"months": the newest three, "latest", "usual", "average", "angle", "first_week", "note": this week's note or None,
+    "yardsticks": what the newest statement is judged against (`spending.yardsticks`; `income` is the reader's monthly
+    income when the ledger has it), "follow_up": what the statement before was asked to adjust, then and now}.
     The angle is the one already written this week, else the first the newest statement has not had yet.
     """
-    statements = spending.load(where, last=6)
-    whole = spending.summary(statements, spending.load_own(where))
+    statements, own = spending.load(where, last=6), spending.load_own(where)
+    whole = spending.summary(statements, own)
     if whole is None:
         return None
     months = whole["months"][-3:]
     latest = months[-1]
-    weeks = [w for w in _weeks(where) if w.get("settled") == latest["settled"]]
+    noted = _weeks(where)
+    weeks = [w for w in noted if w.get("settled") == latest["settled"]]
     this = next((w for w in weeks if w.get("week") == _week(today)), None)
     used = [w.get("angle") for w in weeks]
     angle = this["angle"] if this else next((a for a in ANGLES if a not in used), ANGLES[len(used) % len(ANGLES)])
@@ -151,6 +209,7 @@ def picture(where: Path, today: date) -> dict[str, Any] | None:
     return {"months": months, "latest": latest, "usual": whole["usual"], "recurring": whole["recurring"],
             "average": {k: v for k, v in average.items() if v}, "angle": angle,
             "first_week": not [w for w in weeks if w is not this], "note": this.get("note") if this else None,
+            "yardsticks": spending.yardsticks(statements, own, income), "follow_up": _follow_up(noted, whole["months"]),
             "earlier": [w["note"] for w in weeks if w is not this and isinstance(w.get("note"), dict)]}
 
 
@@ -159,7 +218,7 @@ def payload(view: dict[str, Any], *, today: date, client_notes: list[str], healt
             terms: list[dict[str, str]] | None = None) -> dict[str, Any]:
     """The allowlisted model input. Merchants of the fixed and the unsorted groups are left out: a maintenance-fee line
     names the apartment, and an unsorted name may be a building or a person."""
-    label = spending.CATEGORIES
+    label, sticks = spending.CATEGORIES, view.get("yardsticks") or {}
 
     def month(m: dict[str, Any]) -> dict[str, Any]:
         groups = {label[key]: {"amount": g["amount"], "count": g["count"], "share": g["share"],
@@ -177,11 +236,15 @@ def payload(view: dict[str, Any], *, today: date, client_notes: list[str], healt
         "months": [month(m) for m in view["months"]],
         "average_3m": {label[k]: v for k, v in view["average"].items()},
         "usual_before_latest": {label[k]: v for k, v in view["usual"].items()},
-        "every_month": [{"merchant": r["merchant"], "category": label[r["category"]], "monthly": r["monthly"]}
+        "yardsticks": {**sticks, "areas": [{**a, "category": label[a["category"]]} for a in sticks.get("areas", [])]},
+        "every_month": [{"merchant": r["merchant"], "category": label[r["category"]], "monthly": r["monthly"],
+                         "yearly": r["monthly"] * 12}
                         for r in view["recurring"] if r["category"] not in spending.FIXED and r["category"] != "other"],
+        "follow_up": [{**row, "category": label[row["category"]]} for row in view.get("follow_up", [])],
         "card": card, "public_card_terms": terms or [], "client_notes": client_notes, "health_constraints": health_constraints,
         "client_memory": client_memory,
-        "earlier_this_statement": [{"headline": n.get("headline"), "titles": [p.get("title") for p in n.get("points", [])]}
+        "earlier_this_statement": [{"headline": n.get("headline"), "titles": [p.get("title") for p in n.get("points", [])],
+                                    "judged": [f"{v.get('kind')}: {v.get('subject')}" for v in n.get("verdicts", [])]}
                                    for n in view["earlier"]],
     }
 
@@ -270,10 +333,41 @@ def _checked_term(found: dict[str, Any], now: datetime) -> dict[str, Any] | None
     return {"text": korean.tidy(text, []), "source_url": url, "confirmed": record["status"] == "matched"}
 
 
+# A share may be written "31%", "31퍼센트" or "31프로"; an average is often written in 천 원 ("약 6천 원", "5만 1천 원"),
+# which the narrative's amount parser does not read (Codex review 2026-11-21: both passed unchecked).
+_PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s*(?:%|퍼센트|프로)")
+_THOUSANDS = re.compile(r"(?:(\d+)\s*만\s*)?(\d+)\s*천\s*원")
+
+
+def _percents(sent_text: str) -> set[float]:
+    """Percentages the payload holds: a share written as a fraction (0.314 -> 31.4), a `*_pct` figure, or one written
+    out in a text the payload quotes (a card's term)."""
+    held = {float(n) for n in _PERCENT.findall(sent_text)}
+
+    def walk(node: Any, key: str = "") -> None:
+        if isinstance(node, dict):
+            for name, value in node.items():
+                walk(value, str(name))
+        elif isinstance(node, list):
+            for value in node:
+                walk(value, key)
+        elif isinstance(node, bool):
+            return
+        elif isinstance(node, float) and "share" in key:
+            held.add(round(node * 100, 1))
+        elif isinstance(node, (int, float)) and key.endswith("_pct"):
+            held.add(abs(float(node)))
+    try:
+        walk(json.loads(sent_text))
+    except ValueError:
+        pass
+    return held
+
+
 def verify(output: dict[str, Any], sent_text: str, cited: dict[str, bool] | None = None,
            unproven: str = "") -> dict[str, Any] | None:
-    """The note with every paragraph whose won amounts, in its title and its text, the payload holds; None when no
-    paragraph is left. `sent_text` is the payload without its unconfirmed terms and `unproven` is their text: an
+    """The note with every verdict and paragraph whose won amounts and percentages the payload holds; None when
+    neither a verdict nor a paragraph is left. One verdict a kind is kept, in the card's order. `sent_text` is the payload without its unconfirmed terms and `unproven` is their text: an
     amount found only there passes in a paragraph that links that term's page, and the link is marked unconfirmed.
     A source link is kept only when it is a key of `cited` (page of a public term -> figures seen on it by code): a
     URL the model wrote on its own proves nothing and excuses no amount."""
@@ -282,13 +376,28 @@ def verify(output: dict[str, Any], sent_text: str, cited: dict[str, bool] | None
     cited = cited or {}
     evidence = narrative._amounts(sent_text)
     loose = evidence | narrative._amounts(unproven)
+    shares = _percents(sent_text)
+    loose_shares = shares | {float(n) for n in _PERCENT.findall(unproven)}
 
     def held(text: str, known_amounts: set[Decimal] | None = None) -> bool:
         pool = evidence if known_amounts is None else known_amounts
-        return all(any(abs(value - known) <= max(precision, known * Decimal("0.03")) for known in pool)
-                   for _, _, value, precision in narrative._money(text) if value >= 1000)
+        rates = shares if known_amounts is None or known_amounts is evidence else loose_shares
+        close = lambda value, slack: any(abs(value - known) <= max(slack, known * Decimal("0.03")) for known in pool)  # noqa: E731
+        rounded = [Decimal(int(man or 0) * 10_000 + int(thousand) * 1_000) for man, thousand in _THOUSANDS.findall(text)]
+        return all(close(value, precision) for _, _, value, precision in narrative._money(text) if value >= 1000) \
+            and all(close(value, Decimal(500)) for value in rounded) \
+            and all(any(abs(float(written) - known) <= 1.0 for known in rates) for written in _PERCENT.findall(text))
 
     fixes: list[dict[str, str]] = []
+    keys = {name: key for key, name in spending.CATEGORIES.items()}
+    judged: dict[str, dict[str, str]] = {}
+    for verdict in output.get("verdicts", []):
+        kind = verdict.get("kind")
+        if kind not in VERDICTS or kind in judged or not (held(str(verdict.get("subject") or "")) and held(str(verdict.get("text") or ""))):
+            continue
+        judged[kind] = {"kind": kind, "subject": korean.tidy(str(verdict["subject"]), fixes),
+                        "text": korean.tidy(str(verdict["text"]), fixes), "category": keys.get(verdict.get("category"), "")}
+    verdicts = [judged[kind] for kind in VERDICTS if kind in judged]
     points = []
     for point in output.get("points", []):
         source = str(point.get("source_url") or "")
@@ -298,9 +407,10 @@ def verify(output: dict[str, Any], sent_text: str, cited: dict[str, bool] | None
             continue
         points.append({"title": korean.tidy(point["title"], fixes), "text": korean.tidy(point["text"], fixes),
                        **({"source_url": source} if source in cited else {}), **({"unconfirmed": True} if doubtful else {})})
-    if not points:
+    if not points and not verdicts:
         return None
-    note = {"headline": korean.tidy(output["headline"], fixes) if held(output["headline"]) else "", "points": points}
+    note = {"headline": korean.tidy(output["headline"], fixes) if held(output["headline"]) else "", "verdicts": verdicts,
+            "points": points}
     extra = output.get("try_this_week")
     if extra and held(extra):
         note["try_this_week"] = korean.tidy(extra, fixes)
@@ -308,15 +418,16 @@ def verify(output: dict[str, Any], sent_text: str, cited: dict[str, bool] | None
 
 
 def write(db: Path, *, today: date, now: datetime, secrets: list[str], executable: Path | None = None,
-          runner: headless.Runner = subprocess.run, model: str = MODEL) -> dict[str, Any]:
+          runner: headless.Runner = subprocess.run, model: str = MODEL, income: int | None = None) -> dict[str, Any]:
     """Write this week's note unless it exists, with the audit in advice_runs. Never raises for a model failure.
+    `income` is the reader's monthly income for the share-of-income yardstick, when the letter's data has it.
 
     Returns {"outcome": "written" | "kept" | "nothing" | "failure", "error_code"}.
     """
     from smith import health
 
     where = folder(db)
-    view = picture(where, today)
+    view = picture(where, today, income)
     if view is None:
         return {"outcome": "nothing", "error_code": None}
     if view["note"] is not None:
@@ -376,11 +487,14 @@ def attach(db: Path, data: dict[str, Any], *, now: datetime, secrets: list[str] 
     today = data["as_of"].date() if isinstance(data.get("as_of"), datetime) else now.date()
     problem = None
     try:
+        # The reader's own monthly income as the ledger has it ("나의 한 달"); without one the yardstick is left out.
+        inflow = (data.get("own_month") or {}).get("inflow")
+        income = int(inflow) if inflow and inflow > 0 else None
         if secrets is not None:
-            result = write(db, today=today, now=now, secrets=secrets)
+            result = write(db, today=today, now=now, secrets=secrets, income=income)
             if result["outcome"] == "failure":
                 problem = f"Spending note failed: {result['error_code']}"
-        data["own_spending"] = picture(folder(db), today)
+        data["own_spending"] = picture(folder(db), today, income)
     except Exception as error:  # noqa: BLE001 - a card must never stop the letter
         logger.warning("spending card unavailable: %s", type(error).__name__)
         return f"Spending card unavailable: {type(error).__name__}"

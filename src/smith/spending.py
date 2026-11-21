@@ -58,6 +58,7 @@ _FEE_KEY = "D5"
 _PURCHASE_KEY = "D0"   # 일시불: every statement read so far has it
 _REFUND_KEY = "DF"     # refunds of earlier months: the one section the page gives no total
 _SMALL = 10_000
+_LARGE = 50_000   # a purchase the reader would remember: counted apart inside its area
 
 
 class SpendingError(Exception):
@@ -309,6 +310,62 @@ def _slice(entries: list[Entry]) -> dict[str, int]:
 def _line(entry: Entry, own: dict[str, str]) -> dict[str, Any]:
     return {"day": entry.day.isoformat(), "merchant": entry.merchant, "amount": entry.spent,
             "category": categorize(entry, own)}
+
+
+def _units(statement: Statement, own: dict[str, str]) -> dict[str, dict[str, int]]:
+    """Per category, the purchases alone (refunds left out): how many, their sum, and the large ones among them."""
+    found: dict[str, dict[str, int]] = defaultdict(lambda: {"amount": 0, "count": 0, "large_amount": 0, "large_count": 0})
+    for entry in statement.entries:
+        if entry.spent <= 0:
+            continue
+        unit = found[categorize(entry, own)]
+        unit["amount"] += entry.spent
+        unit["count"] += 1
+        if entry.spent >= _LARGE:
+            unit["large_amount"] += entry.spent
+            unit["large_count"] += 1
+    return found
+
+
+def yardsticks(statements: list[Statement], own: dict[str, str], income: int | None = None) -> dict[str, Any] | None:
+    """What the newest statement is judged against (FR-60, spending design §5.1): the reader's own earlier months,
+    the price and pace of one purchase in each area, the large purchases inside it, and the share of the monthly
+    income when the ledger has one. A verdict may quote these figures and no others, so nothing is added up by a model.
+
+    Fixed costs and unsorted merchants have no area here: a habit is judged on what is chosen and known.
+    None when nothing is stored; "usual" is absent with a single statement, "income" without an income.
+    """
+    if not statements:
+        return None
+    months, units = [month(s, own) for s in statements], [_units(s, own) for s in statements]
+    latest, now, earlier = months[-1], units[-1], len(statements) - 1
+    areas = []
+    for key, group in latest["categories"].items():
+        unit = now.get(key)
+        if key in FIXED or key == "other" or not unit or not unit["count"]:
+            continue
+        area: dict[str, Any] = {
+            "category": key, "amount": group["amount"], "count": unit["count"], "each": round(unit["amount"] / unit["count"]),
+            "per_week": round(unit["count"] * 7 / max(latest["days"], 1), 1),
+            "large": {"from": _LARGE, "count": unit["large_count"], "amount": unit["large_amount"]}}
+        if earlier:
+            before = [u[key] for u in units[:-1] if key in u]
+            usual = round(sum(m["categories"].get(key, {}).get("amount", 0) for m in months[:-1]) / earlier)
+            counted = sum(u["count"] for u in before)
+            area["usual"] = {"months": earlier, "amount": usual, "count": round(counted / earlier, 1),
+                             "each": round(sum(u["amount"] for u in before) / counted) if counted else None}
+            area["over_usual"] = group["amount"] - usual
+            area["over_usual_pct"] = round((group["amount"] - usual) * 100 / usual) if usual > 0 else None
+        areas.append(area)
+    result: dict[str, Any] = {"areas": areas, "months": [{"label": m["label"], "spent": m["spent"],
+                                                         "chosen": m["spent"] - m["fixed"]} for m in months]}
+    if income and income > 0:
+        recent = months[-3:]
+        result["income"] = {
+            "share": round(latest["spent"] / income, 3), "chosen_share": round((latest["spent"] - latest["fixed"]) / income, 3),
+            "without_paid_early_share": round((latest["spent"] - latest["prepaid"]) / income, 3),
+            "average_share": round(sum(m["spent"] for m in recent) / len(recent) / income, 3), "average_months": len(recent)}
+    return result
 
 
 def summary(statements: list[Statement], own: dict[str, str]) -> dict[str, Any] | None:
