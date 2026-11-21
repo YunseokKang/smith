@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from smith import headless, korean, ledger, memory, sources, spending
+from smith import headless, household_stats, korean, ledger, memory, sources, spending
 from smith.payload import PayloadRejected, check_outbound
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,8 @@ BUDGET_USD = "2.00"
 TIMEOUT_SECONDS = 600
 # v2: rounded amounts, a short headline (first sample 2026-11-21). v3: no web tool; public terms arrive in the input.
 # v4: three verdicts every week, judged against `yardsticks` (client 2026-11-21: "이 소비에 대한 피드백이 없는 것 같다").
-PROMPT_VERSION = "spending-note-v4"
+# v5: `peer_comparison`, the public household survey as a one-sided reference (client 2026-11-21: "통계정보 활용부터").
+PROMPT_VERSION = "spending-note-v5"
 VERDICTS = ("keep", "adjust", "check")   # the order the card shows them in
 TERMS_PROMPT_VERSION = "spending-card-terms-v1"
 _OFFICIAL = ("samsungcard.com",)   # a published term counts only from the issuer's own pages
@@ -113,6 +114,15 @@ what you judge against, computed for you:
 - `every_month`: what is charged every month, with its `yearly` cost.
 - `follow_up`: what an earlier statement's note asked the reader to adjust, then and now. When it is there, one
   verdict or point says plainly whether it moved.
+- `peer_comparison`: the national household survey (`survey`, `period`) for households like the reader's (`groups`).
+  The two sides are not the same thing: the survey figure is what a WHOLE HOUSEHOLD spends a month by every means of
+  payment, and `card_average` is ONE PERSON's ONE CARD (the average of `card_months` statements). So it cuts one way
+  only, and you are given only the areas where the card alone reaches the household figure: say that plainly, it is
+  a real finding. For any other area, and when `peer_comparison` is null, do not compare with other households at
+  all, and never say the reader spends less than others (the rest of the household's spending is not on this card).
+  Name the group and the survey when you use it ("2025년 가계동향조사의 2인 가구 평균"), use the given amounts and
+  `card_average_pct` only (no "몇 배"), mind `survey_also_holds`, and treat an average as a reference, never as a
+  standard to meet. Use it in at most one verdict or point a week, where it changes the judgment.
 
 verdicts: exactly three, one of each kind, each on a different subject.
 - keep: spending that serves this reader well and is worth protecting. Say why, with its figure.
@@ -185,12 +195,15 @@ def _follow_up(noted: list[dict[str, Any]], months: list[dict[str, Any]]) -> lis
     return rows
 
 
-def picture(where: Path, today: date, income: int | None = None) -> dict[str, Any] | None:
+def picture(where: Path, today: date, income: int | None = None,
+            household_income: int | None = None) -> dict[str, Any] | None:
     """What the card shows this week, or None without a stored statement.
 
     {"months": the newest three, "latest", "usual", "average", "angle", "first_week", "note": this week's note or None,
     "yardsticks": what the newest statement is judged against (`spending.yardsticks`; `income` is the reader's monthly
-    income when the ledger has it), "follow_up": what the statement before was asked to adjust, then and now}.
+    income when the ledger has it), "follow_up": what the statement before was asked to adjust, then and now,
+    "peers": the public household survey beside the card's areas (`household_stats.compare`; the group is chosen by
+    the household's size as recorded and by `household_income`, its monthly take-home in the ledger)}.
     The angle is the one already written this week, else the first the newest statement has not had yet.
     """
     statements, own = spending.load(where, last=6), spending.load_own(where)
@@ -210,6 +223,8 @@ def picture(where: Path, today: date, income: int | None = None) -> dict[str, An
             "average": {k: v for k, v in average.items() if v}, "angle": angle,
             "first_week": not [w for w in weeks if w is not this], "note": this.get("note") if this else None,
             "yardsticks": spending.yardsticks(statements, own, income), "follow_up": _follow_up(noted, whole["months"]),
+            "peers": household_stats.compare(whole["months"], members=spending.household_members(where),
+                                             household_income=household_income),
             "earlier": [w["note"] for w in weeks if w is not this and isinstance(w.get("note"), dict)]}
 
 
@@ -241,12 +256,26 @@ def payload(view: dict[str, Any], *, today: date, client_notes: list[str], healt
                          "yearly": r["monthly"] * 12}
                         for r in view["recurring"] if r["category"] not in spending.FIXED and r["category"] != "other"],
         "follow_up": [{**row, "category": label[row["category"]]} for row in view.get("follow_up", [])],
+        "peer_comparison": _reached(view.get("peers")),
         "card": card, "public_card_terms": terms or [], "client_notes": client_notes, "health_constraints": health_constraints,
         "client_memory": client_memory,
         "earlier_this_statement": [{"headline": n.get("headline"), "titles": [p.get("title") for p in n.get("points", [])],
                                     "judged": [f"{v.get('kind')}: {v.get('subject')}" for v in n.get("verdicts", [])]}
                                    for n in view["earlier"]],
     }
+
+
+def _reached(peers: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The survey comparison as the model may use it: only the areas, and in them only the groups, whose
+    whole-household figure the card alone reaches. A figure the card stays under says nothing about the household
+    (the rest of its spending is not on this card), so it is not sent: an amount the payload does not hold cannot be
+    quoted. None when the card reaches nothing. The card's own table shows every area, with that caveat under it."""
+    if not peers:
+        return None
+    areas = [{**area, "peers": reached} for area in peers["areas"]
+             if (reached := [peer for peer in area["peers"] if peer["reaches"]])]
+    return {**peers, "groups": [g for g in peers["groups"] if any(p["group"] == g["label"] for a in areas for p in a["peers"])],
+            "areas": areas} if areas else None
 
 
 def _card(where: Path) -> list[dict[str, Any]]:
@@ -337,6 +366,14 @@ def _checked_term(found: dict[str, Any], now: datetime) -> dict[str, Any] | None
 # which the narrative's amount parser does not read (Codex review 2026-11-21: both passed unchecked).
 _PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s*(?:%|퍼센트|프로)")
 _THOUSANDS = re.compile(r"(?:(\d+)\s*만\s*)?(\d+)\s*천\s*원")
+# The survey cuts one way (spending design §5.2): a sentence that sets the reader beside other households and
+# concludes that the reader spends less is not kept, whatever its figures.
+_OTHERS = re.compile(r"가계동향|가구\s*평균|다른\s*가구|또래|남들|분위|상위\s*\d+\s*%")
+_LESS = re.compile(r"덜\s|적게|적은\s*편|낮은\s*(?:편|수준)|못\s*미|미치지|밑돌|밑도|아끼|절약|알뜰|검소")
+
+
+def _less_than_others(text: str) -> bool:
+    return any(_OTHERS.search(sentence) and _LESS.search(sentence) for sentence in re.split(r"(?<=[.!?。])\s+|\n", text))
 
 
 def _percents(sent_text: str) -> set[float]:
@@ -382,6 +419,8 @@ def verify(output: dict[str, Any], sent_text: str, cited: dict[str, bool] | None
     def held(text: str, known_amounts: set[Decimal] | None = None) -> bool:
         pool = evidence if known_amounts is None else known_amounts
         rates = shares if known_amounts is None or known_amounts is evidence else loose_shares
+        if _less_than_others(text):
+            return False
         close = lambda value, slack: any(abs(value - known) <= max(slack, known * Decimal("0.03")) for known in pool)  # noqa: E731
         rounded = [Decimal(int(man or 0) * 10_000 + int(thousand) * 1_000) for man, thousand in _THOUSANDS.findall(text)]
         return all(close(value, precision) for _, _, value, precision in narrative._money(text) if value >= 1000) \
@@ -418,16 +457,18 @@ def verify(output: dict[str, Any], sent_text: str, cited: dict[str, bool] | None
 
 
 def write(db: Path, *, today: date, now: datetime, secrets: list[str], executable: Path | None = None,
-          runner: headless.Runner = subprocess.run, model: str = MODEL, income: int | None = None) -> dict[str, Any]:
+          runner: headless.Runner = subprocess.run, model: str = MODEL, income: int | None = None,
+          household_income: int | None = None) -> dict[str, Any]:
     """Write this week's note unless it exists, with the audit in advice_runs. Never raises for a model failure.
-    `income` is the reader's monthly income for the share-of-income yardstick, when the letter's data has it.
+    `income` is the reader's monthly income for the share-of-income yardstick and `household_income` the household's
+    for choosing the public survey's income group, when the letter's data has them.
 
     Returns {"outcome": "written" | "kept" | "nothing" | "failure", "error_code"}.
     """
     from smith import health
 
     where = folder(db)
-    view = picture(where, today, income)
+    view = picture(where, today, income, household_income)
     if view is None:
         return {"outcome": "nothing", "error_code": None}
     if view["note"] is not None:
@@ -490,11 +531,14 @@ def attach(db: Path, data: dict[str, Any], *, now: datetime, secrets: list[str] 
         # The reader's own monthly income as the ledger has it ("나의 한 달"); without one the yardstick is left out.
         inflow = (data.get("own_month") or {}).get("inflow")
         income = int(inflow) if inflow and inflow > 0 else None
+        # The household's monthly take-home chooses the public survey's income group; it is not sent anywhere.
+        shared = (data.get("spending_split") or {}).get("inflow")
+        household_income = int(shared) if shared and shared > 0 else None
         if secrets is not None:
-            result = write(db, today=today, now=now, secrets=secrets, income=income)
+            result = write(db, today=today, now=now, secrets=secrets, income=income, household_income=household_income)
             if result["outcome"] == "failure":
                 problem = f"Spending note failed: {result['error_code']}"
-        data["own_spending"] = picture(folder(db), today, income)
+        data["own_spending"] = picture(folder(db), today, income, household_income)
     except Exception as error:  # noqa: BLE001 - a card must never stop the letter
         logger.warning("spending card unavailable: %s", type(error).__name__)
         return f"Spending card unavailable: {type(error).__name__}"

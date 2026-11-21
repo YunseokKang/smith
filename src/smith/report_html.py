@@ -629,6 +629,7 @@ def _render_edition(data: dict[str, Any], edition: editions.Edition) -> tuple[st
         # The reader's own month (§42); the household's month, reserve and room are in "spending" and "cash".
         "my_month": lambda: _spending(None, data.get("own_month")),
         "my_spending": lambda: _my_spending(data.get("own_spending")),
+        "plan_vs_card": lambda: _plan_vs_card(data),
         "my_overview": lambda: _my_overview(data),
     }
     if data.get("audience", "self") != "self":
@@ -692,7 +693,11 @@ def _split_bands(data: dict[str, Any], edition: editions.Edition, renderers: dic
                  else "")
     household_proposals = (_proposals(both, full, edition=edition, heading="두 분께 드리는 제안", data=data)
                            if both["proposals"] else "")
-    ours = group(edition.household)
+    due = _reference_due(data)
+    # A request the judgement cannot do without is never left waiting for the month's first letter.
+    pressing = tuple(name for name in edition.reference
+                     if name == "requests" and any(r.priority == "must" for r in data.get("requests") or []))
+    ours = group(edition.household + (() if due else pressing))
     bands = _cards(_group_title(f"나의 {edition.label}", "고객님 명의의 계좌·집·대출·연금·보험만 봅니다."),
                    [*mine[:1], proposals, *mine[1:]])
     changes = _changes_outside(story, "이번 주 눈여겨볼 변화" if edition.key == "overview" else f"{edition.label} — 눈여겨볼 변화")
@@ -705,25 +710,35 @@ def _split_bands(data: dict[str, Any], edition: editions.Edition, renderers: dic
     bands += _cards(_group_title(f"우리 집 {edition.household_label or edition.label}", "두 분을 합쳐 봅니다."),
                     [lead + household_proposals, *ours])
     # The long-range tracks (home move, lease return, retirement) are the household's: under its group.
-    if edition.strategy and advice["strategy"]:
+    banded = bool(edition.strategy and advice["strategy"])
+    if banded and (due or not edition.reference_strategy):
         bands.append(_band(DARK, _strategy(advice["strategy"], story.get("direction", ""))))
     reference = [(name, part) for name in edition.reference for part in (renderers[name](),) if part]
-    if reference and _reference_due(data):
+    if reference and due:
         bands += _cards(_group_title("참고", "매주 크게 바뀌지 않는 기준과 표입니다. 매달 첫 레터에만 싣습니다."),
                         [part for _, part in reference])
     elif reference:
         # The month's later letters name what the reference group holds in one line (user decision 2026-11-19, report
-        # design §49: "2번으로 해", the whole group only in the month's first letter of each theme).
-        names = ", ".join(dict.fromkeys(REFERENCE_TITLES.get(name, name) for name, _ in reference))
+        # design §49: "2번으로 해", the whole group only in the month's first letter of each theme), and say what
+        # moved in it since the last letter of the theme, when the report computed that (report design §51).
+        titles = [REFERENCE_TITLES.get(name, name) for name, _ in reference if name not in pressing]
+        if banded and edition.reference_strategy:
+            titles.append("전략 방향")
+        names = ", ".join(dict.fromkeys(titles))
+        moved = data.get("reference_changes")
+        since = ("" if moved is None else " 지난 레터 이후 달라진 것은 없습니다." if not moved else
+                 " 지난 레터 이후 달라진 것: " + ", ".join(escape(item) for item in moved) + ".")
         bands.append(_band(CANVAS, f'<tr><td style="font-size:13px;line-height:1.7;color:{BODY}"><b style="font-weight:600;'
                                    f'color:{INK}">참고</b> · 매주 크게 바뀌지 않는 표({escape(names)})는 매달 첫 '
                                    f'{escape(edition.label)} 레터에만 싣습니다. 이번 달 첫 레터에 전체가 있고, 필요하시면 답장으로 '
-                                   "물어 주십시오.</td></tr>", border=True))
+                                   f"물어 주십시오.{since}</td></tr>", border=True))
     return bands
 
 
 # What each reference section is called in the one line that stands for the group.
-REFERENCE_TITLES = {"stress_summary": "스트레스 테스트", "stress": "스트레스 테스트", "macro": "금리 표와 공식 발표",
+REFERENCE_TITLES = {"cash": "현금·유동성", "spending": "남는 돈의 쓰임", "goals": "목표까지의 준비",
+                    "requests": "다음에 확인할 것",
+                    "stress_summary": "스트레스 테스트", "stress": "스트레스 테스트", "macro": "금리 표와 공식 발표",
                     "macro_brief": "시장 금리와 환율", "real_estate": "두 집의 시세", "tax": "세금 관점 전략",
                     "holding_tax": "집 보유세", "annuity_review": "보유 연금보험 평가"}
 
@@ -1604,6 +1619,22 @@ def _decision_line(p: Proposal, number: int, asks: bool) -> str:
             f'line-height:1.6;color:{BODY}"><b style="font-weight:700;color:{INK}">{p.times_shown}번 안내드렸습니다.</b> {how}</div>')
 
 
+def _waiting_line(waiting: list[Proposal], numbers: dict[str, int], asks: bool) -> str:
+    """The proposals still waiting for a decision as one block (report design §51): each by its card number and its
+    short name with how often it was said, then how to answer. Their reasoning was read on the cards of the weeks
+    before and is a reply away."""
+    def number(p: Proposal) -> int:
+        return numbers.get(p.identity or p.key, 0)
+    items = " · ".join(f"{number(p)}번 {escape(p.headline or p.title)}({p.times_shown}번 안내)" for p in waiting)
+    first = number(waiting[0])
+    how = (f"답장으로 「{first}번 할게」, 「{first}번 보류」, 「{first}번 했어」처럼 보내 주시면 기록해 두고, 수치가 크게 바뀌거나 기한이 "
+           "가까워질 때만 다시 펼쳐 말씀드립니다. 근거가 궁금하시면 답장으로 물어 주십시오." if asks else
+           "하실지 미루실지 정하시면 배우자분께 전해 주십시오.")
+    return (f'<tr><td style="padding-top:12px"><div style="background:{SOFT};border-radius:16px;padding:14px 16px;'
+            f'font-size:14px;line-height:1.7;color:{BODY}"><b style="font-weight:700;color:{INK}">결정 대기 {len(waiting)}건</b> · '
+            f'{items}<div style="font-size:13px;margin-top:6px">{how}</div></div></td></tr>')
+
+
 def _proposals(advice: dict[str, Any], full: bool, edition: editions.Edition | None = None,
                heading: str = "고객님께 드리는 제안", *, data: dict[str, Any] | None = None) -> str:
     """The proposal cards: why now, effect, risks, timing, what would change the judgement, certainty.
@@ -1623,10 +1654,19 @@ def _proposals(advice: dict[str, Any], full: bool, edition: editions.Edition | N
                 "무엇이 필요한지 아래에 적었습니다." if advice.get("undetermined") else
                 "새 제안이 없습니다. 제안이 없는 것도 판단입니다. 다음 보고에서 변화가 있으면 다시 말씀드리겠습니다.")
         return head + f'<tr><td style="font-size:15px;line-height:1.6;color:{BODY}">{text}</td></tr>' + pending
+    # On an edition that asks for it, a proposal still undecided after STALE_AFTER deliveries is one line, not a card
+    # said again in full every week; moved figures or a near deadline make it a card again (report design §51).
+    compact = edition is not None and edition.compact_pending and full and today is not None
+    waiting = [p for p in proposals[:CARDS] if compact and urgency(p, today) == "decide"]
     cards = []
     for place, p in enumerate(proposals[:CARDS], 1):
         number = numbers.get(p.identity or p.key, place)
         state = "" if today is None else urgency(p, today)
+        if p in waiting:
+            if p is waiting[0]:
+                cards.append(_waiting_line(waiting, numbers, asks))
+            continue
+        lead_card = not any(card for card in cards if "<details" in card)   # The first card drawn in full.
         badge = (f'<span style="display:inline-block;background:{BLUE};color:#ffffff;font-size:12px;font-weight:600;'
                  f'border-radius:100px;padding:4px 11px;margin-right:6px">{number}</span>'
                  + _urgency_badges(p, state, today))
@@ -1643,7 +1683,7 @@ def _proposals(advice: dict[str, Any], full: bool, edition: editions.Edition | N
                 rows.append(("시장·정책 맥락", escape(_first_sentence(p.context)) + _sources(p.links)))
             if settled:
                 rows.append(("다시 판단할 조건", escape(_first_sentence(p.reconsider))))
-            elif place == 1 and state != "decide":   # A decision request has been explained already: why and when.
+            elif lead_card and state != "decide":   # A decision request has been explained already: why and when.
                 rows += [("예상 효과", escape(_first_sentence(p.effect))), ("위험과 대안", escape(_first_sentence(p.risks))),
                          ("시점", escape(p.timing)), ("다시 판단할 조건", escape(_first_sentence(p.reconsider))),
                          ("근거의 성격", escape(p.certainty))]
@@ -1679,7 +1719,7 @@ def _proposals(advice: dict[str, Any], full: bool, edition: editions.Edition | N
             detail += _decision_line(p, number, asks)
         # One card open at a time (user review 2026-10-18): the first proposal shows its detail, the others
         # show the badges and the title until tapped.
-        opened = " open" if place == 1 else ""
+        opened = " open" if lead_card else ""
         cards.append(f'<tr><td style="padding-top:12px"><div style="background:{CANVAS};border:1px solid {HAIRLINE};'
                      f'border-radius:24px;padding:18px 20px"><details{opened} style="margin:0">'
                      f'<summary style="cursor:pointer;outline:none">{badge}{title}{_expand_hint(block=True)}</summary>'
@@ -2649,9 +2689,56 @@ def _my_spending(view: dict[str, Any] | None) -> str:
             lines.append([spending.CATEGORIES[key], f"{_won(Decimal(group['amount']))} · {group['count']}건{unit}{against}"
                           + (f" · {names}" if names else "")])
         body += _bars(rows) + _table(["분야", "이번 명세서"], lines)
+        body += _peer_chart(view.get("peers"))
     body += (f'<div style="font-size:12px;line-height:1.5;color:{MUTED};margin-top:8px">삼성카드 한 장의 명세서만 본 것입니다(다른 카드·현금·'
              f'계좌이체 제외). 선결제한 금액도 쓴 돈에 넣었고, 나눠 낸 자리의 대표 결제는 전액이 잡힙니다.</div>')
     return _section("나의 카드 소비", lead, body, note=escape(f"{latest['label']} · {_short(Decimal(latest['spent']))}"), brief=None)
+
+
+def _peer_chart(peers: dict[str, Any] | None) -> str:
+    """The card beside households like the reader's, as bars (spending design §5.2; client 2026-11-21: the table was
+    hard to read). One block an area: the card's bar on top, a grey bar for each reference group, on the area's own
+    scale. An area where the card alone reaches a household figure comes first, in the warm colour with a tag that
+    says by how much; the others stay neutral and carry no verdict, because a card under a whole household's average
+    says nothing (the caption says so once). Empty without an area."""
+    areas = (peers or {}).get("areas") or []
+    if not areas:
+        return ""
+    warm, warm_text = "#f29900", PILLS["warn"][1]
+    label = f"width:92px;font-size:12px;line-height:1.3;padding:3px 8px 3px 0;white-space:nowrap"
+    figure = f"width:64px;text-align:right;font-family:{MONO};font-size:12px;padding-left:8px;white-space:nowrap"
+
+    def bar(name: str, amount: int, peak: int, color: str, *, strong: bool = False) -> str:
+        width = max(2, round(amount * 100 / peak))
+        weight, ink = ("font-weight:700;", INK) if strong else ("", MUTED)
+        return (f'<tr><td style="{label};{weight}color:{ink}">{escape(name)}</td>'
+                f'<td><div style="background:{color};height:{14 if strong else 10}px;width:{width}%;border-radius:0 100px 100px 0"></div></td>'
+                f'<td style="{figure};{weight}color:{ink}">{_short(Decimal(amount))}</td></tr>')
+
+    blocks = []
+    # Reached areas first, the furthest over on top; the rest in the survey module's order.
+    for area in sorted(areas, key=lambda a: -max((p["card_average_pct"] for p in a["peers"] if p["reaches"]), default=0)):
+        over = [peer for peer in area["peers"] if peer["reaches"]]
+        peak = max(area["card_average"], *(peer["amount"] for peer in area["peers"]))
+        tag = (f' <span style="display:inline-block;background:{PILLS["warn"][0]};color:{warm_text};font-size:12px;font-weight:700;'
+               f'border-radius:100px;padding:2px 9px;white-space:nowrap">{escape(over[0]["short"])} 평균의 {over[0]["card_average_pct"]}%</span>'
+               if over else "")
+        rows = bar("내 카드", area["card_average"], peak, warm if over else ACCENT, strong=True)
+        rows += "".join(bar(peer["short"], peer["amount"], peak, MUTED_BAR) for peer in area["peers"])
+        blocks.append(f'<div style="margin:14px 0 0"><div style="font-size:14px;font-weight:600;color:{INK};margin:0 0 4px">'
+                      f'{escape(area["area"])}{tag}</div>'
+                      f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{rows}</table></div>')
+    months = areas[0]["card_months"]
+    # A size group needs no gloss; an income group's households are larger than the reader's, which is worth saying.
+    sizes = ", ".join(f"{g['short']}{'' if g['short'].endswith('가구') else ' 가구'}는 평균 {g['members']:.1f}명"
+                      for g in peers["groups"] if g["short"] != g["label"])
+    return (f'<div style="font-size:15px;font-weight:600;color:{INK};margin:20px 0 2px">또래 가구와 견주기</div>'
+            f'<div style="font-size:12px;line-height:1.5;color:{MUTED}">내 카드는 한 사람의 카드 한 장({months}개 명세서 평균), 회색 막대는 '
+            f'가구 전체의 한 달 평균입니다.</div>' + "".join(blocks)
+            + f'<div style="font-size:12px;line-height:1.5;color:{MUTED};margin-top:12px">{escape(peers["period"])} '
+            f'<a href="{escape(peers["source_url"])}" style="color:{ACCENT}">{escape(peers["survey"])}</a>의 가구당 월평균입니다{escape(f"({sizes})" if sizes else "")}. '
+            f'가구 전체가 모든 결제 수단으로 쓴 평균이라, 카드 한 장의 막대가 회색 막대보다 길면 뚜렷한 신호이고 짧으면 이 카드만으로는 '
+            f'판단할 수 없습니다. 막대 길이는 분야마다 따로 맞췄고, 평균은 참고이지 기준이 아닙니다.</div>')
 
 
 def _spending(room: dict[str, Any] | None, split: dict[str, Any] | None = None) -> str:
@@ -2670,33 +2757,49 @@ def _spending(room: dict[str, Any] | None, split: dict[str, Any] | None = None) 
         balance_chart = _stacked(segments)
     if room is None:
         return "" if not balance else _section("한 달 소비의 균형", balance, balance_chart)
-    safe, with_goals = max(room["room"], Decimal(0)), max(room["room_with_goals"], Decimal(0))
+    # One recommendation for the room (report design §51): a standing transfer first, the rest to spend. The pace the
+    # planned goals would need every month is not said here: it read as a monthly shortfall nobody can act on.
+    free = room["free"] if room["room"] >= 0 else Decimal(0)
     committed = [("비상금 채우기(주식 일부 정리로 일시 충당)" if label == "비상금 채우기" and room.get("reserve_swap") else label, amount)
                  for label, amount in room["committed"]]
-    rows = ([("남는 돈", room["surplus"], False)] + [(label, amount, False) for label, amount in committed]
-            + [("안심 소비 한도(약정 기준)", safe, True)])
-    if room["planned"]:
-        rows += [(label, amount, False) for label, amount in room["planned"]] + [("계획한 목표까지 지킬 때", with_goals, False)]
+    rows = [("남는 돈", room["surplus"], False)] + [(label, amount, False) for label, amount in committed]
     if room["room"] >= 0:
-        lead = (f"이번 달에 쓰셔도 비상금과 약정이 늦어지지 않는 <b>안심 소비 한도</b>는 <b>{_short(room['room'])}</b>입니다(남는 돈 "
-                f"{_short(room['surplus'])} − 비상금·약정 적립 {_short(room['committed_total'])}).")
-        if room["planned"]:
-            lead += (f" 계획한 목표(매월 {_short(room['planned_total'])})까지 지금 속도로 지키려면 약 "
-                     f"<b>{_short(room['room_with_goals'])}</b>입니다." if room["room_with_goals"] >= 0 else
-                     f" 다만 계획한 목표(매월 {_short(room['planned_total'])})까지 지금 속도로 지키려면 매월 "
-                     f"{_short(-room['room_with_goals'])}이 모자라, 목표의 시점·금액을 손보지 않는 한 그 목표는 늦어집니다.")
+        where = f"{room['transfer_name']} " if room.get("transfer_name") else ""
+        lead = (f"매월 남는 돈 <b>{_short(room['surplus'])}</b>에서 비상금·약정 적립 {_short(room['committed_total'])}을 뺀 "
+                f"{_short(room['room'])} 가운데 약 <b>{_short(room['transfer'])}</b>은 {where}자동이체로 먼저 묶고, 남는 약 "
+                f"<b>{_short(free)}</b>을 쓰시길 권합니다.")
         if room.get("reserve_swap"):
             lead += (f" 비상금 부족분 {_short(room['reserve_swap'])}은 보유 주식 일부를 정리해 한 번에 채우는 방안을 제안했으므로 "
                      "매월 적립에서 뺐습니다.")
-        lead += " 쌓아 두는 것이 목적이 아니라면, 시간이 지나도 남는 경험에 먼저 배정하시길 권합니다."
+        lead += " 쓰실 몫은 시간이 지나도 남는 경험에 먼저 배정하시길 권합니다."
+        rows.append(("자동이체 먼저(권고)", room["transfer"], False))
     else:
         lead = (f"남는 돈 {_short(room['surplus'])}보다 비상금과 약정에 매월 필요한 적립 {_short(room['committed_total'])}이 "
                 f"<b>{_short(-room['room'])}</b> 더 큽니다. 지금은 마음 편히 쓸 여유가 없고, 약정과 지출을 먼저 손봐야 합니다.")
-    table = _table(["항목", "매월"], [[label, _won(value)] for label, value, _ in rows])
+    rows.append(("쓰셔도 되는 돈", free, True))
     chart = (balance_chart + '<div style="height:12px"></div>') if balance else ""
-    # The room and the goals' pace lead; the month's split follows (the household day's hero bar shows it too).
-    return _section("마음 편히 써도 되는 돈", lead + (" " + balance if balance else ""), chart + _bars(rows) + table,
-                    note=escape(f"안심 소비 한도 {_short(safe)}"))
+    # The bars carry the amounts: the table under them said the same rows a second time (user review 2026-11-21).
+    return _section("남는 돈의 쓰임", lead + (" " + balance if balance else ""), chart + _bars(rows),
+                    note=escape(f"쓰셔도 되는 돈 {_short(free)}"))
+
+
+def _plan_vs_card(data: dict[str, Any]) -> str:
+    """One line under the card statement (report design §51): the discretionary spending the ledger plans for the
+    reader a month beside what the latest statement shows was spent outside fixed bills. The ledger's split is a plan
+    that reads the same every week; the statement is what happened. Empty without both."""
+    month, spend = data.get("own_month"), data.get("own_spending")
+    latest = (spend or {}).get("latest")
+    if not month or not latest or not month.get("discretionary"):
+        return ""
+    planned, actual = month["discretionary"], Decimal(latest["spent"] - latest["fixed"])
+    gap = planned - actual
+    verdict = (f"계획보다 {_short(gap)} 적습니다" if gap > 0 else f"계획보다 {_short(-gap)} 많습니다" if gap < 0
+               else "계획과 같습니다")
+    return (f'<tr><td style="padding:8px 0"><div style="font-size:14px;line-height:1.7;color:{BODY}">'
+            f'<b style="font-weight:600;color:{INK}">계획과 실제</b> · 원장에 적어 두신 고객님의 재량 지출은 월 '
+            f'<b>{_short(planned)}</b>이고, {escape(str(latest["label"]))} 카드 명세서에서 고정 지출을 뺀 실제 소비는 '
+            f'<b>{_short(actual)}</b>으로 {verdict}. 다만 명세서는 카드 한 장만 본 것이고, 원장의 재량 지출에는 카드로 내지 않는 '
+            "돈(이체·현금·대출 추가 상환)도 들어 있어 이 차이가 곧 남는 돈은 아닙니다.</div></td></tr>")
 
 
 

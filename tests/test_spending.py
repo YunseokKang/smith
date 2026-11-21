@@ -272,6 +272,91 @@ class VerdictTest(unittest.TestCase):
             self.assertIn(shown, page)
 
 
+class PeerTest(unittest.TestCase):
+    """The public household survey beside the card (spending design §5.2)."""
+
+    def test_every_survey_row_adds_up_to_its_own_total(self) -> None:
+        from smith import household_stats as stats
+        rows = {"all": stats.ALL, **{f"size {k}": v for k, v in stats.BY_SIZE.items()},
+                **{f"fifth {k}": v for k, v in stats.BY_FIFTH.items()}}
+        for name, row in rows.items():   # a copying slip in one cell shows here; the survey's own rounding is a few won
+            with self.subTest(name):
+                self.assertLessEqual(abs(sum(row[item] for item in stats.ITEMS) - row["consumption"]), 12)
+
+    def test_the_group_follows_the_household_and_the_card_is_set_beside_it(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from smith import household_stats as stats
+        self.assertEqual([stats.fifth_for(won) for won in (900_000, 3_000_000, 3_600_000, 7_000_000, 15_000_000)], [1, 2, 3, 4, 5])
+        self.assertEqual([g["label"] for g in stats.groups(2, 10_000_000)], ["2인 가구", "소득 상위 20% 가구(평균 3.1명)"])
+        self.assertEqual([g["label"] for g in stats.groups(None, None)], ["전체 가구 평균(평균 2.2명)"])
+        with tempfile.TemporaryDirectory() as tmp:
+            _two_months(Path(tmp))   # dinners: 40,000 then 100,000 -> 70,000 a month on average
+            months = spending.summary(spending.load(Path(tmp)), {})["months"]
+        (eating,) = stats.compare(months, members=2)["areas"]
+        self.assertEqual((eating["area"], eating["card_latest"], eating["card_average"], eating["card_months"]),
+                         ("외식·커피·술", 100_000, 70_000, 2))
+        self.assertEqual(eating["peers"], [{"group": "2인 가구", "short": "2인 가구", "amount": 396_333, "reaches": False,
+                                            "card_average_pct": 17}])
+
+    def test_reaching_is_decided_on_whole_won_and_a_gym_is_not_medical_care(self) -> None:
+        from smith import household_stats as stats
+        month = lambda key, won: {"categories": {key: {"amount": won}}}   # noqa: E731
+        cases = {395_000: (False, 99), 396_333: (True, 100), 400_000: (True, 100)}
+        for won, expected in cases.items():
+            with self.subTest(won):
+                (peer,) = stats.compare([month("dining", won)], members=2)["areas"][0]["peers"]
+                self.assertEqual((peer["reaches"], peer["card_average_pct"]), expected)
+        pilates = spending.Entry(spending.date(2026, 10, 9), "동네 필라테스", 300_000, 300_000)
+        self.assertEqual(spending.categorize(pilates, {}), "fitness")
+        self.assertEqual(spending.category_of_place(["gym", "health"]), "fitness")
+        self.assertEqual(stats.compare([month("fitness", 300_000)], members=2)["areas"], [])   # nothing to set it beside
+
+    def test_the_card_shows_the_reference_rows_in_the_first_week_and_names_the_survey(self) -> None:
+        import json
+        import tempfile
+        from datetime import date
+        from pathlib import Path
+        from smith import report_html, spending_letter
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            _two_months(folder)
+            (folder / "context.json").write_text(json.dumps({"household_members": 2}), encoding="utf-8")
+            view = spending_letter.picture(folder, date(2026, 11, 28), household_income=10_000_000)
+            page = report_html._my_spending(view)
+            for shown in ("또래 가구와 견주기", "내 카드", "2인 가구", "소득 상위 20%", "40만", "79만", "2025년 연간", "kosis.kr",
+                          "(소득 상위 20% 가구는 평균 3.1명)"):
+                self.assertIn(shown, page)
+            self.assertNotIn("평균의", page)   # 70,000 a month reaches no household figure: no tag, no verdict
+            sent = json.dumps(spending_letter.payload(view, today=date(2026, 11, 28), client_notes=[], health_constraints=[],
+                                                      client_memory=[], card=[]), ensure_ascii=False)
+            self.assertNotIn("10000000", sent)   # the household income chooses the group and is not itself sent
+            # The card (70,000 a month) reaches no household figure: nothing of the survey goes to the model, so a
+            # line quoting it has no evidence, and "less than others" is dropped whatever it quotes.
+            self.assertIsNone(json.loads(sent)["peer_comparison"])
+            verdict = lambda text: {"headline": "h", "points": [], "verdicts": [   # noqa: E731
+                {"kind": "check", "subject": "외식", "category": "식비·외식", "text": text}]}
+            self.assertIsNone(spending_letter.verify(verdict("2인 가구 평균 40만 원보다 적습니다."), sent))
+            self.assertIsNone(spending_letter.verify(verdict("외식은 10만 원으로 다른 가구보다 덜 쓰고 계십니다."), sent))
+            self.assertIsNotNone(spending_letter.verify(verdict("외식은 10만 원으로 지난달보다 많았습니다."), sent))
+
+    def test_an_area_the_card_reaches_comes_first_with_its_tag(self) -> None:
+        from smith import household_stats as stats, report_html
+        month = {"categories": {"transport": {"amount": 100_000}, "dining": {"amount": 800_000}}}
+        page = report_html._peer_chart(stats.compare([month], members=2, household_income=10_000_000))
+        self.assertIn("2인 가구 평균의 201%", page)
+        self.assertLess(page.index("외식·커피·술"), page.index("교통"))
+        self.assertEqual(page.count("평균의"), 1)
+        self.assertEqual(report_html._peer_chart(None), "")
+
+    def test_only_the_areas_the_card_reaches_go_to_the_model(self) -> None:
+        from smith import household_stats as stats, spending_letter
+        month = {"categories": {"dining": {"amount": 800_000}, "transport": {"amount": 100_000}}}
+        sent = spending_letter._reached(stats.compare([month], members=2, household_income=10_000_000))
+        self.assertEqual([(a["area"], [p["group"] for p in a["peers"]]) for a in sent["areas"]],
+                         [("외식·커피·술", ["2인 가구", "소득 상위 20% 가구(평균 3.1명)"])])
+
+
 class LookupTest(unittest.TestCase):
     def test_place_types(self) -> None:
         self.assertEqual(spending.category_of_place(["barbecue_restaurant", "restaurant"]), "dining")

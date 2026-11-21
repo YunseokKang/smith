@@ -21,7 +21,7 @@ CATEGORIES = {
     "cafe": "커피·간식", "dining": "식비·외식", "drinks": "술·유흥", "grocery": "장보기·생활용품",
     "transport": "교통", "culture": "문화·책", "learning": "배움·자기계발", "subscription": "구독·디지털",
     "shopping": "쇼핑",
-    "health": "의료·건강", "travel": "여행·숙박", "housing": "주거·세금·통신", "fee": "연회비·수수료", "other": "미분류",
+    "health": "의료·건강", "fitness": "운동·몸 관리", "travel": "여행·숙박", "housing": "주거·세금·통신", "fee": "연회비·수수료", "other": "미분류",
 }
 # Recurring obligations: a habit review reads them apart from the spending one chooses day by day.
 FIXED = frozenset({"housing", "fee"})
@@ -41,7 +41,9 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("learning", ("대학", "학원", "CONFERENCE", "UDEMY", "COURSERA", "인프런", "클래스101")),
     ("grocery", ("쿠팡", "이마트", "홈플러스", "롯데마트", "코스트코", "마켓컬리", "컬리", "편의점", "GS25", "CU ", "세븐일레븐",
                  "TARGET", "다이소", "올리브영")),
-    ("health", ("약국", "병원", "의원", "클리닉", "치과", "한의원", "안과", "피부과", "헬스", "필라테스")),
+    # Before health: a gym or a studio is not medical care (the household survey counts it under leisure).
+    ("fitness", ("헬스", "필라테스", "요가", "피트니스", "FITNESS", "GYM", "크로스핏", "수영장", "스포츠센터", "마사지", "스파")),
+    ("health", ("약국", "병원", "의원", "클리닉", "치과", "한의원", "안과", "피부과")),
     ("shopping", ("삼성전자", "아울렛", "백화점", "네이버페이", "무신사", "유니클로", "UNIQLO", "자라", "나이키", "뉴발란스", "페더럴익스프레스")),
     ("dining", ("김밥", "스시", "식당", "찌개", "돈가스", "피자", "파파존스", "버거", "IN-N-OUT", "HABIT", "치킨", "국밥", "고기",
                 "식육", "갈비", "곱창", "냉면", "웰스토리", "아워홈", "프레시웨이", "맥도날드", "롯데리아", "써브웨이", "쇼핑 ")),
@@ -197,6 +199,13 @@ def load_own(folder: Path) -> dict[str, str]:
     return own
 
 
+def household_members(folder: Path) -> int | None:
+    """How many people live in the household (context.json "household_members"), for choosing the public
+    statistics' size group; None when it was never recorded."""
+    members = _table_file(folder / "context.json").get("household_members")
+    return members if isinstance(members, int) and not isinstance(members, bool) and 0 < members < 20 else None
+
+
 def notes(folder: Path) -> list[str]:
     """What the client said about the spending: about a merchant (merchants.json "note") or in general (context.json)."""
     told = [f"{needle}: {value['note']}" for needle, value in _table_file(folder / "merchants.json").items()
@@ -210,7 +219,8 @@ def notes(folder: Path) -> list[str]:
 _PLACE_WORDS = (("drinks", {"bar", "pub", "izakaya", "brewery", "karaoke", "night", "wine"}),
                 ("cafe", {"cafe", "coffee", "bakery", "dessert", "tea", "ice", "donut", "confectionery"}),
                 ("dining", {"restaurant", "meal", "food"}),
-                ("health", {"doctor", "hospital", "pharmacy", "physiotherapist", "dentist", "gym", "fitness", "massage", "spa"}),
+                ("fitness", {"gym", "fitness", "yoga", "pilates", "sports", "massage", "spa", "sauna"}),
+                ("health", {"doctor", "hospital", "pharmacy", "physiotherapist", "dentist", "clinic", "medical"}),
                 ("culture", {"museum", "book", "gallery", "movie", "library", "theater", "performing"}),
                 ("travel", {"lodging", "hotel", "travel", "airport"}),
                 ("transport", {"gas", "parking", "taxi", "transit"}),
