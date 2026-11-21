@@ -273,12 +273,12 @@ class PerspectiveTests(Upgrade):
         self.assertEqual(metrics["home_plan"]["plan_of"], "household_member_1")
         self.assertEqual(metrics["own_month"]["income"], "4000000")
         # Codex review 2026-11-08: an accepted household proposal (in progress) stays under the household's group.
-        room = self.proposal(mine, "spending-room")
+        room = self.proposal(mine, "surplus-plan")
         accepted = {room.identity: {"status": "accepted", "figures": {k: str(v) for k, v in room.figures.items()}}}
         with unittest.mock.patch("smith.ledger.active_proposals", return_value=accepted):
             mine = build_report(self.conn, as_of=AT, known_at=AT, baseline=None, kind="life", household=household)
         own_page = render(mine)[1]
-        self.assertIn("spending-room", [p.key for p in mine["advice"]["in_progress"]])
+        self.assertIn("surplus-plan", [p.key for p in mine["advice"]["in_progress"]])
         self.assertNotIn("진행 중", own_page[own_page.index("나의 생활·목표"):own_page.index("우리 집 생활·목표")])
         self.assertIn("진행 중", own_page[own_page.index("우리 집 생활·목표"):])
 

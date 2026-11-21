@@ -49,6 +49,11 @@ class Edition:
     # too long; what reads the same every week goes below what changed and what to do). Every themed day has one since
     # the letter review of 2026-11-19 (report design §46: 72% of a Thursday letter repeated the week before).
     reference: tuple[str, ...] = ()
+    # The long-range "on track?" band goes with the reference group (the month's first letter) instead of every week.
+    reference_strategy: bool = False
+    # Proposals the reader has not decided after STALE_AFTER deliveries shrink to one "결정 대기" line; they open again
+    # when their figures move or a deadline nears (report design §51).
+    compact_pending: bool = False
 
 
 EDITIONS: dict[str, Edition] = {e.key: e for e in (
@@ -158,28 +163,33 @@ EDITIONS: dict[str, Edition] = {e.key: e for e in (
             "life", ("experiences", "cash", "spending", "stress", "goals", "follow_up", "requests"),
             ("emergency-reserve", "surplus-plan", "spending-room"),
             ("experience",), False, True,
-            "the household's own month: income, spending, saving and investing transfers, what is left, the "
-            "emergency reserve, and progress toward the dated goals (lease deposit, home move, retirement) on the "
-            "household basis (sector_metrics.home_plan). Two private-banker questions belong here: how many months "
-            "of spending the cash covers and what would lengthen it (the stress test is an extreme check with its own "
-            "section: cite it only with its whole result), and what may the client spend this month without slowing a "
-            "goal (sector_metrics.spending_room). "
-            "A reserve gap is filled by moving money between assets when sector_metrics.cash.reserve_swap says the "
-            "sellable assets allow it, never by cutting the monthly surplus to nothing. Where there is room, suggest "
-            "spending that keeps its value over time (health, learning, travel, art and performances, time with "
-            "family) over goods that lose value, as a suggestion shaped by the preferences in client_memory, never an "
-            "instruction and never invented tastes. Diagnose the month's balance of fixed costs and discretionary "
-            "spending (sector_metrics.cash.spending_split) against the household's income and net worth before any "
-            "figure. Then curate the experience dividend: from the brief's experience findings (exhibitions, books, "
+            "the household's own week in money, and only what is new in it (user review 2026-11-21: the household "
+            "part repeated itself week after week and helped little). The month's split, the emergency reserve, the "
+            "dated goals (lease deposit, home move, retirement) and the long-range tracks are printed in full in the "
+            "month's first letter: when sector_metrics.reference_changes is an empty list nothing moved in them, so "
+            "say in one sentence that the household's standing is as it was and which decision still waits, and "
+            "leave their figures out; when it lists changes, write about those. The month's surplus has one "
+            "recommendation (sector_metrics.spending_room): the standing transfer first, and what is left after it "
+            "to spend. A reserve gap is filled by moving money between assets when sector_metrics.cash.reserve_swap "
+            "says the sellable assets allow it, never by cutting the monthly surplus to nothing. For what is left to "
+            "spend, suggest spending that keeps its value over time (health, learning, travel, art and performances, "
+            "time with family) over goods that lose value, as a suggestion shaped by the preferences in client_memory, "
+            "never an instruction and never invented tastes. The stress test is an extreme check with its own "
+            "section: cite it only with its whole result. Then curate the experience dividend: from the brief's experience findings (exhibitions, books, "
             "places, dining, sport), write one or two `experiences` the client might enjoy this week, timely and of "
             "quality, matched to the preferences in client_memory, offered freely as choices, each with its refs. No "
             "market or policy news is researched for this theme; work from the household's numbers and the client's "
             "statements.",
             # "my_spending": the reader's card statements from one angle a week (FR-60); absent without a statement.
-            personal=("my_month", "my_spending", "follow_up", "experiences"),
-            household=("cash", "spending", "goals", "household_follow_up", "requests"),
+            # What changes every week leads (user review 2026-11-21, report design §51: the card spending and the
+            # curation helped, the household's group repeated itself): the reader's month is the hero's bar already,
+            # and the reserve, the room, the goals, the requests and the long-range band read the same from week to
+            # week, so they are the reference group of the month's first letter.
+            personal=("my_spending", "plan_vs_card", "follow_up", "experiences"),
+            household=("household_follow_up",),
             household_label="생활·목표",
-            reference=("stress",)),   # As on the overview: an extreme check that reads the same from week to week.
+            reference=("cash", "spending", "goals", "requests", "stress"),
+            reference_strategy=True, compact_pending=True),
 )}
 
 # Proposals on the household's money rather than one member's (report design §42): the reserve, the month's surplus

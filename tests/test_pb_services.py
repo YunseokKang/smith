@@ -76,8 +76,11 @@ class Household(unittest.TestCase):
     def room(self):
         return self.report()["advice"]["spending_room"]
 
-    def proposal(self, data):
-        return next(p for p in data["advice"]["proposals"] if p.key == "spending-room")
+    def proposal(self, data, key="spending-room"):
+        return next(p for p in data["advice"]["proposals"] if p.key == key)
+
+    def keys(self, data):
+        return [p.key for p in data["advice"]["proposals"]]
 
 
 class StressAndSpendingTests(Household):
@@ -138,13 +141,21 @@ class StressAndSpendingTests(Household):
         self.assertEqual(room["surplus"], Decimal(4_000_000))
         self.assertEqual(dict(room["committed"]), {"비상금 채우기": Decimal(0), "보증금 반환 준비": Decimal(0)})
         self.assertEqual((room["planned"], room["room"], room["room_with_goals"]), ([], Decimal(4_000_000), Decimal(4_000_000)))
-        proposal = self.proposal(data)
-        self.assertEqual(proposal.priority, 3)
-        self.assertIn("400만 원", proposal.title)
-        self.assertIn("경험", proposal.effect)
+        # One recommendation for that money (user decision 2026-11-21, report design §51): the surplus plan says how
+        # much goes to a standing transfer first (85% in 10만 steps) and what is left to spend; no second card calls
+        # the whole of it free to spend.
+        self.assertEqual((room["transfer"], room["free"], room["transfer_name"]), (Decimal(3_400_000), Decimal(600_000), None))
+        self.assertNotIn("spending-room", self.keys(data))
+        proposal = self.proposal(data, "surplus-plan")
+        self.assertIn("자동이체로 약 340만 원을 먼저 묶고, 남는 약 60만 원만 쓰시길 권합니다.", proposal.title)
+        self.assertEqual((proposal.figures["transfer"], proposal.figures["free"]), (Decimal(3_400_000), Decimal(600_000)))
         page = render(data)[1]
-        self.assertIn("마음 편히 써도 되는 돈", page)
-        self.assertIn("안심 소비 한도(약정 기준)", page)
+        self.assertIn("남는 돈의 쓰임", page)
+        self.assertIn("자동이체 먼저(권고)", page)
+        self.assertIn("쓰셔도 되는 돈 60만 원", page)
+        self.assertIn("경험", page)
+        self.assertNotIn("마음 편히 써도 되는 돈", page)
+        self.assertNotIn("<th>항목</th>", page)                              # The bars carry the rows once, no table under them.
         self.assertIn(report_html.STRESS_TITLE, page)
         # Concrete: the four assumptions with their sizes and the 2022 precedent with its sources (review 2026-10-18).
         self.assertIn("변동금리 +1.5%p, 가장 큰 소득 12개월 중단, 집값 20%·주가 30% 하락이 한 해에 모두 오는 드문 극단을 가정해도", page)
@@ -177,7 +188,10 @@ class StressAndSpendingTests(Household):
         metrics = narrative.sector_metrics(view, data)
         self.assertEqual((metrics["stress"]["verdict"], metrics["stress"]["liquidity_verdict"]), ("watch", "robust"))
         self.assertEqual(metrics["stress"]["months_on_cash"], "12.0")
-        self.assertEqual((metrics["spending_room"]["room"], metrics["spending_room"]["room_with_goals"]), ("4000000", "4000000"))
+        self.assertEqual(metrics["spending_room"], {
+            "monthly_surplus": "4000000", "room": "4000000", "transfer_first": "3400000", "left_to_spend": "600000",
+            "transfer_toward": None, "committed_needs": metrics["spending_room"]["committed_needs"]})
+        self.assertIsNone(metrics["reference_changes"])                    # No earlier letter of the theme to compare.
         self.assertIn("sector_metrics", narrative._EVIDENCE_KEYS)
         # The scenario's "1.5%p", "20%", "30%" and the net-worth fall in % are percent candidates for the
         # number check, so a sentence quoting them passes.
@@ -206,10 +220,13 @@ class ReviewCounterexampleTests(Household):
         self.assertEqual(dict(room["planned"]), {"큰 지출 목표(2026.11)": Decimal(1_000_000_000)})
         self.assertEqual(room["room"], Decimal(4_000_000))                    # Reserve and the lease are still fine ...
         self.assertLess(room["room_with_goals"], 0)                           # ... but the planned goal is not.
-        proposal = self.proposal(data)
-        self.assertEqual(proposal.priority, 3)
-        self.assertIn("여유가 없습니다", proposal.title)
-        self.assertIn("계획한 목표까지 지킬 때", render(data)[1])
+        # The pace that goal would need every month is not turned into a monthly shortfall (§51): the surplus plan
+        # names the goal the transfer goes toward, and nothing says the same money is free to spend.
+        self.assertNotIn("spending-room", self.keys(data))
+        self.assertIn("큰 지출 자금 자동이체로 약 340만 원을 먼저 묶고", self.proposal(data, "surplus-plan").title)
+        page = render(data)[1]
+        self.assertNotIn("계획한 목표까지 지킬 때", page)
+        self.assertNotIn("모자라", page[page.index("남는 돈의 쓰임"):page.index("남는 돈의 쓰임") + 1500])
 
     def test_a_home_goal_whose_plan_cannot_be_computed_makes_the_room_undetermined(self):
         self.load([goal("home-usd", "home", "2000000", "2029-01-01", currency="USD")])   # No FX rate.
@@ -227,7 +244,8 @@ class ReviewCounterexampleTests(Household):
         self.assertGreater(dict(room["planned"])["주택 이전 목표"], room["surplus"])
         self.assertEqual(room["room"], Decimal(4_000_000))
         self.assertLess(room["room_with_goals"], 0)
-        self.assertEqual(self.proposal(data).priority, 3)
+        self.assertEqual(room["transfer_name"], "주택 이전 자금")
+        self.assertIn("주택 이전 자금 자동이체로", self.proposal(data, "surplus-plan").title)
 
     def test_a_deposit_due_later_this_month_is_one_month_away_not_dropped(self):
         self.load([lease("lease3", "50000000", "2026-10-31")])
@@ -269,9 +287,10 @@ class BenchmarkAndShieldTests(unittest.TestCase):
         self.assertNotIn("one or two", adviser.SYSTEM_PROMPT)
         self.assertIn("Behavioural shield", qa.SYSTEM_PROMPT)
         self.assertIn("sector_metrics.stress", narrative.SYSTEM_PROMPT)
-        self.assertIn("room_with_goals", narrative.SYSTEM_PROMPT)
+        self.assertIn("left_to_spend", narrative.SYSTEM_PROMPT)
+        self.assertNotIn("room_with_goals", narrative.SYSTEM_PROMPT)
         self.assertEqual((adviser.PROMPT_VERSION, qa.PROMPT_VERSION, narrative.PROMPT_VERSION),
-                         ("advice-v10", "mail-answer-v21", "narrative-v46"))
+                         ("advice-v10", "mail-answer-v21", "narrative-v47"))
         self.assertIn("spending-room", proposals.RULE_KEYS)
 
 

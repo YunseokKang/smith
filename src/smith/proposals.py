@@ -5,6 +5,7 @@ Every amount here is computed in code from one ledger snapshot. The narrative st
 reorder and explain these proposals with policy and market briefs, but it never invents an amount.
 Text is formal Korean addressed to the client; terms are explained where they first appear.
 """
+import re
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from decimal import ROUND_CEILING, Decimal
@@ -106,6 +107,10 @@ RULE_KEYS = ("lease-return", "emergency-reserve", "goal-stocks-glide", "concentr
              "pension-credit", "pension-split", "overseas-harvest", "isa-open", "insurance-review", "prepayment",
              "variable-rate", "refinance", "spending-room")
 SPENDING_FILL_MONTHS = 12  # Assumption (§16.3): an emergency-reserve gap is filled within a year.
+# Of the surplus left after the reserve and the contractual payments, this share goes to a standing transfer first
+# (the surplus card always said "80~90%"); what is left after it is the reader's to spend (report design §51).
+TRANSFER_SHARE = Decimal("0.85")
+TRANSFER_STEP = Decimal(100_000)   # The transfer is said in 10만 원 steps.
 # Assumption (§17.1): when assets sellable within days are at least this many times the reserve gap, the gap
 # is filled by moving money between assets once, not by diverting the monthly surplus for months.
 SWAP_MULTIPLE = Decimal(3)
@@ -862,14 +867,21 @@ def _surplus_plan(facts: dict[str, Any]) -> Proposal | Undetermined | None:
         return None
     already = (f" 이 가운데 {short_won(allocated)}은 연금 등으로 이미 매월 이체되고 있고, 나머지는" if allocated
                else " 그런데 이 돈이")
+    # The one recommendation for this money (§51): how much goes to a standing transfer first and what is left to
+    # spend, from the same split the room card prints. Without a computable room the title keeps to the transfer.
+    room = facts.get("spending_room")
+    split = room is not None and room["transfer"] > 0
+    where = "" if not split or not room["transfer_target"] else f"{_transfer_name(room['transfer_target'])} "
+    tail = (f"{where}자동이체로 약 {short_won(room['transfer'])}을 먼저 묶고, 남는 약 {short_won(room['free'])}만 쓰시길 권합니다."
+            if split else "자동이체로 묶어 두시길 권합니다.")
     return Proposal(
         key="surplus-plan", priority=2, watch=("surplus",),
         # Named as the part of the monthly surplus without a destination: the letter of 2026-11-02 showed 321만
         # (the tile), this 97만 and the spending room 9만 all as "월 여유" (user review).
-        headline=f"쓰임새 미정 월 {short_won(surplus)} 자동이체 배정",
-        title=(f"매월 남는 {short_won(surplus + allocated)} 가운데 쓰임새가 정해지지 않은 약 {short_won(surplus)}을 "
-               "자동이체로 묶어 두시길 권합니다." if allocated else
-               f"매월 남는 약 {short_won(surplus)}의 쓰임새를 정해 자동이체로 묶어 두시길 권합니다."),
+        headline=(f"월 {short_won(surplus)}: 자동이체 {short_won(room['transfer'])} 먼저" if split
+                  else f"쓰임새 미정 월 {short_won(surplus)} 자동이체 배정"),
+        title=(f"매월 남는 {short_won(surplus + allocated)} 가운데 쓰임새가 정해지지 않은 약 {short_won(surplus)}은 {tail}"
+               if allocated else f"매월 남는 약 {short_won(surplus)}은 {tail}"),
         why=(f"수입 {short_won(summary.monthly_inflow)}에서 생활비·대출 상환·보험료 {short_won(summary.monthly_outflow)}을 "
              f"빼면 매월 {short_won(surplus + allocated)}이 남습니다.{already} 어디로 가는지(저축·투자 이체)가 기록되어 있지 않습니다. "
              "정해 두지 않은 돈은 이자가 거의 없는 통장에 머물거나 소비로 흘러가기 쉽습니다."),
@@ -878,8 +890,14 @@ def _surplus_plan(facts: dict[str, Any]) -> Proposal | Undetermined | None:
         risks="자동이체 금액을 너무 크게 잡으면 생활비가 모자랄 수 있으니, 여유의 80~90% 수준에서 시작하시길 권합니다.",
         timing="다음 월급일부터",
         reconsider="실제로 이미 자동 저축·투자를 하고 계시면 그 이체를 원장에 기록해 주십시오. 이 제안은 사라집니다.",
-        certainty="계산(기록된 현금흐름 기준)",
-        figures={"surplus": surplus})
+        certainty="계산(기록된 현금흐름 기준)" + (f" + 가정(여유의 {percent(TRANSFER_SHARE, 0)}를 먼저 이체)" if split else ""),
+        figures={"surplus": surplus, **({"transfer": room["transfer"], "free": room["free"]} if split else {})})
+
+
+def _transfer_name(label: str) -> str:
+    """A planned goal's label as the name of the money sent to it: "주택 이전 목표" -> "주택 이전 자금", and a dated
+    one without its date ("큰 지출 목표(2026.11)" -> "큰 지출 자금")."""
+    return re.sub(r" 목표(\([^)]*\))?$", " 자금", label)
 
 
 def _pension_credit(facts: dict[str, Any]) -> Proposal | None:
@@ -1363,7 +1381,15 @@ def spending_room(facts: dict[str, Any]) -> dict[str, Any] | None:
         planned.append((label, goal["target"] / max(1, goal["months_left"])))
     committed_total = sum((amount for _, amount in committed), Decimal(0))
     planned_total = sum((amount for _, amount in planned), Decimal(0))
+    # One recommendation for the room (report design §51, user decision 2026-11-21: the letter called the same money
+    # "tie it up", "free to spend" and "all for the move" at once): a standing transfer first, toward the nearest
+    # planned goal that still needs money, and what is left after it to spend.
+    room = surplus - committed_total
+    transfer = max(Decimal(0), (room * TRANSFER_SHARE) // TRANSFER_STEP * TRANSFER_STEP)
+    target = next((label for label, amount in planned if amount > 0), None)
     return {"surplus": surplus, "committed": committed, "reserve_fill_months": fill_over, "planned": planned, "committed_total": committed_total,
+            "transfer": transfer, "free": max(Decimal(0), room - transfer), "transfer_target": target,
+            "transfer_name": None if target is None else _transfer_name(target),
             "planned_total": planned_total, "room": surplus - committed_total,
             "room_with_goals": surplus - committed_total - planned_total, "near_commitment_short": near_short,
             "reserve_swap": cash["reserve_gap"] if one_step else None}
@@ -1396,6 +1422,10 @@ def _spending_room(facts: dict[str, Any]) -> Proposal | Undetermined | None:
     figures = {"room": room["room"], "room_with_goals": with_goals, "surplus": room["surplus"],
                "needs": room["committed_total"] + room["planned_total"]}
     reconsider = "월 현금흐름, 목표 금액·시점, 전세 시세가 바뀌면 다시 계산합니다."
+    if room["room"] >= 0 and isinstance(_surplus_plan(facts), Proposal):
+        # The surplus plan already says where this money goes and what is left to spend: a second card calling the
+        # whole of it free to spend said the opposite (user decision 2026-11-21, §51).
+        return None
     if room["room"] >= 0:
         tail = ("" if not room["planned"] else
                 f" 계획한 목표까지 지키면 약 {short_won(with_goals)}입니다." if with_goals >= 0 else

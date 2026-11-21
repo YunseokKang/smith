@@ -66,7 +66,7 @@ logger = logging.getLogger(__name__)
 # v32: no per-sentence law caveat; the footer says it once (user decision 2026-11-02); the check no longer asks for it.
 # v33: holdings[].week_change and index_moves; a holding that moved 10% or more opens its reason with why (2026-11-03).
 # v34: tax.realized_this_year, this year's sales with their estimated gains and the deduction left (2026-11-03).
-PROMPT_VERSION = "narrative-v46"   # v46: the reader's pension tax by age, the private-pension limit, the target net of the health-insurance premium (§50); v45: a single annuity is "보유 연금보험", not "연금보험 1" (§48); v44: the week's net-worth change only on the overview, whose holdings a share is of (§47); v43: relationships and close_people on the tax day (§43); v42: replies_recorded (the spouse's replies are answered, their facts not kept); v41: the money needed outside the pensions in the client's wording; v40: the overview per person, whose pay; v39: property and life days per person (§42).
+PROMPT_VERSION = "narrative-v47"   # v47: one split of the month's surplus and no restating of an unchanged reference group (§51); v46: the reader's pension tax by age, the private-pension limit, the target net of the health-insurance premium (§50); v45: a single annuity is "보유 연금보험", not "연금보험 1" (§48); v44: the week's net-worth change only on the overview, whose holdings a share is of (§47); v43: relationships and close_people on the tax day (§43); v42: replies_recorded (the spouse's replies are answered, their facts not kept); v41: the money needed outside the pensions in the client's wording; v40: the overview per person, whose pay; v39: property and life days per person (§42).
 MODEL = headless.MODEL
 # A runaway guard, not a cost limit (flat-rate subscription): the markets day cost 4.39 USD on 2026-10-27 and, with a
 # payload a fifth larger, ran past 5.00 on 2026-11-03 (error_max_budget_usd), so that report went out without opinions.
@@ -271,10 +271,17 @@ Input JSON:
   rarer), and the code writes it in its own section. Keep it out of the headline and the situation; mention it
   only when flags name a dated payment (the lease deposit) the scenario cannot return, and then with its whole
   result (months on cash and what stock sales add), never by the verdict word alone. A fragile verdict moves the
-  reserve proposal up; it does not set the tone of the report. sector_metrics.spending_room: room is what the client may spend every month
-  without touching the reserve or a contractual payment, room_with_goals the smaller figure when the
-  planned goals (home move and other dated goals) are kept at their current pace; null when unknown.
-  Spending the room is not a failure: money is meant to become life in time.
+  reserve proposal up; it does not set the tone of the report. sector_metrics.spending_room: room is the monthly
+  surplus left after the reserve and the contractual payments; of it transfer_first goes to a standing transfer
+  (toward transfer_toward when named) and left_to_spend is the reader's to spend; null when unknown. Say this one
+  split and nothing else about that money: never the same surplus as free to spend, to be tied up and all needed
+  for a goal at once, and never a monthly shortfall against the pace a dated goal would need (a home move is paid
+  from sales and pay, not from the month). Spending left_to_spend is not a failure: money is meant to become life
+  in time. sector_metrics.reference_changes: what moved since the last letter of this theme in the cards printed
+  only in the month's first letter (the reserve, the month's surplus, the goals, the long-range tracks, the
+  requests), as "name before → after"; an empty list means nothing moved, and then their figures are not restated
+  anywhere (situation, household, insights, watch): write what did change this week, or say in one sentence that
+  the household's standing is as it was and what decision still waits; null means not compared.
   sector_metrics.cash.reserve_swap: the reserve gap, the assets sellable within days, the excess above the
   single-company limit, and one_step (true: fill the gap by one asset swap, keep the surplus free).
   sector_metrics.cash.reserve_basis says whose reserve size it is: client (the client set it), proposed (Smith
@@ -724,6 +731,7 @@ def sector_metrics(view: Any, data: dict[str, Any]) -> dict[str, Any]:
                               "annuity_reviews": _annuity_reviews(data.get("annuity_reviews") or [])},
         "stress": _stress_metrics(data["stress"]),
         "spending_room": _spending_metrics(advice.get("spending_room")),
+        "reference_changes": data.get("reference_changes"),
         "fx": _fx_metrics(s["macro"].get("fx")),
         "policy": _policy_metrics(s["macro"].get("policy")),
     }
@@ -1032,10 +1040,12 @@ def _spending_metrics(room: dict[str, Any] | None) -> dict[str, Any] | None:
     """Guilt-free spending room (report design §16.3): None when an input is unknown."""
     if room is None:
         return None
+    # The pace the planned goals would need every month is not sent (report design §51): the letter said it as a
+    # monthly shortfall for weeks, which nobody can act on. One split of the room is.
     return {"monthly_surplus": won(room["surplus"]),
             "committed_needs": [{"item": label, "monthly": won(amount)} for label, amount in room["committed"]],
-            "planned_goal_needs": [{"item": label, "monthly": won(amount)} for label, amount in room["planned"]],
-            "room": won(room["room"]), "room_with_goals": won(room["room_with_goals"])}
+            "room": won(room["room"]), "transfer_first": won(room["transfer"]), "left_to_spend": won(room["free"]),
+            "transfer_toward": room.get("transfer_name")}
 
 
 def ratio(value: Decimal | None) -> str | None:

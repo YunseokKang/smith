@@ -15,6 +15,7 @@ from smith import (cases, checklist, dividends, editions, evidence, fundamentals
                    insiders, law_watch, lease, ledger, move_plan, nhis, official_price, pension, perspective, picks, principles,
                    product_review, proposals, realestate, stress, tax)
 from smith.config import DEFAULT_TIMEZONE, local_time
+from smith.fmt import percent, short_won
 from smith.payload import LedgerView, base_amount, load_view, unrealized_gain
 from smith.records import INFLOW_CATEGORIES, TRANSFER_CATEGORIES, Kind, RecordInput, Status
 from smith.summary import BASE_CURRENCY, DECIMAL_PRECISION, build_summary, recurring_active
@@ -96,7 +97,7 @@ def _series_last(conn: sqlite3.Connection, kind: str, as_of: datetime, audience:
 def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: datetime,
                   baseline: datetime | None, kind: str, household: dict[str, Any] | None,
                   schedule: dict[str, Any] | None, audience: str = "self",
-                  client_household: dict[str, Any] | None = None) -> dict[str, Any]:
+                  client_household: dict[str, Any] | None = None, nested: bool = False) -> dict[str, Any]:
     base = load_view(conn, as_of=as_of, known_at=known_at)
     view = perspective.as_seen_by(base, audience)
     change = None if baseline is None else decompose(conn, baseline, as_of, known_at)
@@ -231,7 +232,61 @@ def _build_report(conn: sqlite3.Connection, *, as_of: datetime, known_at: dateti
             "view": view}
     data["policy"] = principles.policy(data)  # Investment policy checks (report design §13), from the data above.
     data["figures"] = _edition_figures(data)
+    # What moved in the cards left to the month's first letter, since the last letter of this theme (§51). The
+    # earlier letter's figures come from the same build at its time; that build does not look further back.
+    data["reference_changes"] = None if nested else _reference_changes(
+        conn, data, household=household, schedule=schedule, audience=audience, client_household=client_household)
     return data
+
+
+def _life_digest(data: dict[str, Any]) -> dict[str, str | None]:
+    """The figures of the life day's reference cards as the letter prints them (report design §51), by the name the
+    letter gives each; None where one is unknown. Two letters with the same digest print the same cards."""
+    cash = data["sectors"]["cash"]
+    covered = (None if cash.get("reserve_target") in (None, 0) or cash.get("immediate") is None
+               else cash["immediate"] / cash["reserve_target"])
+    room = (data.get("advice") or {}).get("spending_room")
+    home = data["kpis"]["home_progress"]
+    found = {"비상금 확보율": None if covered is None else percent(covered, 0),
+             "매월 남는 돈": None if room is None else short_won(room["surplus"]),
+             "쓰셔도 되는 돈": None if room is None or room["room"] < 0 else short_won(room["free"]),
+             "주택 준비율": None if home is None else percent(home["ratio_baseline"], 0),
+             "확인할 자료": f"{len(data.get('requests') or [])}건"}
+    for track in (data.get("advice") or {}).get("strategy") or []:
+        found[f"{track.name} 궤도"] = TRACK_WORDS.get(track.status, track.status)
+    return found
+
+
+TRACK_WORDS = {"on_track": "궤도 위", "attention": "보완 필요", "unknown": "판단 불가"}
+# The editions whose reference cards have a digest: only these say what moved since their last letter.
+_DIGESTS = {"life": _life_digest}
+
+
+def _reference_changes(conn: sqlite3.Connection, data: dict[str, Any], *, household: dict[str, Any] | None,
+                       schedule: dict[str, Any] | None, audience: str,
+                       client_household: dict[str, Any] | None) -> list[str] | None:
+    """What moved in an edition's reference cards since the last letter of its theme, as "이름 전 → 후" items in the
+    letter's own wording; an empty list when nothing did. None when the edition has no digest, when this is the
+    theme's first letter of the month (the cards are printed in full then) or when no earlier letter exists: the
+    letter then makes no claim. The earlier figures are the same build at that letter's time, with the ledger as it
+    was known when that letter was made."""
+    digest = _DIGESTS.get(data["kind"])
+    last, now = data["series_last"], data["as_of"]
+    if digest is None or last is None or (last.year, last.month) != (now.year, now.month):
+        return None
+    known = last
+    if audience == "self":
+        # The letter was made a little after its slot: what it knew is the ledger at its creation time.
+        made = [datetime.fromisoformat(r["created_at"]) for r in ledger.report_runs(conn, limit=1000)
+                if r["status"] == "sent" and r["as_of"] and r["created_at"]
+                and datetime.fromisoformat(r["as_of"]).astimezone(timezone.utc) == last.astimezone(timezone.utc)]
+        known = max(made, default=last)
+        known = known if known.tzinfo is not None else known.replace(tzinfo=timezone.utc)
+    earlier = _build_report(conn, as_of=last, known_at=known, baseline=None, kind=data["kind"], household=household,
+                            schedule=schedule, audience=audience, client_household=client_household, nested=True)
+    before, after = digest(earlier), digest(data)
+    return [f"{name} {before[name]} → {value}" for name, value in after.items()
+            if value is not None and before.get(name) is not None and before[name] != value]
 
 
 def _property_figures(props: list[dict[str, Any]]) -> dict[str, Any]:

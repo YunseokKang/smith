@@ -4,6 +4,7 @@ import json
 import re
 import tempfile
 import unittest
+import unittest.mock
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -115,6 +116,81 @@ class LayoutTests(unittest.TestCase):
             ledger.advance_daily_run(conn, run_key=key, token=token, from_status="building", status=status, finished_at=at)
         last = _series_last(conn, "rates", now, "partner")
         self.assertEqual((last.month, last.day), (11, 12))                       # The failed one and the tax letter are not it.
+
+    def test_the_life_letter_leads_with_what_changes_and_keeps_the_standing_cards_for_the_months_first_letter(self):
+        """User review 2026-11-21 (report design §51): the household part of the Saturday letter repeated itself."""
+        data = self.built["life"]
+        standing = ("현금·유동성", "남는 돈의 쓰임", "목표까지의 준비", "전략 방향")
+        first = report_html.render({**data, "series_last": None})[1]
+        for title in standing:
+            self.assertIn(title, first, title)
+        self.assertLess(first.index("우리 집 생활·목표"), first.index("현금·유동성"))     # After the household's group: 참고.
+        self.assertNotIn("한 달 소비의 균형", first)                                  # The hero's bar says the month's split.
+        # Later in the month none of them is a card: one line names them and says what moved since the last letter.
+        later = {**data, "series_last": AT - timedelta(days=7)}
+        for moved, said in ((None, "물어 주십시오.</td>"), ([], "지난 레터 이후 달라진 것은 없습니다."),
+                            (["비상금 확보율 60% → 72%"], "지난 레터 이후 달라진 것: 비상금 확보율 60% → 72%.")):
+            with self.subTest(moved=moved):
+                page = report_html.render({**later, "reference_changes": moved})[1]
+                self.assertIn(said, page)
+                self.assertIn("매주 크게 바뀌지 않는 표(현금·유동성, 남는 돈의 쓰임, 목표까지의 준비", page)
+                self.assertNotIn("비상금 기준 대비 즉시 가용 자금", page)           # The reserve card's gauge.
+                self.assertNotIn("목표까지 지금 궤도에 있습니까", page)             # The long-range band.
+        # A request the judgement cannot do without is never left for the month's first letter.
+        from smith.checklist import Request
+        must = Request("must-have", "must", "꼭 필요한 자료", "판단할 수 없습니다.", "답장으로 알려 주십시오.")
+        page = report_html.render({**later, "requests": [must]})[1]
+        self.assertIn("꼭 필요한 자료", page)
+
+    def test_proposals_left_undecided_shrink_to_one_line_and_open_again_when_they_press(self):
+        """§51: an undecided proposal was a full card every Saturday; a deadline or a new proposal is still a card."""
+        data = self.built["life"]
+        waiting = [proposal("emergency-reserve", 2, STALE_AFTER), proposal("surplus-plan", 2, STALE_AFTER + 3)]
+        fresh = proposal("spending-room", 1, 0)
+        page = report_html.render({**data, "advice": {**data["advice"], "proposals": [fresh, *waiting]}})[1]
+        block = page[page.index("결정 대기 2건"):]
+        self.assertIn(f"2번 emergency-reserve 요약({STALE_AFTER}번 안내)", block)
+        self.assertIn(f"3번 surplus-plan 요약({STALE_AFTER + 3}번 안내)", block)
+        self.assertIn("「2번 할게」", block)
+        self.assertIn("spending-room 제안입니다.", page)                                # The new one keeps its card ...
+        self.assertNotIn("emergency-reserve 제안입니다.", page)                          # ... the waiting ones do not.
+        self.assertIn("<details open", page[page.index("spending-room 제안입니다.") - 900:page.index("spending-room 제안입니다.")])
+        # The same proposals on a day that does not ask for it stay cards (the rule is the life day's).
+        tax = self.built["tax"]
+        credit = proposal("pension-credit", 2, STALE_AFTER)
+        self.assertNotIn("결정 대기", report_html.render({**tax, "advice": {**tax["advice"], "proposals": [credit]}})[1])
+
+    def test_the_plan_is_set_beside_what_the_card_statement_shows(self):
+        month = {"inflow": Decimal(9_000_000), "discretionary": Decimal(3_560_000)}
+        latest = {"label": "10/9~11/8", "spent": 2_580_000, "fixed": 230_000}
+        line = report_html._plan_vs_card({"own_month": month, "own_spending": {"latest": latest}})
+        for said in ("계획과 실제", "재량 지출은 월 <b>356만 원</b>", "실제 소비는 <b>235만 원</b>", "계획보다 121만 원 적습니다",
+                     "카드 한 장만 본 것"):
+            self.assertIn(said, line, said)
+        over = report_html._plan_vs_card({"own_month": month, "own_spending": {"latest": {**latest, "spent": 4_000_000}}})
+        self.assertIn("계획보다 21만 원 많습니다", over)
+        # No statement, or no planned figure: nothing is said (unknown is not zero).
+        self.assertEqual(report_html._plan_vs_card({"own_month": month, "own_spending": None}), "")
+        self.assertEqual(report_html._plan_vs_card({"own_month": None, "own_spending": {"latest": latest}}), "")
+
+    def test_what_moved_since_the_last_letter_is_read_from_the_same_build_at_that_time(self):
+        from smith import report_data
+        before = {"kind": "life", "as_of": AT, "sectors": {"cash": {"reserve_target": Decimal(100), "immediate": Decimal(60)}},
+                  "advice": {"spending_room": None, "strategy": []}, "kpis": {"home_progress": None}, "requests": [1, 2]}
+        after = {**before, "sectors": {"cash": {"reserve_target": Decimal(100), "immediate": Decimal(72)}}, "requests": [1]}
+        self.assertEqual(report_data._life_digest(before)["비상금 확보율"], "60%")
+        with closing(ledger.connect(":memory:")) as conn, unittest.mock.patch.object(report_data, "_build_report",
+                                                                                     return_value=before) as built:
+            def moved(data, last):
+                return report_data._reference_changes(conn, {**data, "series_last": last}, household=None, schedule=None,
+                                                      audience="self", client_household=None)
+            self.assertEqual(moved(after, AT - timedelta(days=7)), ["비상금 확보율 60% → 72%", "확인할 자료 2건 → 1건"])
+            self.assertEqual(moved(before, AT - timedelta(days=7)), [])
+            self.assertTrue(all(call.kwargs["nested"] for call in built.call_args_list))   # It never looks further back.
+            # The month's first letter prints the cards in full and a theme without a digest claims nothing.
+            self.assertIsNone(moved(after, None))
+            self.assertIsNone(moved(after, AT - timedelta(days=40)))
+            self.assertIsNone(moved({**after, "kind": "rates"}, AT - timedelta(days=7)))
 
     def test_a_standing_card_delivered_for_two_weeks_says_only_why_and_what_would_change_it(self):
         for shown, short in ((STALE_AFTER - 1, False), (STALE_AFTER, True)):
