@@ -17,7 +17,7 @@ def add_parser(sub: Any, default_db: Any) -> None:
     ask.add_argument("question", help="The question, in the client's words")
     ask.add_argument("--db", type=Path, default=default_db)
     ask.add_argument("--config", type=Path, default=DEFAULT_LOCAL_CONFIG)
-    ask.add_argument("--domains", help="Skip the router: comma-separated stores to read (finance,health,life); "
+    ask.add_argument("--domains", help="Skip the router: comma-separated stores to read (finance,health,life,food,weather); "
                                        "an empty string reads notes and memory only")
     ask.add_argument("--show-payload", action="store_true",
                      help="Route and assemble, then print what the answer model would receive; no answer call")

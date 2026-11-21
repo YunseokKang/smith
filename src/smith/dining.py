@@ -77,7 +77,7 @@ _NEGATED = re.compile(r"(?:못|안)\s*(?:드시|드실|먹)\S*|드시면\s*안\S
 # Any word that offers a food, directly or not ("드셔 보세요", "좋겠습니다", "어울려요", "시키세요").
 _SUGGESTING = re.compile(r"드십시오|드세요|드셔|드시|드실|먹어|먹는|먹을|먹기|추천|권합|권해|권장|좋겠|좋아요|좋습니다|좋을|"
                          r"괜찮|어울|시키|주문|챙기|챙겨|곁들|맛보|맛있")
-# The words a Naver query may carry beyond a known area (dining_evening.AREAS): what people eat, nothing else, so a
+# The words a Naver query may carry beyond a public place name (places.find): what people eat, nothing else, so a
 # question's names or plans never reach Naver.
 FOOD_WORDS = ("한식", "양식", "일식", "중식", "아시안", "파스타", "피자", "버거", "스테이크", "브런치", "카페", "디저트",
               "베이커리", "빵", "와인바", "와인", "이자카야", "오마카세", "라멘", "우동", "소바", "돈카츠", "돈까스", "돈가스",
@@ -300,11 +300,13 @@ def _drop_reason(detail: Detail, rules: Rules, visit: dining_log.Visit | None, e
     return None
 
 
-def query_words(text: str, area: str | None) -> str:
-    """The Naver query for a question: the known area and up to two FOOD_WORDS found in it, nothing else (counsel
-    review 2026-11-16, P0: a router-written query could carry a contact's name). "맛집" when it names no food."""
-    foods = [w for w in FOOD_WORDS if w in text and w != "맛집"][:2]
-    return " ".join([*([area] if area else []), *(foods or ["맛집"])])
+def query_words(text: str, area: str) -> str:
+    """The Naver query for a question: the place and up to two FOOD_WORDS found in it, nothing else (counsel review
+    2026-11-16, P0: a router-written query could carry a contact's name). "맛집" when it names no food. A food word
+    inside the place's own name is not one ("오리역" is no 오리 restaurant)."""
+    rest = re.sub(re.escape(area), " ", text, flags=re.IGNORECASE)
+    foods = [w for w in FOOD_WORDS if w in rest and w != "맛집"][:2]
+    return " ".join([area, *(foods or ["맛집"])])
 
 
 def _main(menu: Menu) -> bool:

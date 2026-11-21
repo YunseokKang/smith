@@ -18,3 +18,7 @@ smith = "smith.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+# Public place names for restaurant questions (FR-55), built by scripts/build_places.py.
+smith = ["places_kr.txt"]

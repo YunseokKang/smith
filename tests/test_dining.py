@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from smith import (agenda, aside, counsel, daily_qa, dining, dining_command, dining_evening, dining_log, dining_view,
-                   evening_html, google_places, naver_place)
+                   evening_html, google_places, naver_place, places)
 from smith.naver_place import Detail, Menu, Place, Stars
 
 EXE = Path("aside.exe")
@@ -305,12 +305,6 @@ class GoogleAndLogTest(unittest.TestCase):
 
 
 class EveningTest(unittest.TestCase):
-    def test_areas_in_titles(self) -> None:
-        for text, area in (("광화문 보라쇼", "광화문"), ("에버랜드", "에버랜드"), ("성수동 브런치", "성수"), ("강남역 미팅", "강남역"),
-                           ("DDP에서 전시", "DDP"), ("신사업 회의", None), ("미사 참석", None), ("치과", None)):
-            with self.subTest(text=text):
-                self.assertEqual(dining_evening.area_in(text), area)
-
     def test_outings_from_events_and_tasks(self) -> None:
         def event(title: str, location: str | None = None, hour: int | None = 19) -> agenda.Event:
             start = datetime(2026, 11, 17, hour or 0)
@@ -321,8 +315,12 @@ class EveningTest(unittest.TestCase):
         task = type("Task", (), {"title": "광화문 보라쇼 예매 확인"})()
         found = dining_evening.outings(events, [task], skip=("판교",))
         self.assertEqual([(o.area, o.when) for o in found], [("에버랜드", "종일"), ("샤롯데씨어터", "19:00")])
-        # A location's own words never become a query (review 2026-11-16, P0): only listed areas leave.
+        # A location's own words never become a query (review 2026-11-16, P0): only public place names leave.
         self.assertEqual([o.area for o in dining_evening.outings(events[:1], [task])], ["광화문"])
+        # Any station or 동 in the country, not only a hand list (BUG-2026-007); never a friend's name.
+        dinner, coffee = event("가족 저녁", "서울 은평구 불광동 123"), event("서현 근처 카페")
+        self.assertEqual([o.area for o in dining_evening.outings([dinner, event("연신내역 저녁 약속")], [])], ["불광동", "연신내역"])
+        self.assertEqual([o.area for o in dining_evening.outings([coffee], [], people=frozenset({"서현"}))], [])
 
     def test_step_reads_once_reuses_and_names_a_failure(self) -> None:
         result = {"query": "광화문 맛집", "picks": [{"name": "가나"}], "ruled_out": {}, "unread": [], "rules_known": True}
@@ -383,11 +381,10 @@ class RenderTest(unittest.TestCase):
         ledger = mock.Mock(constraints=[mock.Mock(text="생선 알레르기")])
         with mock.patch.object(dining_command, "search", side_effect=lambda db, q, now: seen.append(q) or result), \
                 mock.patch.object(counsel.health, "load", return_value=ledger):
-            for question in ("가나다랑 성수에서 파스타 먹을 곳?", "광화문 근처 저녁 어디서 먹지?", "오늘 저녁 뭐 먹지?"):
-                for_model, full, food = counsel._food(Path("x.db"), question, now=NOW)
-        # Only a listed area and food words reach Naver: never a name from the question (review 2026-11-16, P0).
-        self.assertEqual(seen, ["성수 파스타", "광화문 맛집", "맛집"])
-        self.assertTrue(for_model["around_this_computer"])
+            for question in ("가나다랑 성수에서 파스타 먹을 곳?", "광화문 근처 저녁 어디서 먹지?", "회사(연신내역)근처 외식하려는데"):
+                for_model, full, food = counsel._food(Path("x.db"), question, places.find(question), now=NOW)
+        # Only a public place name and food words reach Naver: never a name from the question (review 2026-11-16, P0).
+        self.assertEqual(seen, ["성수 파스타", "광화문 맛집", "연신내역 맛집"])
         self.assertNotIn("link", for_model["picks"][0])
         self.assertNotIn("area", for_model["picks"][0])   # An address-shaped field would (rightly) stop the payload.
         for sentence, kept in (("활어회정식을 추천합니다.", False), ("생선 알레르기가 있어도 연어를 추천합니다.", False),
@@ -417,6 +414,47 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(text, "")
         with mock.patch.object(counsel.health, "load", side_effect=counsel.health.HealthError("broken")):
             self.assertTrue(dining.Rules.household(lambda: counsel.health.load(Path("x")).constraints).fish)
+
+    def test_counsel_reads_naver_only_for_a_place(self) -> None:
+        """No place, no read and no answer call: code says so and offers a guess (BUG-2026-007; Naver searched a
+        place-less query around central Seoul). A follow-up in the thread keeps the place named before, and the
+        address book's names are never a place (Codex review 2026-11-16, P0)."""
+        result = {"query": "x", "picks": [self.pick()], "ruled_out": {}, "unread": [], "rules_known": True}
+        seen = []
+        # Display names with a note and a title beside the name (Codex review 2026-11-16, round 5).
+        friends = [counsel.contacts.Contact(c, name, (), None, None, (), "", "")
+                   for c, name in (("c1", "김서현(동창)"), ("c2", "김한식 차장"))]
+
+        def never(*args):
+            raise AssertionError("no model call expected")
+        route = {"summary": "", "domains": ["food"], "search_terms": [], "web": {"needed": False}, "asks_action": False}
+        with mock.patch.object(dining_command, "search", side_effect=lambda db, q, now: seen.append(q) or result), \
+                mock.patch.object(counsel.health, "load", return_value=mock.Mock(constraints=[])), \
+                mock.patch.object(counsel.keep, "load_all", return_value=[]), \
+                mock.patch.object(counsel.memory, "load", return_value=[]), \
+                mock.patch.object(counsel.contacts, "load", return_value=friends):
+            replies = [counsel.answer(Path("x.db"), {}, question, now=NOW, received_at=NOW, history=[], secrets=[],
+                                      tz="Asia/Seoul", caller=never, domains_override=["food"])
+                       for question in ("구파밸역 근처 저녁 어디서 먹지?", "서현 근처 맛집 알려줘")]
+            # A friend's given name that is also a food word (김한식) never joins the query (Codex review, round 4).
+            counsel.prepare(Path("x.db"), {}, "한식이랑 연신내역에서 저녁 뭐 먹지?", now=NOW, tz="Asia/Seoul", history=[],
+                            secrets=[], caller=never, domains_override=["food"])
+            earlier = ["연신내역 맛집 알려줘", "아내도 좋아할까?"]
+            followed = counsel.assemble(Path("x.db"), {}, route, "고기집은 없어?", now=NOW, tz="Asia/Seoul", earlier=earlier)
+            # A new place the code cannot read gets the guess (or none), not the thread's old place, and so does the
+            # turn after it (Codex review 2026-11-16, rounds 3-4).
+            moved, after, unknown = (counsel.assemble(Path("x.db"), {}, route, question, now=NOW, tz="Asia/Seoul", earlier=before)
+                                     for question, before in (("이번엔 구파밸역 근처 파스타는?", earlier),
+                                                              ("거기 고기집은 없어?", [*earlier, "이번엔 구파밸역 근처 파스타는?"]),
+                                                              ("이번엔 김천구미역 근처 맛집은?", earlier)))
+        self.assertEqual([(r["text"], r["no_place"]) for r in replies],
+                         [(dining_view.no_place_text(["구파발역"]), True), (dining_view.no_place_text([]), True)])
+        self.assertNotIn("읽은 자료", counsel.render("구파밸역 근처 저녁 어디서 먹지?", replies[0])[0])
+        self.assertEqual((seen, followed["data_status"]["food"]), (["연신내역 맛집", "연신내역 고기"], "included"))
+        for ctx, hints in ((moved, ["구파발역"]), (after, ["구파발역"]), (unknown, [])):
+            self.assertEqual((ctx["data_status"]["food"], ctx["_dining"]), ("no place", {"no_place": dining_view.no_place_text(hints)}))
+        # A letter on more than food carries the note where the list would be.
+        self.assertEqual(counsel._dining_lines({"no_place": "말씀하신 동네를 찾지 못해"}), ["맛집 검색", "말씀하신 동네를 찾지 못해"])
 
     def test_evening_reply_never_offers_a_flagged_dish(self) -> None:
         """A reply to the evening mail with picks passes the same food check (review 2026-11-16, P1)."""

@@ -97,5 +97,17 @@ def notes(result: dict[str, Any]) -> list[str]:
     return out + [FISH_NOTE]
 
 
+def no_place_text(hints: list[str]) -> str:
+    """The reply to a restaurant question that names no place Smith knows (client 2026-11-16: say the search failed
+    and offer a guess, rather than search somewhere else)."""
+    text = "말씀하신 동네를 찾지 못해 맛집을 검색하지 못했습니다."
+    if len(hints) == 1:
+        text += f" 혹시 찾으시는 동네가 {hints[0]}인가요?"
+    elif hints:
+        text += f" 혹시 찾으시는 동네가 {', '.join(hints)} 중에 있나요?"
+    example = f"{hints[0]} 맛집" if hints else "성수동 파스타, 강남역 맛집"
+    return text + f" 동네나 역 이름을 넣어 다시 물어봐 주세요(예: {example})."
+
+
 def pct(share: float) -> str:
     return "1% 미만" if 0 < share < 0.005 else f"{share:.0%}"

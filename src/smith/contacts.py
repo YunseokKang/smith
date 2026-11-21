@@ -445,8 +445,36 @@ def about_events(found: list[Contact], titles: list[str], *, per_event: int = 2)
 def names_in(text: str, contact: Contact) -> bool:
     """Whether `text` refers to this contact by any key or by the given name alone (for keeping facts about them out of
     the client's memory, where a false positive only drops a fact)."""
-    given = [contact.name[1:]] if len(contact.name) in (3, 4) and re.fullmatch(r"[가-힣]+", contact.name) else []
-    return any(k and k in text for k in (*keys(contact), *given))
+    return any(k and k in text for k in name_words(contact))
+
+
+def name_words(contact: Contact) -> list[str]:
+    """Every word that may name this contact: the keys and, for a Korean name of three or four letters, the given name
+    alone ("서현" for 김서현). A four-letter name may carry a two-letter surname, so both readings count ("궁서현" and
+    "서현" for 남궁서현; Codex review 2026-11-16, P0)."""
+    parts = contact.name.split()
+    name = "".join(parts)   # "김 서현" and "남궁 서현" as written run together (Codex review 2026-11-16, round 3).
+    given = _given(name) if re.fullmatch(r"[가-힣]+", name) else []
+    spaced = [name, *(p for p in parts if len(p) >= 2)] if len(parts) > 1 else []
+    return list(dict.fromkeys([*keys(contact), *spaced, *given]))
+
+
+def blank_words(contact: Contact) -> list[str]:
+    """Every word to blank out of a text before any of it may leave Smith (the restaurant search, FR-55): `name_words`
+    plus each Korean word of two or more letters in the display name and nicknames with its given-name readings, so a
+    title or a note beside the name does not hide it ("김한식 차장" -> 한식, "김서현(동창)" -> 서현; Codex review
+    2026-11-16, round 5). Broader than `name_words` on purpose: a false positive only loses a place, while
+    `names_in` would drop the client's facts that merely mention "차장"."""
+    found = list(name_words(contact))
+    for key in (contact.name, *contact.nicknames):
+        for token in re.findall(r"[가-힣]{2,}", key):
+            found += [token, *_given(token)]
+    return list(dict.fromkeys(found))
+
+
+def _given(name: str) -> list[str]:
+    """The given name after a one-letter surname, and also after a two-letter one for a four-letter name."""
+    return [name[1:], name[2:]] if len(name) == 4 else [name[1:]] if len(name) == 3 else []
 
 
 def _names(text: str, key: str) -> bool:

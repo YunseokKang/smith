@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 
-from smith import naver_place, net
+from smith import naver_place, net, places
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +81,7 @@ def _same_branch(naver: str, google: str, area: str, address: str) -> bool:
 def _without_branch(name: str, area_words: list[str]) -> str:
     """A shop name without its branch words: after the first word, those ending in 점 ("본점", "성수2호점"), listed
     meeting areas ("서울숲") and the start of an area word ("성수" for "성수동1가")."""
-    from smith.dining_evening import AREAS   # Here, not at the top: dining_evening reaches this module at import.
-
-    areas = {naver_place.name_key(a) for a in AREAS}
+    areas = {naver_place.name_key(a) for a in places.KNOWN}
     spots = [naver_place.name_key(w) for w in area_words]
     words = [w for w in (naver_place.name_key(w) for w in name.split()) if w]
     return "".join(words[:1] + [w for w in words[1:]

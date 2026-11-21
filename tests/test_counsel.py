@@ -9,7 +9,7 @@ from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from smith import contacts, counsel, gmail, headless, health_qa, keep, ledger, memory, qa, reader
+from smith import contacts, counsel, gmail, headless, health_qa, keep, ledger, memory, qa, reader, sources, weather
 from smith.config import load_config
 from smith.importer import parse_import
 
@@ -58,12 +58,15 @@ NOTES = [note("n1", "2026-10", "1006 ㆍ 팀장 제안을 받으면 사람 관�
 
 
 def verified(items):
-    """Plays sources.verify: https items are kept with a check whose status a [marker] in the title may set."""
+    """Plays sources.verify: https items are kept with a check whose status a [marker] in the title may set. A page
+    that was read holds the claim's numbers, except the ones a [without N] marker names."""
     kept = []
     for item in items:
         if item["source_url"].startswith("https://"):
             status = next((s for s in ("unchecked", "mismatch", "matched") if f"[{s}]" in item["source_title"]), "reachable")
-            kept.append({**item, "ref": f"R{len(kept) + 1}", "check": {"status": status}})
+            missing = set(re.findall(r"\[without (\d+)\]", item["source_title"]))
+            found = [] if status == "unchecked" else sorted(sources.numbers(item["detail"]) - missing)
+            kept.append({**item, "ref": f"R{len(kept) + 1}", "check": {"status": status, "found": found}})
     return kept, {}
 
 
@@ -88,10 +91,10 @@ class CounselPipelineTests(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
 
-    def answer(self, script, question=QUESTION, **kwargs):
+    def answer(self, script, question=QUESTION, config=CONFIG, history=(), **kwargs):
         call, calls = fake_caller(script)
-        result = counsel.answer(self.db, CONFIG, question, now=NOW, received_at=NOW, history=[], secrets=[], tz="Asia/Seoul",
-                                caller=call, verifier=verified, **kwargs)
+        result = counsel.answer(self.db, config, question, now=NOW, received_at=NOW, history=list(history), secrets=[],
+                                tz="Asia/Seoul", caller=call, verifier=verified, **kwargs)
         return result, calls
 
     def test_plan_normalises_router_output(self):
@@ -142,7 +145,9 @@ class CounselPipelineTests(unittest.TestCase):
         result, calls = self.answer([dict(ROUTE), output])
         self.assertEqual([(u, w) for u, w, _ in calls], [("counsel-route", False), ("counsel-answer", False)])
         routed = json.loads(calls[0][2])
-        self.assertEqual(sorted(routed), ["earlier_questions", "question", "stores", "today"])   # No personal data.
+        # No personal data: of Smith's last letter the router learns only how many questions it suggested.
+        self.assertEqual(sorted(routed), ["earlier_questions", "question", "stores", "suggested_count", "today"])
+        self.assertIn("확인 규칙에 걸린 문장 3개는 보내지 않았어요", result["memos"][0])   # The gaps are owned up to.
         payload = json.loads(calls[1][2])
         self.assertIn("balance_sheet", payload["finance"])
         self.assertNotIn("health", payload)
@@ -377,7 +382,8 @@ class CounselPipelineTests(unittest.TestCase):
             "gaps": []}
         output = {"answer": "LDL 기준은 177이에요 [R1]. 흔한 목표는 130 미만이에요 [R2].", "follow_up": [], "remember": [], "health_statements": []}
         result, _ = self.answer([route, findings, output])
-        self.assertEqual(result["text"], "흔한 목표는 130 미만이에요 [R2].")   # Only a page whose numbers matched lends a value.
+        # Only a page whose numbers matched lends a value; the refs are numbered as the letter cites them.
+        self.assertEqual((result["text"], result["links"]), ("흔한 목표는 130 미만이에요 [R1].", {"R1": ("Guide [matched]", "https://b.example/x")}))
 
     def test_amount_sentences_round_from_ledger_figures_only(self):
         money = counsel.ledger_money({"net_worth": "450000000", "loss": "-120000000", "share": "0.3521", "rate": "3.25", "all": "1.0",
@@ -411,6 +417,118 @@ class CounselPipelineTests(unittest.TestCase):
         result, _ = self.answer([{**ROUTE, "domains": ["finance"]}, output], question="월급 500만 원인데 팀장 제안을 받을까?")
         self.assertEqual(result["text"], "말씀하신 월급 500만 원이면 괜찮아요.")
         self.assertIn("말씀하신 금액(500만 원)은 원장에서 확인되지 않은 값이라 그 가정대로 답했어요.", result["memos"])
+        # A replaced promise does not take the letter's ledger figures with it: the second pass uses the same checks.
+        output = {**output, "answer": "지금 현금은 1,000만 원이에요. 다음 보고서부터 반영하겠습니다."}
+        result, _ = self.answer([{**ROUTE, "domains": ["finance"]}, output])
+        self.assertIn("지금 현금은 1,000만 원이에요.", result["text"])
+        self.assertNotIn("다음 보고서부터", result["text"])
+
+    def test_a_public_price_passes_only_beside_the_ref_of_the_page_that_states_it(self):
+        def finding(claim, page, title="Guide", confidence="single-source"):
+            return {"claim": claim, "source_title": title, "source_url": f"https://{page}.example/x", "published_on": "",
+                    "publisher": "", "confidence": confidence}
+        route = {**ROUTE, "domains": [], "web": {"needed": "yes", "subject": "놀이공원 입장권 가격", "queries": ["놀이공원 입장권 가격"]}}
+        findings = {"findings": [finding("종일권 온라인 예매가는 46,900원이다", "a"), finding("야간권은 38,500원이다", "a"),
+                                 finding("토요일 혼잡도는 73%로 가장 높다", "b", confidence="confirmed"),
+                                 finding("빠른 입장권은 54,000원이다", "c", title="Pass [unchecked]"),
+                                 # "matched" on two of its three numbers: the price is the one the page does not hold.
+                                 finding("연간권은 98,765원이고 10시부터 22시까지 연다", "b", title="Guide [matched] [without 98765]")],
+                    "gaps": []}
+        letter = ("토요일 혼잡도는 73%예요 [R2]. 종일권은 46,900원으로 안내돼요 [R1]. 야간권은 38,500원이에요. "
+                  "두 분이면 93,800원이에요 [R1]. 빠른 입장권은 54,000원이에요 [R3]. 연간권은 98,765원이에요 [R2].")
+        output = {"answer": letter, "follow_up": ["야간권으로 가면 뭘 놓칠까?", "주차는 어디가 좋아?"], "remember": [], "health_statements": []}
+        result, calls = self.answer([route, findings, output])
+        # One ref a page, and the letter's refs renumbered in the order it cites them. Gone: the price without its ref,
+        # the sum the model worked out, the price from the page that could not be read, and the price the page check
+        # did not see on its page. What the check saw stays in code: the model is not sent it.
+        sent = json.loads(calls[2][2])["research_findings"]["items"]
+        self.assertEqual([f["ref"] for f in sent], ["R1", "R1", "R2", "R3", "R2"])
+        self.assertFalse(any("page_numbers" in f for f in sent))
+        self.assertEqual(result["text"], "토요일 혼잡도는 73%예요 [R1]. 종일권은 46,900원으로 안내돼요 [R2].")
+        self.assertEqual(result["links"], {"R1": ("Guide", "https://b.example/x"), "R2": ("Guide", "https://a.example/x")})
+        self.assertEqual((result["single"], result["unchecked"]), (["R2"], []))
+        self.assertIn("확인 규칙에 걸린 문장 4개는 보내지 않았어요", result["memos"][0])
+        html, text = counsel.render(QUESTION, result)
+        self.assertIn("[R2] Guide</a> (한 곳에서만 확인)", html)
+        self.assertNotIn("[R1] Guide</a> (", html)
+        # The stored text carries the suggested questions, so the next turn can read them back.
+        self.assertEqual(counsel.suggested(text), ["야간권으로 가면 뭘 놓칠까?", "주차는 어디가 좋아?"])
+        self.assertEqual((counsel.suggested("편지만 있어요."), counsel.suggested(None)), ([], []))
+        # A long page cannot push the other pages out of the cut: every page's first finding comes before any second.
+        many = [{"source_url": page, "n": n} for n, page in enumerate(["a"] * 9 + ["b", "b", "c"])]
+        self.assertEqual([f["n"] for f in counsel._spread(many, 6)], [0, 1, 2, 9, 10, 11])
+
+    def test_suggested_questions_the_client_takes_up_are_planned_and_answered(self):
+        earlier = {"text": "내일은 붐벼요.", "refs": [], "links": {}, "follow_up": ["잠실 롯데월드 근처 저녁 식당 알려 줘", "퍼레이드는 어디서 봐?"],
+                   "remember": [], "noted": [], "memos": [], "data_status": {}}
+        history = [{"client": "내일 롯대월드에 가려고 해", "smith": counsel.render("내일 롯대월드에 가려고 해", earlier)[1]}]
+        output = {"answer": "퍼레이드는 1층에서 보세요.", "follow_up": [], "remember": [], "health_statements": []}
+        took = {**ROUTE, "domains": [], "takes_up_suggestions": "yes",
+                "web": {"needed": "yes", "subject": "놀이공원 퍼레이드", "queries": ["놀이공원 퍼레이드 관람 위치"]}}
+        # The second router call has read what Smith wrote from household records: whatever it asks of the web is
+        # dropped, and the look-up runs on the first call's queries (Codex review 2026-11-21, P0).
+        leaky = {**ROUTE, "domains": [], "web": {"needed": "yes", "subject": "동생의 이혼 준비", "queries": ["동생의 이혼 준비", "딸의 전학 준비"]}}
+        result, calls = self.answer([took, leaky, {"findings": [], "gaps": []}, output], question="좋다. 모두 답해줘.", history=history)
+        self.assertEqual([u for u, _, _ in calls], ["counsel-route", "counsel-route", "counsel-research", "counsel-answer"])
+        self.assertEqual(json.loads(calls[2][2])["queries"], ["놀이공원 퍼레이드 관람 위치"])
+        self.assertNotIn("이혼", calls[2][2])
+        first, second, payload = (json.loads(calls[n][2]) for n in (0, 1, 3))
+        # The router sees Smith's suggestions only once it has read the client as asking for them.
+        self.assertEqual((first["suggested_count"], "adopted_questions" in first), (2, False))
+        self.assertNotIn("붐벼요", calls[1][2])
+        self.assertEqual(second["adopted_questions"], earlier["follow_up"])
+        self.assertEqual(payload["adopted_questions"], earlier["follow_up"])
+        # "2번만" adopts that one alone; a number past the list adopts none and is routed once.
+        took = {**took, "web": ROUTE["web"]}
+        _, calls = self.answer([{**took, "takes_up_suggestions": "2"}, {**ROUTE, "domains": []}, output], question="2번만 답해줘", history=history)
+        self.assertEqual(json.loads(calls[1][2])["adopted_questions"], earlier["follow_up"][1:])
+        _, calls = self.answer([{**took, "takes_up_suggestions": "3"}, output], question="3번 답해줘", history=history)
+        self.assertEqual([u for u, _, _ in calls], ["counsel-route", "counsel-answer"])
+        # A reply that does not take them up is routed once, and nothing of Smith's letter reaches the router.
+        result, calls = self.answer([{**ROUTE, "domains": []}, output], question="고마워. 주차는 어때?", history=history)
+        self.assertEqual([u for u, _, _ in calls], ["counsel-route", "counsel-answer"])
+        self.assertNotIn("adopted_questions", json.loads(calls[1][2]))
+        # A place in an adopted question is the thread's place, and a misspelt one is read from the router's spelling
+        # only when the gazetteer knows it.
+        seen = []
+        route = counsel.plan({"domains": ["food"], "place": "롯데월드"})
+        with unittest.mock.patch.object(counsel.dining_command, "search",
+                                        side_effect=lambda db, q, now: seen.append(q) or {"picks": [], "ruled_out": {}}), \
+                unittest.mock.patch.object(counsel.health, "load", return_value=unittest.mock.Mock(constraints=[])):
+            for plan, question in (({**route, "place": "", "adopted": ["석촌호수 근처 파스타 알려 줘"]}, "모두 답해줘"),
+                                   (route, "내일 롯대월드 가서 뭐 먹지?"),
+                                   # A route to walk is no course meal: only a text about eating lends food words.
+                                   ({**route, "adopted": ["잠실 마켓 둘러볼 코스 알려 줘"]}, "내일 롯대월드 데이트 코스 짜 줘"),
+                                   ({**route, "place": "우리집 앞"}, "뭐 먹지?")):
+                ctx = counsel.assemble(self.db, CONFIG, plan, question, now=NOW, tz="Asia/Seoul")
+        self.assertEqual((seen, ctx["data_status"]["food"]), (["석촌호수 파스타", "롯데월드 맛집", "잠실 맛집"], "no place"))
+
+    def test_weather_is_read_for_the_day_of_the_plan_and_lends_its_percentages(self):
+        spot = {"lat": 37.35, "lon": 127.11, "air_station": "정자1동", "air_region": "경기남부", "pollen_area_no": "4113500000",
+                "warning_keywords": ["경기", "성남"], "label": "성남시 분당구"}
+        config = {**CONFIG, "daily": {"weather": spot, "airways_sensitive": True}}
+        day = date(2026, 11, 2)
+        report = weather.Report(weather.Forecast(day, 2.0, 9.0, 60, (15, 16), ("비",), "흐림", 4.0, "20261101 1100"), None, None, (),
+                                None, (), {"air": "timeout"}, "tomorrow")
+        route = {**ROUTE, "domains": ["weather"], "weather_day": "tomorrow"}
+        # Wind 4 m/s and a high of 9 degrees are in the forecast too, and are no percentages (Codex review, P1).
+        output = {"answer": "내일은 최저 2도예요. 강수확률은 60%예요. 습도는 85%예요. 강수확률은 9%예요. 대출 금리는 60%예요. 금리는 4%예요. "
+                            "강수확률은 60%이고 대출 금리도 60%예요. 습도는 60%예요. 강수확률은 모르지만 금리는 60%예요. "
+                            "강수확률과 대출 금리는 60%예요.",
+                  "follow_up": ["강수확률 60%면 우산을 챙길까요 [R1]?"], "remember": [], "health_statements": []}
+        with unittest.mock.patch.object(counsel.credentials, "load_api_key", return_value="key"), \
+                unittest.mock.patch.object(counsel.weather, "fetch", return_value=report) as fetch:
+            result, calls = self.answer([route, output], config=config)
+        self.assertEqual(fetch.call_args.kwargs["horizon"], "tomorrow")
+        sent = json.loads(calls[1][2])["weather"]
+        self.assertEqual((sent["basis"], sent["tomorrow"]["pop_max"], sent["failures"]), ("성남시 분당구", 60, {"air": "timeout"}))
+        # A percentage the forecast does not hold is the model's own, and the forecast's lends nothing to a loan rate.
+        self.assertEqual(result["text"], "내일은 최저 2도예요. 강수확률은 60%예요.")
+        self.assertEqual(result["follow_up"], ["강수확률 60%면 우산을 챙길까요?"])   # A suggested question carries no ref.
+        self.assertIn("날씨 자료", counsel.render(QUESTION, result)[1])
+        # Without the daily mail's spot there is no forecast to read, and the letter is told so.
+        result, _ = self.answer([route, output])
+        self.assertEqual(result["data_status"]["weather"], "unavailable: not-configured")
 
     def test_counsel_facts_stay_in_the_counsel_topic(self):
         # A fact no word list would call a health fact (fifth review 2026-11-01) is still kept away from the threads
